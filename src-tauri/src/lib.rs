@@ -1,3 +1,17 @@
+mod connectors;
+mod models;
+mod parser;
+mod policy;
+mod processing;
+mod store;
+
+pub use connectors::{CloudConnector, CloudDirectory, CloudItem, ConnectorError, MockConnector, Provider};
+pub use models::{may_transition, DownloadTask, NewTask, TaskStatus};
+pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
+pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
+pub use processing::{plan_processing, ProcessingHint, Resource};
+pub use store::{StoreError, TaskStore};
+
 pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
