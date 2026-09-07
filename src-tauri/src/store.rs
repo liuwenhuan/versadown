@@ -73,6 +73,21 @@ impl TaskStore {
         let tasks = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(tasks)
     }
+
+    pub fn find(&self, id: Uuid) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.query_row("SELECT id, source, name, kind, status, progress, error FROM tasks WHERE id = ?1", [id.to_string()], task_from_row)
+            .map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) { StoreError::NotFound(id) } else { StoreError::Database(error) })
+    }
+
+    pub fn fail(&self, id: Uuid, message: impl Into<String>) -> Result<DownloadTask, StoreError> {
+        let mut task = self.transition(id, TaskStatus::Failed)?;
+        let message = message.into();
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.execute("UPDATE tasks SET error = ?1 WHERE id = ?2", params![message, id.to_string()])?;
+        task.error = Some(message);
+        Ok(task)
+    }
 }
 
 fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
