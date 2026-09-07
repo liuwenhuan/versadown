@@ -135,7 +135,15 @@ Expected: FAIL with unresolved `TaskStore`/`TaskStatus`.
 
 ```rust
 pub enum TaskStatus { Draft, Parsing, AwaitingUser, Queued, Downloading, Processing, Completed, Failed, Cancelled, Paused }
-pub fn may_transition(from: TaskStatus, to: TaskStatus) -> bool { /* explicit state table */ }
+pub fn may_transition(from: TaskStatus, to: TaskStatus) -> bool {
+    matches!((from, to),
+        (TaskStatus::Draft, TaskStatus::Parsing)
+        | (TaskStatus::Parsing, TaskStatus::Queued | TaskStatus::AwaitingUser | TaskStatus::Failed)
+        | (TaskStatus::Queued, TaskStatus::Downloading | TaskStatus::Paused | TaskStatus::Cancelled)
+        | (TaskStatus::Downloading, TaskStatus::Processing | TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled)
+        | (TaskStatus::Paused, TaskStatus::Queued | TaskStatus::Downloading | TaskStatus::Cancelled)
+        | (TaskStatus::Processing, TaskStatus::Completed | TaskStatus::Failed))
+}
 ```
 
 - [ ] **Step 4: Run native persistence tests**
@@ -392,7 +400,9 @@ Expected: FAIL with absent processing/settings modules.
 
 ```rust
 #[cfg(feature = "report-debug-tool")]
-pub fn debug_trace(task_id: TaskId) -> Result<DebugTrace, StoreError> { /* redacted trace */ }
+pub fn debug_trace(task_id: TaskId) -> Result<DebugTrace, StoreError> {
+    load_debug_trace(task_id).map(DebugTrace::redacted)
+}
 ```
 
 When the feature is disabled, `get_debug_report` returns `DebugFeatureDisabled`; no detailed event record is written.
