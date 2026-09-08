@@ -271,6 +271,87 @@ async fn recovery_isolates_a_missing_tasks_persistence_failure() {
 }
 
 #[tokio::test]
+async fn recovery_isolates_a_completed_tasks_persistence_failure_and_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let rejected_output = dir.path().join("rejected-complete.bin");
+    let healthy_output = dir.path().join("healthy-complete.bin");
+    std::fs::write(&rejected_output, b"done").unwrap();
+    std::fs::write(&healthy_output, b"safe").unwrap();
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+        other => panic!("{other}"),
+    })
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("tasks.sqlite");
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+
+    // list() returns newest first, so create the healthy task first and prove recovery
+    // continues to it after the rejected task.
+    let healthy = store
+        .create(NewTask::direct("http://127.0.0.1/healthy-complete.bin"))
+        .unwrap();
+    let mut healthy = store.bind_gid(healthy.id, "missing-healthy").unwrap();
+    healthy.status = TaskStatus::Downloading;
+    healthy.total_length = Some(4);
+    store.apply_transfer_snapshot(healthy.clone()).unwrap();
+    store
+        .upsert_files(
+            healthy.id,
+            &[(1, healthy_output.to_string_lossy().into_owned(), 4, 0, true)],
+        )
+        .unwrap();
+
+    let rejected = store
+        .create(NewTask::direct("http://127.0.0.1/rejected-complete.bin"))
+        .unwrap();
+    let mut rejected = store.bind_gid(rejected.id, "missing-rejected").unwrap();
+    rejected.status = TaskStatus::Downloading;
+    rejected.total_length = Some(4);
+    store.apply_transfer_snapshot(rejected.clone()).unwrap();
+    store
+        .upsert_files(
+            rejected.id,
+            &[(
+                1,
+                rejected_output.to_string_lossy().into_owned(),
+                4,
+                0,
+                true,
+            )],
+        )
+        .unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER reject_completed_recovery BEFORE UPDATE OF status ON tasks \
+             WHEN NEW.status='completed' AND NEW.id='{}' \
+             BEGIN SELECT RAISE(ABORT,'fixture completed persistence failed'); END;",
+            rejected.id
+        ))
+        .unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .expect("one completed-state persistence failure must not disable recovery");
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.completed, 1);
+    let rejected = store.find(rejected.id).unwrap();
+    assert_eq!(rejected.status, TaskStatus::Paused);
+    assert!(rejected
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("恢复失败")));
+    assert_eq!(
+        store.find(healthy.id).unwrap().status,
+        TaskStatus::Completed
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn recovery_completes_a_full_output_when_the_last_persisted_byte_count_is_stale() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("completed-before-shutdown.bin");
@@ -734,6 +815,173 @@ async fn recovery_resumes_control_file_in_its_original_directory() {
     assert_eq!(task.status, TaskStatus::Downloading);
     assert_eq!(std::fs::read(file).unwrap(), b"part");
     assert!(dir.path().join("partial.bin.aria2").is_file());
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_isolates_partial_tell_status_failure_and_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let completed_file = dir.path().join("later-complete.bin");
+    let partial_file = dir.path().join("partial-status-failure.bin");
+    std::fs::write(&completed_file, b"done").unwrap();
+    std::fs::write(&partial_file, b"part").unwrap();
+    std::fs::write(
+        dir.path().join("partial-status-failure.bin.aria2"),
+        b"fixture",
+    )
+    .unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let wire_calls = calls.clone();
+    let (client, server) = fixture::server(move |request| {
+        let method = request["method"].as_str().unwrap().to_string();
+        wire_calls.lock().unwrap().push(method.clone());
+        match method.as_str() {
+            "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            "aria2.addUri" => json!("resumed-with-bad-status"),
+            "aria2.tellStatus" => json!(false),
+            "aria2.pause" => json!("resumed-with-bad-status"),
+            other => panic!("{other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+
+    // The newer partial task is visited first; this completed task proves the loop
+    // proceeds after tellStatus fails for the replacement GID.
+    let completed = store
+        .create(NewTask::direct("http://127.0.0.1/later-complete.bin"))
+        .unwrap();
+    let mut completed = store.bind_gid(completed.id, "missing-complete").unwrap();
+    completed.status = TaskStatus::Downloading;
+    completed.total_length = Some(4);
+    store.apply_transfer_snapshot(completed.clone()).unwrap();
+    store
+        .upsert_files(
+            completed.id,
+            &[(1, completed_file.to_string_lossy().into_owned(), 4, 0, true)],
+        )
+        .unwrap();
+
+    let partial = store
+        .create(NewTask::direct(
+            "http://127.0.0.1/partial-status-failure.bin",
+        ))
+        .unwrap();
+    let mut partial = store.bind_gid(partial.id, "missing-partial").unwrap();
+    partial.status = TaskStatus::Downloading;
+    partial.total_length = Some(100);
+    partial.completed_length = 4;
+    store.apply_transfer_snapshot(partial.clone()).unwrap();
+    store
+        .upsert_files(
+            partial.id,
+            &[(1, partial_file.to_string_lossy().into_owned(), 100, 4, true)],
+        )
+        .unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .expect("one replacement tellStatus failure must not disable recovery");
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.completed, 1);
+    assert_eq!(report.resumed, 0);
+    let partial = store.find(partial.id).unwrap();
+    assert_eq!(partial.aria_gid.as_deref(), Some("resumed-with-bad-status"));
+    assert_eq!(partial.status, TaskStatus::Paused);
+    assert!(partial
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("恢复失败")));
+    assert_eq!(
+        store.find(completed.id).unwrap().status,
+        TaskStatus::Completed
+    );
+    let recovery_calls = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|method| {
+            matches!(
+                method.as_str(),
+                "aria2.addUri" | "aria2.tellStatus" | "aria2.pause"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovery_calls,
+        ["aria2.addUri", "aria2.tellStatus", "aria2.pause"]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_does_not_claim_partial_is_paused_when_status_and_pause_both_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    let partial_file = dir.path().join("possibly-running.bin");
+    std::fs::write(&partial_file, b"part").unwrap();
+    std::fs::write(dir.path().join("possibly-running.bin.aria2"), b"fixture").unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let wire_calls = calls.clone();
+    let (client, server) = fixture::server(move |request| {
+        let method = request["method"].as_str().unwrap().to_string();
+        wire_calls.lock().unwrap().push(method.clone());
+        match method.as_str() {
+            "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            "aria2.addUri" => json!("possibly-running"),
+            "aria2.tellStatus" | "aria2.pause" => json!(false),
+            other => panic!("{other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let partial = store
+        .create(NewTask::direct("http://127.0.0.1/possibly-running.bin"))
+        .unwrap();
+    let mut partial = store.bind_gid(partial.id, "missing-partial").unwrap();
+    partial.status = TaskStatus::Downloading;
+    partial.total_length = Some(100);
+    partial.completed_length = 4;
+    store.apply_transfer_snapshot(partial.clone()).unwrap();
+    store
+        .upsert_files(
+            partial.id,
+            &[(1, partial_file.to_string_lossy().into_owned(), 100, 4, true)],
+        )
+        .unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .expect("a partial task's status and pause failures must remain isolated");
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.resumed, 0);
+    let partial = store.find(partial.id).unwrap();
+    assert_eq!(partial.aria_gid.as_deref(), Some("possibly-running"));
+    assert_eq!(partial.status, TaskStatus::Downloading);
+    assert!(partial
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("状态读取与暂停均失败，可能仍在运行")));
+    let recovery_calls = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|method| {
+            matches!(
+                method.as_str(),
+                "aria2.addUri" | "aria2.tellStatus" | "aria2.pause"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recovery_calls,
+        ["aria2.addUri", "aria2.tellStatus", "aria2.pause"]
+    );
     server.abort();
 }
 

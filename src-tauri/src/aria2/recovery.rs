@@ -1,5 +1,5 @@
-use super::{DownloadService, DownloadServiceError};
-use crate::{NewTask, TaskStatus};
+use super::{Aria2Api, DownloadService, DownloadServiceError};
+use crate::{DownloadTask, NewTask, TaskStatus, TaskStore};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -50,6 +50,51 @@ impl RestartBudget {
 }
 
 impl DownloadService {
+    fn record_recovery_failure(
+        &self,
+        store: &TaskStore,
+        mut task: DownloadTask,
+        gid: &str,
+        error: impl std::fmt::Display,
+    ) {
+        task.status = TaskStatus::Paused;
+        task.download_speed = 0;
+        task.upload_speed = 0;
+        task.eta_seconds = None;
+        task.error = Some(format!("任务恢复失败（{gid}）：{error}"));
+        if let Ok(task) = store.apply_transfer_snapshot(task) {
+            let _ = self.publish_task(&task);
+        }
+    }
+
+    async fn record_partial_resume_failure(
+        &self,
+        store: &TaskStore,
+        api: &dyn Aria2Api,
+        mut task: DownloadTask,
+        gid: &str,
+        error: impl std::fmt::Display,
+    ) {
+        let recovery_error = error.to_string();
+        match api.pause(gid).await {
+            Ok(_) => self.record_recovery_failure(store, task, gid, recovery_error),
+            Err(pause_error) => {
+                // The replacement may still be transferring. Do not claim it is paused
+                // until aria2 acknowledges the pause; polling can reconcile it later.
+                task.status = TaskStatus::Downloading;
+                task.download_speed = 0;
+                task.upload_speed = 0;
+                task.eta_seconds = None;
+                task.error = Some(format!(
+                    "任务恢复失败（{gid}）：{recovery_error}；状态读取与暂停均失败，可能仍在运行：{pause_error}"
+                ));
+                if let Ok(task) = store.apply_transfer_snapshot(task) {
+                    let _ = self.publish_task(&task);
+                }
+            }
+        }
+    }
+
     pub async fn recover(&self) -> Result<RecoveryReport, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         let api = self.api();
@@ -162,23 +207,15 @@ impl DownloadService {
                     // A single corrupt status or persistence failure must not make a
                     // healthy aria2 sidecar unavailable to every other task.
                     report.failed += 1;
-                    let mut task = task;
-                    task.status = TaskStatus::Paused;
-                    task.download_speed = 0;
-                    task.upload_speed = 0;
-                    task.eta_seconds = None;
-                    task.error = Some(format!("任务恢复失败（{status_gid}）：{error}"));
-                    if let Ok(task) = store.apply_transfer_snapshot(task) {
-                        let _ = self.publish_task(&task);
-                    }
+                    self.record_recovery_failure(&store, task, &status_gid, error);
                 }
             }
         }
         for task in existing {
-            let Some(gid) = task.aria_gid.as_ref() else {
+            let Some(gid) = task.aria_gid.clone() else {
                 continue;
             };
-            if session_gids.contains(gid)
+            if session_gids.contains(&gid)
                 || matches!(
                     task.status,
                     TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
@@ -203,12 +240,12 @@ impl DownloadService {
                 });
             let mut task = task;
             if completed {
+                let recovery_fallback = task.clone();
                 task.status = TaskStatus::Completed;
                 task.progress = 100;
                 task.completed_length = selected.iter().map(|f| f.length).sum();
                 task.total_length = Some(task.completed_length);
                 task.error = None;
-                report.completed += 1;
                 task.download_speed = 0;
                 task.upload_speed = 0;
                 task.eta_seconds = None;
@@ -228,8 +265,19 @@ impl DownloadService {
                         )
                     })
                     .collect::<Vec<_>>();
-                let task = store.apply_transfer_snapshot_with_files(task, &files)?;
-                self.publish_task(&task)?;
+                match store
+                    .apply_transfer_snapshot_with_files(task, &files)
+                    .map_err(DownloadServiceError::from)
+                    .and_then(|task| {
+                        self.publish_task(&task)?;
+                        Ok(task)
+                    }) {
+                    Ok(_) => report.completed += 1,
+                    Err(error) => {
+                        report.failed += 1;
+                        self.record_recovery_failure(&store, recovery_fallback, &gid, error);
+                    }
+                }
                 continue;
             } else {
                 // Missing output or session is explicit failure; a retained control file
@@ -257,10 +305,76 @@ impl DownloadService {
                     }
                     match api.add_uri(vec![task.source.clone()], options).await {
                         Ok(gid) => {
-                            let task = store.bind_gid(task.id, &gid)?;
-                            self.apply_status(task, api.tell_status(&gid).await?, false)
-                                .await?;
-                            report.resumed += 1;
+                            let bound = match store.bind_gid(task.id, &gid) {
+                                Ok(bound) => bound,
+                                Err(bind_error) => {
+                                    let cleanup = match api.remove(&gid).await {
+                                        Ok(_) => Ok(()),
+                                        Err(remove_error) => api
+                                            .force_remove(&gid)
+                                            .await
+                                            .map(|_| ())
+                                            .map_err(|force_error| (remove_error, force_error)),
+                                    };
+                                    report.failed += 1;
+                                    match cleanup {
+                                        Ok(()) => self.record_recovery_failure(
+                                            &store,
+                                            task.clone(),
+                                            &gid,
+                                            bind_error,
+                                        ),
+                                        Err((remove_error, force_error)) => {
+                                            let message = format!(
+                                                "任务恢复失败且无法清理 aria2 GID {gid}：{bind_error}；remove: {remove_error}；forceRemove: {force_error}"
+                                            );
+                                            match store.bind_gid_and_fail(task.id, &gid, &message) {
+                                                Ok(tracked) => {
+                                                    let _ = self.publish_task(&tracked);
+                                                }
+                                                Err(track_error) => self.record_recovery_failure(
+                                                    &store,
+                                                    task.clone(),
+                                                    &gid,
+                                                    format!(
+                                                        "{message}；无法记录 GID：{track_error}"
+                                                    ),
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
+                            };
+                            match api.tell_status(&gid).await {
+                                Ok(status) => {
+                                    match self.apply_status(bound.clone(), status, false).await {
+                                        Ok(_) => report.resumed += 1,
+                                        Err(error) => {
+                                            report.failed += 1;
+                                            self.record_partial_resume_failure(
+                                                &store,
+                                                api.as_ref(),
+                                                bound,
+                                                &gid,
+                                                error,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    report.failed += 1;
+                                    self.record_partial_resume_failure(
+                                        &store,
+                                        api.as_ref(),
+                                        bound,
+                                        &gid,
+                                        error,
+                                    )
+                                    .await;
+                                }
+                            }
                             continue;
                         }
                         Err(_) => {}
