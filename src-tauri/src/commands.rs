@@ -4,9 +4,10 @@ use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::downloader::load_torrent_base64;
 use crate::{
     confirm_download, prepare_download, DownloadAction, DownloadService, DownloadServiceError,
-    DownloadTask, ParseOutcome, ParseResource, TaskStore, TransferFile,
+    DownloadTask, ParseOutcome, ParseResource, TaskStatus, TaskStore, TransferFile,
 };
 
 pub struct AppState {
@@ -42,7 +43,35 @@ pub async fn parse_download(
     state: State<'_, AppState>,
 ) -> Result<ParseOutcome, String> {
     let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
-    if !outcome.requires_confirmation {
+    if outcome.task.kind == "torrent" {
+        let encoded = match load_torrent_base64(&outcome.task.source).await {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                let message = error.to_string();
+                let _ = state.store.fail(outcome.task.id, message.clone());
+                return Err(message);
+            }
+        };
+        outcome.task = match state
+            .service
+            .submit_torrent(outcome.task.id, encoded, vec![], Default::default())
+            .await
+        {
+            Ok(task) => task,
+            Err(error) => {
+                let message = error.to_string();
+                if state
+                    .store
+                    .find(outcome.task.id)
+                    .is_ok_and(|task| task.status == TaskStatus::Parsing)
+                {
+                    let _ = state.store.fail(outcome.task.id, message.clone());
+                }
+                return Err(message);
+            }
+        };
+        outcome.resources = parse_resources(&state.store, outcome.task.id)?;
+    } else if !outcome.requires_confirmation {
         outcome.task = state
             .service
             .submit_uri(
@@ -67,21 +96,24 @@ pub async fn parse_download(
             Err(DownloadServiceError::MetadataTimeout) => {}
             Err(error) => return Err(error.to_string()),
         }
-        outcome.resources = state
-            .store
-            .files(outcome.task.id)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|file| ParseResource {
-                id: file.index.to_string(),
-                index: file.index,
-                name: file.path,
-                size: format!("{} B", file.length),
-                selected: file.selected,
-            })
-            .collect();
+        outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     }
     Ok(outcome)
+}
+
+fn parse_resources(store: &TaskStore, task_id: Uuid) -> Result<Vec<ParseResource>, String> {
+    Ok(store
+        .files(task_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|file| ParseResource {
+            id: file.index.to_string(),
+            index: file.index,
+            name: file.path,
+            size: format!("{} B", file.length),
+            selected: file.selected,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -104,6 +136,9 @@ pub async fn confirm_download_command(
             .map_err(|error| error.to_string())?;
         return task_payload(&state.store, task);
     }
+    if let Some(error) = unbound_torrent_confirmation_error(&current) {
+        return Err(error.to_string());
+    }
     let task = confirm_download(id, &state.store).map_err(|error| error.to_string())?;
     let task = state
         .service
@@ -111,6 +146,11 @@ pub async fn confirm_download_command(
         .await
         .map_err(|error| error.to_string())?;
     task_payload(&state.store, task)
+}
+
+fn unbound_torrent_confirmation_error(task: &DownloadTask) -> Option<&'static str> {
+    (task.kind == "torrent" && task.aria_gid.is_none())
+        .then_some("种子文件尚未完成解析，请重新添加任务")
 }
 
 #[tauri::command]
@@ -180,4 +220,22 @@ pub fn update_debug_reports(enabled: bool, state: State<'_, AppState>) -> Result
     Ok(Settings {
         debug_reports: *setting,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NewTask;
+
+    #[test]
+    fn unbound_torrent_confirmation_is_rejected_instead_of_becoming_uri_download() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut new_task = NewTask::direct("C:\\Downloads\\game.torrent");
+        new_task.kind = "torrent".into();
+        let task = store.create(new_task).unwrap();
+
+        assert!(unbound_torrent_confirmation_error(&task)
+            .unwrap()
+            .contains("尚未完成解析"));
+    }
 }

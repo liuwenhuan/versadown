@@ -5,6 +5,107 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
+async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_start() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let wire = calls.clone();
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_running = running.clone();
+    let (client, server) = fixture::server(move |request| {
+        wire.lock().unwrap().push(request.clone());
+        match request["method"].as_str().unwrap() {
+            "aria2.addTorrent" => {
+                assert_eq!(request["params"][1], "dG9ycmVudC1ieXRlcw==");
+                assert_eq!(request["params"][3]["pause"], "true");
+                json!("torrent-gid")
+            }
+            "aria2.tellStatus" => {
+                let state = if wire_running.load(std::sync::atomic::Ordering::SeqCst) {
+                    "active"
+                } else {
+                    "paused"
+                };
+                let mut status = fixture::status("torrent-gid", state, 0);
+                status["files"] = json!([
+                    {"index":"1","path":"game/data.bin","length":"70","completedLength":"0","selected":"true"},
+                    {"index":"2","path":"game/readme.txt","length":"30","completedLength":"0","selected":"true"}
+                ]);
+                status
+            }
+            "aria2.changeOption" => {
+                assert_eq!(request["params"][2]["select-file"], "2");
+                json!("OK")
+            }
+            "aria2.unpause" => {
+                wire_running.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("torrent-gid")
+            }
+            other => panic!("unexpected method {other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\game.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let pending = service
+        .submit_torrent(
+            task.id,
+            "dG9ycmVudC1ieXRlcw==".into(),
+            vec![],
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.status, TaskStatus::AwaitingUser);
+    assert_eq!(pending.aria_gid.as_deref(), Some("torrent-gid"));
+    let files = store.files(task.id).unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[1].path, "game/readme.txt");
+
+    let started = service.select_files(task.id, vec![2]).await.unwrap();
+    assert_eq!(started.status, TaskStatus::Downloading);
+    let calls = calls.lock().unwrap();
+    let select = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.changeOption")
+        .unwrap();
+    let start = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.unpause")
+        .unwrap();
+    assert!(select < start);
+    server.abort();
+}
+
+#[tokio::test]
+async fn torrent_without_real_files_never_enters_empty_confirmation() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => json!("empty-gid"),
+        "aria2.tellStatus" => fixture::status("empty-gid", "paused", 0),
+        "aria2.remove" => json!("empty-gid"),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\empty.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let error = service
+        .submit_torrent(task.id, "ZW1wdHk=".into(), vec![], Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("未包含可下载文件"), "{error}");
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Parsing);
+    assert!(store.find(task.id).unwrap().aria_gid.is_none());
+    server.abort();
+}
+
+#[tokio::test]
 async fn metadata_child_is_persisted_and_selection_precedes_unpause() {
     let calls = Arc::new(Mutex::new(vec![]));
     let wire = calls.clone();

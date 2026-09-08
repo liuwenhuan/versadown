@@ -191,3 +191,13 @@ fn magnet_waits_for_file_confirmation() {
     assert!(outcome.requires_confirmation);
     assert_eq!(outcome.task.status, TaskStatus::AwaitingUser);
 }
+
+#[test]
+fn torrent_stays_in_parsing_until_bytes_are_loaded_and_aria2_returns_files() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let outcome = prepare_download("C:\\Downloads\\game.torrent", &store).unwrap();
+    assert!(outcome.requires_confirmation);
+    assert_eq!(outcome.task.kind, "torrent");
+    assert_eq!(outcome.task.status, TaskStatus::Parsing);
+    assert!(outcome.resources.is_empty());
+}

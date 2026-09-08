@@ -23,6 +23,7 @@ pub struct Candidate {
 pub fn classify_input(input: &str) -> Candidate {
     let uri = input.trim().to_string();
     let lower = uri.to_lowercase();
+    let path_without_query = lower.split(['?', '#']).next().unwrap_or(&lower);
     let kind = if lower.starts_with("magnet:") {
         CandidateKind::Magnet
     } else if lower.starts_with("thunder://") {
@@ -31,7 +32,7 @@ pub fn classify_input(input: &str) -> Candidate {
         CandidateKind::QuarkShare
     } else if lower.contains("mypikpak.com") || lower.contains("pikpak.me") {
         CandidateKind::PikPakShare
-    } else if lower.ends_with(".torrent") {
+    } else if path_without_query.ends_with(".torrent") {
         CandidateKind::Torrent
     } else if lower.starts_with("http://") || lower.starts_with("https://") {
         CandidateKind::Direct

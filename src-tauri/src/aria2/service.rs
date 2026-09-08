@@ -39,6 +39,8 @@ pub enum DownloadServiceError {
     AlreadySubmitted,
     #[error("磁力元数据仍在获取，请稍后重试确认")]
     MetadataTimeout,
+    #[error("种子文件未包含可下载文件")]
+    EmptyTorrent,
 }
 
 pub struct DownloadService {
@@ -114,22 +116,48 @@ impl DownloadService {
         task_id: Uuid,
         torrent_base64: String,
         web_seed_uris: Vec<String>,
-        options: BTreeMap<String, String>,
+        mut options: BTreeMap<String, String>,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         if self.store.find(task_id)?.aria_gid.is_some() {
             return Err(DownloadServiceError::AlreadySubmitted);
         }
+        // A torrent must remain paused until the user has reviewed aria2's real
+        // file list and `select-file` has been applied.
+        options.insert("pause".into(), "true".into());
         let gid = self
             .api()
             .add_torrent(torrent_base64, web_seed_uris, options)
             .await?;
-        if let Err(error) = self.store.bind_gid(task_id, &gid) {
+        let status = match self.api().tell_status(&gid).await {
+            Ok(status) if status.gid == gid && !status.files.is_empty() => status,
+            Ok(status) if status.gid == gid && status.files.is_empty() => {
+                let _ = self.api().remove(&gid).await;
+                return Err(DownloadServiceError::EmptyTorrent);
+            }
+            Ok(_) => {
+                let _ = self.api().remove(&gid).await;
+                return Err(Aria2Error::MalformedResponse.into());
+            }
+            Err(error) => {
+                let _ = self.api().remove(&gid).await;
+                return Err(error.into());
+            }
+        };
+        if TransferSnapshot::try_from(status.clone()).is_err() {
             let _ = self.api().remove(&gid).await;
-            return Err(error.into());
+            return Err(Aria2Error::MalformedResponse.into());
         }
-        self.reconcile_task_unlocked(task_id).await
+        let current = match self.store.bind_metadata_gid(task_id, &gid) {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = self.api().remove(&gid).await;
+                return Err(error.into());
+            }
+        };
+        self.publish_task(&current)?;
+        self.apply_status(current, status, false).await
     }
 
     pub async fn control(
