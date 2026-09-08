@@ -2,11 +2,14 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $nodeBin = Join-Path $projectRoot '.tools\node-v24.20.0-win-x64'
+$installedNodeBin = Join-Path $env:LOCALAPPDATA 'Programs\nodejs'
 $cargoHome = Join-Path $projectRoot '.tools\cargo'
 $rustupHome = Join-Path $projectRoot '.tools\rustup'
 
 if (Test-Path -LiteralPath $nodeBin) {
     $env:Path = "$nodeBin;$env:Path"
+} elseif (Test-Path -LiteralPath (Join-Path $installedNodeBin 'npm.cmd')) {
+    $env:Path = "$installedNodeBin;$env:Path"
 }
 if (Test-Path -LiteralPath (Join-Path $cargoHome 'bin\cargo.exe')) {
     $env:CARGO_HOME = $cargoHome
