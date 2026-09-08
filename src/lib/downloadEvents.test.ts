@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatEta, formatSpeed, upsertTask } from './downloadEvents';
+import { formatBytes, formatCompactSpeed, formatEta, formatSpeed, upsertTask } from './downloadEvents';
 import type { QueueTask } from './types';
 
 function task(overrides: Partial<QueueTask> = {}): QueueTask {
@@ -33,6 +33,11 @@ describe('transfer formatters', () => {
     expect(formatBytes(1_572_864)).toBe('1.5 MB');
     expect(formatSpeed(524_288)).toBe('512 KB/s');
     expect(formatEta(65)).toBe('1 分 5 秒');
+  });
+
+  it('formats a speed value compactly enough for the 48px launcher', () => {
+    expect(formatCompactSpeed(870_400)).toBe('850K');
+    expect(formatCompactSpeed(1_258_291)).toBe('1.2M');
   });
 
   it('does not invent a percentage when aria2 reports an unknown total', () => {
