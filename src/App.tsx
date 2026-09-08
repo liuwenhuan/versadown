@@ -7,10 +7,11 @@ import { TaskDetails } from './components/TaskDetails';
 import { CloudManager } from './components/CloudManager';
 import { SettingsPanel } from './components/SettingsPanel';
 import { WindowTitleBar } from './components/WindowTitleBar';
-import { confirmDownload, isTauriRuntime, listPersistedTasks, parseDownload, runTaskAction, selectDownloadFiles } from './lib/api';
+import { EngineStatusBanner } from './components/EngineStatusBanner';
+import { confirmDownload, getDownloadEngineState, isTauriRuntime, listPersistedTasks, parseDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles } from './lib/api';
 import { formatBytes, mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { mainWindowIsMaximized, runMainWindowAction } from './lib/mainWindow';
-import { ParseResult, QueueTask } from './lib/types';
+import { DownloadEngineState, ParseResult, QueueTask } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 
 export function App() {
@@ -21,8 +22,10 @@ export function App() {
   const [maximized, setMaximized] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [eventsReady, setEventsReady] = useState(false);
+  const [engineState, setEngineState] = useState<DownloadEngineState>({ available: true, retrying: false });
   const taskEventEpoch = useRef(0);
   const taskEventVersions = useRef(new Map<string, number>());
+  const engineEventEpoch = useRef(0);
   const selectedTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === selectedTaskId), [selectedTaskId, tasks]);
 
   function recordTaskEvent(task: QueueTask) {
@@ -88,6 +91,30 @@ export function App() {
     if (!isTauriRuntime()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    listen<DownloadEngineState>('download-engine-state-updated', (event) => {
+      engineEventEpoch.current += 1;
+      if (!disposed) setEngineState(event.payload);
+    }).then((stop) => {
+      if (disposed) { stop(); return; }
+      unlisten = stop;
+      const requestEpoch = engineEventEpoch.current;
+      void getDownloadEngineState().then((state) => {
+        if (!disposed && engineEventEpoch.current === requestEpoch) setEngineState(state);
+      }).catch((error: unknown) => {
+        if (!disposed && engineEventEpoch.current === requestEpoch) {
+          setEngineState({ available: false, retrying: false, error: String(error) });
+        }
+      });
+    }).catch((error: unknown) => {
+      if (!disposed) setEngineState({ available: false, retrying: false, error: String(error) });
+    });
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
     const refreshMaximized = () => {
       void mainWindowIsMaximized().then((value) => {
         if (!disposed) setMaximized(value);
@@ -145,6 +172,16 @@ export function App() {
     setTasks((current) => upsertTask(current, nativeTask)); setSelectedTaskId(nativeTask.id); setConfirmation(null);
   }
 
+  async function retryEngine() {
+    if (engineState.retrying) return;
+    setEngineState((current) => ({ ...current, retrying: true, error: undefined }));
+    try {
+      setEngineState(await retryDownloadEngine());
+    } catch (error) {
+      setEngineState({ available: false, retrying: false, error: String(error) });
+    }
+  }
+
   function reopenTaskConfirmation(task: QueueTask) {
     if (task.status !== 'awaiting_user' || (task.kind !== 'magnet' && task.kind !== 'torrent')) return;
     setConfirmation({
@@ -187,6 +224,7 @@ export function App() {
         </div>
         <div className="header-summary"><b>{tasks.filter((task) => task.status === 'downloading').length}</b><span>正在下载</span></div>
       </header>
+      <EngineStatusBanner state={engineState} onRetry={() => { void retryEngine(); }} />
       {actionError && <p className="action-error" role="alert">操作未完成：{actionError}</p>}
       <div className="workspace"><nav aria-label="主导航"><button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}>↓ 下载</button><button className={view === 'cloud' ? 'nav-active' : ''} onClick={() => setView('cloud')}>☁ 我的网盘</button><button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}>⚙ 设置</button><small>Windows Beta</small></nav>
         {view === 'downloads' && <><section className="queue-area"><div className="queue-toolbar"><div><p className="eyebrow">本地下载引擎</p><h2>全部任务</h2></div><span>标准单文件会自动开始；目录与多文件需要确认。</span></div><DownloadQueue tasks={tasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onAction={taskAction} onConfirm={reopenTaskConfirmation} /></section><TaskDetails task={selectedTask} /></>}

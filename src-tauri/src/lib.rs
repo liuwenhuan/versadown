@@ -4,6 +4,7 @@ pub mod aria2;
 mod commands;
 mod connectors;
 mod downloader;
+mod engine_runtime;
 mod launcher;
 mod models;
 mod parser;
@@ -19,6 +20,9 @@ pub use connectors::{
 pub use downloader::{
     aria2_binary_name, confirm_download, prepare_download, DownloadError, ParseOutcome,
     ParseResource,
+};
+pub use engine_runtime::{
+    EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
 pub use launcher::{
     launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion,
@@ -58,6 +62,12 @@ impl EventSink for TauriDownloadEvents {
 
     fn global_stat_updated(&self, stat: &Aria2GlobalStat) {
         let _ = self.app.emit("download-global-stat-updated", stat);
+    }
+}
+
+impl EngineStateSink for TauriDownloadEvents {
+    fn engine_state_updated(&self, state: &EngineAvailability) {
+        let _ = self.app.emit("download-engine-state-updated", state);
     }
 }
 
@@ -124,32 +134,19 @@ pub fn run() {
                 parent_pid: std::process::id(),
                 peer_discovery: should_enable_peer_discovery(background_ui_test.as_deref()),
             };
-            let (process, client) =
-                tauri::async_runtime::block_on(Aria2Process::start(launch_config.clone()))?;
             let events = std::sync::Arc::new(TauriDownloadEvents {
                 app: app.handle().clone(),
                 store: std::sync::Arc::clone(&store),
             });
-            let service = std::sync::Arc::new(
-                DownloadService::with_process(
-                    std::sync::Arc::new(client.clone()),
-                    std::sync::Arc::clone(&store),
-                    process,
-                )
-                .with_events(events),
-            );
-            tauri::async_runtime::block_on(service.recover())?;
-            let (sync_cancel, sync_cancel_rx) = tokio::sync::watch::channel(false);
-            let synchronizer = TransferSynchronizer::new(std::sync::Arc::clone(&service))
-                .with_websocket(client)
-                .with_restart_config(launch_config);
-            tauri::async_runtime::spawn(async move {
-                synchronizer.run(sync_cancel_rx).await;
-            });
+            let runtime = std::sync::Arc::new(EngineRuntime::new(
+                launch_config,
+                std::sync::Arc::clone(&store),
+                events.clone(),
+                events,
+            ));
             app.manage(commands::AppState {
                 store,
-                service,
-                sync_cancel,
+                runtime: std::sync::Arc::clone(&runtime),
                 debug_reports: std::sync::Mutex::new(false),
             });
             app.manage(launcher::LauncherInteractionState::new(
@@ -165,6 +162,10 @@ pub fn run() {
                     launcher.show()?;
                 }
             }
+            tauri::async_runtime::spawn(async move {
+                let _ = runtime.initialize().await;
+                runtime.start_monitor(std::time::Duration::from_secs(2));
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -174,6 +175,9 @@ pub fn run() {
             commands::list_tasks,
             commands::task_action,
             commands::select_files,
+            commands::get_download_engine_state,
+            commands::retry_download_engine,
+            commands::get_download_global_stat,
             commands::get_settings,
             commands::update_debug_reports,
             launcher::set_launcher_compact_shape,

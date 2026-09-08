@@ -266,13 +266,10 @@ fn begin_application_exit(app: &AppHandle) {
         app.exit(0);
         return;
     };
-    let _ = state.sync_cancel.send(true);
-    let service = std::sync::Arc::clone(&state.service);
+    let runtime = std::sync::Arc::clone(&state.runtime);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _report = service
-            .shutdown_report(std::time::Duration::from_secs(5))
-            .await;
+        let _report = runtime.shutdown(std::time::Duration::from_secs(5)).await;
         app.exit(0);
     });
 }

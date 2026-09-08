@@ -7,12 +7,13 @@ const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
-  confirm: vi.fn(), selectFiles: vi.fn()
+  confirm: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
-  confirmDownload: state.confirm, runTaskAction: vi.fn(), selectDownloadFiles: state.selectFiles
+  confirmDownload: state.confirm, runTaskAction: vi.fn(), selectDownloadFiles: state.selectFiles,
+  getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -44,6 +45,9 @@ beforeEach(() => {
   state.parse.mockReset();
   state.confirm.mockReset();
   state.selectFiles.mockReset();
+  state.getEngineState.mockReset();
+  state.getEngineState.mockResolvedValue({ available: true, retrying: false });
+  state.retryEngine.mockReset();
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -52,6 +56,22 @@ beforeEach(() => {
     state.listeners.set(name, handler);
     return Promise.resolve(() => undefined);
   });
+});
+
+it('shows an unavailable engine and clears it after a successful manual retry', async () => {
+  const user = userEvent.setup();
+  state.list.mockResolvedValueOnce([]);
+  state.getEngineState.mockResolvedValueOnce({
+    available: false, retrying: false, error: '下载引擎不可用：找不到 aria2'
+  });
+  state.retryEngine.mockResolvedValueOnce({ available: true, retrying: false });
+
+  render(<App />);
+
+  expect(await screen.findByText('下载引擎不可用')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '重试下载引擎' }));
+  await waitFor(() => expect(screen.queryByText('下载引擎不可用')).not.toBeInTheDocument());
+  expect(state.retryEngine).toHaveBeenCalledOnce();
 });
 
 it('keeps a live snapshot when the initial list returns an older copy', async () => {
@@ -175,7 +195,11 @@ it('cleans up launcher listeners that resolve after App unmounts', async () => {
   const stopNavigate = vi.fn();
   const stopParse = vi.fn();
   state.list.mockResolvedValueOnce([]);
-  state.listen.mockImplementation((name) => name === 'launcher-navigate' ? navigate.promise : parse.promise);
+  state.listen.mockImplementation((name) => {
+    if (name === 'launcher-navigate') return navigate.promise;
+    if (name === 'launcher-parse') return parse.promise;
+    return Promise.resolve(() => undefined);
+  });
   const { unmount } = render(<App />);
 
   unmount();

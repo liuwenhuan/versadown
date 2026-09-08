@@ -43,6 +43,12 @@ export interface DownloadGlobalStat {
   num_stopped_total?: number;
 }
 
+export interface DownloadEngineState {
+  available: boolean;
+  retrying: boolean;
+  error?: string;
+}
+
 export interface ConfirmResource {
   id: string;
   name: string;

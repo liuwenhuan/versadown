@@ -1,4 +1,4 @@
-import { ConfirmResource, ParseResult, QueueTask } from './types';
+import { ConfirmResource, DownloadEngineState, DownloadGlobalStat, ParseResult, QueueTask } from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -58,4 +58,22 @@ export async function runTaskAction(taskId: string, action: 'pause' | 'resume' |
 
 export async function selectDownloadFiles(taskId: string, indices: number[]): Promise<QueueTask | undefined> {
   return isTauriRuntime() ? invoke<QueueTask>('select_files', { taskId, indices }) : undefined;
+}
+
+export async function getDownloadEngineState(): Promise<DownloadEngineState> {
+  return isTauriRuntime()
+    ? invoke<DownloadEngineState>('get_download_engine_state')
+    : { available: true, retrying: false };
+}
+
+export async function retryDownloadEngine(): Promise<DownloadEngineState> {
+  return isTauriRuntime()
+    ? invoke<DownloadEngineState>('retry_download_engine')
+    : { available: true, retrying: false };
+}
+
+export async function getDownloadGlobalStat(): Promise<DownloadGlobalStat> {
+  return isTauriRuntime()
+    ? invoke<DownloadGlobalStat>('get_download_global_stat')
+    : { download_speed: 0, upload_speed: 0, num_active: 0 };
 }

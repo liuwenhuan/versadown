@@ -6,14 +6,13 @@ use uuid::Uuid;
 
 use crate::downloader::load_torrent_base64;
 use crate::{
-    confirm_download, prepare_download, DownloadAction, DownloadService, DownloadServiceError,
-    DownloadTask, ParseOutcome, ParseResource, TaskStatus, TaskStore, TransferFile,
+    confirm_download, prepare_download, DownloadAction, DownloadServiceError, DownloadTask,
+    ParseOutcome, ParseResource, TaskStatus, TaskStore, TransferFile,
 };
 
 pub struct AppState {
     pub store: Arc<TaskStore>,
-    pub service: Arc<DownloadService>,
-    pub sync_cancel: tokio::sync::watch::Sender<bool>,
+    pub runtime: Arc<crate::EngineRuntime>,
     pub debug_reports: Mutex<bool>,
 }
 
@@ -42,6 +41,11 @@ pub async fn parse_download(
     input: String,
     state: State<'_, AppState>,
 ) -> Result<ParseOutcome, String> {
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| error.to_string())?;
     let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
     if outcome.task.kind == "torrent" {
         let encoded = match load_torrent_base64(&outcome.task.source).await {
@@ -52,8 +56,7 @@ pub async fn parse_download(
                 return Err(message);
             }
         };
-        outcome.task = match state
-            .service
+        outcome.task = match service
             .submit_torrent(outcome.task.id, encoded, vec![], Default::default())
             .await
         {
@@ -72,8 +75,7 @@ pub async fn parse_download(
         };
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     } else if !outcome.requires_confirmation {
-        outcome.task = state
-            .service
+        outcome.task = service
             .submit_uri(
                 outcome.task.id,
                 vec![outcome.task.source.clone()],
@@ -82,13 +84,11 @@ pub async fn parse_download(
             .await
             .map_err(|error| error.to_string())?;
     } else if outcome.task.kind == "magnet" {
-        outcome.task = state
-            .service
+        outcome.task = service
             .prepare_magnet(outcome.task.id, outcome.task.source.clone())
             .await
             .map_err(|error| error.to_string())?;
-        match state
-            .service
+        match service
             .wait_for_metadata(outcome.task.id, std::time::Duration::from_secs(12))
             .await
         {
@@ -122,6 +122,11 @@ pub async fn confirm_download_command(
     selected_ids: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| error.to_string())?;
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
     if current.aria_gid.is_some() {
@@ -129,8 +134,7 @@ pub async fn confirm_download_command(
             .into_iter()
             .map(|value| value.parse::<u32>().map_err(|_| "文件索引无效".to_string()))
             .collect::<Result<Vec<_>, _>>()?;
-        let task = state
-            .service
+        let task = service
             .select_files(id, indices)
             .await
             .map_err(|error| error.to_string())?;
@@ -140,8 +144,7 @@ pub async fn confirm_download_command(
         return Err(error.to_string());
     }
     let task = confirm_download(id, &state.store).map_err(|error| error.to_string())?;
-    let task = state
-        .service
+    let task = service
         .submit_uri(task.id, vec![task.source], Default::default())
         .await
         .map_err(|error| error.to_string())?;
@@ -170,6 +173,11 @@ pub async fn task_action(
     action: String,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| error.to_string())?;
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let action = match action.as_str() {
         "pause" => DownloadAction::Pause,
@@ -177,8 +185,7 @@ pub async fn task_action(
         "cancel" => DownloadAction::Cancel,
         _ => return Err("当前任务不能执行此操作".to_string()),
     };
-    let task = state
-        .service
+    let task = service
         .control(id, action)
         .await
         .map_err(|error| error.to_string())?;
@@ -191,13 +198,47 @@ pub async fn select_files(
     indices: Vec<u32>,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| error.to_string())?;
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    let task = state
-        .service
+    let task = service
         .select_files(id, indices)
         .await
         .map_err(|error| error.to_string())?;
     task_payload(&state.store, task)
+}
+
+#[tauri::command]
+pub fn get_download_engine_state(state: State<'_, AppState>) -> crate::EngineAvailability {
+    state.runtime.status()
+}
+
+#[tauri::command]
+pub async fn retry_download_engine(
+    state: State<'_, AppState>,
+) -> Result<crate::EngineAvailability, String> {
+    let result = state.runtime.retry().await;
+    if result.available {
+        Ok(result)
+    } else {
+        Err(result
+            .error
+            .unwrap_or_else(|| "下载引擎不可用，请稍后重试".into()))
+    }
+}
+
+#[tauri::command]
+pub async fn get_download_global_stat(
+    state: State<'_, AppState>,
+) -> Result<crate::Aria2GlobalStat, String> {
+    state
+        .runtime
+        .global_stat()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
