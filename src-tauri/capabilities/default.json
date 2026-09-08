@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions required by the download manager and its floating launcher.",
   "windows": ["main", "launcher"],
-  "permissions": ["core:default", "core:event:default", "core:window:allow-set-size", "core:window:allow-show", "core:window:allow-set-focus"]
+  "permissions": ["core:default", "core:event:default", "core:window:allow-set-size", "core:window:allow-set-position", "core:window:allow-show", "core:window:allow-set-focus"]
 }

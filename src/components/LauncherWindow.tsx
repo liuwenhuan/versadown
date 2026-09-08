@@ -1,7 +1,10 @@
+import { useEffect } from 'react';
 import { FloatingLauncher } from './FloatingLauncher';
-import { sendLauncherInput, setLauncherExpanded } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, sendLauncherInput, setLauncherExpanded } from '../lib/launcherWindow';
 
 export function LauncherWindow() {
+  useEffect(() => { void anchorLauncherToWorkArea(); }, []);
+
   return (
     <main className="launcher-shell" aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
