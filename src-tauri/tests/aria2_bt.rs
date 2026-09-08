@@ -245,15 +245,33 @@ async fn terminal_torrent_states_are_persisted_and_never_offered_for_confirmatio
 
 #[tokio::test]
 async fn waiting_torrent_with_files_is_a_valid_confirmation_candidate() {
-    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let wire_calls = calls.clone();
+    let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_paused = paused.clone();
+    let (client, server) = fixture::server(move |request| {
+        wire_calls
+            .lock()
+            .unwrap()
+            .push(request["method"].as_str().unwrap().to_owned());
+        match request["method"].as_str().unwrap() {
         "aria2.addTorrent" => json!("waiting-gid"),
         "aria2.tellStatus" => {
-            let mut status = fixture::status("waiting-gid", "waiting", 0);
+            let state = if wire_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                "paused"
+            } else {
+                "waiting"
+            };
+            let mut status = fixture::status("waiting-gid", state, 0);
             status["files"] = json!([{"index":"1","path":"queued.bin","length":"100","completedLength":"0","selected":"true"}]);
             status
         }
+        "aria2.pause" => {
+            wire_paused.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!("waiting-gid")
+        }
         other => panic!("unexpected method {other}"),
-    }).await;
+    }}).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
         .create(NewTask::direct("C:\\Downloads\\waiting.torrent"))
@@ -267,6 +285,85 @@ async fn waiting_torrent_with_files_is_a_valid_confirmation_candidate() {
     assert_eq!(pending.status, TaskStatus::AwaitingUser);
     assert_eq!(pending.aria_gid.as_deref(), Some("waiting-gid"));
     assert_eq!(store.files(task.id).unwrap().len(), 1);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            "aria2.addTorrent",
+            "aria2.tellStatus",
+            "aria2.pause",
+            "aria2.tellStatus"
+        ],
+        "waiting must be paused and verified before confirmation is exposed"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_waiting_pause_and_cleanup_persists_the_gid_as_failed() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => json!("unpaused-orphan"),
+        "aria2.tellStatus" => {
+            let mut status = fixture::status("unpaused-orphan", "waiting", 0);
+            status["files"] = json!([{"index":"1","path":"queued.bin","length":"100","completedLength":"0","selected":"true"}]);
+            status
+        }
+        "aria2.pause" | "aria2.remove" => json!(false),
+        other => panic!("unexpected method {other}"),
+    }).await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\unpaused.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let error = service
+        .submit_torrent(task.id, "dW5wYXVzZWQ=".into(), vec![], Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unpaused-orphan"), "{error}");
+    let stored = store.find(task.id).unwrap();
+    assert_eq!(stored.status, TaskStatus::Failed);
+    assert_eq!(stored.aria_gid.as_deref(), Some("unpaused-orphan"));
+    assert_ne!(stored.status, TaskStatus::AwaitingUser);
+    server.abort();
+}
+
+#[tokio::test]
+async fn waiting_torrent_must_recheck_as_paused_even_if_it_reaches_a_terminal_state() {
+    let status_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wire_reads = status_reads.clone();
+    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => json!("raced-gid"),
+        "aria2.tellStatus" => {
+            let completed = wire_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0;
+            let mut status = fixture::status(
+                "raced-gid",
+                if completed { "complete" } else { "waiting" },
+                if completed { 100 } else { 0 },
+            );
+            status["files"] = json!([{"index":"1","path":"raced.bin","length":"100","completedLength":if completed {"100"} else {"0"},"selected":"true"}]);
+            status
+        }
+        "aria2.pause" | "aria2.remove" => json!("raced-gid"),
+        other => panic!("unexpected method {other}"),
+    }).await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\raced.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let error = service
+        .submit_torrent(task.id, "cmFjZWQ=".into(), vec![], Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("complete"), "{error}");
+    let stored = store.find(task.id).unwrap();
+    assert_eq!(stored.status, TaskStatus::Parsing);
+    assert!(stored.aria_gid.is_none());
+    assert_eq!(status_reads.load(std::sync::atomic::Ordering::SeqCst), 2);
     server.abort();
 }
 

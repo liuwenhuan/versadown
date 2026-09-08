@@ -151,7 +151,7 @@ impl DownloadService {
                 .cleanup_rejected_torrent(task_id, &gid, Aria2Error::MalformedResponse.into())
                 .await);
         }
-        let aria_status = status.status.clone();
+        let mut aria_status = status.status.clone();
         let mut snapshot = match TransferSnapshot::try_from(status) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -160,8 +160,46 @@ impl DownloadService {
                     .await)
             }
         };
+        if snapshot.status == TaskStatus::Queued {
+            if let Err(error) = self.api().pause(&gid).await {
+                return Err(self
+                    .cleanup_rejected_torrent(task_id, &gid, error.into())
+                    .await);
+            }
+            let paused_status = match self.api().tell_status(&gid).await {
+                Ok(status) => status,
+                Err(error) => {
+                    return Err(self
+                        .cleanup_rejected_torrent(task_id, &gid, error.into())
+                        .await)
+                }
+            };
+            if paused_status.gid != gid {
+                return Err(self
+                    .cleanup_rejected_torrent(task_id, &gid, Aria2Error::MalformedResponse.into())
+                    .await);
+            }
+            aria_status = paused_status.status.clone();
+            snapshot = match TransferSnapshot::try_from(paused_status) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    return Err(self
+                        .cleanup_rejected_torrent(task_id, &gid, error.into())
+                        .await)
+                }
+            };
+            if snapshot.status != TaskStatus::Paused {
+                return Err(self
+                    .cleanup_rejected_torrent(
+                        task_id,
+                        &gid,
+                        DownloadServiceError::TorrentNotSelectable(aria_status),
+                    )
+                    .await);
+            }
+        }
         match snapshot.status {
-            TaskStatus::Paused | TaskStatus::Queued => {
+            TaskStatus::Paused => {
                 if snapshot.files.is_empty() {
                     return Err(self
                         .cleanup_rejected_torrent(task_id, &gid, DownloadServiceError::EmptyTorrent)
@@ -198,6 +236,7 @@ impl DownloadService {
                 Err(DownloadServiceError::TorrentNotSelectable(aria_status))
             }
             TaskStatus::Downloading
+            | TaskStatus::Queued
             | TaskStatus::AwaitingUser
             | TaskStatus::Draft
             | TaskStatus::Parsing => Err(self
