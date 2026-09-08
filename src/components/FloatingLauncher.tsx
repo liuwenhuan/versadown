@@ -1,8 +1,9 @@
-import { FormEvent, MouseEvent, useRef, useState } from 'react';
+import { MouseEvent, useRef, useState } from 'react';
+import { NewDownloadDialog } from './NewDownloadDialog';
 
 interface FloatingLauncherProps {
   activeCount: number;
-  onParse(input: string): void;
+  onParse(input: string): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
   onDragStart?(): void;
   onContextMenu?(): void;
@@ -12,22 +13,12 @@ const dragThreshold = 5;
 
 export function FloatingLauncher({ activeCount, onParse, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
   const [expanded, setExpanded] = useState(false);
-  const [input, setInput] = useState('');
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
 
   function setLauncherExpanded(next: boolean) {
     setExpanded(next);
     onExpandedChange?.(next);
-  }
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    const text = input.trim();
-    if (!text) return;
-    onParse(text);
-    setInput('');
-    setLauncherExpanded(false);
   }
 
   function beginPointer(event: MouseEvent<HTMLButtonElement>) {
@@ -74,15 +65,5 @@ export function FloatingLauncher({ activeCount, onParse, onExpandedChange, onDra
     );
   }
 
-  return (
-    <aside className="launcher-panel" aria-label="快速解析下载">
-      <div className="launcher-title"><strong>快速下载</strong><button aria-label="收起下载输入" onClick={() => setLauncherExpanded(false)}>×</button></div>
-      <form onSubmit={submit}>
-        <label htmlFor="download-input">下载内容</label>
-        <textarea id="download-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="粘贴链接、分享地址、文本或网页地址" autoFocus />
-        <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>
-        <button className="primary" type="submit">开始解析下载</button>
-      </form>
-    </aside>
-  );
+  return <NewDownloadDialog open onParse={onParse} onClose={() => setLauncherExpanded(false)} />;
 }

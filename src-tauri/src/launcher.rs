@@ -139,7 +139,10 @@ pub fn set_launcher_compact_shape(
 }
 
 #[tauri::command]
-pub fn start_launcher_dragging(window: WebviewWindow, interaction: State<'_, LauncherInteractionState>) -> Result<(), String> {
+pub fn start_launcher_dragging(
+    window: WebviewWindow,
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<(), String> {
     interaction.record_drag();
     if interaction.is_background_test() {
         return Ok(());
@@ -148,7 +151,11 @@ pub fn start_launcher_dragging(window: WebviewWindow, interaction: State<'_, Lau
 }
 
 #[tauri::command]
-pub fn show_launcher_menu(app: AppHandle, window: WebviewWindow, interaction: State<'_, LauncherInteractionState>) -> Result<(), String> {
+pub fn show_launcher_menu(
+    app: AppHandle,
+    window: WebviewWindow,
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<(), String> {
     if window.label() != "launcher" {
         return Err("右键菜单只能从悬浮窗打开".to_string());
     }
@@ -165,7 +172,9 @@ pub fn show_launcher_menu(app: AppHandle, window: WebviewWindow, interaction: St
 }
 
 #[tauri::command]
-pub fn launcher_interaction_snapshot(interaction: State<'_, LauncherInteractionState>) -> Result<LauncherInteractionSnapshot, String> {
+pub fn launcher_interaction_snapshot(
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<LauncherInteractionSnapshot, String> {
     if !interaction.is_background_test() {
         return Err("交互观测仅在后台测试模式可用".to_string());
     }

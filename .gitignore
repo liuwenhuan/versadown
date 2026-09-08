@@ -4,6 +4,8 @@ node_modules/
 dist/
 target/
 src-tauri/target/
+src-tauri/target-*/
+artifacts/
 *.log
 .env
 .env.*
@@ -13,3 +15,5 @@ src-tauri/target/
 vite.config.js
 vite.config.d.ts
 src-tauri/gen/
+visual-dist/
+.tmp-*/

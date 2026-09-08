@@ -1,10 +1,18 @@
-use alldownloader_lib::{classify_input, extract_candidates, validate_processing, CandidateKind, ProcessStep};
+use alldownloader_lib::{
+    classify_input, extract_candidates, validate_processing, CandidateKind, ProcessStep,
+};
 
 #[test]
 fn recognizes_direct_http_magnet_and_thunder() {
-    assert_eq!(classify_input("magnet:?xt=urn:btih:abc").kind, CandidateKind::Magnet);
+    assert_eq!(
+        classify_input("magnet:?xt=urn:btih:abc").kind,
+        CandidateKind::Magnet
+    );
     assert!(classify_input("https://example.com/a.zip").auto_start);
-    assert_eq!(classify_input("thunder://QUFodHRwOi8vYS9iWlpa").kind, CandidateKind::Thunder);
+    assert_eq!(
+        classify_input("thunder://QUFodHRwOi8vYS9iWlpa").kind,
+        CandidateKind::Thunder
+    );
 }
 
 #[test]

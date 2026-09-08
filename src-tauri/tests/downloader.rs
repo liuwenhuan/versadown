@@ -1,4 +1,4 @@
-use alldownloader_lib::{prepare_download, confirm_download, TaskStatus, TaskStore};
+use alldownloader_lib::{confirm_download, prepare_download, TaskStatus, TaskStore};
 
 #[test]
 fn single_http_result_queues_and_starts_without_confirmation() {

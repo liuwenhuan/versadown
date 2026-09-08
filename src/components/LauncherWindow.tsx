@@ -11,7 +11,7 @@ export function LauncherWindow() {
     <main className="launcher-shell" aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
         activeCount={0}
-        onParse={(input) => { void sendLauncherInput(input); }}
+        onParse={sendLauncherInput}
         onExpandedChange={(expanded) => { void setLauncherExpanded(expanded); }}
         onDragStart={() => { void startLauncherDragging(); }}
         onContextMenu={() => { void showLauncherMenu(); }}

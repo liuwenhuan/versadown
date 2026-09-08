@@ -1,4 +1,6 @@
-use alldownloader_lib::{launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion};
+use alldownloader_lib::{
+    launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion,
+};
 
 #[test]
 fn compact_region_follows_the_ball_inside_a_larger_windows_webview() {
