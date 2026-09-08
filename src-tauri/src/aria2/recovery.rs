@@ -95,6 +95,23 @@ impl DownloadService {
         }
     }
 
+    fn record_terminal_recovery_failure(
+        &self,
+        store: &TaskStore,
+        mut task: DownloadTask,
+        gid: &str,
+        error: impl std::fmt::Display,
+    ) {
+        task.status = TaskStatus::Failed;
+        task.download_speed = 0;
+        task.upload_speed = 0;
+        task.eta_seconds = None;
+        task.error = Some(format!("终态任务恢复失败（{gid}）：{error}"));
+        if let Ok(task) = store.apply_transfer_snapshot(task) {
+            let _ = self.publish_task(&task);
+        }
+    }
+
     pub async fn recover(&self) -> Result<RecoveryReport, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         let api = self.api();
@@ -177,6 +194,8 @@ impl DownloadService {
         });
         for status in statuses {
             let status_gid = status.gid.clone();
+            let raw_status = status.status.clone();
+            let followed_by_gid = status.followed_by.first().cloned();
             let task = if let Some(task) = store.find_by_gid(&status.gid)? {
                 task
             } else if let Some((task_id, _)) = legacy_metadata_claim
@@ -207,7 +226,43 @@ impl DownloadService {
                     // A single corrupt status or persistence failure must not make a
                     // healthy aria2 sidecar unavailable to every other task.
                     report.failed += 1;
-                    self.record_recovery_failure(&store, task, &status_gid, error);
+                    if let Some(child_gid) = followed_by_gid {
+                        let mut task = task;
+                        task.aria_gid = Some(child_gid.clone());
+                        task.followed_by_gid = Some(child_gid.clone());
+                        self.record_partial_resume_failure(
+                            &store,
+                            api.as_ref(),
+                            task,
+                            &child_gid,
+                            error,
+                        )
+                        .await;
+                    } else {
+                        match raw_status.as_str() {
+                            "active" | "waiting" => {
+                                self.record_partial_resume_failure(
+                                    &store,
+                                    api.as_ref(),
+                                    task,
+                                    &status_gid,
+                                    error,
+                                )
+                                .await;
+                            }
+                            "paused" => {
+                                self.record_recovery_failure(&store, task, &status_gid, error);
+                            }
+                            _ => {
+                                self.record_terminal_recovery_failure(
+                                    &store,
+                                    task,
+                                    &status_gid,
+                                    error,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }

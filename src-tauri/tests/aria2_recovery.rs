@@ -197,17 +197,23 @@ async fn recovery_matches_known_imports_unknown_and_reconciles_missing_outputs()
 
 #[tokio::test]
 async fn recovery_isolates_a_malformed_task_and_keeps_reconciling_the_session() {
-    let (client, server) =
-        fixture::server(move |request| match request["method"].as_str().unwrap() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let wire_calls = calls.clone();
+    let (client, server) = fixture::server(move |request| {
+        let method = request["method"].as_str().unwrap().to_string();
+        wire_calls.lock().unwrap().push(method.clone());
+        match method.as_str() {
             "aria2.tellActive" => {
                 let mut malformed = fixture::status("malformed", "active", 10);
                 malformed["completedLength"] = json!("not-a-number");
                 json!([malformed, fixture::status("healthy", "active", 75)])
             }
             "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            "aria2.pause" => json!("malformed"),
             other => panic!("{other}"),
-        })
-        .await;
+        }
+    })
+    .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let malformed = store
         .create(NewTask::direct("http://127.0.0.1/malformed"))
@@ -232,6 +238,99 @@ async fn recovery_isolates_a_malformed_task_and_keeps_reconciling_the_session() 
         .error
         .as_deref()
         .is_some_and(|error| error.contains("恢复失败")));
+    assert!(calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|method| method == "aria2.pause"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_keeps_malformed_active_task_running_when_pause_fails() {
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => {
+                let mut malformed = fixture::status("still-active", "active", 10);
+                malformed["completedLength"] = json!("not-a-number");
+                json!([malformed])
+            }
+            "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            "aria2.pause" => json!(false),
+            other => panic!("{other}"),
+        })
+        .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("http://127.0.0.1/still-active"))
+        .unwrap();
+    store.bind_gid(task.id, "still-active").unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+
+    assert_eq!(report.failed, 1);
+    let task = store.find(task.id).unwrap();
+    assert_eq!(task.status, TaskStatus::Downloading);
+    assert!(task
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("状态读取与暂停均失败，可能仍在运行")));
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_does_not_mark_a_completed_metadata_parent_as_possibly_running() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let wire_calls = calls.clone();
+    let (client, server) = fixture::server(move |request| {
+        let method = request["method"].as_str().unwrap().to_string();
+        wire_calls.lock().unwrap().push(method.clone());
+        match method.as_str() {
+            "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
+            "aria2.tellStopped" => {
+                let mut parent = fixture::status("complete-parent", "complete", 100);
+                parent["followedBy"] = json!(["unreadable-child"]);
+                json!([parent])
+            }
+            "aria2.tellStatus" => json!(false),
+            "aria2.pause" => {
+                assert_eq!(request["params"][1], "unreadable-child");
+                json!("unreadable-child")
+            }
+            other => panic!("{other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("magnet:?xt=urn:btih:completed-parent"))
+        .unwrap();
+    store.bind_metadata_gid(task.id, "complete-parent").unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+
+    assert_eq!(report.failed, 1);
+    let task = store.find(task.id).unwrap();
+    assert_eq!(task.status, TaskStatus::Paused);
+    assert_eq!(task.aria_gid.as_deref(), Some("unreadable-child"));
+    assert_eq!(task.followed_by_gid.as_deref(), Some("unreadable-child"));
+    assert_eq!(task.metadata_gid.as_deref(), Some("complete-parent"));
+    assert!(!task
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("可能仍在运行"));
+    assert!(calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|method| method == "aria2.pause"));
     server.abort();
 }
 
