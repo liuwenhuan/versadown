@@ -30,6 +30,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 
 [dev-dependencies]
 axum = "0.8"
+sha2 = "0.10"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
