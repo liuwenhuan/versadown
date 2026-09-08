@@ -40,6 +40,10 @@ pub fn should_show_windows(background_ui_test: Option<&str>) -> bool {
     background_ui_test != Some("1")
 }
 
+pub fn should_enable_peer_discovery(background_ui_test: Option<&str>) -> bool {
+    background_ui_test != Some("1")
+}
+
 struct TauriDownloadEvents {
     app: tauri::AppHandle,
     store: std::sync::Arc<TaskStore>,
@@ -118,7 +122,7 @@ pub fn run() {
                 data_dir: data_dir.clone(),
                 download_dir: destination,
                 parent_pid: std::process::id(),
-                peer_discovery: true,
+                peer_discovery: should_enable_peer_discovery(background_ui_test.as_deref()),
             };
             let (process, client) =
                 tauri::async_runtime::block_on(Aria2Process::start(launch_config.clone()))?;
@@ -187,4 +191,21 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running AllDownloader");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_enable_peer_discovery, should_show_windows};
+
+    #[test]
+    fn background_ui_test_is_hidden_and_network_isolated() {
+        assert!(!should_show_windows(Some("1")));
+        assert!(!should_enable_peer_discovery(Some("1")));
+    }
+
+    #[test]
+    fn production_keeps_windows_and_peer_discovery_enabled() {
+        assert!(should_show_windows(None));
+        assert!(should_enable_peer_discovery(None));
+    }
 }
