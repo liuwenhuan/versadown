@@ -129,9 +129,11 @@ impl Aria2RpcClient {
             return Err(Aria2Error::HttpStatus(response.status().as_u16()));
         }
         let body = response.text().await.map_err(transport_error)?;
-        // Redact even a malicious loopback peer echoing the secret in a fault/result.
-        let envelope: Value = serde_json::from_str(&self.secret.redact(&body))
-            .map_err(|_| Aria2Error::MalformedResponse)?;
+        let mut envelope: Value =
+            serde_json::from_str(&body).map_err(|_| Aria2Error::MalformedResponse)?;
+        // Decode first: Unicode escapes must not hide an echoed secret from redaction.
+        // Sanitize keys too, before any typed result or fault can escape this boundary.
+        redact_response(&self.secret, &mut envelope);
         if envelope.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
             return Err(Aria2Error::MalformedResponse);
         }
@@ -158,6 +160,24 @@ impl Aria2RpcClient {
     }
     pub async fn get_version(&self) -> Result<Aria2Version, Aria2Error> {
         self.call("aria2.getVersion", vec![]).await
+    }
+}
+fn redact_response(secret: &RpcSecret, value: &mut Value) {
+    match value {
+        Value::String(text) => *text = secret.redact(text),
+        Value::Array(values) => {
+            for value in values {
+                redact_response(secret, value);
+            }
+        }
+        Value::Object(values) => {
+            let original = std::mem::take(values);
+            for (key, mut value) in original {
+                redact_response(secret, &mut value);
+                values.insert(secret.redact(&key), value);
+            }
+        }
+        _ => {}
     }
 }
 fn transport_error(error: reqwest::Error) -> Aria2Error {

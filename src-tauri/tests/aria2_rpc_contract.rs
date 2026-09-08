@@ -36,6 +36,86 @@ async fn fixture(
     (url, calls, handle)
 }
 
+async fn escaped_response_fixture(body: String) -> (Aria2RpcClient, tokio::task::JoinHandle<()>) {
+    let app = Router::new().route(
+        "/jsonrpc",
+        post(move || {
+            let body = body.clone();
+            async move { ([("content-type", "application/json")], body) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Aria2RpcClient::new(
+        format!("http://{}/jsonrpc", listener.local_addr().unwrap()),
+        RpcSecret::from_bytes([0xab; 32]),
+    )
+    .unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (client, handle)
+}
+
+#[tokio::test]
+async fn escaped_rpc_fault_is_redacted_after_json_decoding() {
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":"1","error":{{"code":1,"message":"denied token:{}"}}}}"#,
+        r"\u0061b".repeat(32)
+    );
+    let (client, handle) = escaped_response_fixture(body).await;
+    let error = client.pause("gid").await.unwrap_err();
+    handle.abort();
+    assert!(!format!("{error:?} {error}").contains(&"ab".repeat(32)));
+    let Aria2Error::Rpc(fault) = error else {
+        panic!("Expected an RPC fault");
+    };
+    assert_eq!(fault.message, "denied token:[REDACTED]");
+}
+
+#[tokio::test]
+async fn escaped_multicall_fault_is_redacted_after_json_decoding() {
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":"1","result":[{{"code":1,"message":"denied token:{}"}}]}}"#,
+        r"a\u0062".repeat(32)
+    );
+    let (client, handle) = escaped_response_fixture(body).await;
+    let result = client
+        .multicall(vec![rpc::RpcCall::new(
+            "aria2.tellStatus",
+            vec![json!("gid")],
+        )])
+        .await
+        .unwrap();
+    handle.abort();
+    assert!(!format!("{result:?}").contains(&"ab".repeat(32)));
+    assert_eq!(
+        result[0].as_ref().unwrap_err().message,
+        "denied token:[REDACTED]"
+    );
+}
+
+#[tokio::test]
+async fn escaped_multicall_result_redacts_nested_arrays_values_and_object_keys() {
+    let escaped = r"\u0061\u0062".repeat(32);
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":"1","result":[[{{"outer":[{{"{escaped}":"token:{escaped}"}}]}}]]}}"#
+    );
+    let (client, handle) = escaped_response_fixture(body).await;
+    let result = client
+        .multicall(vec![rpc::RpcCall::new(
+            "aria2.tellStatus",
+            vec![json!("gid")],
+        )])
+        .await
+        .unwrap();
+    handle.abort();
+    assert!(!format!("{result:?}").contains(&"ab".repeat(32)));
+    assert_eq!(
+        result[0].as_ref().unwrap(),
+        &json!({"outer":[{"[REDACTED]":"token:[REDACTED]"}]})
+    );
+}
+
 #[tokio::test]
 async fn protected_call_prepends_secret_and_preserves_options() {
     let (url, calls, handle) = fixture(
