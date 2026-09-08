@@ -6,6 +6,16 @@ export function upsertTask(tasks: readonly QueueTask[], snapshot: QueueTask): Qu
   return next === tasks ? [snapshot, ...tasks] : [...next];
 }
 
+export function mergeInitialTasks(current: readonly QueueTask[], snapshots: readonly QueueTask[]): QueueTask[] {
+  return snapshots.reduceRight<QueueTask[]>((merged, snapshot) => (
+    containsTask(merged, snapshot.id) ? merged : [snapshot, ...merged]
+  ), [...current]);
+}
+
+function containsTask(tasks: readonly QueueTask[], id: string): boolean {
+  return tasks.some((task) => task.id === id || (task.children ? containsTask(task.children, id) : false));
+}
+
 function replaceExistingTask(tasks: readonly QueueTask[], snapshot: QueueTask): QueueTask[] | readonly QueueTask[] {
   let changed = false;
   const next = tasks.map((task) => {
@@ -35,6 +45,13 @@ export function formatSpeed(value: number | undefined): string {
   return value === undefined ? '未知' : `${formatBytes(value)}/s`;
 }
 
+export function formatCompactSpeed(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '—';
+  if (value < 1024) return `${Math.round(value)}B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)}K`;
+  return `${(value / (1024 * 1024)).toFixed(1)}M`;
+}
+
 export function formatEta(seconds: number | undefined): string {
   if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '未知';
   const rounded = Math.floor(seconds);
@@ -59,9 +76,13 @@ export async function subscribeToDownloadEvents(handlers: {
   onTask: (task: QueueTask) => void;
   onGlobalStat: (stat: DownloadGlobalStat) => void;
 }): Promise<UnlistenFn> {
-  const [stopTask, stopGlobal] = await Promise.all([
-    listen<QueueTask>('download-task-updated', (event) => handlers.onTask(event.payload)),
-    listen<DownloadGlobalStat>('download-global-stat-updated', (event) => handlers.onGlobalStat(event.payload))
-  ]);
-  return () => { stopTask(); stopGlobal(); };
+  let stopTask: UnlistenFn | undefined;
+  try {
+    stopTask = await listen<QueueTask>('download-task-updated', (event) => handlers.onTask(event.payload));
+    const stopGlobal = await listen<DownloadGlobalStat>('download-global-stat-updated', (event) => handlers.onGlobalStat(event.payload));
+    return () => { stopTask?.(); stopGlobal(); };
+  } catch (error) {
+    stopTask?.();
+    throw error;
+  }
 }

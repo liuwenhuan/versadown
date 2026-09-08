@@ -8,7 +8,7 @@ import { CloudManager } from './components/CloudManager';
 import { SettingsPanel } from './components/SettingsPanel';
 import { WindowTitleBar } from './components/WindowTitleBar';
 import { confirmDownload, isTauriRuntime, listPersistedTasks, parseDownload, runTaskAction, selectDownloadFiles } from './lib/api';
-import { subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
+import { formatBytes, mergeInitialTasks, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { mainWindowIsMaximized, runMainWindowAction } from './lib/mainWindow';
 import { ParseResult, QueueTask } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
@@ -20,29 +20,54 @@ export function App() {
   const [view, setView] = useState<ManagerView>('downloads');
   const [maximized, setMaximized] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [eventsReady, setEventsReady] = useState(false);
   const selectedTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === selectedTaskId), [selectedTaskId, tasks]);
 
   useEffect(() => {
-    if (!isTauriRuntime()) return;
-    let active = true;
+    if (!isTauriRuntime() || !eventsReady) return;
+    let disposed = false;
     let stopFocus: (() => void) | undefined;
-    const refreshTasks = () => { void listPersistedTasks().then((saved) => { if (active) setTasks(saved); }).catch((error: unknown) => { if (active) setActionError(String(error)); }); };
-    refreshTasks();
+    const refreshTasks = () => { void listPersistedTasks().then((saved) => {
+      if (!disposed) setTasks((current) => mergeInitialTasks(current, saved));
+    }).catch((error: unknown) => { if (!disposed) setActionError(String(error)); }); };
     getCurrentWindow().onFocusChanged(({ payload }) => { if (payload) refreshTasks(); })
-      .then((stop) => { stopFocus = stop; })
+      .then((stop) => { if (disposed) stop(); else stopFocus = stop; })
       .catch(() => undefined);
-    return () => { active = false; stopFocus?.(); };
-  }, []);
+    return () => { disposed = true; stopFocus?.(); };
+  }, [eventsReady]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
-    let active = true;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     subscribeToDownloadEvents({
-      onTask: (task) => { if (active) setTasks((current) => upsertTask(current, task)); },
+      onTask: (task) => {
+        if (disposed) return;
+        setTasks((current) => upsertTask(current, task));
+        setConfirmation((current) => {
+          if (!current || current.taskId !== task.id || !task.files?.length) return current;
+          return {
+            ...current,
+            resources: task.files.map((file) => ({
+              id: String(file.index), index: file.index, name: file.path,
+              size: `${formatBytes(file.completed_length)} / ${formatBytes(file.length)}`,
+              selected: current.resources.find((resource) => resource.index === file.index)?.selected ?? file.selected
+            }))
+          };
+        });
+      },
       onGlobalStat: () => undefined
-    }).then((stop) => { unlisten = stop; }).catch((error: unknown) => { if (active) setActionError(String(error)); });
-    return () => { active = false; unlisten?.(); };
+    }).then((stop) => {
+      if (disposed) stop();
+      else {
+        unlisten = stop;
+        setEventsReady(true);
+        void listPersistedTasks().then((saved) => {
+          if (!disposed) setTasks((current) => mergeInitialTasks(current, saved));
+        }).catch((error: unknown) => { if (!disposed) setActionError(String(error)); });
+      }
+    }).catch((error: unknown) => { if (!disposed) setActionError(String(error)); });
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   useEffect(() => {
@@ -92,7 +117,7 @@ export function App() {
       setActionError(String(error));
       return;
     }
-    if (result.task) { setTasks((current) => [result.task!, ...current]); setSelectedTaskId(result.task.id); }
+    if (result.task) { setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
     if (result.confirmation) setConfirmation(result.confirmation);
   }
 
