@@ -1,0 +1,234 @@
+#[path = "aria2_sync.rs"]
+mod fixture;
+use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore};
+use serde_json::json;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+#[tokio::test]
+async fn shutdown_attempts_shutdown_after_save_failure_and_rejects_later_submissions() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let wire = calls.clone();
+    let (client, server) = fixture::server(move |request| {
+        let method = request["method"].as_str().unwrap().to_string();
+        wire.lock().unwrap().push(method.clone());
+        match method.as_str() {
+            "aria2.saveSession" => json!(false),
+            "aria2.shutdown" => json!("OK"),
+            other => panic!("{other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("http://127.0.0.1/file"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store);
+    let report = service.shutdown_report(Duration::from_millis(50)).await;
+    assert!(!report.session_saved);
+    assert!(report.shutdown_requested);
+    assert!(!report.force_killed);
+    assert!(service
+        .submit_uri(task.id, vec![task.source], Default::default())
+        .await
+        .is_err());
+    assert_eq!(
+        *calls.lock().unwrap(),
+        ["aria2.saveSession", "aria2.shutdown"]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_matches_known_imports_unknown_and_reconciles_missing_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("finished.bin");
+    std::fs::write(&output, b"done").unwrap();
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => json!([fixture::status("known", "active", 25)]),
+            "aria2.tellWaiting" => json!([fixture::status("unknown", "paused", 0)]),
+            "aria2.tellStopped" => json!([]),
+            other => panic!("{other}"),
+        })
+        .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let known = store
+        .create(NewTask::direct("http://127.0.0.1/known"))
+        .unwrap();
+    store.bind_gid(known.id, "known").unwrap();
+    let missing = store
+        .create(NewTask::direct("http://127.0.0.1/missing"))
+        .unwrap();
+    let mut missing = store.bind_gid(missing.id, "missing").unwrap();
+    missing.status = TaskStatus::Downloading;
+    store.apply_transfer_snapshot(missing.clone()).unwrap();
+    let finished = store
+        .create(NewTask::direct("http://127.0.0.1/finished"))
+        .unwrap();
+    let mut finished = store.bind_gid(finished.id, "finished").unwrap();
+    finished.status = TaskStatus::Downloading;
+    store.apply_transfer_snapshot(finished.clone()).unwrap();
+    store
+        .upsert_files(
+            finished.id,
+            &[(1, output.to_string_lossy().into_owned(), 4, 4, true)],
+        )
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+    let report = service.recover().await.unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(store.find(known.id).unwrap().progress, 25);
+    assert_eq!(store.find(missing.id).unwrap().status, TaskStatus::Failed);
+    assert_eq!(
+        store.find(finished.id).unwrap().status,
+        TaskStatus::Completed
+    );
+    let imported = store.find_by_gid("unknown").unwrap().unwrap();
+    assert_eq!(imported.name, "恢复的下载任务");
+    assert_eq!(imported.status, TaskStatus::Paused);
+    assert_eq!(store.list().unwrap().len(), 4);
+    service.recover().await.unwrap();
+    assert_eq!(store.list().unwrap().len(), 4);
+    server.abort();
+}
+
+#[tokio::test]
+async fn restart_budget_allows_exactly_one_attempt_even_when_restart_fails() {
+    use alldownloader_lib::aria2::recovery::RestartBudget;
+    let budget = RestartBudget::default();
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let first = budget
+        .run_once(|| async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>("failed")
+        })
+        .await;
+    assert_eq!(first, Some(Err("failed")));
+    let second = budget
+        .run_once(|| async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<(), &str>(())
+        })
+        .await;
+    assert_eq!(second, None);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn owned_engine_restarts_once_and_shutdown_kills_only_after_deadline() {
+    use alldownloader_lib::aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process};
+    let root = tempfile::tempdir().unwrap();
+    let config = Aria2LaunchConfig {
+        binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+        data_dir: root.path().join("data"),
+        download_dir: root.path().join("downloads"),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+    };
+    let (child, client) = Aria2Process::start(config.clone()).await.unwrap();
+    let service = Arc::new(DownloadService::with_process(
+        Arc::new(client.clone()),
+        Arc::new(TaskStore::open_in_memory().unwrap()),
+        child,
+    ));
+    client.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service.engine_running().await.unwrap() == Some(true) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let sync = alldownloader_lib::aria2::sync::TransferSynchronizer::new(service.clone())
+        .with_websocket(client)
+        .with_restart_config(config.clone());
+    let (cancel, receiver) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(sync.run(receiver));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service.engine_running().await.unwrap() != Some(true) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    cancel.send(true).unwrap();
+    worker.await.unwrap();
+    assert_eq!(service.engine_running().await.unwrap(), Some(true));
+    service.api().shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service.engine_running().await.unwrap() == Some(true) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(service
+        .restart_if_exited(config.clone())
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(service.engine_running().await.unwrap(), Some(false));
+
+    // A fake RPC shutdown acknowledges without stopping the actual owned sidecar.
+    let (child, _) = Aria2Process::start(config).await.unwrap();
+    let (fake, fake_server) = fixture::server(|_| json!("OK")).await;
+    let service = DownloadService::with_process(
+        Arc::new(fake),
+        Arc::new(TaskStore::open_in_memory().unwrap()),
+        child,
+    );
+    let began = std::time::Instant::now();
+    let report = service.shutdown_report(Duration::from_millis(120)).await;
+    assert!(report.force_killed && report.child_stopped);
+    assert!(began.elapsed() >= Duration::from_millis(120));
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert_eq!(service.engine_running().await.unwrap(), Some(false));
+    fake_server.abort();
+}
+
+#[tokio::test]
+async fn recovery_resumes_control_file_in_its_original_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("partial.bin");
+    std::fs::write(&file, b"part").unwrap();
+    std::fs::write(dir.path().join("partial.bin.aria2"), b"fixture").unwrap();
+    let expected_dir = dir.path().to_string_lossy().to_string();
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            "aria2.addUri" => {
+                assert_eq!(request["params"][2]["continue"], "true");
+                assert_eq!(request["params"][2]["dir"], expected_dir);
+                assert_eq!(request["params"][2]["out"], "partial.bin");
+                json!("resumed")
+            }
+            "aria2.tellStatus" => fixture::status("resumed", "active", 4),
+            other => panic!("{other}"),
+        })
+        .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("http://127.0.0.1/partial.bin"))
+        .unwrap();
+    let mut task = store.bind_gid(task.id, "missing").unwrap();
+    task.status = TaskStatus::Downloading;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(1, file.to_string_lossy().into_owned(), 100, 4, true)],
+        )
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+    assert_eq!(service.recover().await.unwrap().resumed, 1);
+    let task = store.find(task.id).unwrap();
+    assert_eq!(task.aria_gid.as_deref(), Some("resumed"));
+    assert_eq!(task.status, TaskStatus::Downloading);
+    assert_eq!(std::fs::read(file).unwrap(), b"part");
+    assert!(dir.path().join("partial.bin.aria2").is_file());
+    server.abort();
+}

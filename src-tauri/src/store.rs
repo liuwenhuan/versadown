@@ -166,6 +166,14 @@ impl TaskStore {
         &self,
         snapshot: DownloadTask,
     ) -> Result<DownloadTask, StoreError> {
+        self.apply_transfer_snapshot_with_files(snapshot, &[])
+    }
+
+    pub fn apply_transfer_snapshot_with_files(
+        &self,
+        snapshot: DownloadTask,
+        files: &[(u32, String, u64, u64, bool)],
+    ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         let changed = transaction.execute(
@@ -183,6 +191,13 @@ impl TaskStore {
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(snapshot.id));
+        }
+        for (index, path, length, completed_length, selected) in files {
+            transaction.execute(
+                "INSERT INTO task_files (task_id,file_index,path,length,completed_length,selected) VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(task_id,file_index) DO UPDATE SET path=excluded.path,length=excluded.length,completed_length=excluded.completed_length,selected=excluded.selected",
+                params![snapshot.id.to_string(), index, path, sqlite_i64("length", *length)?, sqlite_i64("completed_length", *completed_length)?, selected],
+            )?;
         }
         transaction.commit()?;
         find_with_connection(&connection, snapshot.id)
@@ -227,6 +242,22 @@ impl TaskStore {
                     Err(StoreError::Database(error))
                 }
             })
+    }
+
+    pub fn files(&self, id: Uuid) -> Result<Vec<crate::aria2::TransferFile>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        find_with_connection(&connection, id)?;
+        let mut statement = connection.prepare("SELECT file_index,path,length,completed_length,selected FROM task_files WHERE task_id=?1 ORDER BY file_index")?;
+        let rows = statement.query_map([id.to_string()], |row| {
+            Ok(crate::aria2::TransferFile {
+                index: row.get(0)?,
+                path: row.get(1)?,
+                length: required_u64(row, 2)?,
+                completed_length: required_u64(row, 3)?,
+                selected: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
