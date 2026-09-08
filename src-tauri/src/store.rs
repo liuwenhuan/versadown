@@ -139,6 +139,32 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    /// Atomically claims an aria2 GID that could not be cleaned up after submission.
+    /// This keeps recovery from importing the same live session entry as a second task.
+    pub fn bind_gid_and_fail(
+        &self,
+        id: Uuid,
+        gid: impl AsRef<str>,
+        message: impl AsRef<str>,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET aria_gid=?1,followed_by_gid=NULL,status='failed',error=?2,
+             download_speed=0,upload_speed=0,eta_seconds=NULL,selection_confirmed=0,updated_at=?3
+             WHERE id=?4",
+            params![
+                gid.as_ref(),
+                message.as_ref(),
+                current_timestamp(),
+                id.to_string()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
+    }
+
     pub fn bind_metadata_gid(&self, id: Uuid, gid: &str) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let changed=connection.execute("UPDATE tasks SET aria_gid=?1,status='awaiting_user',selection_confirmed=0,updated_at=?2 WHERE id=?3",params![gid,current_timestamp(),id.to_string()])?;

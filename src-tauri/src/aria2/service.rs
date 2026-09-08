@@ -41,6 +41,14 @@ pub enum DownloadServiceError {
     MetadataTimeout,
     #[error("种子文件未包含可下载文件")]
     EmptyTorrent,
+    #[error("种子任务处于不可选择文件的 aria2 状态：{0}")]
+    TorrentNotSelectable(String),
+    #[error("种子任务处理失败且无法清理 aria2 GID {gid}：{cause}；清理错误：{cleanup}")]
+    TorrentCleanupFailed {
+        gid: String,
+        cause: String,
+        cleanup: String,
+    },
 }
 
 pub struct DownloadService {
@@ -131,33 +139,102 @@ impl DownloadService {
             .add_torrent(torrent_base64, web_seed_uris, options)
             .await?;
         let status = match self.api().tell_status(&gid).await {
-            Ok(status) if status.gid == gid && !status.files.is_empty() => status,
-            Ok(status) if status.gid == gid && status.files.is_empty() => {
-                let _ = self.api().remove(&gid).await;
-                return Err(DownloadServiceError::EmptyTorrent);
-            }
-            Ok(_) => {
-                let _ = self.api().remove(&gid).await;
-                return Err(Aria2Error::MalformedResponse.into());
-            }
+            Ok(status) => status,
             Err(error) => {
-                let _ = self.api().remove(&gid).await;
-                return Err(error.into());
+                return Err(self
+                    .cleanup_rejected_torrent(task_id, &gid, error.into())
+                    .await)
             }
         };
-        if TransferSnapshot::try_from(status.clone()).is_err() {
-            let _ = self.api().remove(&gid).await;
-            return Err(Aria2Error::MalformedResponse.into());
+        if status.gid != gid {
+            return Err(self
+                .cleanup_rejected_torrent(task_id, &gid, Aria2Error::MalformedResponse.into())
+                .await);
         }
-        let current = match self.store.bind_metadata_gid(task_id, &gid) {
-            Ok(task) => task,
+        let aria_status = status.status.clone();
+        let mut snapshot = match TransferSnapshot::try_from(status) {
+            Ok(snapshot) => snapshot,
             Err(error) => {
-                let _ = self.api().remove(&gid).await;
-                return Err(error.into());
+                return Err(self
+                    .cleanup_rejected_torrent(task_id, &gid, error.into())
+                    .await)
             }
         };
-        self.publish_task(&current)?;
-        self.apply_status(current, status, false).await
+        match snapshot.status {
+            TaskStatus::Paused | TaskStatus::Queued => {
+                if snapshot.files.is_empty() {
+                    return Err(self
+                        .cleanup_rejected_torrent(task_id, &gid, DownloadServiceError::EmptyTorrent)
+                        .await);
+                }
+                let current = match self.store.bind_metadata_gid(task_id, &gid) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        return Err(self
+                            .cleanup_rejected_torrent(task_id, &gid, error.into())
+                            .await)
+                    }
+                };
+                snapshot.status = TaskStatus::AwaitingUser;
+                self.persist_snapshot(current, snapshot)
+            }
+            TaskStatus::Processing
+            | TaskStatus::Completed
+            | TaskStatus::Failed
+            | TaskStatus::Cancelled => {
+                if snapshot.status == TaskStatus::Failed && snapshot.error_message.is_none() {
+                    snapshot.error_message =
+                        Some(format!("aria2 种子任务以 {aria_status} 状态结束"));
+                }
+                let current = match self.store.bind_gid(task_id, &gid) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        return Err(self
+                            .cleanup_rejected_torrent(task_id, &gid, error.into())
+                            .await)
+                    }
+                };
+                self.persist_snapshot(current, snapshot)?;
+                Err(DownloadServiceError::TorrentNotSelectable(aria_status))
+            }
+            TaskStatus::Downloading
+            | TaskStatus::AwaitingUser
+            | TaskStatus::Draft
+            | TaskStatus::Parsing => Err(self
+                .cleanup_rejected_torrent(
+                    task_id,
+                    &gid,
+                    DownloadServiceError::TorrentNotSelectable(aria_status),
+                )
+                .await),
+        }
+    }
+
+    async fn cleanup_rejected_torrent(
+        &self,
+        task_id: Uuid,
+        gid: &str,
+        cause: DownloadServiceError,
+    ) -> DownloadServiceError {
+        let cleanup = match self.api().remove(gid).await {
+            Ok(_) => return cause,
+            Err(error) => error,
+        };
+        let cause = cause.to_string();
+        let cleanup = cleanup.to_string();
+        let message =
+            format!("种子任务处理失败且无法清理 aria2 GID {gid}：{cause}；清理错误：{cleanup}");
+        match self.store.bind_gid_and_fail(task_id, gid, &message) {
+            Ok(task) => match self.publish_task(&task) {
+                Ok(()) => DownloadServiceError::TorrentCleanupFailed {
+                    gid: gid.into(),
+                    cause,
+                    cleanup,
+                },
+                Err(error) => error,
+            },
+            Err(error) => error.into(),
+        }
     }
 
     pub async fn control(

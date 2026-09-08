@@ -106,6 +106,201 @@ async fn torrent_without_real_files_never_enters_empty_confirmation() {
 }
 
 #[tokio::test]
+async fn malformed_torrent_status_is_removed_without_binding_the_task() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => json!("malformed-gid"),
+        "aria2.tellStatus" => json!(false),
+        "aria2.remove" => json!("malformed-gid"),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\malformed.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let error = service
+        .submit_torrent(task.id, "bWFsZm9ybWVk".into(), vec![], Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Malformed aria2 RPC response"), "{error}");
+    let stored = store.find(task.id).unwrap();
+    assert_eq!(stored.status, TaskStatus::Parsing);
+    assert!(stored.aria_gid.is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn failed_cleanup_binds_the_orphan_gid_and_recovery_does_not_import_a_duplicate() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => json!("tracked-orphan"),
+        "aria2.tellStatus" => {
+            let mut status = fixture::status("tracked-orphan", "paused", 0);
+            status["files"] = json!([{
+                "index":"not-a-number",
+                "path":"broken.bin",
+                "length":"100",
+                "completedLength":"0",
+                "selected":"true"
+            }]);
+            status
+        }
+        "aria2.remove" => json!(false),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\broken.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let error = service
+        .submit_torrent(task.id, "YnJva2Vu".into(), vec![], Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("tracked-orphan"), "{error}");
+    let tracked = store.find(task.id).unwrap();
+    assert_eq!(tracked.status, TaskStatus::Failed);
+    assert_eq!(tracked.aria_gid.as_deref(), Some("tracked-orphan"));
+    assert!(
+        tracked
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("无法清理"),
+        "persisted failure should explain why aria2 still owns the GID"
+    );
+    server.abort();
+
+    let (recovery_client, recovery_server) =
+        fixture::server(|request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => {
+                let mut status = fixture::status("tracked-orphan", "error", 0);
+                status["errorCode"] = json!("3");
+                status["errorMessage"] = json!("bad torrent");
+                json!([status])
+            }
+            "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            other => panic!("unexpected method {other}"),
+        })
+        .await;
+    let recovery = DownloadService::new(Arc::new(recovery_client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+    assert_eq!(recovery.imported, 0);
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert_eq!(store.find(task.id).unwrap().source, task.source);
+    recovery_server.abort();
+}
+
+#[tokio::test]
+async fn terminal_torrent_states_are_persisted_and_never_offered_for_confirmation() {
+    for (aria_status, expected_status) in [
+        ("complete", TaskStatus::Completed),
+        ("error", TaskStatus::Failed),
+        ("removed", TaskStatus::Cancelled),
+    ] {
+        let gid = format!("terminal-{aria_status}");
+        let wire_gid = gid.clone();
+        let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.addTorrent" => json!(wire_gid),
+            "aria2.tellStatus" => {
+                let mut status = fixture::status(&wire_gid, aria_status, if aria_status == "complete" { 100 } else { 0 });
+                status["files"] = json!([{"index":"1","path":"terminal.bin","length":"100","completedLength":status["completedLength"],"selected":"true"}]);
+                if aria_status == "error" {
+                    status["errorCode"] = json!("3");
+                    status["errorMessage"] = json!("bad torrent");
+                }
+                status
+            }
+            other => panic!("terminal state must not be cleaned up or confirmed: {other}"),
+        }).await;
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let task = store
+            .create(NewTask::direct(format!(
+                "C:\\Downloads\\{aria_status}.torrent"
+            )))
+            .unwrap();
+        let service = DownloadService::new(Arc::new(client), store.clone());
+
+        let error = service
+            .submit_torrent(task.id, "dGVybWluYWw=".into(), vec![], Default::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(aria_status), "{error}");
+        let stored = store.find(task.id).unwrap();
+        assert_eq!(stored.status, expected_status);
+        assert_eq!(stored.aria_gid.as_deref(), Some(gid.as_str()));
+        assert_ne!(stored.status, TaskStatus::AwaitingUser);
+        assert_eq!(store.files(task.id).unwrap().len(), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn waiting_torrent_with_files_is_a_valid_confirmation_candidate() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => json!("waiting-gid"),
+        "aria2.tellStatus" => {
+            let mut status = fixture::status("waiting-gid", "waiting", 0);
+            status["files"] = json!([{"index":"1","path":"queued.bin","length":"100","completedLength":"0","selected":"true"}]);
+            status
+        }
+        other => panic!("unexpected method {other}"),
+    }).await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\waiting.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let pending = service
+        .submit_torrent(task.id, "d2FpdGluZw==".into(), vec![], Default::default())
+        .await
+        .unwrap();
+    assert_eq!(pending.status, TaskStatus::AwaitingUser);
+    assert_eq!(pending.aria_gid.as_deref(), Some("waiting-gid"));
+    assert_eq!(store.files(task.id).unwrap().len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn active_torrent_is_rejected_instead_of_becoming_a_confirmation_candidate() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => json!("active-gid"),
+        "aria2.tellStatus" => {
+            let mut status = fixture::status("active-gid", "active", 1);
+            status["files"] = json!([{"index":"1","path":"active.bin","length":"100","completedLength":"1","selected":"true"}]);
+            status
+        }
+        "aria2.remove" => json!("active-gid"),
+        other => panic!("unexpected method {other}"),
+    }).await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("C:\\Downloads\\active.torrent"))
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let error = service
+        .submit_torrent(task.id, "YWN0aXZl".into(), vec![], Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("active"), "{error}");
+    let stored = store.find(task.id).unwrap();
+    assert_eq!(stored.status, TaskStatus::Parsing);
+    assert!(stored.aria_gid.is_none());
+    server.abort();
+}
+
+#[tokio::test]
 async fn metadata_child_is_persisted_and_selection_precedes_unpause() {
     let calls = Arc::new(Mutex::new(vec![]));
     let wire = calls.clone();
