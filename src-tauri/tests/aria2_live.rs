@@ -30,11 +30,13 @@ const POLL: Duration = Duration::from_millis(50);
 #[derive(Clone)]
 struct HttpFixture {
     payload: Arc<Vec<u8>>,
+    total_requests: Arc<AtomicUsize>,
     resumed_requests: Arc<AtomicUsize>,
 }
 
 // The only origin is loopback; streaming keeps pause observable without network timing.
 async fn serve_payload(State(state): State<HttpFixture>, headers: HeaderMap) -> Response {
+    state.total_requests.fetch_add(1, Ordering::SeqCst);
     let length = state.payload.len();
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     let (start, end, partial) = match range {
@@ -114,6 +116,7 @@ impl LiveAria2Fixture {
         let root = tempfile::tempdir().unwrap();
         let http = HttpFixture {
             payload: Arc::new((0..PAYLOAD_BYTES).map(|i| (i % 251) as u8).collect()),
+            total_requests: Arc::new(AtomicUsize::new(0)),
             resumed_requests: Arc::new(AtomicUsize::new(0)),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -304,6 +307,41 @@ async fn bundled_aria2_downloads_pauses_resumes_and_stops() {
     );
     fixture.save_and_shutdown().await;
     println!("aria2 1.37.0: real progress, pause, Range resume, SHA-256, session save and owned-child shutdown passed");
+}
+
+#[tokio::test]
+async fn bundled_aria2_does_not_restore_or_redownload_completed_session_entries() {
+    // Catches completed HTTP transfers being force-saved and loaded as new work on restart.
+    let mut fixture = LiveAria2Fixture::start().await;
+    let gid = fixture.add_slow_download("completed-once.bin").await;
+    fixture.wait_complete(&gid).await;
+    fixture.assert_download_sha256("completed-once.bin");
+    let control_path = fixture.config.download_dir.join("completed-once.bin.aria2");
+    assert!(
+        !control_path.exists(),
+        "a completed transfer must not retain an aria2 control file"
+    );
+    let requests_after_completion = fixture.http.total_requests.load(Ordering::SeqCst);
+
+    fixture.save_and_shutdown().await;
+    fixture.restart().await;
+    sleep(Duration::from_millis(500)).await;
+
+    assert!(
+        fixture.client.tell_status(&gid).await.is_err(),
+        "a completed GID must not be restored from the saved session"
+    );
+    assert_eq!(
+        fixture.http.total_requests.load(Ordering::SeqCst),
+        requests_after_completion,
+        "restarting from the saved session must not issue another HTTP request"
+    );
+    assert!(
+        !control_path.exists(),
+        "restarting must not create a new control file for a completed transfer"
+    );
+    fixture.assert_download_sha256("completed-once.bin");
+    fixture.save_and_shutdown().await;
 }
 
 #[tokio::test]

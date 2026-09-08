@@ -36,7 +36,7 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, port: u16, secret: &RpcSecre
         format!("--input-file={}", session.display()),
         format!("--save-session={}", session.display()),
         "--save-session-interval=10".into(),
-        "--force-save=true".into(),
+        "--force-save=false".into(),
         "--pause-metadata=true".into(),
         format!("--dir={}", config.download_dir.display()),
         format!("--stop-with-process={}", config.parent_pid),
