@@ -196,6 +196,7 @@ pub fn run() {
             cloud::commands::cloud_rename,
             cloud::commands::cloud_move,
             cloud::commands::cloud_trash,
+            cloud::commands::cloud_download_url,
             cloud::commands::cloud_upload_files,
             cloud::commands::cloud_logout,
             launcher::set_launcher_compact_shape,

@@ -1,5 +1,8 @@
 use super::{http::response_json, types::required, *};
-use crate::{DownloadTask, NewTask, TaskStatus, TaskStore};
+use crate::{
+    commands::{task_payload, AppState, DownloadTaskPayload}, DownloadTask, NewTask, TaskStatus,
+    TaskStore, UriSubmissionOptions,
+};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -422,10 +425,72 @@ pub fn enqueue_cloud_download(
         .and_then(|_| store.transition(task.id, TaskStatus::Downloading))
         .map_err(|_| QuarkError::Storage)
 }
+
+pub fn create_cloud_task(
+    store: &TaskStore,
+    provider: CloudProvider,
+    file_id: &str,
+    name: &str,
+) -> Result<DownloadTask, QuarkError> {
+    if file_id.trim().is_empty() {
+        return Err(QuarkError::InvalidInput("网盘文件 ID 无效".into()));
+    }
+    store
+        .create(NewTask {
+            source: format!("cloud://{}/{}", provider.key(), super::types::encoded(file_id)),
+            name: safe_filename(name),
+            kind: "cloud".into(),
+        })
+        .map_err(|_| QuarkError::Storage)
+}
+
+#[tauri::command]
+pub async fn cloud_download_url(
+    app: AppHandle,
+    provider: CloudProvider,
+    file_id: String,
+) -> Result<DownloadTaskPayload, QuarkError> {
+    let resolve_id = file_id.clone();
+    let resolved = run(app.clone(), provider, move |state, http| {
+        resolve_download(provider, &resolve_id, &state.store, http)
+    })
+    .await?;
+    let state = app.state::<AppState>();
+    let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
+    let signed_url = resolved.url.clone();
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| QuarkError::Transport(error.to_string()))?;
+    let submitted = service
+        .submit_uri_with_options(task.id, vec![signed_url], resolved.into_uri_submission_options())
+        .await;
+    let task = match submitted {
+        Ok(task) => task,
+        Err(error) => {
+            let message = format!("aria2 未能接受网盘下载任务：{error}");
+            let _ = state.store.fail(task.id, &message);
+            return Err(QuarkError::Transport(message));
+        }
+    };
+    task_payload(&state.store, task).map_err(|_| QuarkError::Storage)
+}
+
 pub struct ResolvedCloudDownload {
     pub url: String,
     pub name: String,
     pub headers: Vec<(String, String)>,
+}
+
+impl ResolvedCloudDownload {
+    pub fn into_uri_submission_options(self) -> UriSubmissionOptions {
+        UriSubmissionOptions {
+            output_name: Some(safe_filename(&self.name)),
+            headers: self.headers,
+            ..Default::default()
+        }
+    }
 }
 
 fn cookie_pair(value: &str) -> Option<(&str, &str)> {
@@ -504,11 +569,12 @@ pub(crate) fn safe_filename(name: &str) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use super::resolve_download;
+    use super::{create_cloud_task, resolve_download};
     use crate::cloud::{
         CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CredentialStore,
-        MemoryCredentialStore, QuarkError,
+        MemoryCredentialStore, QuarkError, QUARK_DESKTOP_USER_AGENT,
     };
+    use crate::TaskStore;
 
     struct CapturingTransport(Mutex<Option<CloudHttpRequest>>);
 
@@ -585,6 +651,52 @@ mod tests {
             cookie.map(String::as_str),
             Some("sid=web-session; __puus=fresh-download-session")
         );
+    }
+
+    #[test]
+    fn resolved_quark_download_keeps_fresh_cookie_when_building_aria2_options() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("quark", b"sid=web-session; __puus=stale-session")
+            .unwrap();
+
+        let options = resolve_download(
+            CloudProvider::Quark,
+            "fixture",
+            &credentials,
+            &DownloadCookieTransport,
+        )
+        .unwrap()
+        .into_uri_submission_options();
+
+        assert_eq!(options.output_name.as_deref(), Some("fixture.jpg"));
+        assert_eq!(
+            options.headers,
+            vec![
+                ("Cookie".into(), "sid=web-session; __puus=fresh-download-session".into()),
+                ("Referer".into(), "https://pan.quark.cn/".into()),
+                ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cloud_task_persists_encoded_stable_source_not_signed_url() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = create_cloud_task(
+            &store,
+            CloudProvider::Quark,
+            "folder/file?signature=temporary",
+            "fixture.jpg",
+        )
+        .unwrap();
+
+        assert_eq!(
+            task.source,
+            "cloud://quark/folder%2Ffile%3Fsignature%3Dtemporary"
+        );
+        assert_eq!(task.name, "fixture.jpg");
+        assert_eq!(task.kind, "cloud");
     }
 }
 
