@@ -1,9 +1,18 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
-use tauri::{WebviewWindow, WindowEvent};
+use tauri::{AppHandle, Manager, WebviewWindow, Window, WindowEvent};
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn GetForegroundWindow() -> *mut std::ffi::c_void;
+    fn ShowWindow(window: *mut std::ffi::c_void, command: i32) -> i32;
+}
+
+const BACKGROUND_UI_TEST: &str = "ALLDOWNLOADER_BACKGROUND_UI_TEST";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagerCloseDisposition {
@@ -24,12 +33,14 @@ pub fn manager_close_disposition(
 
 pub struct ApplicationLifecycle {
     exiting: AtomicBool,
+    manager_close_requests: AtomicUsize,
 }
 
 impl ApplicationLifecycle {
     pub fn new() -> Self {
         Self {
             exiting: AtomicBool::new(false),
+            manager_close_requests: AtomicUsize::new(0),
         }
     }
 
@@ -40,6 +51,14 @@ impl ApplicationLifecycle {
     pub fn is_exiting(&self) -> bool {
         self.exiting.load(Ordering::Acquire)
     }
+
+    pub fn record_manager_close_request(&self) {
+        self.manager_close_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn manager_close_requests(&self) -> usize {
+        self.manager_close_requests.load(Ordering::Relaxed)
+    }
 }
 
 impl Default for ApplicationLifecycle {
@@ -48,20 +67,96 @@ impl Default for ApplicationLifecycle {
     }
 }
 
-pub fn install_manager_close_handler(
-    window: &WebviewWindow,
-    lifecycle: Arc<ApplicationLifecycle>,
+pub fn handle_manager_window_event(
+    window: &Window,
+    event: &WindowEvent,
+    lifecycle: &ApplicationLifecycle,
 ) {
-    let manager = window.clone();
-    window.on_window_event(move |event| {
-        if matches!(event, WindowEvent::CloseRequested { .. })
-            && manager_close_disposition(manager.label(), lifecycle.is_exiting())
-                == ManagerCloseDisposition::Hide
-        {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = manager.hide();
+    if !matches!(event, WindowEvent::CloseRequested { .. })
+        || manager_close_disposition(window.label(), lifecycle.is_exiting())
+            != ManagerCloseDisposition::Hide
+    {
+        return;
+    }
+
+    lifecycle.record_manager_close_request();
+    if let WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
+        let app = window.app_handle().clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let Some(manager) = app.get_webview_window("main") else {
+                return;
+            };
+            let _ = manager.hide();
+            #[cfg(windows)]
+            if manager.is_visible().unwrap_or(true) {
+                const SW_HIDE: i32 = 0;
+                if let Ok(hwnd) = manager.hwnd() {
+                    unsafe {
+                        ShowWindow(hwnd.0, SW_HIDE);
+                    }
+                }
             }
+        });
+    }
+}
+
+pub fn show_manager_without_activation(window: &WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        const SW_SHOWNOACTIVATE: i32 = 4;
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+        unsafe {
+            ShowWindow(hwnd.0, SW_SHOWNOACTIVATE);
         }
-    });
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        window.show().map_err(|error| error.to_string())
+    }
+}
+
+fn require_background_ui_test() -> Result<(), String> {
+    if std::env::var(BACKGROUND_UI_TEST).as_deref() == Ok("1") {
+        Ok(())
+    } else {
+        Err("窗口观测仅在后台测试模式可用".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn request_native_manager_close_for_test(app: AppHandle) -> Result<(), String> {
+    require_background_ui_test()?;
+    let manager = app
+        .get_webview_window("main")
+        .ok_or_else(|| "下载管理器窗口不存在".to_string())?;
+
+    manager.close().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn foreground_window_handle_for_test() -> Result<Option<u64>, String> {
+    require_background_ui_test()?;
+
+    #[cfg(windows)]
+    {
+        let hwnd = unsafe { GetForegroundWindow() };
+        Ok((!hwnd.is_null()).then_some(hwnd as usize as u64))
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+pub fn manager_close_request_count_for_test(
+    lifecycle: tauri::State<'_, Arc<ApplicationLifecycle>>,
+) -> Result<usize, String> {
+    require_background_ui_test()?;
+    Ok(lifecycle.manager_close_requests())
 }

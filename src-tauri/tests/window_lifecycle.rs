@@ -1,6 +1,4 @@
-use alldownloader_lib::{
-    manager_close_disposition, ApplicationLifecycle, ManagerCloseDisposition,
-};
+use alldownloader_lib::{manager_close_disposition, ApplicationLifecycle, ManagerCloseDisposition};
 
 #[test]
 fn main_close_hides_until_application_exit_begins() {
@@ -25,4 +23,13 @@ fn lifecycle_marks_only_intentional_application_exit() {
     assert!(!lifecycle.is_exiting());
     lifecycle.begin_exit();
     assert!(lifecycle.is_exiting());
+}
+
+#[test]
+fn lifecycle_counts_main_close_requests_for_background_observability() {
+    let lifecycle = ApplicationLifecycle::new();
+
+    lifecycle.record_manager_close_request();
+
+    assert_eq!(lifecycle.manager_close_requests(), 1);
 }

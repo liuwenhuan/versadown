@@ -159,7 +159,10 @@ pub fn set_launcher_compact_shape(
 }
 
 #[tauri::command]
-pub fn start_launcher_dragging(window: WebviewWindow, interaction: State<'_, LauncherInteractionState>) -> Result<(), String> {
+pub fn start_launcher_dragging(
+    window: WebviewWindow,
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<(), String> {
     interaction.record_drag();
     if interaction.is_background_test() {
         return Ok(());
@@ -168,7 +171,11 @@ pub fn start_launcher_dragging(window: WebviewWindow, interaction: State<'_, Lau
 }
 
 #[tauri::command]
-pub fn show_launcher_menu(app: AppHandle, window: WebviewWindow, interaction: State<'_, LauncherInteractionState>) -> Result<(), String> {
+pub fn show_launcher_menu(
+    app: AppHandle,
+    window: WebviewWindow,
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<(), String> {
     if window.label() != "launcher" {
         return Err("右键菜单只能从悬浮窗打开".to_string());
     }
@@ -185,7 +192,9 @@ pub fn show_launcher_menu(app: AppHandle, window: WebviewWindow, interaction: St
 }
 
 #[tauri::command]
-pub fn launcher_interaction_snapshot(interaction: State<'_, LauncherInteractionState>) -> Result<LauncherInteractionSnapshot, String> {
+pub fn launcher_interaction_snapshot(
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<LauncherInteractionSnapshot, String> {
     if !interaction.is_background_test() {
         return Err("交互观测仅在后台测试模式可用".to_string());
     }
@@ -228,7 +237,7 @@ pub fn handle_launcher_menu_action(app: &AppHandle, id: &str) {
     match id {
         OPEN_MANAGER => reveal_manager(app, None),
         OPEN_SETTINGS => reveal_manager(app, Some("settings")),
-        QUIT => app.exit(0),
+        QUIT => begin_application_exit(app),
         _ => {}
     }
 }
@@ -240,9 +249,30 @@ fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
     if let Some(destination) = destination {
         let _ = app.emit_to("main", "launcher-navigate", destination);
     }
-    let _ = manager.unminimize();
-    let _ = manager.show();
-    if !background_ui_test_enabled() {
+    if background_ui_test_enabled() {
+        let _ = crate::window_lifecycle::show_manager_without_activation(&manager);
+    } else {
+        let _ = manager.unminimize();
+        let _ = manager.show();
         let _ = manager.set_focus();
     }
+}
+
+fn begin_application_exit(app: &AppHandle) {
+    if let Some(lifecycle) = app.try_state::<std::sync::Arc<crate::ApplicationLifecycle>>() {
+        lifecycle.begin_exit();
+    }
+    let Some(state) = app.try_state::<crate::commands::AppState>() else {
+        app.exit(0);
+        return;
+    };
+    let _ = state.sync_cancel.send(true);
+    let service = std::sync::Arc::clone(&state.service);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _report = service
+            .shutdown_report(std::time::Duration::from_secs(5))
+            .await;
+        app.exit(0);
+    });
 }

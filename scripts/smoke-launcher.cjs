@@ -1,10 +1,15 @@
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const WebSocket = require('ws');
 
 const projectRoot = path.resolve(__dirname, '..');
-const executable = path.join(projectRoot, 'src-tauri', 'target', 'release', 'alldownloader.exe');
+const targetRoot = process.env.CARGO_TARGET_DIR
+  ? path.resolve(projectRoot, process.env.CARGO_TARGET_DIR)
+  : path.join(projectRoot, 'src-tauri', 'target');
+const executable = path.join(targetRoot, 'release', 'alldownloader.exe');
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -76,6 +81,7 @@ function assert(condition, message) {
 
 async function run() {
   const port = await availablePort();
+  const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-ui-smoke-'));
   const child = spawn(executable, [], {
     cwd: path.dirname(executable),
     windowsHide: true,
@@ -83,6 +89,7 @@ async function run() {
     env: {
       ...process.env,
       ALLDOWNLOADER_BACKGROUND_UI_TEST: '1',
+      ALLDOWNLOADER_TEST_DATA_DIR: testDataDir,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`
     }
   });
@@ -151,13 +158,48 @@ async function run() {
     assert(launcherInteractions.state.menuRequests === 1, `Launcher right click did not request its native menu: ${JSON.stringify(launcherInteractions)}`);
     assert(launcherInteractions.compact && !launcherInteractions.expanded, `Drag or right click unexpectedly expanded the launcher: ${JSON.stringify(launcherInteractions)}`);
 
-    await evaluate(manager, `window.__TAURI_INTERNALS__.invoke('hide_manager_for_test')`);
-    const hidden = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
-    assert(hidden.exists && !hidden.visible, 'Main window was destroyed or remained visible after hiding.');
+    const foregroundBeforeLifecycleChecks = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('foreground_window_handle_for_test')`);
+
+    await evaluate(manager, `document.querySelector('button[aria-label="关闭下载管理器"]').click()`);
+    const hiddenAfterCustomClose = JSON.parse(await waitForEvaluation(
+      launcher,
+      `(async () => JSON.stringify(await window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')))()`,
+      (value) => {
+        const snapshot = JSON.parse(value);
+        return snapshot.exists && !snapshot.visible;
+      }
+    ));
+    assert(hiddenAfterCustomClose.exists && !hiddenAfterCustomClose.visible, 'Custom close destroyed or left the main window visible.');
 
     await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.open_manager' })`);
-    const shown = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
-    assert(shown.exists && shown.visible, 'Launcher could not reopen the hidden manager window.');
+    const shownAfterCustomClose = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
+    assert(shownAfterCustomClose.exists && shownAfterCustomClose.visible, 'Launcher could not reopen the custom-hidden manager window.');
+    const foregroundAfterCustomReopen = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('foreground_window_handle_for_test')`);
+    assert(foregroundAfterCustomReopen === foregroundBeforeLifecycleChecks, 'Custom-close reopen activated a foreground window.');
+
+    const closeRequestsBeforeNativeClose = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_close_request_count_for_test')`);
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('request_native_manager_close_for_test')`);
+    const closeRequestsAfterNativeClose = await waitForEvaluation(
+      launcher,
+      `window.__TAURI_INTERNALS__.invoke('manager_close_request_count_for_test')`,
+      (count) => count === closeRequestsBeforeNativeClose + 1
+    );
+    const hiddenAfterNativeClose = JSON.parse(await waitForEvaluation(
+      launcher,
+      `(async () => JSON.stringify(await window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')))()`,
+      (value) => {
+        const snapshot = JSON.parse(value);
+        return snapshot.exists && !snapshot.visible;
+      }
+    ));
+    assert(hiddenAfterNativeClose.exists && !hiddenAfterNativeClose.visible, 'Native close destroyed or left the main window visible.');
+    assert(closeRequestsAfterNativeClose === closeRequestsBeforeNativeClose + 1, 'Native close did not reach the lifecycle handler.');
+
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.open_manager' })`);
+    const shownAfterNativeClose = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
+    assert(shownAfterNativeClose.exists && shownAfterNativeClose.visible, 'Launcher could not reopen the native-close-hidden manager window.');
+    const foregroundAfterNativeReopen = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('foreground_window_handle_for_test')`);
+    assert(foregroundAfterNativeReopen === foregroundBeforeLifecycleChecks, 'Native-close reopen activated a foreground window.');
 
     await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.settings' })`);
     const settingsVisible = await waitForEvaluation(
@@ -190,9 +232,16 @@ async function run() {
     const restoredRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
     assert(restoredRegion && restoredRegion.width === restoredRegion.height, `Compact region was not restored after collapse: ${JSON.stringify(restoredRegion)}`);
 
-    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native circular region ${nativeRegion.width}px, hide/reopen/settings verified without foreground activation, expanded ${expanded.width}x${expanded.height}.\n`);
+    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native circular region ${nativeRegion.width}px, custom/native close reopen and settings verified without foreground activation, expanded ${expanded.width}x${expanded.height}.\n`);
   } finally {
-    child.kill();
+    if (child.exitCode === null) {
+      child.kill();
+      await new Promise((resolve) => {
+        const fallback = setTimeout(resolve, 2000);
+        child.once('exit', () => { clearTimeout(fallback); resolve(); });
+      });
+    }
+    fs.rmSync(testDataDir, { recursive: true, force: true });
   }
 }
 
