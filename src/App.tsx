@@ -7,12 +7,13 @@ import { CloudManager } from './components/CloudManager';
 import { SettingsPanel } from './components/SettingsPanel';
 import { confirmDownload, isTauriRuntime, listPersistedTasks, parseDownload, runTaskAction } from './lib/api';
 import { ParseResult, QueueTask } from './lib/types';
+import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 
 export function App() {
   const [tasks, setTasks] = useState<QueueTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ParseResult | null>(null);
-  const [view, setView] = useState<'downloads' | 'cloud' | 'settings'>('downloads');
+  const [view, setView] = useState<ManagerView>('downloads');
   const selectedTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === selectedTaskId), [selectedTaskId, tasks]);
 
   useEffect(() => {
@@ -20,6 +21,16 @@ export function App() {
     let active = true;
     listPersistedTasks().then((saved) => { if (active) setTasks(saved); }).catch(() => undefined);
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    listen<unknown>('launcher-navigate', (event) => {
+      const destination = managerViewFromLauncherPayload(event.payload);
+      if (destination) setView(destination);
+    }).then((stop) => { unlisten = stop; }).catch(() => undefined);
+    return () => { unlisten?.(); };
   }, []);
 
   useEffect(() => {

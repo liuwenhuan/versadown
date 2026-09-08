@@ -3,6 +3,7 @@ use tauri::Manager;
 mod connectors;
 mod commands;
 mod downloader;
+mod launcher;
 mod models;
 mod parser;
 mod policy;
@@ -11,6 +12,7 @@ mod store;
 
 pub use connectors::{CloudConnector, CloudDirectory, CloudItem, ConnectorError, MockConnector, Provider};
 pub use downloader::{aria2_binary_name, confirm_download, prepare_download, start_aria2, DownloadError, ParseOutcome};
+pub use launcher::{launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion};
 pub use models::{may_transition, DownloadTask, NewTask, TaskStatus};
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
@@ -32,6 +34,7 @@ fn app_version_command() -> String {
 
 pub fn run() {
     tauri::Builder::default()
+        .on_menu_event(|app, event| launcher::handle_launcher_menu_action(app, event.id().as_ref()))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -42,13 +45,17 @@ pub fn run() {
             let destination = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from).map(|path| path.join("Downloads")).unwrap_or_else(|| data_dir.join("downloads"));
             app.manage(commands::AppState { store, sidecar, destination, debug_reports: std::sync::Mutex::new(false) });
             let background_ui_test = std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST").ok();
+            app.manage(launcher::LauncherInteractionState::new(background_ui_test.as_deref() == Some("1")));
             if should_show_windows(background_ui_test.as_deref()) {
                 if let Some(main) = app.get_webview_window("main") { main.show()?; }
-                if let Some(launcher) = app.get_webview_window("launcher") { launcher.show()?; }
+                if let Some(launcher) = app.get_webview_window("launcher") {
+                    launcher::set_launcher_compact_shape(launcher.clone(), true).map_err(std::io::Error::other)?;
+                    launcher.show()?;
+                }
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![app_version_command, commands::parse_download, commands::confirm_download_command, commands::list_tasks, commands::task_action, commands::get_settings, commands::update_debug_reports])
+        .invoke_handler(tauri::generate_handler![app_version_command, commands::parse_download, commands::confirm_download_command, commands::list_tasks, commands::task_action, commands::get_settings, commands::update_debug_reports, launcher::set_launcher_compact_shape, launcher::start_launcher_dragging, launcher::show_launcher_menu, launcher::launcher_interaction_snapshot])
         .run(tauri::generate_context!())
         .expect("error while running AllDownloader");
 }

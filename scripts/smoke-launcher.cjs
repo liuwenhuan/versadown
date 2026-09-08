@@ -123,11 +123,50 @@ async function run() {
     assert(nativeCompact.position.x + nativeCompact.size.width <= workArea.position.x + workArea.size.width, `Launcher extends beyond the right edge: ${JSON.stringify(nativeCompact)}`);
     assert(nativeCompact.position.y + nativeCompact.size.height <= workArea.position.y + workArea.size.height, `Launcher extends beyond the bottom edge: ${JSON.stringify(nativeCompact)}`);
 
+    const nativeRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
+    assert(nativeRegion && nativeRegion.width === nativeRegion.height && nativeRegion.width > 0, `Windows launcher region is not circular: ${JSON.stringify(nativeRegion)}`);
+    assert(nativeRegion.x >= 0 && nativeRegion.y >= 0, `Windows launcher region starts outside its native window: ${JSON.stringify(nativeRegion)}`);
+
+    await evaluate(launcher, `(() => {
+      window.__launcherSmokeEvents = [];
+      const button = document.querySelector('.launcher-trigger');
+      for (const type of ['mousedown', 'mousemove', 'mouseup', 'click', 'contextmenu']) {
+        button.addEventListener(type, (event) => window.__launcherSmokeEvents.push({ type, button: event.button, buttons: event.buttons, clientX: event.clientX, clientY: event.clientY }), { capture: true, once: true });
+      }
+      button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1, clientX: 10, clientY: 10 }));
+      button.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, button: 0, buttons: 1, clientX: 20, clientY: 18 }));
+      button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, buttons: 0, clientX: 20, clientY: 18 }));
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 }));
+    })()`);
+    const launcherInteractions = JSON.parse(await waitForEvaluation(
+      launcher,
+      `(async () => JSON.stringify({ state: await window.__TAURI_INTERNALS__.invoke('launcher_interaction_snapshot'), events: window.__launcherSmokeEvents, compact: Boolean(document.querySelector('.launcher-trigger')), expanded: Boolean(document.querySelector('.launcher-panel')) }))()`,
+      (value) => {
+        const state = JSON.parse(value).state;
+        return state.dragRequests === 1 && state.menuRequests === 1;
+      }
+    ));
+    assert(launcherInteractions.state.dragRequests === 1, `Launcher drag did not invoke native window dragging: ${JSON.stringify(launcherInteractions)}`);
+    assert(launcherInteractions.state.menuRequests === 1, `Launcher right click did not request its native menu: ${JSON.stringify(launcherInteractions)}`);
+    assert(launcherInteractions.compact && !launcherInteractions.expanded, `Drag or right click unexpectedly expanded the launcher: ${JSON.stringify(launcherInteractions)}`);
+
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('plugin:event|emit_to', { target: { kind: 'AnyLabel', label: 'main' }, event: 'launcher-navigate', payload: 'settings' })`);
+    const settingsVisible = await waitForEvaluation(
+      manager,
+      `Boolean(document.querySelector('.settings-panel'))`,
+      Boolean
+    );
+    assert(settingsVisible, 'Launcher settings action did not navigate the manager to Settings.');
+
     await evaluate(launcher, 'document.querySelector("button[aria-label=\\"打开下载输入\\"]").click()');
     const expanded = JSON.parse(await waitForEvaluation(
       launcher,
       'JSON.stringify({ width: innerWidth, height: innerHeight, panel: Boolean(document.querySelector(".launcher-panel")), action: document.querySelector(".launcher-panel .primary")?.textContent })',
-      (value) => JSON.parse(value).panel
+      (value) => {
+        const state = JSON.parse(value);
+        return state.panel && state.width >= 469 && state.height >= 299;
+      }
     ));
     assert(expanded.width >= 469 && expanded.height >= 299, `Launcher did not expand to the input panel: ${JSON.stringify(expanded)}`);
     assert(expanded.action === '开始解析下载', 'Expanded launcher action label is incorrect.');
@@ -135,12 +174,15 @@ async function run() {
     await evaluate(launcher, 'document.querySelector("button[aria-label=\\"收起下载输入\\"]").click()');
     const collapsed = await waitForEvaluation(
       launcher,
-      'Boolean(document.querySelector(".launcher-trigger")) && !document.querySelector(".launcher-panel")',
+      'Boolean(document.querySelector(".launcher-trigger")) && !document.querySelector(".launcher-panel") && innerWidth < 200 && innerHeight < 100',
       Boolean
     );
     assert(collapsed, 'Launcher did not collapse back to the floating button.');
 
-    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height} at native (${nativeCompact.position.x},${nativeCompact.position.y}), expanded ${expanded.width}x${expanded.height}.\n`);
+    const restoredRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
+    assert(restoredRegion && restoredRegion.width === restoredRegion.height, `Compact region was not restored after collapse: ${JSON.stringify(restoredRegion)}`);
+
+    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native circular region ${nativeRegion.width}px, drag/context menu/settings verified, expanded ${expanded.width}x${expanded.height}.\n`);
   } finally {
     child.kill();
   }
