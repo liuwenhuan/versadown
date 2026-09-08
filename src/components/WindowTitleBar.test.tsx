@@ -37,13 +37,12 @@ it('uses the restore label while the window is maximized', async () => {
   expect(screen.getByRole('button', { name: '还原下载管理器' })).toBeVisible();
 });
 
-it('toggles maximize when the user double-clicks the custom title drag region', async () => {
+it('leaves title-area double clicks exclusively to Tauri native drag handling', async () => {
   const user = userEvent.setup();
   const onAction = vi.fn();
 
   render(<WindowTitleBar title="下载管理" maximized={false} onAction={onAction} />);
   await user.dblClick(screen.getByTestId('titlebar-drag-region'));
 
-  expect(onAction).toHaveBeenCalledOnce();
-  expect(onAction).toHaveBeenCalledWith('toggle-maximize');
+  expect(onAction).not.toHaveBeenCalled();
 });
