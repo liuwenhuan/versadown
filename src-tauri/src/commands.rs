@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -7,14 +10,16 @@ use uuid::Uuid;
 use crate::downloader::load_torrent_base64;
 use crate::{
     confirm_download, duplicate_state, prepare_download, retry_duplicate_state, DownloadAction,
-    DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome, ParseResource,
-    TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
+    AppSettings, DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome,
+    ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
 
 pub struct AppState {
     pub store: Arc<TaskStore>,
     pub runtime: Arc<crate::EngineRuntime>,
     pub debug_reports: Mutex<bool>,
+    pub settings: Mutex<AppSettings>,
+    pub settings_path: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -56,6 +61,55 @@ pub struct Settings {
     pub debug_reports: bool,
 }
 
+fn proxy_url(proxy: &ProxySettings) -> Result<Option<String>, String> {
+    if !proxy.enabled {
+        return Ok(None);
+    }
+    if !matches!(proxy.protocol.as_str(), "http" | "https") {
+        return Err("aria2 仅支持 HTTP/HTTPS 代理".into());
+    }
+    if proxy.host.trim().is_empty() || proxy.host.contains("://") || proxy.port == 0 {
+        return Err("代理服务器地址或端口无效".into());
+    }
+    let host = proxy.host.trim();
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let mut value = url::Url::parse(&format!("{}://{}:{}", proxy.protocol, host, proxy.port))
+        .map_err(|_| "代理服务器地址无效".to_string())?;
+    if !proxy.username.is_empty() {
+        value
+            .set_username(&proxy.username)
+            .map_err(|_| "代理用户名无效".to_string())?;
+    }
+    if !proxy.password.is_empty() {
+        value
+            .set_password(Some(&proxy.password))
+            .map_err(|_| "代理密码无效".to_string())?;
+    }
+    Ok(Some(value.to_string()))
+}
+
+pub(crate) fn download_submission_options(
+    state: &AppState,
+) -> Result<UriSubmissionOptions, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())?;
+    let directory = PathBuf::from(settings.download_directory.trim());
+    if !directory.is_absolute() {
+        return Err("下载目录必须是绝对路径".into());
+    }
+    Ok(UriSubmissionOptions {
+        directory: Some(directory),
+        proxy: proxy_url(&settings.proxy)?,
+        ..Default::default()
+    })
+}
+
 #[tauri::command]
 pub async fn parse_download(
     input: String,
@@ -71,6 +125,9 @@ pub async fn parse_download(
         return Ok(outcome);
     }
     if outcome.task.kind == "torrent" {
+        let options = download_submission_options(&state)?
+            .into_aria2_options()
+            .map_err(|error| error.to_string())?;
         let encoded = match load_torrent_base64(&outcome.task.source).await {
             Ok(encoded) => encoded,
             Err(error) => {
@@ -80,7 +137,7 @@ pub async fn parse_download(
             }
         };
         outcome.task = match service
-            .submit_torrent(outcome.task.id, encoded, vec![], Default::default())
+            .submit_torrent(outcome.task.id, encoded, vec![], options)
             .await
         {
             Ok(task) => task,
@@ -98,17 +155,19 @@ pub async fn parse_download(
         };
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     } else if !outcome.requires_confirmation {
+        let options = download_submission_options(&state)?;
         outcome.task = service
-            .submit_uri(
+            .submit_uri_with_options(
                 outcome.task.id,
                 vec![outcome.task.source.clone()],
-                Default::default(),
+                options,
             )
             .await
             .map_err(|error| error.to_string())?;
     } else if outcome.task.kind == "magnet" {
+        let options = download_submission_options(&state)?;
         outcome.task = service
-            .prepare_magnet(outcome.task.id, outcome.task.source.clone())
+            .prepare_magnet_with_options(outcome.task.id, outcome.task.source.clone(), options)
             .await
             .map_err(|error| error.to_string())?;
         match service
@@ -167,8 +226,9 @@ pub async fn confirm_download_command(
         return Err(error.to_string());
     }
     let task = confirm_download(id, &state.store).map_err(|error| error.to_string())?;
+    let options = download_submission_options(&state)?;
     let task = service
-        .submit_uri(task.id, vec![task.source], Default::default())
+        .submit_uri_with_options(task.id, vec![task.source], options)
         .await
         .map_err(|error| error.to_string())?;
     task_payload(&state.store, task)
@@ -296,12 +356,21 @@ async fn resubmit_task(
         .service()
         .await
         .map_err(|error| error.to_string())?;
+    let configured = download_submission_options(state)?;
+    if options.directory.is_none() {
+        options.directory = configured.directory;
+    }
+    if options.proxy.is_none() {
+        options.proxy = configured.proxy;
+    }
     if task.source.starts_with("cloud://") {
         let resolved = crate::cloud::commands::resolve_stable_cloud_download(app, &task.source)
             .await
             .map_err(|error| format!("无法重新获取网盘下载地址：{error}"))?;
         let signed_url = resolved.url.clone();
         let mut cloud_options = resolved.into_uri_submission_options();
+        cloud_options.directory = options.directory.clone();
+        cloud_options.proxy = options.proxy.clone();
         cloud_options.allow_overwrite = options.allow_overwrite;
         cloud_options.continue_download = options.continue_download;
         return service
@@ -412,13 +481,12 @@ pub async fn get_download_global_stat(
 }
 
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    Ok(Settings {
-        debug_reports: *state
-            .debug_reports
-            .lock()
-            .map_err(|_| "设置锁不可用".to_string())?,
-    })
+pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())
+        .map(|settings| settings.clone())
 }
 
 #[tauri::command]
@@ -428,15 +496,69 @@ pub fn update_debug_reports(enabled: bool, state: State<'_, AppState>) -> Result
         .lock()
         .map_err(|_| "设置锁不可用".to_string())?;
     *setting = enabled;
+    if let Ok(mut settings) = state.settings.lock() {
+        settings.debug_reports = enabled;
+    }
     Ok(Settings {
         debug_reports: *setting,
     })
+}
+
+#[tauri::command]
+pub fn update_settings(
+    mut settings: AppSettings,
+    state: State<'_, AppState>,
+) -> Result<AppSettings, String> {
+    settings.download_directory = settings.download_directory.trim().to_string();
+    let download_directory = PathBuf::from(&settings.download_directory);
+    if settings.download_directory.is_empty() || !download_directory.is_absolute() {
+        return Err("下载目录必须是绝对路径".into());
+    }
+    std::fs::create_dir_all(&download_directory)
+        .map_err(|error| format!("无法创建下载目录：{error}"))?;
+    settings.proxy.host = settings.proxy.host.trim().to_string();
+    settings.proxy.username = settings.proxy.username.trim().to_string();
+    proxy_url(&settings.proxy)?;
+
+    let json = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| format!("无法保存设置：{error}"))?;
+    std::fs::write(&state.settings_path, json)
+        .map_err(|error| format!("无法保存设置：{error}"))?;
+
+    *state
+        .debug_reports
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())? = settings.debug_reports;
+    *state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())? = settings.clone();
+    Ok(settings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{DuplicateDownloadState, NewTask};
+
+    #[test]
+    fn disabled_proxy_does_not_leak_process_proxy_settings_into_aria2() {
+        assert_eq!(proxy_url(&ProxySettings::default()).unwrap(), None);
+    }
+
+    #[test]
+    fn authenticated_proxy_is_validated_and_encoded_for_aria2() {
+        let proxy = ProxySettings {
+            enabled: true,
+            protocol: "https".into(),
+            host: "127.0.0.1".into(),
+            port: 1080,
+            username: "user@example.com".into(),
+            password: "p@ss word".into(),
+        };
+        let value = proxy_url(&proxy).unwrap().unwrap();
+        assert_eq!(value, "https://user%40example.com:p%40ss%20word@127.0.0.1:1080/");
+    }
 
     #[test]
     fn unbound_torrent_confirmation_is_rejected_instead_of_becoming_uri_download() {

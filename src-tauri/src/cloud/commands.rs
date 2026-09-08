@@ -514,13 +514,18 @@ pub async fn cloud_download_url(
     let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
     let signed_url = resolved.url.clone();
+    let mut options = resolved.into_uri_submission_options();
+    let configured = crate::commands::download_submission_options(&state)
+        .map_err(QuarkError::Transport)?;
+    options.directory = configured.directory;
+    options.proxy = configured.proxy;
     let service = state
         .runtime
         .service()
         .await
         .map_err(|error| QuarkError::Transport(error.to_string()))?;
     let submitted = service
-        .submit_uri_with_options(task.id, vec![signed_url], resolved.into_uri_submission_options())
+        .submit_uri_with_options(task.id, vec![signed_url], options)
         .await;
     let task = match submitted {
         Ok(task) => task,

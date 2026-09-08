@@ -1,6 +1,7 @@
 export type TaskStatus = 'draft' | 'parsing' | 'awaiting_user' | 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'paused';
 export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'cloud';
 export type DuplicateDownloadState = 'existing_active' | 'resume_available' | 'completed_files_present' | 'completed_files_missing' | 'overwrite_required';
+export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'open_directory' | 'copy_link' | 'details' | 'remove_record';
 
 export interface QueueTask {
   id: string;
@@ -9,8 +10,14 @@ export interface QueueTask {
   status: TaskStatus;
   progress: number;
   speed?: string;
-  eta?: string;
+  speedBytes?: number;
+  download_speed?: number;
+  upload_speed?: number;
   size?: string;
+  eta?: string;
+  eta_seconds?: number;
+  connections?: number;
+  statusMessage?: string;
   source?: string;
   children?: readonly QueueTask[];
   error?: string;
@@ -18,10 +25,6 @@ export interface QueueTask {
   followed_by_gid?: string;
   total_length?: number;
   completed_length?: number;
-  download_speed?: number;
-  upload_speed?: number;
-  connections?: number;
-  eta_seconds?: number;
   aria_error_code?: string;
   files?: readonly DownloadFile[];
   file_index?: number;
@@ -86,4 +89,21 @@ export interface CloudItem {
   kind: 'folder' | 'file';
   size?: string;
   modified: string;
+}
+
+export type ProxyProtocol = 'http' | 'https';
+
+export interface ProxySettings {
+  enabled: boolean;
+  protocol: ProxyProtocol;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+}
+
+export interface AppSettings {
+  debugReports: boolean;
+  downloadDirectory: string;
+  proxy: ProxySettings;
 }

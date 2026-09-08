@@ -36,7 +36,7 @@ pub struct UriSubmissionOptions {
 }
 
 impl UriSubmissionOptions {
-    fn into_aria2_options(self) -> Result<Aria2Options, DownloadServiceError> {
+    pub(crate) fn into_aria2_options(self) -> Result<Aria2Options, DownloadServiceError> {
         let mut options = Aria2Options::new();
         if let Some(directory) = self.directory {
             if directory.as_os_str().is_empty() {
@@ -433,13 +433,24 @@ impl DownloadService {
         task_id: Uuid,
         magnet: String,
     ) -> Result<DownloadTask, DownloadServiceError> {
+        self.prepare_magnet_with_options(task_id, magnet, UriSubmissionOptions::default())
+            .await
+    }
+
+    pub async fn prepare_magnet_with_options(
+        &self,
+        task_id: Uuid,
+        magnet: String,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         let task = self.store.find(task_id)?;
         if task.aria_gid.is_some() {
             return self.reconcile_task_unlocked(task_id).await;
         }
-        let options = BTreeMap::from([("pause-metadata".into(), "true".into())]);
+        let mut options = options.into_aria2_options()?;
+        options.insert("pause-metadata".into(), "true".into());
         let gid = self.api().add_uri(vec![magnet], options).await?;
         let current = match self.store.bind_metadata_gid(task_id, &gid) {
             Ok(task) => task,

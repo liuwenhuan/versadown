@@ -30,7 +30,8 @@ pub use launcher::{
     launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion,
 };
 pub use models::{
-    may_transition, DownloadTask, DuplicateDownloadState, NewTask, TaskStatus,
+    may_transition, AppSettings, DownloadTask, DuplicateDownloadState, NewTask, ProxySettings,
+    TaskStatus,
 };
 pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
@@ -85,6 +86,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .on_menu_event(|app, event| launcher::handle_launcher_menu_action(app, event.id().as_ref()))
         .on_window_event(|window, event| {
             if let Some(lifecycle) = window
@@ -127,7 +129,7 @@ pub fn run() {
             } else {
                 bundled_sidecar
             };
-            let destination = if background_ui_test.as_deref() == Some("1") {
+            let default_destination = if background_ui_test.as_deref() == Some("1") {
                 std::env::var_os("ALLDOWNLOADER_TEST_DOWNLOAD_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| data_dir.join("downloads"))
@@ -137,6 +139,17 @@ pub fn run() {
                     .map(|path| path.join("Downloads"))
                     .unwrap_or_else(|| data_dir.join("downloads"))
             };
+            let settings_path = data_dir.join("settings.json");
+            let mut settings: AppSettings = std::fs::read(&settings_path)
+                .ok()
+                .and_then(|json| serde_json::from_slice(&json).ok())
+                .unwrap_or_default();
+            if settings.download_directory.trim().is_empty() {
+                settings.download_directory = default_destination.to_string_lossy().into_owned();
+            }
+            let debug_reports = settings.debug_reports;
+            let destination = std::path::PathBuf::from(&settings.download_directory);
+            std::fs::create_dir_all(&destination)?;
             let launch_config = Aria2LaunchConfig {
                 binary: sidecar,
                 data_dir: data_dir.clone(),
@@ -157,7 +170,9 @@ pub fn run() {
             app.manage(commands::AppState {
                 store,
                 runtime: std::sync::Arc::clone(&runtime),
-                debug_reports: std::sync::Mutex::new(false),
+                debug_reports: std::sync::Mutex::new(debug_reports),
+                settings: std::sync::Mutex::new(settings),
+                settings_path,
             });
             app.manage(cloud);
             app.manage(launcher::LauncherInteractionState::new(
@@ -194,6 +209,7 @@ pub fn run() {
             commands::get_download_global_stat,
             commands::get_settings,
             commands::update_debug_reports,
+            commands::update_settings,
             cloud::commands::cloud_begin_authorization,
             cloud::commands::cloud_complete_authorization,
             cloud::commands::cloud_login_password,

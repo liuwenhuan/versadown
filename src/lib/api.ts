@@ -1,7 +1,4 @@
-import {
-  ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownload,
-  DuplicateDownloadState, ParseResult, QueueTask, TaskActionResult
-} from './types';
+import { AppSettings, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownload, DuplicateDownloadState, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -70,21 +67,21 @@ export async function listPersistedTasks(): Promise<QueueTask[]> {
   return isTauriRuntime() ? invoke<QueueTask[]>('list_tasks') : [];
 }
 
-export async function runTaskAction(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'retry'): Promise<TaskActionResult> {
+export async function runTaskAction(taskId: string, action: Extract<TaskCommand, 'pause' | 'resume' | 'cancel' | 'retry'>): Promise<TaskActionResult> {
   if (!isTauriRuntime()) return {};
   return duplicateResult(await invoke<NativeTaskOutcome>('task_action', { taskId, action }));
+}
+
+export async function openTaskDirectory(taskId: string): Promise<void> {
+  if (isTauriRuntime()) await invoke('open_task_directory', { taskId });
 }
 
 export async function resolveDuplicateDownload(taskId: string, action: 'resume' | 'restart_missing' | 'overwrite'): Promise<QueueTask | undefined> {
   return isTauriRuntime() ? invoke<QueueTask>('resolve_duplicate_download', { taskId, action }) : undefined;
 }
 
-export async function openTaskDirectory(taskId: string): Promise<void> {
-  if (isTauriRuntime()) await invoke<void>('open_task_directory', { taskId });
-}
-
 export async function removeTaskRecord(taskId: string): Promise<void> {
-  if (isTauriRuntime()) await invoke<void>('remove_task_record', { taskId });
+  if (isTauriRuntime()) await invoke('remove_task_record', { taskId });
 }
 
 export async function selectDownloadFiles(taskId: string, indices: number[]): Promise<QueueTask | undefined> {
@@ -107,4 +104,18 @@ export async function getDownloadGlobalStat(): Promise<DownloadGlobalStat> {
   return isTauriRuntime()
     ? invoke<DownloadGlobalStat>('get_download_global_stat')
     : { download_speed: 0, upload_speed: 0, num_active: 0 };
+}
+
+export const defaultSettings: AppSettings = {
+  debugReports: false,
+  downloadDirectory: '',
+  proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }
+};
+
+export async function getSettings(): Promise<AppSettings> {
+  return isTauriRuntime() ? invoke<AppSettings>('get_settings') : defaultSettings;
+}
+
+export async function updateSettings(settings: AppSettings): Promise<AppSettings> {
+  return isTauriRuntime() ? invoke<AppSettings>('update_settings', { settings }) : settings;
 }

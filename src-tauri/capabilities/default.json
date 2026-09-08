@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions required by the download manager and its floating launcher.",
   "windows": ["main", "launcher"],
-  "permissions": ["core:default", "core:event:default", "core:window:allow-set-size", "core:window:allow-set-position", "core:window:allow-unminimize", "core:window:allow-show", "core:window:allow-set-focus", "core:window:allow-start-dragging", "core:window:allow-minimize", "core:window:allow-toggle-maximize", "core:window:allow-hide", "core:window:allow-is-maximized"]
+  "permissions": ["core:default", "core:event:default", "core:window:allow-set-size", "core:window:allow-set-position", "core:window:allow-unminimize", "core:window:allow-show", "core:window:allow-set-focus", "core:window:allow-start-dragging", "core:window:allow-minimize", "core:window:allow-toggle-maximize", "core:window:allow-hide", "core:window:allow-is-maximized", "dialog:allow-open", "clipboard-manager:allow-write-text"]
 }

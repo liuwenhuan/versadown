@@ -9,6 +9,7 @@ it('expands the 48px launcher and labels its action 开始解析下载', async (
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   expect(trigger).toHaveAttribute('data-size', '48');
   await user.click(trigger);
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
   expect(screen.getByRole('button', { name: '开始解析下载' })).toBeVisible();
 });
 
@@ -23,6 +24,16 @@ it('notifies its host when the compact launcher expands and collapses', async ()
 
   await user.click(screen.getByRole('button', { name: '收起下载输入' }));
   expect(onExpandedChange).toHaveBeenLastCalledWith(false);
+});
+
+it('collapses the expanded launcher with Escape', async () => {
+  const user = userEvent.setup();
+  render(<FloatingLauncher onParse={vi.fn()} activeCount={0} />);
+
+  await user.click(screen.getByRole('button', { name: '打开下载输入' }));
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+  await user.keyboard('{Escape}');
+  expect(screen.getByRole('button', { name: '打开下载输入' })).toBeVisible();
 });
 
 it('submits a pasted input to the parser', async () => {
