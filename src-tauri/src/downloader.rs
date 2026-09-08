@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
+use std::io::Read;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -34,12 +35,35 @@ pub enum DownloadError {
 }
 
 const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
+const TORRENT_INPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Reads a user-selected torrent from disk or HTTP(S), enforcing a small metadata
 /// size ceiling before encoding it for aria2's `addTorrent` RPC.
 pub async fn load_torrent_base64(source: &str) -> Result<String, DownloadError> {
-    let bytes = if source.starts_with("http://") || source.starts_with("https://") {
-        let mut response = reqwest::get(source)
+    load_torrent_base64_with_timeout(source, TORRENT_INPUT_TIMEOUT).await
+}
+
+async fn load_torrent_base64_with_timeout(
+    source: &str,
+    timeout: std::time::Duration,
+) -> Result<String, DownloadError> {
+    let parsed_url = url::Url::parse(source).ok();
+    let remote_url = parsed_url
+        .as_ref()
+        .filter(|url| matches!(url.scheme(), "http" | "https"));
+    let bytes = if let Some(remote_url) = remote_url {
+        let client = reqwest::Client::builder()
+            .connect_timeout(timeout.min(std::time::Duration::from_secs(10)))
+            .read_timeout(timeout.min(std::time::Duration::from_secs(10)))
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|error| {
+                DownloadError::TorrentInput(format!("无法创建种子下载请求：{error}"))
+            })?;
+        let mut response = client
+            .get(remote_url.clone())
+            .send()
             .await
             .map_err(|error| DownloadError::TorrentInput(format!("无法获取种子文件：{error}")))?;
         if !response.status().is_success() {
@@ -69,28 +93,51 @@ pub async fn load_torrent_base64(source: &str) -> Result<String, DownloadError> 
         }
         bytes
     } else {
-        let path = if source.starts_with("file:") {
-            url::Url::parse(source)
-                .map_err(|_| DownloadError::TorrentInput("本地种子文件 URL 无效".into()))?
+        let path = if parsed_url
+            .as_ref()
+            .is_some_and(|url| url.scheme() == "file")
+        {
+            parsed_url
+                .expect("file URL was checked above")
                 .to_file_path()
                 .map_err(|_| DownloadError::TorrentInput("本地种子文件路径无效".into()))?
+        } else if parsed_url.is_some() && source.contains("://") {
+            return Err(DownloadError::TorrentInput(
+                "种子文件仅支持本地路径、file:、HTTP 或 HTTPS 地址".into(),
+            ));
         } else {
             std::path::PathBuf::from(source)
         };
-        tokio::task::spawn_blocking(move || {
-            let metadata = std::fs::metadata(&path).map_err(|error| {
-                DownloadError::TorrentInput(format!("无法读取本地种子文件：{error}"))
-            })?;
-            if metadata.len() > MAX_TORRENT_BYTES as u64 {
-                return Err(DownloadError::TorrentInput(
-                    "种子文件超过 16 MiB 安全限制".into(),
-                ));
-            }
-            std::fs::read(&path).map_err(|error| {
-                DownloadError::TorrentInput(format!("无法读取本地种子文件：{error}"))
-            })
-        })
+        tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || {
+                let metadata = std::fs::metadata(&path).map_err(|error| {
+                    DownloadError::TorrentInput(format!("无法读取本地种子文件：{error}"))
+                })?;
+                if metadata.len() > MAX_TORRENT_BYTES as u64 {
+                    return Err(DownloadError::TorrentInput(
+                        "种子文件超过 16 MiB 安全限制".into(),
+                    ));
+                }
+                let file = std::fs::File::open(&path).map_err(|error| {
+                    DownloadError::TorrentInput(format!("无法读取本地种子文件：{error}"))
+                })?;
+                let mut bytes = Vec::with_capacity(metadata.len() as usize);
+                file.take(MAX_TORRENT_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| {
+                        DownloadError::TorrentInput(format!("无法读取本地种子文件：{error}"))
+                    })?;
+                if bytes.len() > MAX_TORRENT_BYTES {
+                    return Err(DownloadError::TorrentInput(
+                        "种子文件超过 16 MiB 安全限制".into(),
+                    ));
+                }
+                Ok(bytes)
+            }),
+        )
         .await
+        .map_err(|_| DownloadError::TorrentInput("读取本地种子文件超时".into()))?
         .map_err(|error| DownloadError::TorrentInput(format!("读取种子文件失败：{error}")))??
     };
     if bytes.is_empty() {
@@ -187,6 +234,14 @@ mod tests {
                 .unwrap(),
             "dG9ycmVudC1ieXRlcw=="
         );
+        let file_url = url::Url::from_file_path(&torrent)
+            .unwrap()
+            .to_string()
+            .replacen("file:", "FILE:", 1);
+        assert_eq!(
+            load_torrent_base64(&file_url).await.unwrap(),
+            "dG9ycmVudC1ieXRlcw=="
+        );
         let error = load_torrent_base64(directory.path().join("missing.torrent").to_str().unwrap())
             .await
             .unwrap_err()
@@ -206,12 +261,19 @@ mod tests {
             .route(
                 "/missing.torrent",
                 axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/slow.torrent",
+                axum::routing::get(|| async {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    b"late-torrent" as &'static [u8]
+                }),
             );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         assert_eq!(
             load_torrent_base64(&format!(
-                "http://{address}/game.torrent?token=temporary#download"
+                "HTTP://{address}/game.torrent?token=temporary#download"
             ))
             .await
             .unwrap(),
@@ -222,6 +284,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("HTTP 404"), "{error}");
+        assert!(load_torrent_base64("ftp://example.test/game.torrent")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("仅支持"));
+        let began = std::time::Instant::now();
+        let error = load_torrent_base64_with_timeout(
+            &format!("http://{address}/slow.torrent"),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("无法获取种子文件"), "{error}");
+        assert!(began.elapsed() < std::time::Duration::from_millis(500));
         server.abort();
     }
 }
