@@ -19,31 +19,68 @@ pub enum TaskStatus {
 impl TaskStatus {
     pub fn as_db(self) -> &'static str {
         match self {
-            Self::Draft => "draft", Self::Parsing => "parsing", Self::AwaitingUser => "awaiting_user",
-            Self::Queued => "queued", Self::Downloading => "downloading", Self::Processing => "processing",
-            Self::Completed => "completed", Self::Failed => "failed", Self::Cancelled => "cancelled", Self::Paused => "paused",
+            Self::Draft => "draft",
+            Self::Parsing => "parsing",
+            Self::AwaitingUser => "awaiting_user",
+            Self::Queued => "queued",
+            Self::Downloading => "downloading",
+            Self::Processing => "processing",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Paused => "paused",
         }
     }
 
     pub fn from_db(value: &str) -> Option<Self> {
         Some(match value {
-            "draft" => Self::Draft, "parsing" => Self::Parsing, "awaiting_user" => Self::AwaitingUser,
-            "queued" => Self::Queued, "downloading" => Self::Downloading, "processing" => Self::Processing,
-            "completed" => Self::Completed, "failed" => Self::Failed, "cancelled" => Self::Cancelled, "paused" => Self::Paused,
+            "draft" => Self::Draft,
+            "parsing" => Self::Parsing,
+            "awaiting_user" => Self::AwaitingUser,
+            "queued" => Self::Queued,
+            "downloading" => Self::Downloading,
+            "processing" => Self::Processing,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "paused" => Self::Paused,
             _ => return None,
         })
     }
 }
 
 pub fn may_transition(from: TaskStatus, to: TaskStatus) -> bool {
-    matches!((from, to),
+    matches!(
+        (from, to),
         (TaskStatus::Draft, TaskStatus::Parsing)
-        | (TaskStatus::Parsing, TaskStatus::Queued | TaskStatus::AwaitingUser | TaskStatus::Failed)
-        | (TaskStatus::AwaitingUser, TaskStatus::Queued | TaskStatus::Cancelled)
-        | (TaskStatus::Queued, TaskStatus::Downloading | TaskStatus::Paused | TaskStatus::Cancelled)
-        | (TaskStatus::Downloading, TaskStatus::Processing | TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled)
-        | (TaskStatus::Paused, TaskStatus::Queued | TaskStatus::Downloading | TaskStatus::Cancelled)
-        | (TaskStatus::Processing, TaskStatus::Completed | TaskStatus::Failed))
+            | (
+                TaskStatus::Parsing,
+                TaskStatus::Queued | TaskStatus::AwaitingUser | TaskStatus::Failed
+            )
+            | (
+                TaskStatus::AwaitingUser,
+                TaskStatus::Queued | TaskStatus::Cancelled
+            )
+            | (
+                TaskStatus::Queued,
+                TaskStatus::Downloading | TaskStatus::Paused | TaskStatus::Cancelled
+            )
+            | (
+                TaskStatus::Downloading,
+                TaskStatus::Processing
+                    | TaskStatus::Paused
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+            )
+            | (
+                TaskStatus::Paused,
+                TaskStatus::Queued | TaskStatus::Downloading | TaskStatus::Cancelled
+            )
+            | (
+                TaskStatus::Processing,
+                TaskStatus::Completed | TaskStatus::Failed
+            )
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -55,6 +92,26 @@ pub struct DownloadTask {
     pub status: TaskStatus,
     pub progress: u8,
     pub error: Option<String>,
+    #[serde(default)]
+    pub aria_gid: Option<String>,
+    #[serde(default)]
+    pub followed_by_gid: Option<String>,
+    #[serde(default)]
+    pub total_length: Option<u64>,
+    #[serde(default)]
+    pub completed_length: u64,
+    #[serde(default)]
+    pub download_speed: u64,
+    #[serde(default)]
+    pub upload_speed: u64,
+    #[serde(default)]
+    pub connections: u32,
+    #[serde(default)]
+    pub eta_seconds: Option<u64>,
+    #[serde(default)]
+    pub aria_error_code: Option<String>,
+    #[serde(default)]
+    pub updated_at: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -67,7 +124,16 @@ pub struct NewTask {
 impl NewTask {
     pub fn direct(source: impl Into<String>) -> Self {
         let source = source.into();
-        let name = source.rsplit('/').next().filter(|item| !item.is_empty()).unwrap_or("download").to_string();
-        Self { source, name, kind: "file".to_string() }
+        let name = source
+            .rsplit('/')
+            .next()
+            .filter(|item| !item.is_empty())
+            .unwrap_or("download")
+            .to_string();
+        Self {
+            source,
+            name,
+            kind: "file".to_string(),
+        }
     }
 }
