@@ -7,6 +7,106 @@ use std::{
     time::Duration,
 };
 
+async fn slow_server(
+    delay: Duration,
+) -> (
+    alldownloader_lib::aria2::Aria2RpcClient,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::Receiver<String>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/jsonrpc", listener.local_addr().unwrap());
+    let (sender, receiver) = tokio::sync::mpsc::channel(20);
+    let app = axum::Router::new().route(
+        "/jsonrpc",
+        axum::routing::post(move |axum::Json(request): axum::Json<serde_json::Value>| {
+            let sender = sender.clone();
+            async move {
+                sender
+                    .send(request["method"].as_str().unwrap().to_string())
+                    .await
+                    .unwrap();
+                tokio::time::sleep(delay).await;
+                axum::Json(json!({"jsonrpc":"2.0","id":request["id"],"result":"OK"}))
+            }
+        }),
+    );
+    let worker = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (
+        alldownloader_lib::aria2::Aria2RpcClient::new(
+            endpoint,
+            alldownloader_lib::aria2::RpcSecret::from_bytes([1; 32]),
+        )
+        .unwrap(),
+        worker,
+        receiver,
+    )
+}
+
+#[tokio::test]
+async fn shutdown_one_deadline_covers_both_rpc_phases() {
+    let (client, server, _requests) = slow_server(Duration::from_millis(90)).await;
+    let service = DownloadService::new(
+        Arc::new(client),
+        Arc::new(TaskStore::open_in_memory().unwrap()),
+    );
+    let began = std::time::Instant::now();
+    let report = service.shutdown_report(Duration::from_millis(120)).await;
+    assert!(report.session_saved);
+    assert!(
+        !report.shutdown_requested,
+        "shutdown must not get a fresh timeout after saveSession"
+    );
+    assert!(began.elapsed() < Duration::from_millis(170));
+    server.abort();
+}
+
+#[tokio::test]
+async fn shutdown_deadline_includes_busy_operation_lock_and_stops_owned_child() {
+    use alldownloader_lib::aria2::{Aria2LaunchConfig, Aria2Process};
+    let root = tempfile::tempdir().unwrap();
+    let config = Aria2LaunchConfig {
+        binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+        data_dir: root.path().join("data"),
+        download_dir: root.path().join("downloads"),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+    };
+    let (child, _) = Aria2Process::start(config).await.unwrap();
+    let (client, server, mut requests) = slow_server(Duration::from_secs(1)).await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("http://127.0.0.1/file"))
+        .unwrap();
+    store.bind_gid(task.id, "gid").unwrap();
+    let service = Arc::new(DownloadService::with_process(
+        Arc::new(client),
+        store,
+        child,
+    ));
+    let operation_service = service.clone();
+    let operation = tokio::spawn(async move {
+        operation_service
+            .control(task.id, alldownloader_lib::DownloadAction::Pause)
+            .await
+    });
+    assert_eq!(requests.recv().await.as_deref(), Some("aria2.pause"));
+    let began = std::time::Instant::now();
+    let report = service.shutdown_report(Duration::from_millis(100)).await;
+    assert!(
+        began.elapsed() < Duration::from_millis(200),
+        "operation-lock wait exceeded shutdown deadline"
+    );
+    assert!(report.force_killed && report.child_stopped);
+    assert!(!report.session_saved && !report.shutdown_requested);
+    assert_eq!(service.engine_running().await.unwrap(), Some(false));
+    operation.abort();
+    server.abort();
+}
+
 #[tokio::test]
 async fn shutdown_attempts_shutdown_after_save_failure_and_rejects_later_submissions() {
     let calls = Arc::new(Mutex::new(vec![]));
@@ -231,4 +331,162 @@ async fn recovery_resumes_control_file_in_its_original_directory() {
     assert_eq!(std::fs::read(file).unwrap(), b"part");
     assert!(dir.path().join("partial.bin.aria2").is_file());
     server.abort();
+}
+
+#[tokio::test]
+async fn replacement_client_remains_available_when_recovery_persistence_fails() {
+    use alldownloader_lib::aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process};
+    let root = tempfile::tempdir().unwrap();
+    let config = Aria2LaunchConfig {
+        binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+        data_dir: root.path().join("data"),
+        download_dir: root.path().join("downloads"),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+    };
+    let database = root.path().join("tasks.sqlite");
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+    let task = store
+        .create(NewTask::direct("http://127.0.0.1/missing"))
+        .unwrap();
+    let mut task = store.bind_gid(task.id, "missing").unwrap();
+    task.status = TaskStatus::Downloading;
+    store.apply_transfer_snapshot(task).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_recovery BEFORE UPDATE OF status ON tasks WHEN NEW.status='failed' BEGIN SELECT RAISE(ABORT,'fixture recovery persistence failed'); END;").unwrap();
+    let (child, client) = Aria2Process::start(config.clone()).await.unwrap();
+    let old_endpoint = client.endpoint().to_string();
+    let service = DownloadService::with_process(Arc::new(client.clone()), store, child);
+    client.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service.engine_running().await.unwrap() == Some(true) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let result = service.restart_if_exited(config).await;
+    assert!(
+        result.is_ok(),
+        "recovery failure discarded an already-running replacement client: {result:?}"
+    );
+    let replacement = result.unwrap().unwrap();
+    // The new client must be usable by the notification coordinator even when
+    // importing/reconciling the persisted tasks failed.
+    assert_ne!(replacement.client.endpoint().as_str(), old_endpoint);
+    assert!(replacement.recovery.is_err());
+    assert_eq!(
+        replacement.client.get_version().await.unwrap().version,
+        "1.37.0"
+    );
+    assert!(
+        service
+            .shutdown_report(Duration::from_secs(5))
+            .await
+            .child_stopped
+    );
+}
+
+#[tokio::test]
+async fn recovery_failure_still_switches_websocket_and_wakes_idle_sync() {
+    use alldownloader_lib::aria2::{
+        sync::TransferSynchronizer, Aria2Api, Aria2GlobalStat, Aria2LaunchConfig, Aria2Process,
+        EventSink,
+    };
+    struct Events {
+        target: uuid::Uuid,
+        ready: tokio::sync::Notify,
+        downloading: tokio::sync::Notify,
+    }
+    impl EventSink for Events {
+        fn task_updated(&self, t: &alldownloader_lib::DownloadTask) {
+            if t.id == self.target && t.status == TaskStatus::Downloading {
+                self.downloading.notify_one();
+            }
+        }
+        fn global_stat_updated(&self, _: &Aria2GlobalStat) {
+            self.ready.notify_one();
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let config = Aria2LaunchConfig {
+        binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+        data_dir: root.path().join("data"),
+        download_dir: root.path().join("downloads"),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+    };
+    let database = root.path().join("tasks.sqlite");
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+    let missing = store
+        .create(NewTask::direct("http://127.0.0.1/missing"))
+        .unwrap();
+    let mut missing = store.bind_gid(missing.id, "missing").unwrap();
+    missing.status = TaskStatus::Paused;
+    store.apply_transfer_snapshot(missing).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_recovery BEFORE UPDATE OF status ON tasks WHEN NEW.status='failed' BEGIN SELECT RAISE(ABORT,'fixture recovery failure'); END;").unwrap();
+    let target = store
+        .create(NewTask::direct("http://127.0.0.1/target"))
+        .unwrap();
+    let events = Arc::new(Events {
+        target: target.id,
+        ready: Default::default(),
+        downloading: Default::default(),
+    });
+    let (child, client) = Aria2Process::start(config.clone()).await.unwrap();
+    let service = Arc::new(
+        DownloadService::with_process(Arc::new(client.clone()), store.clone(), child)
+            .with_events(events.clone()),
+    );
+    client.shutdown().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while service.engine_running().await.unwrap() == Some(true) {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let sync = TransferSynchronizer::new(service.clone())
+        .with_websocket(client)
+        .with_restart_config(config);
+    let (cancel, receiver) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(sync.run(receiver));
+    tokio::time::timeout(Duration::from_secs(5), events.ready.notified())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let uri = format!("http://{}/file", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/file",
+        axum::routing::get(|| async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            "fixture"
+        }),
+    );
+    let file_server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let gid = service
+        .api()
+        .add_uri(
+            vec![uri],
+            std::collections::BTreeMap::from([("pause".into(), "true".into())]),
+        )
+        .await
+        .unwrap();
+    store.bind_gid(target.id, &gid).unwrap();
+    service.api().unpause(&gid).await.unwrap();
+    let woke = tokio::time::timeout(Duration::from_secs(1), events.downloading.notified()).await;
+    cancel.send(true).unwrap();
+    worker.await.unwrap();
+    service.shutdown_report(Duration::from_secs(5)).await;
+    file_server.abort();
+    assert!(
+        woke.is_ok(),
+        "notification from replacement engine did not wake idle polling after recovery failed"
+    );
 }

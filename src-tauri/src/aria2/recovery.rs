@@ -24,6 +24,13 @@ pub struct RecoveryReport {
     pub resumed: usize,
 }
 
+#[derive(Debug)]
+pub struct RestartReport {
+    /// Available after process replacement regardless of task-recovery outcome.
+    pub client: super::Aria2RpcClient,
+    pub recovery: Result<RecoveryReport, DownloadServiceError>,
+}
+
 #[derive(Default)]
 pub struct RestartBudget {
     attempted: AtomicBool,

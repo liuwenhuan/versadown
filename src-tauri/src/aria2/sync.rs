@@ -68,8 +68,10 @@ impl TransferSynchronizer {
             if let Some(config) = self.restart_config.as_ref() {
                 // Only an observed owned-child exit spends the automatic restart budget.
                 // HTTP/WS outages alone never launch a second sidecar.
-                if let Ok(Some(client)) = self.service.restart_if_exited(config.clone()).await {
-                    self.websocket.send_replace(Some(client));
+                if let Ok(Some(report)) = self.service.restart_if_exited(config.clone()).await {
+                    // Task recovery can fail after process replacement. The WS endpoint
+                    // and secret must still advance to the newly running child.
+                    self.websocket.send_replace(Some(report.client));
                 }
             }
             tokio::select! {

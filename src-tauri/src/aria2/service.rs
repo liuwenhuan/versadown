@@ -45,7 +45,7 @@ pub struct DownloadService {
     api: std::sync::RwLock<Arc<dyn Aria2Api>>,
     store: Arc<TaskStore>,
     accepting: AtomicBool,
-    process: tokio::sync::Mutex<Option<Aria2Process>>,
+    process: std::sync::Mutex<Option<Aria2Process>>,
     events: Arc<dyn EventSink>,
     published: std::sync::Mutex<BTreeMap<Uuid, serde_json::Value>>,
     global: std::sync::Mutex<Option<Aria2GlobalStat>>,
@@ -59,7 +59,7 @@ impl DownloadService {
             api: std::sync::RwLock::new(api),
             store,
             accepting: AtomicBool::new(true),
-            process: tokio::sync::Mutex::new(None),
+            process: std::sync::Mutex::new(None),
             events: Arc::new(NoEvents),
             published: Default::default(),
             global: Default::default(),
@@ -74,7 +74,7 @@ impl DownloadService {
         process: Aria2Process,
     ) -> Self {
         let mut service = Self::new(api, store);
-        service.process = tokio::sync::Mutex::new(Some(process));
+        service.process = std::sync::Mutex::new(Some(process));
         service
     }
 
@@ -195,14 +195,14 @@ impl DownloadService {
         }
         let options = BTreeMap::from([("pause-metadata".into(), "true".into())]);
         let gid = self.api().add_uri(vec![magnet], options).await?;
-        let mut current = match self.store.bind_gid(task_id, &gid) {
+        let current = match self.store.bind_metadata_gid(task_id, &gid) {
             Ok(task) => task,
             Err(error) => {
                 let _ = self.api().remove(&gid).await;
                 return Err(error.into());
             }
         };
-        current.status = TaskStatus::AwaitingUser;
+        self.publish_task(&current)?;
         self.apply_status(current, self.api().tell_status(&gid).await?, false)
             .await
     }
@@ -296,9 +296,10 @@ impl DownloadService {
         self.api()
             .change_option(gid, BTreeMap::from([("select-file".into(), selection)]))
             .await?;
-        if task.status == TaskStatus::AwaitingUser {
+        if task.status == TaskStatus::AwaitingUser && !self.store.selection_confirmed(task_id)? {
             self.api().unpause(gid).await?;
         }
+        self.store.confirm_selection(task_id)?;
         self.apply_status(task.clone(), self.api().tell_status(gid).await?, true)
             .await
     }
@@ -309,7 +310,7 @@ impl DownloadService {
             .store
             .list()?
             .into_iter()
-            .filter(|task| task.aria_gid.is_some())
+            .filter(|task| task.aria_gid.is_some() && task.status != TaskStatus::Cancelled)
             .collect();
         let mut first_error = None;
         for chunk in tasks.chunks(100) {
@@ -370,6 +371,7 @@ impl DownloadService {
             let Some(next) = status.followed_by.first().cloned() else {
                 let mut snapshot = TransferSnapshot::try_from(status)?;
                 if !confirmed
+                    && !self.store.selection_confirmed(current.id)?
                     && current.status == TaskStatus::AwaitingUser
                     && matches!(
                         snapshot.status,
@@ -419,37 +421,56 @@ impl DownloadService {
         &self,
         timeout: std::time::Duration,
     ) -> super::recovery::ShutdownReport {
+        let deadline = tokio::time::Instant::now() + timeout;
         self.stop_accepting();
-        let _guard = self.operation.lock().await;
-        // Bound even an injected/unresponsive API; never skip shutdown after save failure.
-        let session_saved = matches!(
-            tokio::time::timeout(timeout, self.api().save_session()).await,
-            Ok(Ok(_))
-        );
-        let shutdown_requested = matches!(
-            tokio::time::timeout(timeout, self.api().shutdown()).await,
-            Ok(Ok(_))
-        );
-        let mut process = self.process.lock().await;
         let mut report = super::recovery::ShutdownReport {
-            session_saved,
-            shutdown_requested,
+            session_saved: false,
+            shutdown_requested: false,
             child_stopped: true,
             force_killed: false,
         };
-        if let Some(process) = process.as_mut() {
-            if !matches!(process.wait_for_exit(timeout).await, Ok(true)) {
-                report.force_killed = true;
-                report.child_stopped = process.terminate_fallback().is_ok();
-            }
+        let _guard = tokio::time::timeout_at(deadline, self.operation.lock())
+            .await
+            .ok();
+        if _guard.is_some() {
+            // Every stage spends the same entry deadline, including operation-lock wait.
+            report.session_saved = matches!(
+                tokio::time::timeout_at(deadline, self.api().save_session()).await,
+                Ok(Ok(_))
+            );
+            report.shutdown_requested = matches!(
+                tokio::time::timeout_at(deadline, self.api().shutdown()).await,
+                Ok(Ok(_))
+            );
         }
-        report
+        loop {
+            {
+                // Never hold the owned-child mutex across an await. A blocked control
+                // cannot prevent the deadline path from terminating this child.
+                let mut process = self.process.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(process) = process.as_mut() else {
+                    return report;
+                };
+                if matches!(process.is_running(), Ok(false)) {
+                    return report;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    report.force_killed = true;
+                    report.child_stopped = process.terminate_fallback().is_ok();
+                    return report;
+                }
+            }
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + std::time::Duration::from_millis(25)).min(deadline),
+            )
+            .await;
+        }
     }
 
     pub async fn engine_running(&self) -> Result<Option<bool>, DownloadServiceError> {
         self.process
             .lock()
-            .await
+            .unwrap_or_else(|e| e.into_inner())
             .as_mut()
             .map(|child| child.is_running().map_err(Into::into))
             .transpose()
@@ -458,7 +479,7 @@ impl DownloadService {
     pub async fn restart_if_exited(
         &self,
         config: super::Aria2LaunchConfig,
-    ) -> Result<Option<super::Aria2RpcClient>, DownloadServiceError> {
+    ) -> Result<Option<super::recovery::RestartReport>, DownloadServiceError> {
         self.ensure_accepting()?;
         if self.engine_running().await? != Some(false) {
             return Ok(None);
@@ -469,13 +490,18 @@ impl DownloadService {
                 let client = {
                     let _guard = self.operation.lock().await;
                     self.ensure_accepting()?;
-                    let (process, client) = Aria2Process::start(config).await?;
-                    *self.process.lock().await = Some(process);
+                    let (mut process, client) = Aria2Process::start(config).await?;
+                    let mut owned = self.process.lock().unwrap_or_else(|e| e.into_inner());
+                    if !self.is_accepting() {
+                        process.terminate_fallback()?;
+                        return Err(DownloadServiceError::ShuttingDown);
+                    }
+                    *owned = Some(process);
                     *self.api.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(client.clone());
                     client
                 };
-                self.recover().await?;
-                Ok::<_, DownloadServiceError>(client)
+                let recovery = self.recover().await;
+                Ok::<_, DownloadServiceError>(super::recovery::RestartReport { client, recovery })
             })
             .await
             .transpose()

@@ -303,3 +303,72 @@ async fn invalid_file_persistence_rolls_back_task_snapshot_and_emits_nothing() {
     assert!(events.values.lock().unwrap().is_empty());
     server.abort();
 }
+
+#[tokio::test]
+async fn cancel_acknowledgement_persists_event_and_missing_gid_does_not_break_later_polling() {
+    let cancelled_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wire = cancelled_queries.clone();
+    let (client, server) = server(move |r| match r["method"].as_str().unwrap() {
+        "aria2.remove" => json!("removed-gid"),
+        "system.multicall" => serde_json::Value::Array(
+            r["params"][0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|call| {
+                    if call["params"][1] == "removed-gid" {
+                        wire.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        json!({"code":1,"message":"GID not found"})
+                    } else {
+                        json!([status("active-gid", "active", 50)])
+                    }
+                })
+                .collect(),
+        ),
+        "aria2.getGlobalStat" => global(),
+        other => panic!("unexpected request after cancel: {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let cancelled = store
+        .create(NewTask::direct("http://127.0.0.1/cancelled"))
+        .unwrap();
+    store.bind_gid(cancelled.id, "removed-gid").unwrap();
+    let active = store
+        .create(NewTask::direct("http://127.0.0.1/active"))
+        .unwrap();
+    store.bind_gid(active.id, "active-gid").unwrap();
+    let events = Arc::new(Events {
+        store: store.clone(),
+        values: Mutex::new(vec![]),
+        globals: Mutex::new(0),
+    });
+    let service = DownloadService::new(Arc::new(client), store.clone()).with_events(events.clone());
+    assert_eq!(
+        service
+            .control(cancelled.id, alldownloader_lib::DownloadAction::Cancel)
+            .await
+            .unwrap()
+            .status,
+        alldownloader_lib::TaskStatus::Cancelled
+    );
+    assert_eq!(
+        events.values.lock().unwrap().len(),
+        1,
+        "cancel acknowledgement must publish persisted task"
+    );
+    service
+        .reconcile_now()
+        .await
+        .expect("missing cancelled GID must not fail synchronization");
+    assert_eq!(
+        cancelled_queries.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(store.find(active.id).unwrap().progress, 50);
+    assert_eq!(
+        store.find(cancelled.id).unwrap().status,
+        alldownloader_lib::TaskStatus::Cancelled
+    );
+    server.abort();
+}

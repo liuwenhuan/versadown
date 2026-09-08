@@ -139,6 +139,39 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    pub fn bind_metadata_gid(&self, id: Uuid, gid: &str) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed=connection.execute("UPDATE tasks SET aria_gid=?1,status='awaiting_user',selection_confirmed=0,updated_at=?2 WHERE id=?3",params![gid,current_timestamp(),id.to_string()])?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
+    }
+
+    /// An acknowledged BT confirmation is application intent, independent of the
+    /// last successful aria2 transfer snapshot and durable across service restarts.
+    pub fn confirm_selection(&self, id: Uuid) -> Result<(), StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET selection_confirmed=1 WHERE id=?1",
+            [id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn selection_confirmed(&self, id: Uuid) -> Result<bool, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        find_with_connection(&connection, id)?;
+        Ok(connection.query_row(
+            "SELECT selection_confirmed FROM tasks WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn replace_gid(
         &self,
         id: Uuid,
@@ -265,7 +298,7 @@ const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, erro
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 1 {
+    if version >= 2 {
         return Ok(());
     }
 
@@ -281,6 +314,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         ("eta_seconds", "INTEGER"),
         ("aria_error_code", "TEXT"),
         ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("selection_confirmed", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !column_exists(&transaction, name)? {
             transaction.execute_batch(&format!(
@@ -300,7 +334,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             PRIMARY KEY(task_id, file_index),
             FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
          );
-         PRAGMA user_version = 1;",
+         PRAGMA user_version = 2;",
     )?;
     transaction.commit()?;
     Ok(())

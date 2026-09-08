@@ -162,3 +162,121 @@ async fn metadata_timeout_leaves_pending_task_available_for_later_sync() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn successful_confirmation_survives_status_failure_and_service_reopen() {
+    let queries = std::sync::atomic::AtomicUsize::new(0);
+    let (client, server) = fixture::server(move |r| match r["method"].as_str().unwrap() {
+        "aria2.changeOption" | "aria2.unpause" => json!("OK"),
+        "aria2.tellStatus" if queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 => {
+            json!(false)
+        }
+        "aria2.tellStatus" => fixture::status("child", "active", 30),
+        other => panic!("{other}"),
+    })
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("tasks.sqlite");
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+    let task = store
+        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .unwrap();
+    store.bind_gid(task.id, "child").unwrap();
+    store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
+    store
+        .upsert_files(task.id, &[(1, "actual.bin".into(), 100, 0, true)])
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client.clone()), store.clone());
+    assert!(service.select_files(task.id, vec![1]).await.is_err());
+    assert_eq!(
+        store.find(task.id).unwrap().status,
+        TaskStatus::AwaitingUser,
+        "failed status read retains last observed state"
+    );
+    drop(service);
+    drop(store);
+    let reopened = Arc::new(TaskStore::open_path(&database).unwrap());
+    let service = DownloadService::new(Arc::new(client), reopened);
+    assert_eq!(
+        service.reconcile_task(task.id).await.unwrap().status,
+        TaskStatus::Downloading,
+        "successful confirmation must not be forgotten after reopening SQLite"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn prepare_magnet_persists_pending_state_before_first_status_read_and_retry() {
+    let queries = std::sync::atomic::AtomicUsize::new(0);
+    let adds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wire_adds = adds.clone();
+    let (client, server) = fixture::server(move |r| match r["method"].as_str().unwrap() {
+        "aria2.addUri" => {
+            wire_adds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            json!("meta")
+        }
+        "aria2.tellStatus" if queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 => {
+            json!(false)
+        }
+        "aria2.tellStatus" => fixture::status("meta", "active", 0),
+        other => panic!("{other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .unwrap();
+    assert_eq!(task.status, TaskStatus::Parsing);
+    let service = DownloadService::new(Arc::new(client), store.clone());
+    assert!(service
+        .prepare_magnet(task.id, task.source.clone())
+        .await
+        .is_err());
+    assert_eq!(
+        store.find(task.id).unwrap().status,
+        TaskStatus::AwaitingUser
+    );
+    assert_eq!(
+        store.find(task.id).unwrap().aria_gid.as_deref(),
+        Some("meta")
+    );
+    assert_eq!(
+        service
+            .prepare_magnet(task.id, task.source)
+            .await
+            .unwrap()
+            .status,
+        TaskStatus::AwaitingUser
+    );
+    assert_eq!(adds.load(std::sync::atomic::Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[test]
+fn version_one_database_keeps_tasks_and_defaults_confirmation_false() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("tasks.sqlite");
+    let store = TaskStore::open_path(&database).unwrap();
+    let task = store
+        .create(NewTask::direct("http://127.0.0.1/kept"))
+        .unwrap();
+    store
+        .upsert_files(task.id, &[(1, "kept.bin".into(), 100, 0, true)])
+        .unwrap();
+    drop(store);
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch("ALTER TABLE tasks DROP COLUMN selection_confirmed; PRAGMA user_version=1;")
+        .unwrap();
+    drop(connection);
+    let store = TaskStore::open_path(&database).unwrap();
+    assert_eq!(store.find(task.id).unwrap().name, "kept");
+    assert_eq!(store.files(task.id).unwrap().len(), 1);
+    assert!(!store.selection_confirmed(task.id).unwrap());
+    store.confirm_selection(task.id).unwrap();
+    drop(store);
+    assert!(TaskStore::open_path(&database)
+        .unwrap()
+        .selection_confirmed(task.id)
+        .unwrap());
+}
