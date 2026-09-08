@@ -29,6 +29,8 @@ pub enum DownloadError {
     Store(#[from] StoreError),
     #[error("{0}")]
     TorrentInput(String),
+    #[error("{0}")]
+    ThunderInput(String),
 }
 
 const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
@@ -101,9 +103,39 @@ pub fn aria2_binary_name() -> &'static str {
     "aria2c-x86_64-pc-windows-msvc.exe"
 }
 
+fn decode_thunder_source(source: &str) -> Result<String, DownloadError> {
+    let encoded = source
+        .get("thunder://".len()..)
+        .ok_or_else(|| DownloadError::ThunderInput("迅雷链接格式无效".into()))?;
+    let decoded = STANDARD
+        .decode(encoded)
+        .map_err(|_| DownloadError::ThunderInput("迅雷链接编码无效".into()))?;
+    let decoded = String::from_utf8(decoded)
+        .map_err(|_| DownloadError::ThunderInput("迅雷链接内容不是有效文本".into()))?;
+    let target = decoded
+        .strip_prefix("AA")
+        .and_then(|value| value.strip_suffix("ZZ"))
+        .ok_or_else(|| DownloadError::ThunderInput("迅雷链接缺少标准 AA/ZZ 包装".into()))?;
+    let scheme = url::Url::parse(target)
+        .map_err(|_| DownloadError::ThunderInput("迅雷链接中的下载地址无效".into()))?
+        .scheme()
+        .to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https" | "ftp") {
+        return Err(DownloadError::ThunderInput(
+            "该迅雷链接不是 aria2 可下载的 HTTP/HTTPS/FTP 地址".into(),
+        ));
+    }
+    Ok(target.to_string())
+}
+
 pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, DownloadError> {
     let candidate = classify_input(input);
-    let mut new_task = NewTask::direct(candidate.uri);
+    let source = if candidate.kind == CandidateKind::Thunder {
+        decode_thunder_source(&candidate.uri)?
+    } else {
+        candidate.uri.clone()
+    };
+    let mut new_task = NewTask::direct(source);
     new_task.kind = match candidate.kind {
         CandidateKind::Magnet => "magnet",
         CandidateKind::Torrent => "torrent",

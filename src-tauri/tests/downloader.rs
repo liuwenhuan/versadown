@@ -201,3 +201,20 @@ fn torrent_stays_in_parsing_until_bytes_are_loaded_and_aria2_returns_files() {
     assert_eq!(outcome.task.status, TaskStatus::Parsing);
     assert!(outcome.resources.is_empty());
 }
+
+#[test]
+fn thunder_wrapper_is_decoded_before_aria2_submission() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let outcome = prepare_download("thunder://QUFodHRwOi8vYS9iWlo=", &store).unwrap();
+
+    assert!(!outcome.requires_confirmation);
+    assert_eq!(outcome.task.source, "http://a/b");
+    assert_eq!(outcome.task.status, TaskStatus::Parsing);
+}
+
+#[test]
+fn malformed_or_unsupported_thunder_wrapper_is_rejected() {
+    let store = TaskStore::open_in_memory().unwrap();
+    assert!(prepare_download("thunder://not-base64", &store).is_err());
+    assert!(store.list().unwrap().is_empty());
+}
