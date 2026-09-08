@@ -196,6 +196,101 @@ async fn recovery_matches_known_imports_unknown_and_reconciles_missing_outputs()
 }
 
 #[tokio::test]
+async fn recovery_completes_a_full_output_when_the_last_persisted_byte_count_is_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("completed-before-shutdown.bin");
+    std::fs::write(&output, b"done").unwrap();
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+        other => panic!("{other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct(
+            "http://127.0.0.1/completed-before-shutdown.bin",
+        ))
+        .unwrap();
+    let mut task = store
+        .bind_gid(task.id, "completed-but-not-persisted")
+        .unwrap();
+    task.status = TaskStatus::Downloading;
+    task.completed_length = 2;
+    task.total_length = Some(4);
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(1, output.to_string_lossy().into_owned(), 4, 2, true)],
+        )
+        .unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+
+    assert_eq!(report.completed, 1);
+    let recovered = store.find(task.id).unwrap();
+    assert_eq!(recovered.status, TaskStatus::Completed);
+    assert_eq!(recovered.completed_length, 4);
+    assert_eq!(recovered.total_length, Some(4));
+    assert_eq!(store.files(task.id).unwrap()[0].completed_length, 4);
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_does_not_infer_completion_from_zero_length_or_non_file_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let zero_output = dir.path().join("zero.bin");
+    std::fs::write(&zero_output, []).unwrap();
+    let directory_output = dir.path().join("not-a-file");
+    std::fs::create_dir(&directory_output).unwrap();
+    let directory_length = std::fs::metadata(&directory_output).unwrap().len();
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+        other => panic!("{other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let mut ids = Vec::new();
+    for (source, gid, path, length) in [
+        ("http://127.0.0.1/zero.bin", "zero-gid", zero_output, 0),
+        (
+            "http://127.0.0.1/not-a-file",
+            "directory-gid",
+            directory_output,
+            directory_length,
+        ),
+    ] {
+        let task = store.create(NewTask::direct(source)).unwrap();
+        let mut task = store.bind_gid(task.id, gid).unwrap();
+        task.status = TaskStatus::Downloading;
+        task.total_length = Some(length);
+        store.apply_transfer_snapshot(task.clone()).unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(1, path.to_string_lossy().into_owned(), length, 0, true)],
+            )
+            .unwrap();
+        ids.push(task.id);
+    }
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+
+    assert_eq!(report.completed, 0);
+    assert_eq!(report.failed, 2);
+    for id in ids {
+        assert_eq!(store.find(id).unwrap().status, TaskStatus::Failed);
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn recovery_claims_regenerated_magnet_child_for_the_original_local_task() {
     let (initial_client, initial_server) =
         fixture::server(|request| match request["method"].as_str().unwrap() {
@@ -288,6 +383,145 @@ async fn recovery_claims_regenerated_magnet_child_for_the_original_local_task() 
     assert_eq!(recovered.metadata_gid.as_deref(), Some("metadata-parent"));
     assert_eq!(recovered.status, TaskStatus::AwaitingUser);
     recovery_server.abort();
+}
+
+#[tokio::test]
+async fn migrated_v2_magnet_claims_its_single_regenerated_metadata_parent() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("tasks.sqlite");
+    let original_id = uuid::Uuid::new_v4();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY NOT NULL, source TEXT NOT NULL, name TEXT NOT NULL,
+                kind TEXT NOT NULL, status TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0,
+                error TEXT, aria_gid TEXT, followed_by_gid TEXT, total_length INTEGER,
+                completed_length INTEGER NOT NULL DEFAULT 0,
+                download_speed INTEGER NOT NULL DEFAULT 0,
+                upload_speed INTEGER NOT NULL DEFAULT 0, connections INTEGER NOT NULL DEFAULT 0,
+                eta_seconds INTEGER, aria_error_code TEXT, updated_at INTEGER NOT NULL DEFAULT 0,
+                selection_confirmed INTEGER NOT NULL DEFAULT 0
+             );
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks
+             (id,source,name,kind,status,aria_gid,followed_by_gid)
+             VALUES (?1,'magnet:?xt=urn:btih:legacy','legacy','torrent','awaiting_user','old-child','old-child')",
+            [original_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+    assert_eq!(store.find(original_id).unwrap().metadata_gid, None);
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => json!([]),
+        "aria2.tellWaiting" => {
+            let mut child = fixture::status("new-child", "paused", 0);
+            child["files"] = json!([{
+                "index": "1", "path": "payload.bin", "length": "100",
+                "completedLength": "0", "selected": "true"
+            }]);
+            json!([child])
+        }
+        "aria2.tellStopped" => {
+            let mut parent = fixture::status("metadata-parent", "complete", 100);
+            parent["followedBy"] = json!(["new-child"]);
+            json!([parent])
+        }
+        "aria2.tellStatus" if request["params"][1] == "new-child" => {
+            let mut child = fixture::status("new-child", "paused", 0);
+            child["files"] = json!([{
+                "index": "1", "path": "payload.bin", "length": "100",
+                "completedLength": "0", "selected": "true"
+            }]);
+            child
+        }
+        other => panic!("{other}"),
+    })
+    .await;
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+
+    assert_eq!(report.imported, 0);
+    assert_eq!(store.list().unwrap().len(), 1);
+    let recovered = store.find(original_id).unwrap();
+    assert_eq!(recovered.aria_gid.as_deref(), Some("new-child"));
+    assert_eq!(recovered.metadata_gid.as_deref(), Some("metadata-parent"));
+    assert_eq!(recovered.status, TaskStatus::AwaitingUser);
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_does_not_guess_a_metadata_parent_when_multiple_legacy_magnets_are_orphaned() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => json!([]),
+        "aria2.tellWaiting" => {
+            let mut child = fixture::status("new-child", "paused", 0);
+            child["files"] = json!([{
+                "index": "1", "path": "payload.bin", "length": "100",
+                "completedLength": "0", "selected": "true"
+            }]);
+            json!([child])
+        }
+        "aria2.tellStopped" => {
+            let mut parent = fixture::status("metadata-parent", "complete", 100);
+            parent["followedBy"] = json!(["new-child"]);
+            json!([parent])
+        }
+        "aria2.tellStatus" if request["params"][1] == "new-child" => {
+            let mut child = fixture::status("new-child", "paused", 0);
+            child["files"] = json!([{
+                "index": "1", "path": "payload.bin", "length": "100",
+                "completedLength": "0", "selected": "true"
+            }]);
+            child
+        }
+        other => panic!("{other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    for (source, gid) in [
+        ("magnet:?xt=urn:btih:legacy-one", "old-child-one"),
+        ("magnet:?xt=urn:btih:legacy-two", "old-child-two"),
+    ] {
+        let task = store
+            .create(NewTask {
+                source: source.into(),
+                name: source.into(),
+                kind: "torrent".into(),
+            })
+            .unwrap();
+        let mut task = store.bind_gid(task.id, gid).unwrap();
+        task.followed_by_gid = Some(gid.into());
+        task.status = TaskStatus::AwaitingUser;
+        store.apply_transfer_snapshot(task).unwrap();
+    }
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+
+    assert_eq!(report.imported, 1);
+    assert_eq!(store.list().unwrap().len(), 3);
+    assert_eq!(
+        store
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|task| task.metadata_gid.as_deref() == Some("metadata-parent"))
+            .count(),
+        0
+    );
+    server.abort();
 }
 
 #[tokio::test]

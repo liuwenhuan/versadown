@@ -79,6 +79,47 @@ impl DownloadService {
             .iter()
             .flat_map(|s| s.followed_by.clone())
             .collect();
+        let legacy_magnets: Vec<_> = existing
+            .iter()
+            .filter(|task| {
+                task.source.starts_with("magnet:")
+                    && task.metadata_gid.is_none()
+                    && task.aria_gid.is_some()
+                    && task.followed_by_gid.as_deref() == task.aria_gid.as_deref()
+                    && task
+                        .aria_gid
+                        .as_ref()
+                        .is_some_and(|gid| !session_gids.contains(gid))
+                    && !matches!(
+                        task.status,
+                        TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
+                    )
+            })
+            .collect();
+        let unknown_metadata_parents: Vec<_> = statuses
+            .iter()
+            .filter(|status| {
+                status.status == "complete"
+                    && !status.followed_by.is_empty()
+                    && !existing.iter().any(|task| {
+                        task.aria_gid.as_deref() == Some(status.gid.as_str())
+                            || task.metadata_gid.as_deref() == Some(status.gid.as_str())
+                    })
+                    && status.followed_by.iter().all(|child| {
+                        !existing.iter().any(|task| {
+                            task.aria_gid.as_deref() == Some(child.as_str())
+                                || task.metadata_gid.as_deref() == Some(child.as_str())
+                        })
+                    })
+            })
+            .collect();
+        let legacy_metadata_claim = match (
+            legacy_magnets.as_slice(),
+            unknown_metadata_parents.as_slice(),
+        ) {
+            ([task], [parent]) => Some((task.id, parent.gid.clone())),
+            _ => None,
+        };
         // Known parents first, so following a metadata GID claims the child before import.
         statuses.sort_by_key(|s| {
             (
@@ -92,6 +133,11 @@ impl DownloadService {
         for status in statuses {
             let task = if let Some(task) = store.find_by_gid(&status.gid)? {
                 task
+            } else if let Some((task_id, _)) = legacy_metadata_claim
+                .as_ref()
+                .filter(|(_, parent_gid)| parent_gid.as_str() == status.gid.as_str())
+            {
+                store.bind_metadata_alias(*task_id, &status.gid)?
             } else {
                 // Do not reimport a completed metadata parent whose child is already mapped.
                 let mut child_mapped = false;
@@ -133,7 +179,7 @@ impl DownloadService {
             let completed = !selected.is_empty()
                 && selected.iter().all(|file| {
                     let path = std::path::Path::new(&file.path);
-                    file.completed_length == file.length
+                    file.length > 0
                         && std::fs::metadata(path)
                             .map(|m| m.is_file() && m.len() == file.length)
                             .unwrap_or(false)
@@ -147,6 +193,28 @@ impl DownloadService {
                 task.total_length = Some(task.completed_length);
                 task.error = None;
                 report.completed += 1;
+                task.download_speed = 0;
+                task.upload_speed = 0;
+                task.eta_seconds = None;
+                let files = files
+                    .iter()
+                    .map(|file| {
+                        (
+                            file.index,
+                            file.path.clone(),
+                            file.length,
+                            if file.selected {
+                                file.length
+                            } else {
+                                file.completed_length
+                            },
+                            file.selected,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let task = store.apply_transfer_snapshot_with_files(task, &files)?;
+                self.publish_task(&task)?;
+                continue;
             } else {
                 // Missing output or session is explicit failure; a retained control file
                 // may be continued via the original URI without deleting any partial data.

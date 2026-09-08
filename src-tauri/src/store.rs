@@ -175,6 +175,21 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    pub fn bind_metadata_alias(&self, id: Uuid, gid: &str) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET metadata_gid=?1,updated_at=?2 WHERE id=?3 AND metadata_gid IS NULL",
+            params![gid, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return match find_with_connection(&connection, id) {
+                Ok(_) => Err(StoreError::Database(rusqlite::Error::QueryReturnedNoRows)),
+                Err(error) => Err(error),
+            };
+        }
+        find_with_connection(&connection, id)
+    }
+
     pub fn bind_awaiting_gid(&self, id: Uuid, gid: &str) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let changed=connection.execute("UPDATE tasks SET aria_gid=?1,metadata_gid=NULL,status='awaiting_user',selection_confirmed=0,updated_at=?2 WHERE id=?3",params![gid,current_timestamp(),id.to_string()])?;
