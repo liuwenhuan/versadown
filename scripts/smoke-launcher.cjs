@@ -1,5 +1,6 @@
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
@@ -35,7 +36,7 @@ async function waitForTargets(port) {
   let lastError;
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
-      const targets = await targetsAt(port);
+      const targets = (await targetsAt(port)).filter((target) => target.type === 'page' && target.url !== 'about:blank');
       if (targets.length >= 2) return targets;
     } catch (error) {
       lastError = error;
@@ -79,9 +80,96 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+async function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null) return child.exitCode;
+  return await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`Application did not exit within ${timeoutMs}ms.`)), timeoutMs);
+    child.once('exit', (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+  });
+}
+
+function windowsChildProcessIds(parentPid) {
+  const script = `$items = @(Get-CimInstance Win32_Process -Filter \"ParentProcessId = ${Number(parentPid)}\" | Where-Object { $_.Name -like 'aria2c*' } | Select-Object -ExpandProperty ProcessId); ConvertTo-Json -Compress -InputObject $items`;
+  const result = require('node:child_process').execFileSync(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', script],
+    { encoding: 'utf8', windowsHide: true }
+  ).trim();
+  if (!result) return [];
+  const parsed = JSON.parse(result);
+  return Array.isArray(parsed) ? parsed.map(Number) : [Number(parsed)];
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error && error.code === 'EPERM';
+  }
+}
+
+async function waitForOwnedSidecar(parentPid) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const pids = windowsChildProcessIds(parentPid);
+    if (pids.length === 1) return pids;
+    if (pids.length > 1) throw new Error(`Expected one owned aria2 sidecar, found ${pids.join(', ')}.`);
+    await delay(100);
+  }
+  throw new Error('Timed out waiting for the app-owned aria2 sidecar.');
+}
+
+async function waitForProcessesToStop(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pids.every((pid) => !processExists(pid))) return;
+    await delay(50);
+  }
+  throw new Error(`Owned aria2 sidecar did not stop: ${pids.filter(processExists).join(', ')}.`);
+}
+
+async function startSlowDownloadFixture() {
+  const payloadSize = 64 * 1024 * 1024;
+  const chunk = Buffer.alloc(64 * 1024, 0x5a);
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, {
+      'Accept-Ranges': 'bytes',
+      'Content-Length': String(payloadSize),
+      'Content-Type': 'application/octet-stream'
+    });
+    let sent = 0;
+    const timer = setInterval(() => {
+      if (sent >= payloadSize) {
+        clearInterval(timer);
+        response.end();
+        return;
+      }
+      response.write(chunk);
+      sent += chunk.length;
+    }, 100);
+    const stop = () => clearInterval(timer);
+    request.once('close', stop);
+    response.once('close', stop);
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    server,
+    url: `http://127.0.0.1:${server.address().port}/launcher-quit-payload.bin`
+  };
+}
+
 async function run() {
   const port = await availablePort();
   const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-ui-smoke-'));
+  const downloadFixture = await startSlowDownloadFixture();
+  let ownedSidecarPids = [];
+  let completedQuitFlow = false;
   const child = spawn(executable, [], {
     cwd: path.dirname(executable),
     windowsHide: true,
@@ -90,6 +178,7 @@ async function run() {
       ...process.env,
       ALLDOWNLOADER_BACKGROUND_UI_TEST: '1',
       ALLDOWNLOADER_TEST_DATA_DIR: testDataDir,
+      ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(testDataDir, 'downloads'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`
     }
   });
@@ -101,7 +190,7 @@ async function run() {
     for (const target of targets) {
       const role = await waitForEvaluation(
         target,
-        'document.readyState === "complete" ? (document.querySelector(".launcher-shell") ? "launcher" : document.querySelector(".app-shell") ? "manager" : "unknown") : "loading"',
+        'document.readyState === "complete" ? (document.querySelector(".launcher-shell") ? "launcher" : document.querySelector(".app-shell") ? "manager" : `unknown:${location.href}:${document.body.innerText.slice(0, 120)}`) : "loading"',
         (value) => value === 'launcher' || value === 'manager'
       );
       if (role === 'launcher') launcher = target;
@@ -109,6 +198,7 @@ async function run() {
     }
     assert(launcher, 'Launcher WebView2 target did not render.');
     assert(manager, 'Download manager WebView2 target did not render.');
+    ownedSidecarPids = await waitForOwnedSidecar(child.pid);
 
     const compact = JSON.parse(await evaluate(launcher, `JSON.stringify((() => {
       const button = document.querySelector('.launcher-trigger');
@@ -159,6 +249,22 @@ async function run() {
     assert(launcherInteractions.compact && !launcherInteractions.expanded, `Drag or right click unexpectedly expanded the launcher: ${JSON.stringify(launcherInteractions)}`);
 
     const foregroundBeforeLifecycleChecks = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('foreground_window_handle_for_test')`);
+
+    await evaluate(manager, `window.__TAURI_INTERNALS__.invoke('request_native_launcher_close_for_test')`);
+    const launcherVisibleAfterNativeClose = await waitForEvaluation(
+      manager,
+      `window.__TAURI_INTERNALS__.invoke('launcher_visible_for_test')`,
+      Boolean
+    );
+    const launcherStillAlive = await waitForEvaluation(
+      launcher,
+      `Boolean(document.querySelector('.launcher-shell'))`,
+      Boolean
+    );
+    assert(
+      launcherStillAlive && launcherVisibleAfterNativeClose && child.exitCode === null,
+      `Native launcher close destroyed, hid, or exited the entry point: ${JSON.stringify({ launcherStillAlive, launcherVisibleAfterNativeClose, exitCode: child.exitCode })}.`
+    );
 
     await evaluate(manager, `document.querySelector('button[aria-label="关闭下载管理器"]').click()`);
     const hiddenAfterCustomClose = JSON.parse(await waitForEvaluation(
@@ -232,14 +338,38 @@ async function run() {
     const restoredRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
     assert(restoredRegion && restoredRegion.width === restoredRegion.height, `Compact region was not restored after collapse: ${JSON.stringify(restoredRegion)}`);
 
-    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native circular region ${nativeRegion.width}px, custom/native close reopen and settings verified without foreground activation, expanded ${expanded.width}x${expanded.height}.\n`);
+    const parsedTask = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('parse_download', { input: ${JSON.stringify(downloadFixture.url)} })`);
+    assert(parsedTask && parsedTask.task && parsedTask.task.aria_gid, `Local fixture was not submitted to aria2: ${JSON.stringify(parsedTask)}`);
+
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.quit' })`);
+    const exitCode = await waitForChildExit(child, 8000);
+    assert(exitCode === 0, `Application quit returned exit code ${exitCode}.`);
+    await waitForProcessesToStop(ownedSidecarPids, 2000);
+
+    const sessionPath = path.join(testDataDir, 'aria2.session');
+    assert(fs.existsSync(sessionPath), 'aria2 session was not written before application exit.');
+    const session = fs.readFileSync(sessionPath, 'utf8');
+    assert(session.includes(downloadFixture.url), `Saved aria2 session does not contain the active fixture URL: ${JSON.stringify(session)}`);
+    assert(!session.includes('rpc-secret') && !session.includes('token:'), 'Saved aria2 session leaked RPC credentials.');
+    completedQuitFlow = true;
+
+    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native launcher close stayed alive, manager custom/native close reopened without activation, and launcher.quit saved the active aria2 session then stopped owned sidecar ${ownedSidecarPids.join(', ')}.\n`);
   } finally {
-    if (child.exitCode === null) {
+    downloadFixture.server.closeAllConnections?.();
+    await new Promise((resolve) => downloadFixture.server.close(resolve));
+    if (!completedQuitFlow && child.exitCode === null) {
       child.kill();
       await new Promise((resolve) => {
         const fallback = setTimeout(resolve, 2000);
         child.once('exit', () => { clearTimeout(fallback); resolve(); });
       });
+    }
+    if (!completedQuitFlow) {
+      for (const pid of ownedSidecarPids) {
+        if (processExists(pid)) {
+          try { process.kill(pid); } catch {}
+        }
+      }
     }
     fs.rmSync(testDataDir, { recursive: true, force: true });
   }

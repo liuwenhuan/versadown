@@ -12,6 +12,10 @@ fn main_close_hides_until_application_exit_begins() {
     );
     assert_eq!(
         manager_close_disposition("launcher", false),
+        ManagerCloseDisposition::KeepOpen
+    );
+    assert_eq!(
+        manager_close_disposition("launcher", true),
         ManagerCloseDisposition::Exit
     );
 }

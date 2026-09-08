@@ -17,6 +17,7 @@ const BACKGROUND_UI_TEST: &str = "ALLDOWNLOADER_BACKGROUND_UI_TEST";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagerCloseDisposition {
     Hide,
+    KeepOpen,
     Exit,
 }
 
@@ -24,10 +25,13 @@ pub fn manager_close_disposition(
     window_label: &str,
     application_exiting: bool,
 ) -> ManagerCloseDisposition {
-    if window_label == "main" && !application_exiting {
-        ManagerCloseDisposition::Hide
-    } else {
-        ManagerCloseDisposition::Exit
+    if application_exiting {
+        return ManagerCloseDisposition::Exit;
+    }
+    match window_label {
+        "main" => ManagerCloseDisposition::Hide,
+        "launcher" => ManagerCloseDisposition::KeepOpen,
+        _ => ManagerCloseDisposition::Exit,
     }
 }
 
@@ -72,16 +76,29 @@ pub fn handle_manager_window_event(
     event: &WindowEvent,
     lifecycle: &ApplicationLifecycle,
 ) {
-    if !matches!(event, WindowEvent::CloseRequested { .. })
-        || manager_close_disposition(window.label(), lifecycle.is_exiting())
-            != ManagerCloseDisposition::Hide
-    {
+    if !matches!(event, WindowEvent::CloseRequested { .. }) {
         return;
     }
-
-    lifecycle.record_manager_close_request();
     if let WindowEvent::CloseRequested { api, .. } = event {
-        api.prevent_close();
+        match manager_close_disposition(window.label(), lifecycle.is_exiting()) {
+            ManagerCloseDisposition::Exit => return,
+            ManagerCloseDisposition::KeepOpen => {
+                api.prevent_close();
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    let Some(launcher) = app.get_webview_window("launcher") else {
+                        return;
+                    };
+                    if !launcher.is_visible().unwrap_or(false) {
+                        let _ = show_manager_without_activation(&launcher);
+                    }
+                });
+                return;
+            }
+            ManagerCloseDisposition::Hide => api.prevent_close(),
+        }
+        lifecycle.record_manager_close_request();
         let app = window.app_handle().clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -135,6 +152,25 @@ pub fn request_native_manager_close_for_test(app: AppHandle) -> Result<(), Strin
         .ok_or_else(|| "下载管理器窗口不存在".to_string())?;
 
     manager.close().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn request_native_launcher_close_for_test(app: AppHandle) -> Result<(), String> {
+    require_background_ui_test()?;
+    let launcher = app
+        .get_webview_window("launcher")
+        .ok_or_else(|| "悬浮窗不存在".to_string())?;
+
+    launcher.close().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn launcher_visible_for_test(app: AppHandle) -> Result<bool, String> {
+    require_background_ui_test()?;
+    app.get_webview_window("launcher")
+        .ok_or_else(|| "悬浮窗不存在".to_string())?
+        .is_visible()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

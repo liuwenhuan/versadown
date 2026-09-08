@@ -103,10 +103,16 @@ pub fn run() {
             } else {
                 bundled_sidecar
             };
-            let destination = std::env::var_os("USERPROFILE")
-                .map(std::path::PathBuf::from)
-                .map(|path| path.join("Downloads"))
-                .unwrap_or_else(|| data_dir.join("downloads"));
+            let destination = if background_ui_test.as_deref() == Some("1") {
+                std::env::var_os("ALLDOWNLOADER_TEST_DOWNLOAD_DIR")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| data_dir.join("downloads"))
+            } else {
+                std::env::var_os("USERPROFILE")
+                    .map(std::path::PathBuf::from)
+                    .map(|path| path.join("Downloads"))
+                    .unwrap_or_else(|| data_dir.join("downloads"))
+            };
             let launch_config = Aria2LaunchConfig {
                 binary: sidecar,
                 data_dir: data_dir.clone(),
@@ -174,6 +180,8 @@ pub fn run() {
             launcher::manager_window_snapshot,
             launcher::activate_launcher_menu_for_test,
             window_lifecycle::request_native_manager_close_for_test,
+            window_lifecycle::request_native_launcher_close_for_test,
+            window_lifecycle::launcher_visible_for_test,
             window_lifecycle::foreground_window_handle_for_test,
             window_lifecycle::manager_close_request_count_for_test
         ])
