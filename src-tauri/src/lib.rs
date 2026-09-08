@@ -5,6 +5,7 @@ pub mod cloud;
 mod commands;
 mod connectors;
 mod downloader;
+mod duplicates;
 mod engine_runtime;
 mod launcher;
 mod models;
@@ -28,7 +29,10 @@ pub use engine_runtime::{
 pub use launcher::{
     launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion,
 };
-pub use models::{may_transition, DownloadTask, NewTask, TaskStatus};
+pub use models::{
+    may_transition, DownloadTask, DuplicateDownloadState, NewTask, TaskStatus,
+};
+pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
@@ -181,6 +185,9 @@ pub fn run() {
             commands::confirm_download_command,
             commands::list_tasks,
             commands::task_action,
+            commands::resolve_duplicate_download,
+            commands::open_task_directory,
+            commands::remove_task_record,
             commands::select_files,
             commands::get_download_engine_state,
             commands::retry_download_engine,

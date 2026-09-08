@@ -32,6 +32,7 @@ pub struct UriSubmissionOptions {
     pub headers: Vec<(String, String)>,
     pub proxy: Option<String>,
     pub allow_overwrite: bool,
+    pub continue_download: bool,
 }
 
 impl UriSubmissionOptions {
@@ -69,6 +70,9 @@ impl UriSubmissionOptions {
         }
         if self.allow_overwrite {
             options.insert("allow-overwrite".into(), "true".into());
+        }
+        if self.continue_download {
+            options.insert("continue".into(), "true".into());
         }
         Ok(options)
     }
@@ -194,6 +198,27 @@ impl DownloadService {
     ) -> Result<DownloadTask, DownloadServiceError> {
         self.submit_uri(task_id, uris, options.into_aria2_options()?)
             .await
+    }
+
+    /// Re-submits the same durable local task after the caller has completed
+    /// duplicate-file preflight and obtained any required consent. The old GID
+    /// remains durable until aria2 accepts the replacement URI, avoiding a
+    /// false "queued" task when the RPC call itself fails.
+    pub async fn resubmit_uri_with_options(
+        &self,
+        task_id: Uuid,
+        uris: Vec<String>,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        let options = options.into_aria2_options()?;
+        let _guard = self.operation.lock().await;
+        self.ensure_accepting()?;
+        let gid = self.api().add_uri(uris, options).await?;
+        if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
+            let _ = self.api().remove(&gid).await;
+            return Err(error.into());
+        }
+        self.reconcile_task_unlocked(task_id).await
     }
 
     pub async fn submit_torrent(

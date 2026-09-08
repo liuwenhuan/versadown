@@ -1,5 +1,6 @@
 export type TaskStatus = 'draft' | 'parsing' | 'awaiting_user' | 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'paused';
 export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'cloud';
+export type DuplicateDownloadState = 'existing_active' | 'resume_available' | 'completed_files_present' | 'completed_files_missing' | 'overwrite_required';
 
 export interface QueueTask {
   id: string;
@@ -8,6 +9,7 @@ export interface QueueTask {
   status: TaskStatus;
   progress: number;
   speed?: string;
+  eta?: string;
   size?: string;
   source?: string;
   children?: readonly QueueTask[];
@@ -32,6 +34,16 @@ export interface DownloadFile {
   length: number;
   completed_length: number;
   selected: boolean;
+}
+
+export interface DuplicateDownload {
+  task: QueueTask;
+  state: DuplicateDownloadState;
+}
+
+export interface TaskActionResult {
+  task?: QueueTask;
+  duplicate?: DuplicateDownload;
 }
 
 export interface DownloadGlobalStat {

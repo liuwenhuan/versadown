@@ -1,4 +1,7 @@
-import { ConfirmResource, DownloadEngineState, DownloadGlobalStat, ParseResult, QueueTask } from './types';
+import {
+  ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownload,
+  DuplicateDownloadState, ParseResult, QueueTask, TaskActionResult
+} from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -28,9 +31,24 @@ export function isTauriRuntime() {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
-export async function parseDownload(input: string): Promise<{ task?: QueueTask; confirmation?: ParseResult }> {
+type NativeTaskOutcome = QueueTask & { duplicate?: DuplicateDownloadState };
+type NativeParseOutcome = {
+  task: QueueTask;
+  requires_confirmation: boolean;
+  resources?: ConfirmResource[];
+  duplicate?: DuplicateDownloadState;
+};
+
+function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
+  return result.duplicate
+    ? { duplicate: { task: result, state: result.duplicate } }
+    : { task: result };
+}
+
+export async function parseDownload(input: string): Promise<{ task?: QueueTask; confirmation?: ParseResult; duplicate?: DuplicateDownload }> {
   if (!isTauriRuntime()) return parseLocally(input);
-  const result = await invoke<{ task: QueueTask; requires_confirmation: boolean; resources?: ConfirmResource[] }>('parse_download', { input });
+  const result = await invoke<NativeParseOutcome>('parse_download', { input });
+  if (result.duplicate) return { duplicate: { task: result.task, state: result.duplicate } };
   if (!result.requires_confirmation) return { task: result.task };
   return {
     confirmation: {
@@ -52,8 +70,21 @@ export async function listPersistedTasks(): Promise<QueueTask[]> {
   return isTauriRuntime() ? invoke<QueueTask[]>('list_tasks') : [];
 }
 
-export async function runTaskAction(taskId: string, action: 'pause' | 'resume' | 'cancel'): Promise<QueueTask | undefined> {
-  return isTauriRuntime() ? invoke<QueueTask>('task_action', { taskId, action }) : undefined;
+export async function runTaskAction(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'retry'): Promise<TaskActionResult> {
+  if (!isTauriRuntime()) return {};
+  return duplicateResult(await invoke<NativeTaskOutcome>('task_action', { taskId, action }));
+}
+
+export async function resolveDuplicateDownload(taskId: string, action: 'resume' | 'restart_missing' | 'overwrite'): Promise<QueueTask | undefined> {
+  return isTauriRuntime() ? invoke<QueueTask>('resolve_duplicate_download', { taskId, action }) : undefined;
+}
+
+export async function openTaskDirectory(taskId: string): Promise<void> {
+  if (isTauriRuntime()) await invoke<void>('open_task_directory', { taskId });
+}
+
+export async function removeTaskRecord(taskId: string): Promise<void> {
+  if (isTauriRuntime()) await invoke<void>('remove_task_record', { taskId });
 }
 
 export async function selectDownloadFiles(taskId: string, indices: number[]): Promise<QueueTask | undefined> {

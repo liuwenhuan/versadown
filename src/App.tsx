@@ -4,20 +4,38 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { DownloadQueue } from './components/DownloadQueue';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { TaskDetails } from './components/TaskDetails';
-import { CloudManager } from './components/CloudManager';
+import { CloudWorkspace } from './components/CloudWorkspace';
+import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
 import { SettingsPanel } from './components/SettingsPanel';
 import { WindowTitleBar } from './components/WindowTitleBar';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { confirmDownload, getDownloadEngineState, isTauriRuntime, listPersistedTasks, parseDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles } from './lib/api';
+import { confirmDownload, getDownloadEngineState, isTauriRuntime, listPersistedTasks, openTaskDirectory, parseDownload, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles } from './lib/api';
+import * as cloudApi from './lib/cloudApi';
 import { formatBytes, mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { mainWindowIsMaximized, runMainWindowAction } from './lib/mainWindow';
-import { DownloadEngineState, ParseResult, QueueTask } from './lib/types';
+import { DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
+
+const cloudClient = {
+  beginCloudAuthorization: cloudApi.beginCloudAuthorization,
+  completeCloudAuthorization: cloudApi.completeCloudAuthorization,
+  loginCloudWithPassword: cloudApi.loginCloudWithPassword,
+  getCloudAccount: cloudApi.getCloudAccount,
+  listCloudDirectory: cloudApi.listCloudDirectory,
+  createCloudDirectory: cloudApi.createCloudDirectory,
+  renameCloudFile: cloudApi.renameCloudFile,
+  moveCloudFiles: cloudApi.moveCloudFiles,
+  trashCloudFiles: cloudApi.trashCloudFiles,
+  downloadCloudFile: cloudApi.downloadCloudFile,
+  logoutCloud: cloudApi.logoutCloud,
+  pickAndUploadFiles: cloudApi.pickAndUploadFiles,
+};
 
 export function App() {
   const [tasks, setTasks] = useState<QueueTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ParseResult | null>(null);
+  const [duplicate, setDuplicate] = useState<DuplicateDownload | null>(null);
   const [view, setView] = useState<ManagerView>('downloads');
   const [maximized, setMaximized] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -153,7 +171,7 @@ export function App() {
 
   async function parse(input: string) {
     setActionError(null);
-    let result: { task?: QueueTask; confirmation?: ParseResult };
+    let result: { task?: QueueTask; confirmation?: ParseResult; duplicate?: DuplicateDownload };
     try {
       result = await parseDownload(input);
     } catch (error) {
@@ -162,6 +180,56 @@ export function App() {
     }
     if (result.task) { recordTaskEvent(result.task); setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
     if (result.confirmation) setConfirmation(result.confirmation);
+    if (result.duplicate) showDuplicate(result.duplicate);
+  }
+
+  function showDuplicate(next: DuplicateDownload) {
+    recordTaskEvent(next.task);
+    setTasks((current) => upsertTask(current, next.task));
+    setSelectedTaskId(next.task.id);
+    setDuplicate(next);
+  }
+
+  async function resolveDuplicate(action: 'resume' | 'restart_missing' | 'overwrite') {
+    if (!duplicate) return;
+    setActionError(null);
+    try {
+      const task = await resolveDuplicateDownload(duplicate.task.id, action);
+      if (task) {
+        recordTaskEvent(task);
+        setTasks((current) => upsertTask(current, task));
+        setSelectedTaskId(task.id);
+      }
+      setDuplicate(null);
+    } catch (error) {
+      setActionError(String(error));
+    }
+  }
+
+  async function openDuplicateDirectory() {
+    if (!duplicate) return;
+    setActionError(null);
+    try {
+      await openTaskDirectory(duplicate.task.id);
+      setDuplicate(null);
+    } catch (error) {
+      setActionError(String(error));
+    }
+  }
+
+  function acceptCloudDownload(result: unknown) {
+    const outcome = result as TaskActionResult | undefined;
+    if (outcome?.duplicate) {
+      showDuplicate(outcome.duplicate);
+      return;
+    }
+    if (outcome?.task) {
+      recordTaskEvent(outcome.task);
+      setTasks((current) => upsertTask(current, outcome.task!));
+      setSelectedTaskId(outcome.task.id);
+      return;
+    }
+    setActionError('网盘下载任务的返回数据无效');
   }
 
   async function confirm(selectedIds: string[]) {
@@ -197,7 +265,7 @@ export function App() {
     });
   }
 
-  async function taskAction(id: string, action: 'pause' | 'resume' | 'cancel' | 'select' | 'skip') {
+  async function taskAction(id: string, action: 'pause' | 'resume' | 'cancel' | 'retry' | 'select' | 'skip') {
     setActionError(null);
     const parent = tasks.find((task) => task.id === id || task.children?.some((child) => child.id === id) || task.files?.some((file) => `${task.id}-file-${file.index}` === id));
     if ((action === 'select' || action === 'skip') && parent?.status === 'awaiting_user') return;
@@ -205,8 +273,16 @@ export function App() {
     const fileIndex = file && ('index' in file ? file.index : file.file_index);
     const nativeTask = action === 'select' || action === 'skip'
       ? parent && fileIndex !== undefined ? await selectDownloadFiles(parent.id, (parent.files ?? []).filter((item) => action === 'select' ? item.selected || item.index === fileIndex : item.selected && item.index !== fileIndex).map((item) => item.index)).catch((error: unknown) => { setActionError(String(error)); return undefined; }) : undefined
-      : await runTaskAction(id, action).catch((error: unknown) => { setActionError(String(error)); return undefined; });
+      : undefined;
     if (nativeTask) setTasks((current) => upsertTask(current, nativeTask));
+    if (action !== 'select' && action !== 'skip') {
+      const result = await runTaskAction(id, action).catch((error: unknown) => { setActionError(String(error)); return undefined; });
+      if (result?.duplicate) showDuplicate(result.duplicate);
+      else if (result?.task) {
+        recordTaskEvent(result.task);
+        setTasks((current) => upsertTask(current, result.task!));
+      }
+    }
   }
 
   return (
@@ -228,10 +304,18 @@ export function App() {
       {actionError && <p className="action-error" role="alert">操作未完成：{actionError}</p>}
       <div className="workspace"><nav aria-label="主导航"><button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}>↓ 下载</button><button className={view === 'cloud' ? 'nav-active' : ''} onClick={() => setView('cloud')}>☁ 我的网盘</button><button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}>⚙ 设置</button><small>Windows Beta</small></nav>
         {view === 'downloads' && <><section className="queue-area"><div className="queue-toolbar"><div><p className="eyebrow">本地下载引擎</p><h2>全部任务</h2></div><span>标准单文件会自动开始；目录与多文件需要确认。</span></div><DownloadQueue tasks={tasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onAction={taskAction} onConfirm={reopenTaskConfirmation} /></section><TaskDetails task={selectedTask} /></>}
-        {view === 'cloud' && <section className="view-panel"><CloudManager provider="quark" /><CloudManager provider="pikpak" /></section>}
+        {view === 'cloud' && <section className="view-panel"><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} /></section>}
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={{ debugReports: false }} onChange={() => undefined} /></section>}
       </div>
       {confirmation && <ParseConfirmDialog result={confirmation} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? { ...current, resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) })) } : current)} onClose={() => setConfirmation(null)} />}
+      {duplicate && <DuplicateDownloadDialog
+        task={duplicate.task}
+        state={duplicate.state}
+        onOpenDirectory={() => { void openDuplicateDirectory(); }}
+        onResolve={(action) => { void resolveDuplicate(action); }}
+        onRestartMissing={() => { void resolveDuplicate('restart_missing'); }}
+        onClose={() => setDuplicate(null)}
+      />}
     </main>
   );
 }

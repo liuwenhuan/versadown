@@ -122,6 +122,38 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    /// Finds the most recently created task for an identical stable source.
+    /// Cloud tasks persist only `cloud://provider/file-id`, so this never
+    /// compares an expiring signed download URL or a session credential.
+    pub fn find_by_source(&self, source: &str) -> Result<Option<DownloadTask>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection
+            .query_row(
+                &format!("{TASK_SELECT} WHERE source = ?1 ORDER BY rowid DESC LIMIT 1"),
+                [source],
+                task_from_row,
+            )
+            .map(Some)
+            .or_else(|error| {
+                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                    Ok(None)
+                } else {
+                    Err(StoreError::Database(error))
+                }
+            })
+    }
+
+    /// Removes only the durable task record. `task_files` rows cascade, while
+    /// the actual downloaded payload is never touched by this operation.
+    pub fn remove_task_record(&self, id: Uuid) -> Result<(), StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute("DELETE FROM tasks WHERE id = ?1", [id.to_string()])?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
     pub fn fail(&self, id: Uuid, message: impl Into<String>) -> Result<DownloadTask, StoreError> {
         let mut task = self.transition(id, TaskStatus::Failed)?;
         let message = message.into();
@@ -137,6 +169,41 @@ impl TaskStore {
     pub fn bind_gid(&self, id: Uuid, gid: impl AsRef<str>) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         update_gid(&connection, id, gid.as_ref(), None)?;
+        find_with_connection(&connection, id)
+    }
+
+    /// Records an aria2 GID accepted for an explicit retry without creating a
+    /// second task. Output-file rows intentionally remain in place so a later
+    /// retry can still decide whether it may resume or needs overwrite consent.
+    pub fn rebind_for_resubmission(
+        &self,
+        id: Uuid,
+        gid: impl AsRef<str>,
+    ) -> Result<DownloadTask, StoreError> {
+        let gid = gid.as_ref();
+        if gid.is_empty() {
+            return Err(StoreError::Database(rusqlite::Error::InvalidParameterName(
+                "empty aria2 gid".into(),
+            )));
+        }
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let current = find_with_connection(&connection, id)?;
+        if !matches!(
+            current.status,
+            TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Completed
+        ) {
+            return Err(StoreError::InvalidTransition {
+                from: current.status,
+                to: TaskStatus::Parsing,
+            });
+        }
+        connection.execute(
+            "UPDATE tasks SET status='parsing',progress=0,error=NULL,aria_gid=?1,followed_by_gid=NULL,
+             metadata_gid=NULL,total_length=NULL,completed_length=0,download_speed=0,upload_speed=0,
+             connections=0,eta_seconds=NULL,aria_error_code=NULL,selection_confirmed=0,updated_at=?2
+             WHERE id=?3",
+            params![gid, current_timestamp(), id.to_string()],
+        )?;
         find_with_connection(&connection, id)
     }
 

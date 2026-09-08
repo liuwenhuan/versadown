@@ -1,7 +1,7 @@
 use super::{http::response_json, types::required, *};
 use crate::{
-    commands::{task_payload, AppState, DownloadTaskPayload}, DownloadTask, NewTask, TaskStatus,
-    TaskStore, UriSubmissionOptions,
+    commands::{task_action_outcome, AppState, TaskActionOutcome}, duplicate_state,
+    DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use std::{
     path::{Path, PathBuf},
@@ -444,18 +444,74 @@ pub fn create_cloud_task(
         .map_err(|_| QuarkError::Storage)
 }
 
+/// Decodes the durable cloud task source. Its restrictive shape prevents a
+/// signed URL or arbitrary endpoint from being substituted during retry.
+pub fn parse_stable_cloud_source(source: &str) -> Result<(CloudProvider, String), QuarkError> {
+    let invalid = || QuarkError::InvalidInput("网盘任务来源无效，请从网盘重新创建下载".into());
+    let (provider, encoded) = source
+        .strip_prefix("cloud://")
+        .and_then(|value| value.split_once('/'))
+        .ok_or_else(invalid)?;
+    let provider = match provider {
+        "quark" => CloudProvider::Quark,
+        "pikpak" => CloudProvider::Pikpak,
+        _ => return Err(invalid()),
+    };
+    if encoded.is_empty() || encoded.contains(['/', '?', '#', '&', '=']) || !encoded.is_ascii() {
+        return Err(invalid());
+    }
+    for (index, byte) in encoded.bytes().enumerate() {
+        if byte == b'%'
+            && !encoded
+                .as_bytes()
+                .get(index + 1..index + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err(invalid());
+        }
+    }
+    let id = url::form_urlencoded::parse(format!("id={encoded}").as_bytes())
+        .next()
+        .ok_or_else(invalid)?
+        .1
+        .into_owned();
+    if id.trim().is_empty() || id.chars().any(|character| character.is_control() || character == '\u{fffd}') {
+        return Err(invalid());
+    }
+    Ok((provider, id))
+}
+
+/// Retrieves a fresh signed URL and request headers only for immediate aria2
+/// submission. Neither value is stored in `TaskStore`.
+pub async fn resolve_stable_cloud_download(
+    app: AppHandle,
+    source: &str,
+) -> Result<ResolvedCloudDownload, QuarkError> {
+    let (provider, file_id) = parse_stable_cloud_source(source)?;
+    run(app, provider, move |state, http| {
+        resolve_download(provider, &file_id, &state.store, http)
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn cloud_download_url(
     app: AppHandle,
     provider: CloudProvider,
     file_id: String,
-) -> Result<DownloadTaskPayload, QuarkError> {
-    let resolve_id = file_id.clone();
-    let resolved = run(app.clone(), provider, move |state, http| {
-        resolve_download(provider, &resolve_id, &state.store, http)
-    })
-    .await?;
+) -> Result<TaskActionOutcome, QuarkError> {
+    let stable_source = format!("cloud://{}/{}", provider.key(), super::types::encoded(&file_id));
     let state = app.state::<AppState>();
+    if let Some(existing) = state
+        .store
+        .find_by_source(&stable_source)
+        .map_err(|_| QuarkError::Storage)?
+    {
+        let duplicate = duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
+        return task_action_outcome(&state.store, existing, Some(duplicate))
+            .map_err(QuarkError::Transport);
+    }
+    let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
     let signed_url = resolved.url.clone();
     let service = state
@@ -474,7 +530,7 @@ pub async fn cloud_download_url(
             return Err(QuarkError::Transport(message));
         }
     };
-    task_payload(&state.store, task).map_err(|_| QuarkError::Storage)
+    task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)
 }
 
 pub struct ResolvedCloudDownload {
@@ -575,6 +631,22 @@ mod tests {
         MemoryCredentialStore, QuarkError, QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
+
+    #[test]
+    fn stable_cloud_source_decodes_the_file_id_without_accepting_url_parts() {
+        assert_eq!(
+            super::parse_stable_cloud_source("cloud://quark/file%2Fid%2Btest").unwrap(),
+            (CloudProvider::Quark, "file/id+test".to_string())
+        );
+        for source in [
+            "https://example.test/file",
+            "cloud://quark/",
+            "cloud://unknown/file",
+            "cloud://quark/file?token=temporary",
+        ] {
+            assert!(super::parse_stable_cloud_source(source).is_err(), "{source}");
+        }
+    }
 
     struct CapturingTransport(Mutex<Option<CloudHttpRequest>>);
 

@@ -16,6 +16,20 @@ pub enum TaskStatus {
     Paused,
 }
 
+/// The explicit user decision required before a task can be submitted again.
+///
+/// The state is derived from the durable task record and its output files; it
+/// deliberately does not depend on a stale aria2 session entry.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateDownloadState {
+    ExistingActive,
+    ResumeAvailable,
+    CompletedFilesPresent,
+    CompletedFilesMissing,
+    OverwriteRequired,
+}
+
 impl TaskStatus {
     pub fn as_db(self) -> &'static str {
         match self {

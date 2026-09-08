@@ -150,6 +150,7 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
                 ],
                 proxy: Some("http://127.0.0.1:7890".into()),
                 allow_overwrite: true,
+                continue_download: false,
             },
         )
         .await
@@ -169,6 +170,39 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
         ])]
     );
     assert_eq!(store.find(task.id).unwrap().source, "cloud://quark/file-1");
+}
+
+#[tokio::test]
+async fn resumed_submission_keeps_one_task_and_sets_aria2_continue() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepare_download("https://example.test/fixture.bin", &store).unwrap().task;
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    service
+        .submit_uri(task.id, vec![task.source.clone()], BTreeMap::new())
+        .await
+        .unwrap();
+    store.fail(task.id, "connection interrupted").unwrap();
+
+    let retried = service
+        .resubmit_uri_with_options(
+            task.id,
+            vec![task.source],
+            UriSubmissionOptions {
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(retried.id, task.id);
+    assert_eq!(retried.status, TaskStatus::Downloading);
+    assert_eq!(api.calls(), ["aria2.addUri", "aria2.tellStatus", "aria2.addUri", "aria2.tellStatus"]);
+    assert_eq!(
+        api.added_options().last().and_then(|options| options.get("continue")),
+        Some(&"true".to_string())
+    );
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ interface DownloadQueueProps {
   tasks: readonly QueueTask[];
   selectedTaskId: string | null;
   onSelect(id: string): void;
-  onAction(id: string, action: 'pause' | 'resume' | 'cancel' | 'select' | 'skip'): void;
+  onAction(id: string, action: 'pause' | 'resume' | 'cancel' | 'retry' | 'select' | 'skip'): void;
   onConfirm(task: QueueTask): void;
 }
 
@@ -42,6 +42,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onAction, onCon
               {awaitsBitTorrentConfirmation && <button aria-label={`确认下载 ${task.name}`} onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认下载</button>}
               {(task.status === 'downloading' || (task.status === 'queued' && task.aria_gid)) && <button aria-label={`暂停 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'pause'); }}>Ⅱ</button>}
               {task.status === 'paused' && <button aria-label={`继续 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'resume'); }}>▶</button>}
+              {(task.status === 'failed' || task.status === 'cancelled') && <button aria-label={`重试 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'retry'); }}>重试</button>}
               {task.status !== 'completed' && <button aria-label={`取消 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'cancel'); }}>×</button>}
             </div>
           </article>

@@ -5,7 +5,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    classify_input, CandidateKind, DownloadTask, NewTask, StoreError, TaskStatus, TaskStore,
+    classify_input, duplicate_state, CandidateKind, DownloadTask, DuplicateDownloadState, NewTask,
+    StoreError, TaskStatus, TaskStore,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -22,6 +23,8 @@ pub struct ParseOutcome {
     pub task: DownloadTask,
     pub requires_confirmation: bool,
     pub resources: Vec<ParseResource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<DuplicateDownloadState>,
 }
 
 #[derive(Debug, Error)]
@@ -190,12 +193,21 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
         _ => "file",
     }
     .to_string();
+    if let Some(task) = store.find_by_source(&new_task.source)? {
+        return Ok(ParseOutcome {
+            duplicate: Some(duplicate_state(store, &task)?),
+            task,
+            requires_confirmation: false,
+            resources: Vec::new(),
+        });
+    }
     let initial = store.create(new_task)?;
     if candidate.auto_start {
         return Ok(ParseOutcome {
             task: initial,
             requires_confirmation: false,
             resources: Vec::new(),
+            duplicate: None,
         });
     }
     if candidate.kind == CandidateKind::Torrent {
@@ -205,12 +217,14 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
             task: initial,
             requires_confirmation: true,
             resources: Vec::new(),
+            duplicate: None,
         });
     }
     Ok(ParseOutcome {
         task: store.transition(initial.id, TaskStatus::AwaitingUser)?,
         requires_confirmation: true,
         resources: Vec::new(),
+        duplicate: None,
     })
 }
 
@@ -221,6 +235,23 @@ pub fn confirm_download(id: Uuid, store: &TaskStore) -> Result<DownloadTask, Dow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_direct_source_returns_the_existing_task_for_duplicate_resolution() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let first = prepare_download("https://example.test/fixture.bin", &store)
+            .unwrap()
+            .task;
+        let failed = store.fail(first.id, "previous transfer stopped").unwrap();
+
+        let repeated = prepare_download("https://example.test/fixture.bin", &store).unwrap();
+
+        assert_eq!(repeated.task.id, failed.id);
+        assert_eq!(
+            repeated.duplicate,
+            Some(crate::DuplicateDownloadState::OverwriteRequired)
+        );
+    }
 
     #[tokio::test]
     async fn loads_local_torrent_bytes_as_base64() {
