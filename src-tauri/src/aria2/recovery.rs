@@ -82,9 +82,10 @@ impl DownloadService {
         // Known parents first, so following a metadata GID claims the child before import.
         statuses.sort_by_key(|s| {
             (
-                !existing
-                    .iter()
-                    .any(|t| t.aria_gid.as_deref() == Some(&s.gid)),
+                !existing.iter().any(|t| {
+                    t.aria_gid.as_deref() == Some(&s.gid)
+                        || t.metadata_gid.as_deref() == Some(&s.gid)
+                }),
                 followed.contains(&s.gid),
             )
         });

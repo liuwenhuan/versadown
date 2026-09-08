@@ -96,6 +96,10 @@ pub struct DownloadTask {
     pub aria_gid: Option<String>,
     #[serde(default)]
     pub followed_by_gid: Option<String>,
+    /// Stable aria2 metadata task GID for magnet downloads. The download child
+    /// GID can be regenerated when an aria2 session is loaded.
+    #[serde(default)]
+    pub metadata_gid: Option<String>,
     #[serde(default)]
     pub total_length: Option<u64>,
     #[serde(default)]

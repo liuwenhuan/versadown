@@ -63,6 +63,54 @@ fn legacy_database_is_preserved_and_accepts_a_gid() {
 }
 
 #[test]
+fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
+    let path = temporary_database_path();
+    let id = Uuid::new_v4();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY NOT NULL, source TEXT NOT NULL, name TEXT NOT NULL,
+                kind TEXT NOT NULL, status TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0,
+                error TEXT, aria_gid TEXT, followed_by_gid TEXT, total_length INTEGER,
+                completed_length INTEGER NOT NULL DEFAULT 0,
+                download_speed INTEGER NOT NULL DEFAULT 0,
+                upload_speed INTEGER NOT NULL DEFAULT 0, connections INTEGER NOT NULL DEFAULT 0,
+                eta_seconds INTEGER, aria_error_code TEXT, updated_at INTEGER NOT NULL DEFAULT 0,
+                selection_confirmed INTEGER NOT NULL DEFAULT 0
+             );
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks (id,source,name,kind,status) VALUES (?1,'magnet:?xt=fixture','fixture','torrent','awaiting_user')",
+            [id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = TaskStore::open_path(&path).unwrap();
+    let task = store.bind_metadata_gid(id, "metadata-parent").unwrap();
+    assert_eq!(task.metadata_gid.as_deref(), Some("metadata-parent"));
+    assert_eq!(
+        store.find_by_gid("metadata-parent").unwrap().unwrap().id,
+        id
+    );
+    drop(store);
+
+    let connection = Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap(),
+        3
+    );
+    drop(connection);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn replacing_a_gid_keeps_the_same_local_task() {
     let store = TaskStore::open_in_memory().expect("memory store");
     let task = store
@@ -107,6 +155,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             error: None,
             aria_gid: Some("gid-42".to_string()),
             followed_by_gid: Some("next-gid".to_string()),
+            metadata_gid: None,
             total_length: Some(1_000),
             completed_length: 250,
             download_speed: 50,

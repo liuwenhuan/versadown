@@ -68,6 +68,7 @@ impl TaskStore {
             error: None,
             aria_gid: None,
             followed_by_gid: None,
+            metadata_gid: None,
             total_length: None,
             completed_length: 0,
             download_speed: 0,
@@ -149,7 +150,7 @@ impl TaskStore {
     ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let changed = connection.execute(
-            "UPDATE tasks SET aria_gid=?1,followed_by_gid=NULL,status='failed',error=?2,
+            "UPDATE tasks SET aria_gid=?1,followed_by_gid=NULL,metadata_gid=NULL,status='failed',error=?2,
              download_speed=0,upload_speed=0,eta_seconds=NULL,selection_confirmed=0,updated_at=?3
              WHERE id=?4",
             params![
@@ -167,7 +168,16 @@ impl TaskStore {
 
     pub fn bind_metadata_gid(&self, id: Uuid, gid: &str) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let changed=connection.execute("UPDATE tasks SET aria_gid=?1,status='awaiting_user',selection_confirmed=0,updated_at=?2 WHERE id=?3",params![gid,current_timestamp(),id.to_string()])?;
+        let changed=connection.execute("UPDATE tasks SET aria_gid=?1,metadata_gid=?1,status='awaiting_user',selection_confirmed=0,updated_at=?2 WHERE id=?3",params![gid,current_timestamp(),id.to_string()])?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
+    }
+
+    pub fn bind_awaiting_gid(&self, id: Uuid, gid: &str) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed=connection.execute("UPDATE tasks SET aria_gid=?1,metadata_gid=NULL,status='awaiting_user',selection_confirmed=0,updated_at=?2 WHERE id=?3",params![gid,current_timestamp(),id.to_string()])?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
@@ -289,7 +299,7 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection
             .query_row(
-                &format!("{TASK_SELECT} WHERE aria_gid = ?1"),
+                &format!("{TASK_SELECT} WHERE aria_gid = ?1 OR metadata_gid = ?1 LIMIT 1"),
                 [gid.as_ref()],
                 task_from_row,
             )
@@ -320,11 +330,11 @@ impl TaskStore {
     }
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, metadata_gid FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 2 {
+    if version >= 3 {
         return Ok(());
     }
 
@@ -341,6 +351,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         ("aria_error_code", "TEXT"),
         ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
         ("selection_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+        ("metadata_gid", "TEXT"),
     ] {
         if !column_exists(&transaction, name)? {
             transaction.execute_batch(&format!(
@@ -350,6 +361,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     }
     transaction.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS tasks_aria_gid_unique ON tasks(aria_gid) WHERE aria_gid IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS tasks_metadata_gid_unique ON tasks(metadata_gid) WHERE metadata_gid IS NOT NULL;
          CREATE TABLE IF NOT EXISTS task_files (
             task_id TEXT NOT NULL,
             file_index INTEGER NOT NULL,
@@ -360,7 +372,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             PRIMARY KEY(task_id, file_index),
             FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
          );
-         PRAGMA user_version = 2;",
+         PRAGMA user_version = 3;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -395,7 +407,7 @@ fn update_gid(
     followed_by_gid: Option<&str>,
 ) -> Result<(), StoreError> {
     let changed = connection.execute(
-        "UPDATE tasks SET aria_gid = ?1, followed_by_gid = ?2, updated_at = ?3 WHERE id = ?4",
+        "UPDATE tasks SET aria_gid = ?1, followed_by_gid = ?2, metadata_gid = NULL, updated_at = ?3 WHERE id = ?4",
         params![gid, followed_by_gid, current_timestamp(), id.to_string()],
     )?;
     if changed == 0 {
@@ -461,6 +473,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         eta_seconds: optional_u64(row, 14)?,
         aria_error_code: row.get(15)?,
         updated_at: row.get(16)?,
+        metadata_gid: row.get(17)?,
     })
 }
 

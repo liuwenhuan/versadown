@@ -196,6 +196,101 @@ async fn recovery_matches_known_imports_unknown_and_reconciles_missing_outputs()
 }
 
 #[tokio::test]
+async fn recovery_claims_regenerated_magnet_child_for_the_original_local_task() {
+    let (initial_client, initial_server) =
+        fixture::server(|request| match request["method"].as_str().unwrap() {
+            "aria2.tellStatus" if request["params"][1] == "metadata-parent" => {
+                let mut parent = fixture::status("metadata-parent", "complete", 100);
+                parent["followedBy"] = json!(["old-child"]);
+                parent
+            }
+            "aria2.tellStatus" => {
+                let mut child = fixture::status("old-child", "paused", 0);
+                child["files"] = json!([{
+                    "index": "1",
+                    "path": "payload.bin",
+                    "length": "100",
+                    "completedLength": "0",
+                    "selected": "true"
+                }]);
+                child
+            }
+            other => panic!("{other}"),
+        })
+        .await;
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("tasks.sqlite");
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+    let original = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:fixture".into(),
+            name: "fixture".into(),
+            kind: "torrent".into(),
+        })
+        .unwrap();
+    store
+        .bind_metadata_gid(original.id, "metadata-parent")
+        .unwrap();
+    let initial = DownloadService::new(Arc::new(initial_client), store.clone());
+    let switched = initial.reconcile_task(original.id).await.unwrap();
+    assert_eq!(switched.aria_gid.as_deref(), Some("old-child"));
+    initial_server.abort();
+    drop(initial);
+    drop(store);
+
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+
+    // aria2 serializes the metadata parent. On the next process start that parent
+    // may invent a different child GID, while the old child is absent.
+    let (recovery_client, recovery_server) =
+        fixture::server(|request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => json!([]),
+            "aria2.tellWaiting" => {
+                let mut child = fixture::status("new-child", "paused", 0);
+                child["files"] = json!([{
+                    "index": "1",
+                    "path": "payload.bin",
+                    "length": "100",
+                    "completedLength": "0",
+                    "selected": "true"
+                }]);
+                json!([child])
+            }
+            "aria2.tellStopped" => {
+                let mut parent = fixture::status("metadata-parent", "complete", 100);
+                parent["followedBy"] = json!(["new-child"]);
+                json!([parent])
+            }
+            "aria2.tellStatus" if request["params"][1] == "new-child" => {
+                let mut child = fixture::status("new-child", "paused", 0);
+                child["files"] = json!([{
+                    "index": "1",
+                    "path": "payload.bin",
+                    "length": "100",
+                    "completedLength": "0",
+                    "selected": "true"
+                }]);
+                child
+            }
+            other => panic!("{other}"),
+        })
+        .await;
+    let recovery = DownloadService::new(Arc::new(recovery_client), store.clone())
+        .recover()
+        .await
+        .unwrap();
+
+    let recovered = store.find(original.id).unwrap();
+    assert_eq!(recovery.imported, 0);
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert_eq!(recovered.id, original.id);
+    assert_eq!(recovered.aria_gid.as_deref(), Some("new-child"));
+    assert_eq!(recovered.metadata_gid.as_deref(), Some("metadata-parent"));
+    assert_eq!(recovered.status, TaskStatus::AwaitingUser);
+    recovery_server.abort();
+}
+
+#[tokio::test]
 async fn restart_budget_allows_exactly_one_attempt_even_when_restart_fails() {
     use alldownloader_lib::aria2::recovery::RestartBudget;
     let budget = RestartBudget::default();

@@ -205,7 +205,7 @@ impl DownloadService {
                         .cleanup_rejected_torrent(task_id, &gid, DownloadServiceError::EmptyTorrent)
                         .await);
                 }
-                let current = match self.store.bind_metadata_gid(task_id, &gid) {
+                let current = match self.store.bind_awaiting_gid(task_id, &gid) {
                     Ok(task) => task,
                     Err(error) => {
                         return Err(self
@@ -505,7 +505,9 @@ impl DownloadService {
         confirmed: bool,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let mut seen = std::collections::BTreeSet::new();
-        if current.aria_gid.as_deref() != Some(status.gid.as_str()) {
+        if current.aria_gid.as_deref() != Some(status.gid.as_str())
+            && current.metadata_gid.as_deref() != Some(status.gid.as_str())
+        {
             return Err(Aria2Error::MalformedResponse.into());
         }
         for _ in 0..8 {
@@ -527,8 +529,7 @@ impl DownloadService {
                 {
                     snapshot.status = TaskStatus::AwaitingUser;
                     if current.source.starts_with("magnet:")
-                        && current.aria_gid.as_deref() == Some(&snapshot.gid)
-                        && current.followed_by_gid != current.aria_gid
+                        && current.metadata_gid.as_deref() == Some(&snapshot.gid)
                     {
                         snapshot.files.clear();
                     }
