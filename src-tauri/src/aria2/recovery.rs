@@ -131,6 +131,7 @@ impl DownloadService {
             )
         });
         for status in statuses {
+            let status_gid = status.gid.clone();
             let task = if let Some(task) = store.find_by_gid(&status.gid)? {
                 task
             } else if let Some((task_id, _)) = legacy_metadata_claim
@@ -155,8 +156,23 @@ impl DownloadService {
                 report.imported += 1;
                 store.bind_gid(task.id, &status.gid)?
             };
-            self.apply_status(task, status, false).await?;
-            report.reconciled += 1;
+            match self.apply_status(task.clone(), status, false).await {
+                Ok(_) => report.reconciled += 1,
+                Err(error) => {
+                    // A single corrupt status or persistence failure must not make a
+                    // healthy aria2 sidecar unavailable to every other task.
+                    report.failed += 1;
+                    let mut task = task;
+                    task.status = TaskStatus::Paused;
+                    task.download_speed = 0;
+                    task.upload_speed = 0;
+                    task.eta_seconds = None;
+                    task.error = Some(format!("任务恢复失败（{status_gid}）：{error}"));
+                    if let Ok(task) = store.apply_transfer_snapshot(task) {
+                        let _ = self.publish_task(&task);
+                    }
+                }
+            }
         }
         for task in existing {
             let Some(gid) = task.aria_gid.as_ref() else {
@@ -254,11 +270,26 @@ impl DownloadService {
                 task.error = Some("下载会话不存在，无法从保留的输出恢复".into());
                 report.failed += 1;
             }
+            let recovery_fallback = task.clone();
             task.download_speed = 0;
             task.upload_speed = 0;
             task.eta_seconds = None;
-            let task = store.apply_transfer_snapshot(task)?;
-            self.publish_task(&task)?;
+            match store.apply_transfer_snapshot(task) {
+                Ok(task) => {
+                    let _ = self.publish_task(&task);
+                }
+                Err(error) => {
+                    let mut task = recovery_fallback;
+                    task.status = TaskStatus::Paused;
+                    task.download_speed = 0;
+                    task.upload_speed = 0;
+                    task.eta_seconds = None;
+                    task.error = Some(format!("任务恢复失败：{error}"));
+                    if let Ok(task) = store.apply_transfer_snapshot(task) {
+                        let _ = self.publish_task(&task);
+                    }
+                }
+            }
         }
         Ok(report)
     }

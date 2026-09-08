@@ -196,6 +196,81 @@ async fn recovery_matches_known_imports_unknown_and_reconciles_missing_outputs()
 }
 
 #[tokio::test]
+async fn recovery_isolates_a_malformed_task_and_keeps_reconciling_the_session() {
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => {
+                let mut malformed = fixture::status("malformed", "active", 10);
+                malformed["completedLength"] = json!("not-a-number");
+                json!([malformed, fixture::status("healthy", "active", 75)])
+            }
+            "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            other => panic!("{other}"),
+        })
+        .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let malformed = store
+        .create(NewTask::direct("http://127.0.0.1/malformed"))
+        .unwrap();
+    store.bind_gid(malformed.id, "malformed").unwrap();
+    let healthy = store
+        .create(NewTask::direct("http://127.0.0.1/healthy"))
+        .unwrap();
+    store.bind_gid(healthy.id, "healthy").unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .expect("one malformed task must not make the engine unavailable");
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.reconciled, 1);
+    assert_eq!(store.find(healthy.id).unwrap().progress, 75);
+    let malformed = store.find(malformed.id).unwrap();
+    assert_eq!(malformed.status, TaskStatus::Paused);
+    assert!(malformed
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("恢复失败")));
+    server.abort();
+}
+
+#[tokio::test]
+async fn recovery_isolates_a_missing_tasks_persistence_failure() {
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            other => panic!("{other}"),
+        })
+        .await;
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("tasks.sqlite");
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+    let task = store
+        .create(NewTask::direct("http://127.0.0.1/missing"))
+        .unwrap();
+    let mut task = store.bind_gid(task.id, "missing").unwrap();
+    task.status = TaskStatus::Downloading;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_recovery BEFORE UPDATE OF status ON tasks WHEN NEW.status='failed' BEGIN SELECT RAISE(ABORT,'fixture recovery persistence failed'); END;").unwrap();
+
+    let report = DownloadService::new(Arc::new(client), store.clone())
+        .recover()
+        .await
+        .expect("one task's failed-state persistence must not disable the engine");
+
+    assert_eq!(report.failed, 1);
+    let task = store.find(task.id).unwrap();
+    assert_eq!(task.status, TaskStatus::Paused);
+    assert!(task
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("恢复失败")));
+    server.abort();
+}
+
+#[tokio::test]
 async fn recovery_completes_a_full_output_when_the_last_persisted_byte_count_is_stale() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("completed-before-shutdown.bin");
@@ -701,10 +776,10 @@ async fn replacement_client_remains_available_when_recovery_persistence_fails() 
         "recovery failure discarded an already-running replacement client: {result:?}"
     );
     let replacement = result.unwrap().unwrap();
-    // The new client must be usable by the notification coordinator even when
-    // importing/reconciling the persisted tasks failed.
+    // The new client remains usable and a single persistence failure is reported
+    // without turning the entire replacement engine unavailable.
     assert_ne!(replacement.client.endpoint().as_str(), old_endpoint);
-    assert!(replacement.recovery.is_err());
+    assert_eq!(replacement.recovery.unwrap().failed, 1);
     assert_eq!(
         replacement.client.get_version().await.unwrap().version,
         "1.37.0"
