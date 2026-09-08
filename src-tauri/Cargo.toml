@@ -20,6 +20,19 @@ regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+base64 = "0.22"
+url = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "test-util"] }
+rand = "0.8"
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", features = ["sink"] }
+
+[dev-dependencies]
+axum = "0.8"
+sha2 = "0.10"
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Graphics_Gdi"] }

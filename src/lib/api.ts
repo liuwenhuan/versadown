@@ -1,4 +1,4 @@
-import { ConfirmResource, ParseResult, QueueTask } from './types';
+import { ConfirmResource, DownloadEngineState, DownloadGlobalStat, ParseResult, QueueTask } from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -28,23 +28,24 @@ export function isTauriRuntime() {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
-function confirmationFor(taskId: string): ParseResult {
+export async function parseDownload(input: string): Promise<{ task?: QueueTask; confirmation?: ParseResult }> {
+  if (!isTauriRuntime()) return parseLocally(input);
+  const result = await invoke<{ task: QueueTask; requires_confirmation: boolean; resources?: ConfirmResource[] }>('parse_download', { input });
+  if (!result.requires_confirmation) return { task: result.task };
   return {
-    taskId, requiresConfirmation: true,
-    resources: [{ id: `${taskId}-default`, name: '待连接后获取文件列表', size: '等待连接器/种子元数据', selected: true }],
-    processing: ['文件选择确认后调用本地 aria2 下载']
+    confirmation: {
+      taskId: result.task.id,
+      requiresConfirmation: true,
+      resources: result.resources ?? [],
+      processing: ['文件选择确认后调用本地 aria2 下载'],
+      isBitTorrent: result.task.kind === 'magnet' || result.task.kind === 'torrent'
+    }
   };
 }
 
-export async function parseDownload(input: string): Promise<{ task?: QueueTask; confirmation?: ParseResult }> {
-  if (!isTauriRuntime()) return parseLocally(input);
-  const result = await invoke<{ task: QueueTask; requires_confirmation: boolean }>('parse_download', { input });
-  return result.requires_confirmation ? { confirmation: confirmationFor(result.task.id) } : { task: result.task };
-}
-
-export async function confirmDownload(taskId: string): Promise<QueueTask | undefined> {
+export async function confirmDownload(taskId: string, selectedIds: string[] = []): Promise<QueueTask | undefined> {
   if (!isTauriRuntime()) return undefined;
-  return invoke<QueueTask>('confirm_download_command', { taskId });
+  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds });
 }
 
 export async function listPersistedTasks(): Promise<QueueTask[]> {
@@ -53,4 +54,26 @@ export async function listPersistedTasks(): Promise<QueueTask[]> {
 
 export async function runTaskAction(taskId: string, action: 'pause' | 'resume' | 'cancel'): Promise<QueueTask | undefined> {
   return isTauriRuntime() ? invoke<QueueTask>('task_action', { taskId, action }) : undefined;
+}
+
+export async function selectDownloadFiles(taskId: string, indices: number[]): Promise<QueueTask | undefined> {
+  return isTauriRuntime() ? invoke<QueueTask>('select_files', { taskId, indices }) : undefined;
+}
+
+export async function getDownloadEngineState(): Promise<DownloadEngineState> {
+  return isTauriRuntime()
+    ? invoke<DownloadEngineState>('get_download_engine_state')
+    : { available: true, retrying: false };
+}
+
+export async function retryDownloadEngine(): Promise<DownloadEngineState> {
+  return isTauriRuntime()
+    ? invoke<DownloadEngineState>('retry_download_engine')
+    : { available: true, retrying: false };
+}
+
+export async function getDownloadGlobalStat(): Promise<DownloadGlobalStat> {
+  return isTauriRuntime()
+    ? invoke<DownloadGlobalStat>('get_download_global_stat')
+    : { download_speed: 0, upload_speed: 0, num_active: 0 };
 }

@@ -78,6 +78,7 @@ export async function anchorLauncherToWorkArea() {
 export async function sendLauncherInput(input: string) {
   if (!isTauriRuntime()) return;
   const mainWindow = await Window.getByLabel('main');
+  await mainWindow?.unminimize();
   await mainWindow?.show();
   await mainWindow?.setFocus();
   await emitTo('main', 'launcher-parse', input);

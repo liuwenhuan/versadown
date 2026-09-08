@@ -12,6 +12,41 @@ export interface QueueTask {
   source?: string;
   children?: readonly QueueTask[];
   error?: string;
+  aria_gid?: string;
+  followed_by_gid?: string;
+  total_length?: number;
+  completed_length?: number;
+  download_speed?: number;
+  upload_speed?: number;
+  connections?: number;
+  eta_seconds?: number;
+  aria_error_code?: string;
+  files?: readonly DownloadFile[];
+  file_index?: number;
+  selected?: boolean;
+}
+
+export interface DownloadFile {
+  index: number;
+  path: string;
+  length: number;
+  completed_length: number;
+  selected: boolean;
+}
+
+export interface DownloadGlobalStat {
+  download_speed: number;
+  upload_speed: number;
+  num_active: number;
+  num_waiting?: number;
+  num_stopped?: number;
+  num_stopped_total?: number;
+}
+
+export interface DownloadEngineState {
+  available: boolean;
+  retrying: boolean;
+  error?: string;
 }
 
 export interface ConfirmResource {
@@ -19,6 +54,7 @@ export interface ConfirmResource {
   name: string;
   size: string;
   selected: boolean;
+  index?: number;
 }
 
 export interface ParseResult {
@@ -27,6 +63,7 @@ export interface ParseResult {
   resources: ConfirmResource[];
   processing: string[];
   discoveredPassword?: string;
+  isBitTorrent?: boolean;
 }
 
 export type Provider = 'quark' | 'pikpak';
