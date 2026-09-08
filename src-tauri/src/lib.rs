@@ -1,6 +1,7 @@
 use tauri::{Emitter, Manager};
 
 pub mod aria2;
+pub mod cloud;
 mod commands;
 mod connectors;
 mod downloader;
@@ -78,6 +79,8 @@ fn app_version_command() -> String {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .on_menu_event(|app, event| launcher::handle_launcher_menu_action(app, event.id().as_ref()))
         .on_window_event(|window, event| {
             if let Some(lifecycle) = window
@@ -104,6 +107,9 @@ pub fn run() {
             };
             std::fs::create_dir_all(&data_dir)?;
             let store = std::sync::Arc::new(TaskStore::open_path(&data_dir.join("tasks.sqlite"))?);
+            let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
+                data_dir.join("cloud-sessions"),
+            )?);
             let manifest_sidecar = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("binaries")
                 .join(aria2_binary_name());
@@ -149,6 +155,7 @@ pub fn run() {
                 runtime: std::sync::Arc::clone(&runtime),
                 debug_reports: std::sync::Mutex::new(false),
             });
+            app.manage(cloud);
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
             ));
@@ -180,6 +187,17 @@ pub fn run() {
             commands::get_download_global_stat,
             commands::get_settings,
             commands::update_debug_reports,
+            cloud::commands::cloud_begin_authorization,
+            cloud::commands::cloud_complete_authorization,
+            cloud::commands::cloud_login_password,
+            cloud::commands::cloud_account,
+            cloud::commands::cloud_list_directory,
+            cloud::commands::cloud_create_directory,
+            cloud::commands::cloud_rename,
+            cloud::commands::cloud_move,
+            cloud::commands::cloud_trash,
+            cloud::commands::cloud_upload_files,
+            cloud::commands::cloud_logout,
             launcher::set_launcher_compact_shape,
             launcher::start_launcher_dragging,
             launcher::show_launcher_menu,
