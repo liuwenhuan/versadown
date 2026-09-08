@@ -53,3 +53,21 @@ it('requires confirmation before an awaiting BitTorrent task can change file sel
   expect(onAction).not.toHaveBeenCalled();
   expect(onConfirm).toHaveBeenCalledWith(task);
 });
+
+it('can pause a queued parent task once aria2 has assigned its GID', async () => {
+  const user = userEvent.setup();
+  const onAction = vi.fn();
+  const task = {
+    id: 'queued-with-gid',
+    name: 'waiting.iso',
+    kind: 'file' as const,
+    status: 'queued' as const,
+    progress: 0,
+    aria_gid: '0123456789abcdef'
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onAction={onAction} onConfirm={() => {}} />);
+
+  await user.click(screen.getByRole('button', { name: '暂停 waiting.iso' }));
+
+  expect(onAction).toHaveBeenCalledWith('queued-with-gid', 'pause');
+});

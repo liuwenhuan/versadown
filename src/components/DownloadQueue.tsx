@@ -40,7 +40,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onAction, onCon
             <div className={`task-progress${hasKnownTotal(task) ? '' : ' unknown-total'}`}><div>{hasKnownTotal(task) && <i style={{ width: `${task.progress}%` }} />}</div><span>{hasKnownTotal(task) ? `${task.progress}% · ${transferProgress(task)}` : transferProgress(task)} {task.download_speed !== undefined ? `· ${formatSpeed(task.download_speed)}` : task.speed && `· ${task.speed}`}</span></div>
             <div className="task-actions"><em className={task.status}>{statusText[task.status]}</em>
               {awaitsBitTorrentConfirmation && <button aria-label={`确认下载 ${task.name}`} onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认下载</button>}
-              {task.status === 'downloading' && <button aria-label={`暂停 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'pause'); }}>Ⅱ</button>}
+              {(task.status === 'downloading' || (task.status === 'queued' && task.aria_gid)) && <button aria-label={`暂停 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'pause'); }}>Ⅱ</button>}
               {task.status === 'paused' && <button aria-label={`继续 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'resume'); }}>▶</button>}
               {task.status !== 'completed' && <button aria-label={`取消 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'cancel'); }}>×</button>}
             </div>

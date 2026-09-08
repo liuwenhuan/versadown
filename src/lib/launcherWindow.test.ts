@@ -1,5 +1,41 @@
-import { expect, it } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
+
+const native = vi.hoisted(() => {
+  const calls: string[] = [];
+  return {
+    calls,
+    emitTo: vi.fn(async () => { calls.push('emit'); }),
+    getByLabel: vi.fn(),
+    mainWindow: {
+      unminimize: vi.fn(async () => { calls.push('unminimize'); }),
+      show: vi.fn(async () => { calls.push('show'); }),
+      setFocus: vi.fn(async () => { calls.push('focus'); })
+    }
+  };
+});
+
+vi.mock('./api', () => ({ isTauriRuntime: () => true }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/event', () => ({ emitTo: native.emitTo }));
+vi.mock('@tauri-apps/api/window', () => ({
+  currentMonitor: vi.fn(),
+  getCurrentWindow: vi.fn(() => ({ label: 'launcher' })),
+  LogicalSize: class LogicalSize {
+    constructor(public width: number, public height: number) {}
+  },
+  PhysicalPosition: class PhysicalPosition {
+    constructor(public x: number, public y: number) {}
+  },
+  Window: { getByLabel: native.getByLabel }
+}));
+
 import * as launcherWindow from './launcherWindow';
+
+beforeEach(() => {
+  native.calls.length = 0;
+  vi.clearAllMocks();
+  native.getByLabel.mockResolvedValue(native.mainWindow);
+});
 
 it('anchors the complete native window inside the monitor work area even when Windows enforces a wider size', () => {
   const position = (launcherWindow as unknown as {
@@ -25,4 +61,16 @@ it('resizes around the launcher bottom-right corner and clamps it to the work ar
   );
 
   expect(resized).toEqual({ x: 414, y: 373 });
+});
+
+it('restores and reveals the main window before forwarding launcher input', async () => {
+  await launcherWindow.sendLauncherInput('https://example.test/file.zip');
+
+  expect(native.getByLabel).toHaveBeenCalledWith('main');
+  expect(native.calls).toEqual(['unminimize', 'show', 'focus', 'emit']);
+  expect(native.emitTo).toHaveBeenCalledWith(
+    'main',
+    'launcher-parse',
+    'https://example.test/file.zip'
+  );
 });
