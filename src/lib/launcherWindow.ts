@@ -11,14 +11,13 @@ export const launcherDimensions = {
 const launcherMargin = 24;
 
 type WorkArea = { x: number; y: number; width: number; height: number };
+type NativeWindowSize = { width: number; height: number };
 
-export function launcherCornerPosition(workArea: WorkArea, scaleFactor: number, expanded = false) {
-  const size = expanded ? launcherDimensions.expanded : launcherDimensions.compact;
-  const occupiedWidth = (size.width + launcherMargin) * scaleFactor;
-  const occupiedHeight = (size.height + launcherMargin) * scaleFactor;
+export function launcherCornerPosition(workArea: WorkArea, windowSize: NativeWindowSize, scaleFactor: number) {
+  const margin = launcherMargin * scaleFactor;
   return {
-    x: Math.round(workArea.x + workArea.width - occupiedWidth),
-    y: Math.round(workArea.y + workArea.height - occupiedHeight)
+    x: Math.round(workArea.x + workArea.width - windowSize.width - margin),
+    y: Math.round(workArea.y + workArea.height - windowSize.height - margin)
   };
 }
 
@@ -31,16 +30,20 @@ export async function setLauncherExpanded(expanded: boolean) {
   const size = expanded ? launcherDimensions.expanded : launcherDimensions.compact;
   const launcher = getCurrentWindow();
   await launcher.setSize(new LogicalSize(size.width, size.height));
-  await anchorLauncherToWorkArea(expanded);
+  await anchorLauncherToWorkArea();
 }
 
-export async function anchorLauncherToWorkArea(expanded = false) {
+export async function anchorLauncherToWorkArea() {
   if (!isTauriRuntime()) return;
   const launcher = getCurrentWindow();
   const monitor = await currentMonitor();
   if (!monitor) return;
-  const { position, size } = monitor.workArea;
-  const corner = launcherCornerPosition({ x: position.x, y: position.y, width: size.width, height: size.height }, monitor.scaleFactor, expanded);
+  const [windowSize, workArea] = await Promise.all([launcher.outerSize(), Promise.resolve(monitor.workArea)]);
+  const corner = launcherCornerPosition(
+    { x: workArea.position.x, y: workArea.position.y, width: workArea.size.width, height: workArea.size.height },
+    { width: windowSize.width, height: windowSize.height },
+    monitor.scaleFactor
+  );
   await launcher.setPosition(new PhysicalPosition(corner.x, corner.y));
 }
 
