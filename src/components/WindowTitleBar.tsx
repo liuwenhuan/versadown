@@ -18,12 +18,11 @@ export function WindowTitleBar({ title, maximized, onAction }: WindowTitleBarPro
         className="window-title-drag-region"
         data-tauri-drag-region
         data-testid="titlebar-drag-region"
-        onDoubleClick={() => onAction('toggle-maximize')}
       >
-        <span className="window-title-brand" aria-hidden="true">↓</span>
-        <span className="window-title-copy">ALLDOWNLOADER</span>
-        <span className="window-title-separator" aria-hidden="true">/</span>
-        <span className="window-title-text">{title}</span>
+        <span className="window-title-brand" data-tauri-drag-region aria-hidden="true">↓</span>
+        <span className="window-title-copy" data-tauri-drag-region>ALLDOWNLOADER</span>
+        <span className="window-title-separator" data-tauri-drag-region aria-hidden="true">/</span>
+        <span className="window-title-text" data-tauri-drag-region>{title}</span>
       </div>
       <div className="window-title-controls" aria-label="窗口控制">
         <button

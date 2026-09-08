@@ -10,6 +10,8 @@ it('renders a drag region and hides through the close button', async () => {
   render(<WindowTitleBar title="下载管理" maximized={false} onAction={onAction} />);
 
   expect(screen.getByTestId('titlebar-drag-region')).toHaveAttribute('data-tauri-drag-region');
+  expect(screen.getByText('ALLDOWNLOADER')).toHaveAttribute('data-tauri-drag-region');
+  expect(screen.getByText('下载管理')).toHaveAttribute('data-tauri-drag-region');
   await user.click(screen.getByRole('button', { name: '关闭下载管理器' }));
   expect(onAction).toHaveBeenCalledWith('hide');
 });
@@ -35,12 +37,12 @@ it('uses the restore label while the window is maximized', async () => {
   expect(screen.getByRole('button', { name: '还原下载管理器' })).toBeVisible();
 });
 
-it('toggles maximization when the noninteractive title area is double clicked', async () => {
+it('leaves title-area double clicks to Tauri drag handling instead of dispatching a duplicate action', async () => {
   const user = userEvent.setup();
   const onAction = vi.fn();
 
   render(<WindowTitleBar title="下载管理" maximized={false} onAction={onAction} />);
   await user.dblClick(screen.getByTestId('titlebar-drag-region'));
 
-  expect(onAction).toHaveBeenCalledWith('toggle-maximize');
+  expect(onAction).not.toHaveBeenCalled();
 });

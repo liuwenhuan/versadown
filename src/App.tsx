@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { DownloadQueue } from './components/DownloadQueue';
@@ -8,7 +8,7 @@ import { CloudManager } from './components/CloudManager';
 import { SettingsPanel } from './components/SettingsPanel';
 import { WindowTitleBar } from './components/WindowTitleBar';
 import { confirmDownload, isTauriRuntime, listPersistedTasks, parseDownload, runTaskAction, selectDownloadFiles } from './lib/api';
-import { formatBytes, mergeInitialTasks, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
+import { formatBytes, mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { mainWindowIsMaximized, runMainWindowAction } from './lib/mainWindow';
 import { ParseResult, QueueTask } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
@@ -21,15 +21,31 @@ export function App() {
   const [maximized, setMaximized] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [eventsReady, setEventsReady] = useState(false);
+  const taskEventEpoch = useRef(0);
+  const taskEventVersions = useRef(new Map<string, number>());
   const selectedTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === selectedTaskId), [selectedTaskId, tasks]);
+
+  function recordTaskEvent(task: QueueTask) {
+    taskEventEpoch.current += 1;
+    taskEventVersions.current.set(task.id, taskEventEpoch.current);
+  }
+
+  function refreshTaskSnapshot(kind: 'initial' | 'focus', disposed: () => boolean) {
+    const requestStartEpoch = taskEventEpoch.current;
+    void listPersistedTasks().then((saved) => {
+      if (disposed()) return;
+      const protectedIds = kind === 'initial'
+        ? new Set([...taskEventVersions.current].flatMap(([id, epoch]) => epoch > requestStartEpoch ? [id] : []))
+        : new Set<string>();
+      setTasks((current) => mergeTaskSnapshot(current, saved, protectedIds));
+    }).catch((error: unknown) => { if (!disposed()) setActionError(String(error)); });
+  }
 
   useEffect(() => {
     if (!isTauriRuntime() || !eventsReady) return;
     let disposed = false;
     let stopFocus: (() => void) | undefined;
-    const refreshTasks = () => { void listPersistedTasks().then((saved) => {
-      if (!disposed) setTasks((current) => mergeInitialTasks(current, saved));
-    }).catch((error: unknown) => { if (!disposed) setActionError(String(error)); }); };
+    const refreshTasks = () => { refreshTaskSnapshot('focus', () => disposed); };
     getCurrentWindow().onFocusChanged(({ payload }) => { if (payload) refreshTasks(); })
       .then((stop) => { if (disposed) stop(); else stopFocus = stop; })
       .catch(() => undefined);
@@ -43,6 +59,7 @@ export function App() {
     subscribeToDownloadEvents({
       onTask: (task) => {
         if (disposed) return;
+        recordTaskEvent(task);
         setTasks((current) => upsertTask(current, task));
         setConfirmation((current) => {
           if (!current || current.taskId !== task.id || !task.files?.length) return current;
@@ -51,7 +68,7 @@ export function App() {
             resources: task.files.map((file) => ({
               id: String(file.index), index: file.index, name: file.path,
               size: `${formatBytes(file.completed_length)} / ${formatBytes(file.length)}`,
-              selected: current.resources.find((resource) => resource.index === file.index)?.selected ?? file.selected
+              selected: current.resources.find((resource) => resource.index === file.index || resource.id === String(file.index))?.selected ?? file.selected
             }))
           };
         });
@@ -62,9 +79,7 @@ export function App() {
       else {
         unlisten = stop;
         setEventsReady(true);
-        void listPersistedTasks().then((saved) => {
-          if (!disposed) setTasks((current) => mergeInitialTasks(current, saved));
-        }).catch((error: unknown) => { if (!disposed) setActionError(String(error)); });
+        refreshTaskSnapshot('initial', () => disposed);
       }
     }).catch((error: unknown) => { if (!disposed) setActionError(String(error)); });
     return () => { disposed = true; unlisten?.(); };
@@ -91,21 +106,23 @@ export function App() {
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     listen<unknown>('launcher-navigate', (event) => {
       const destination = managerViewFromLauncherPayload(event.payload);
       if (destination) setView(destination);
-    }).then((stop) => { unlisten = stop; }).catch(() => undefined);
-    return () => { unlisten?.(); };
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     listen<string>('launcher-parse', (event) => { void parse(event.payload); })
-      .then((stop) => { unlisten = stop; })
+      .then((stop) => { if (disposed) stop(); else unlisten = stop; })
       .catch(() => undefined);
-    return () => { unlisten?.(); };
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   async function parse(input: string) {
@@ -117,7 +134,7 @@ export function App() {
       setActionError(String(error));
       return;
     }
-    if (result.task) { setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
+    if (result.task) { recordTaskEvent(result.task); setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
     if (result.confirmation) setConfirmation(result.confirmation);
   }
 
@@ -161,7 +178,7 @@ export function App() {
         {view === 'cloud' && <section className="view-panel"><CloudManager provider="quark" /><CloudManager provider="pikpak" /></section>}
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={{ debugReports: false }} onChange={() => undefined} /></section>}
       </div>
-      {confirmation && <ParseConfirmDialog result={confirmation} onConfirm={confirm} onClose={() => setConfirmation(null)} />}
+      {confirmation && <ParseConfirmDialog result={confirmation} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? { ...current, resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) })) } : current)} onClose={() => setConfirmation(null)} />}
     </main>
   );
 }

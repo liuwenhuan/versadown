@@ -12,6 +12,16 @@ export function mergeInitialTasks(current: readonly QueueTask[], snapshots: read
   ), [...current]);
 }
 
+export function mergeTaskSnapshot(
+  current: readonly QueueTask[],
+  snapshots: readonly QueueTask[],
+  protectedIds: ReadonlySet<string> = new Set()
+): QueueTask[] {
+  return snapshots.reduce<QueueTask[]>((merged, snapshot) => (
+    protectedIds.has(snapshot.id) ? merged : upsertTask(merged, snapshot)
+  ), [...current]);
+}
+
 function containsTask(tasks: readonly QueueTask[], id: string): boolean {
   return tasks.some((task) => task.id === id || (task.children ? containsTask(task.children, id) : false));
 }
