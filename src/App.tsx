@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { DownloadQueue } from './components/DownloadQueue';
-import { FloatingLauncher } from './components/FloatingLauncher';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { TaskDetails } from './components/TaskDetails';
 import { CloudManager } from './components/CloudManager';
@@ -20,6 +20,15 @@ export function App() {
     let active = true;
     listPersistedTasks().then((saved) => { if (active) setTasks(saved); }).catch(() => undefined);
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | undefined;
+    listen<string>('launcher-parse', (event) => { void parse(event.payload); })
+      .then((stop) => { unlisten = stop; })
+      .catch(() => undefined);
+    return () => { unlisten?.(); };
   }, []);
 
   async function parse(input: string) {
@@ -59,7 +68,6 @@ export function App() {
         {view === 'cloud' && <section className="view-panel"><CloudManager provider="quark" /><CloudManager provider="pikpak" /></section>}
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={{ debugReports: false }} onChange={() => undefined} /></section>}
       </div>
-      <FloatingLauncher activeCount={tasks.filter((task) => task.status === 'downloading').length} onParse={parse} />
       {confirmation && <ParseConfirmDialog result={confirmation} onConfirm={confirm} onClose={() => setConfirmation(null)} />}
     </main>
   );

@@ -10,7 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "AllDownloader", "width": 1280, "height": 820, "minWidth": 960, "minHeight": 640 }],
+    "windows": [
+      { "label": "main", "title": "AllDownloader", "width": 1280, "height": 820, "minWidth": 960, "minHeight": 640 },
+      { "label": "launcher", "title": "AllDownloader 快速下载", "width": 48, "height": 48, "minWidth": 48, "minHeight": 48, "maxWidth": 470, "maxHeight": 300, "resizable": false, "decorations": false, "transparent": true, "alwaysOnTop": true, "skipTaskbar": true }
+    ],
     "security": { "csp": null }
   },
   "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico"], "resources": ["binaries/aria2c-x86_64-pc-windows-msvc.exe"], "windows": { "wix": { "language": ["zh-CN"] } } }

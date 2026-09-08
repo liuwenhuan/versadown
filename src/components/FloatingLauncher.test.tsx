@@ -12,6 +12,19 @@ it('expands the 48px launcher and labels its action 开始解析下载', async (
   expect(screen.getByRole('button', { name: '开始解析下载' })).toBeVisible();
 });
 
+it('notifies its host when the compact launcher expands and collapses', async () => {
+  const user = userEvent.setup();
+  const onExpandedChange = vi.fn();
+  // @ts-expect-error The window-size callback is the behavior under test.
+  render(<FloatingLauncher onParse={vi.fn()} activeCount={0} onExpandedChange={onExpandedChange} />);
+
+  await user.click(screen.getByRole('button', { name: '打开下载输入' }));
+  expect(onExpandedChange).toHaveBeenLastCalledWith(true);
+
+  await user.click(screen.getByRole('button', { name: '收起下载输入' }));
+  expect(onExpandedChange).toHaveBeenLastCalledWith(false);
+});
+
 it('submits a pasted input to the parser', async () => {
   const user = userEvent.setup();
   const onParse = vi.fn();
