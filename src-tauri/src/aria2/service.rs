@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -13,7 +14,8 @@ use crate::{DownloadTask, StoreError, TaskStatus, TaskStore};
 
 use super::sync::{EventSink, NoEvents};
 use super::{
-    Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Process, Aria2Status, RpcCall, TransferSnapshot,
+    Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Process, Aria2Status, RpcCall,
+    TransferSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,6 +23,69 @@ pub enum DownloadAction {
     Pause,
     Resume,
     Cancel,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UriSubmissionOptions {
+    pub directory: Option<PathBuf>,
+    pub output_name: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub proxy: Option<String>,
+    pub allow_overwrite: bool,
+}
+
+impl UriSubmissionOptions {
+    fn into_aria2_options(self) -> Result<Aria2Options, DownloadServiceError> {
+        let mut options = Aria2Options::new();
+        if let Some(directory) = self.directory {
+            if directory.as_os_str().is_empty() {
+                return Err(DownloadServiceError::InvalidUriOption("directory"));
+            }
+            options.insert("dir".into(), directory.to_string_lossy().into_owned());
+        }
+        if let Some(output_name) = self.output_name {
+            if !valid_output_name(&output_name) {
+                return Err(DownloadServiceError::InvalidUriOption("output name"));
+            }
+            options.insert("out".into(), output_name);
+        }
+        if !self.headers.is_empty() {
+            let headers = self
+                .headers
+                .into_iter()
+                .map(|(name, value)| {
+                    valid_header(&name, &value)
+                        .then(|| format!("{name}: {value}"))
+                        .ok_or(DownloadServiceError::InvalidUriOption("header"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            options.insert("header".into(), headers.join("\n"));
+        }
+        if let Some(proxy) = self.proxy {
+            if proxy.trim().is_empty() || proxy.contains(['\r', '\n']) {
+                return Err(DownloadServiceError::InvalidUriOption("proxy"));
+            }
+            options.insert("all-proxy".into(), proxy);
+        }
+        if self.allow_overwrite {
+            options.insert("allow-overwrite".into(), "true".into());
+        }
+        Ok(options)
+    }
+}
+
+fn valid_output_name(value: &str) -> bool {
+    !value.trim().is_empty()
+        && !value.contains(['\r', '\n', '/', '\\', '<', '>', ':', '"', '|', '?', '*'])
+        && !value.ends_with(['.', ' '])
+}
+
+fn valid_header(name: &str, value: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+        && !value.contains(['\r', '\n'])
 }
 
 #[derive(Debug, Error)]
@@ -37,6 +102,8 @@ pub enum DownloadServiceError {
     InvalidFileSelection,
     #[error("task is already submitted")]
     AlreadySubmitted,
+    #[error("invalid aria2 URI option: {0}")]
+    InvalidUriOption(&'static str),
     #[error("磁力元数据仍在获取，请稍后重试确认")]
     MetadataTimeout,
     #[error("种子文件未包含可下载文件")]
@@ -117,6 +184,16 @@ impl DownloadService {
             return Err(error.into());
         }
         self.reconcile_task_unlocked(task_id).await
+    }
+
+    pub async fn submit_uri_with_options(
+        &self,
+        task_id: Uuid,
+        uris: Vec<String>,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        self.submit_uri(task_id, uris, options.into_aria2_options()?)
+            .await
     }
 
     pub async fn submit_torrent(

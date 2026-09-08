@@ -1,11 +1,13 @@
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
     prepare_download, DownloadAction, DownloadService, TaskStatus, TaskStore,
+    UriSubmissionOptions,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -13,6 +15,7 @@ use serde_json::Value;
 #[derive(Default)]
 struct RecordingAria2 {
     calls: Mutex<Vec<String>>,
+    options: Mutex<Vec<Aria2Options>>,
     add_error: bool,
     pause_error: bool,
 }
@@ -26,6 +29,9 @@ impl RecordingAria2 {
     }
     fn record(&self, method: &str) {
         self.calls.lock().unwrap().push(method.to_string());
+    }
+    fn added_options(&self) -> Vec<Aria2Options> {
+        self.options.lock().unwrap().clone()
     }
     fn active(gid: &str) -> Aria2Status {
         Aria2Status {
@@ -49,9 +55,10 @@ impl Aria2Api for RecordingAria2 {
     async fn add_uri(
         &self,
         _uris: Vec<String>,
-        _options: Aria2Options,
+        options: Aria2Options,
     ) -> Result<String, Aria2Error> {
         self.record("aria2.addUri");
+        self.options.lock().unwrap().push(options);
         if self.add_error {
             Err(Aria2Error::Transport)
         } else {
@@ -121,6 +128,47 @@ impl Aria2Api for RecordingAria2 {
     async fn shutdown(&self) -> Result<String, Aria2Error> {
         unimplemented!()
     }
+}
+
+#[tokio::test]
+async fn cloud_submission_forwards_transient_options_without_persisting_them() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepare_download("cloud://quark/file-1", &store).unwrap().task;
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+
+    service
+        .submit_uri_with_options(
+            task.id,
+            vec!["https://signed.example.test/file".into()],
+            UriSubmissionOptions {
+                directory: Some(PathBuf::from("D:/Downloads")),
+                output_name: Some("wallpaper.jpg".into()),
+                headers: vec![
+                    ("Cookie".into(), "sid=web; __puus=fresh".into()),
+                    ("Referer".into(), "https://pan.quark.cn/".into()),
+                ],
+                proxy: Some("http://127.0.0.1:7890".into()),
+                allow_overwrite: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        api.added_options(),
+        vec![BTreeMap::from([
+            ("dir".into(), "D:/Downloads".into()),
+            ("out".into(), "wallpaper.jpg".into()),
+            (
+                "header".into(),
+                "Cookie: sid=web; __puus=fresh\nReferer: https://pan.quark.cn/".into(),
+            ),
+            ("all-proxy".into(), "http://127.0.0.1:7890".into()),
+            ("allow-overwrite".into(), "true".into()),
+        ])]
+    );
+    assert_eq!(store.find(task.id).unwrap().source, "cloud://quark/file-1");
 }
 
 #[tokio::test]
