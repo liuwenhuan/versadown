@@ -7,6 +7,7 @@ interface DownloadQueueProps {
   selectedTaskId: string | null;
   onSelect(id: string): void;
   onAction(id: string, action: 'pause' | 'resume' | 'cancel' | 'select' | 'skip'): void;
+  onConfirm(task: QueueTask): void;
 }
 
 const statusText: Record<TaskStatus, string> = {
@@ -14,7 +15,7 @@ const statusText: Record<TaskStatus, string> = {
   processing: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消', paused: '已暂停'
 };
 
-export function DownloadQueue({ tasks, selectedTaskId, onSelect, onAction }: DownloadQueueProps) {
+export function DownloadQueue({ tasks, selectedTaskId, onSelect, onAction, onConfirm }: DownloadQueueProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   return (
     <section className="download-queue" aria-label="下载队列">
@@ -28,6 +29,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onAction }: Dow
         }));
         const hasChildren = Boolean(taskChildren?.length);
         const isBitTorrent = task.kind === 'magnet' || task.kind === 'torrent';
+        const awaitsBitTorrentConfirmation = isBitTorrent && task.status === 'awaiting_user';
         return <div className="task-group" key={task.id}>
           <article className={`task-row ${selectedTaskId === task.id ? 'selected' : ''}`} onClick={() => onSelect(task.id)}>
             <div className="task-name">
@@ -37,6 +39,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onAction }: Dow
             </div>
             <div className={`task-progress${hasKnownTotal(task) ? '' : ' unknown-total'}`}><div>{hasKnownTotal(task) && <i style={{ width: `${task.progress}%` }} />}</div><span>{hasKnownTotal(task) ? `${task.progress}% · ${transferProgress(task)}` : transferProgress(task)} {task.download_speed !== undefined ? `· ${formatSpeed(task.download_speed)}` : task.speed && `· ${task.speed}`}</span></div>
             <div className="task-actions"><em className={task.status}>{statusText[task.status]}</em>
+              {awaitsBitTorrentConfirmation && <button aria-label={`确认下载 ${task.name}`} onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认下载</button>}
               {task.status === 'downloading' && <button aria-label={`暂停 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'pause'); }}>Ⅱ</button>}
               {task.status === 'paused' && <button aria-label={`继续 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'resume'); }}>▶</button>}
               {task.status !== 'completed' && <button aria-label={`取消 ${task.name}`} onClick={(event) => { event.stopPropagation(); onAction(task.id, 'cancel'); }}>×</button>}
@@ -44,7 +47,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onAction }: Dow
           </article>
           {hasChildren && isExpanded && <div className="children">{taskChildren!.map((child) => <article className="child-row" key={child.id}>
             <span>{child.name}</span><span>{child.size ?? `${child.progress}%`}</span><em>{isBitTorrent ? (child.selected ? '已选择' : '已跳过') : statusText[child.status]}</em>
-            {isBitTorrent ? <button aria-label={`${child.selected ? '跳过此文件' : '下载此文件'} ${child.name}`} onClick={() => onAction(child.id, child.selected ? 'skip' : 'select')}>{child.selected ? '跳过' : '下载'}</button> : child.status === 'downloading' && <button aria-label={`暂停 ${child.name}`} onClick={() => onAction(child.id, 'pause')}>Ⅱ</button>}
+            {!awaitsBitTorrentConfirmation && (isBitTorrent ? <button aria-label={`${child.selected ? '跳过此文件' : '下载此文件'} ${child.name}`} onClick={() => onAction(child.id, child.selected ? 'skip' : 'select')}>{child.selected ? '跳过' : '下载'}</button> : child.status === 'downloading' && <button aria-label={`暂停 ${child.name}`} onClick={() => onAction(child.id, 'pause')}>Ⅱ</button>)}
           </article>)}</div>}
         </div>;
       })}

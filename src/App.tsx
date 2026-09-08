@@ -145,9 +145,25 @@ export function App() {
     setTasks((current) => upsertTask(current, nativeTask)); setSelectedTaskId(nativeTask.id); setConfirmation(null);
   }
 
+  function reopenTaskConfirmation(task: QueueTask) {
+    if (task.status !== 'awaiting_user' || (task.kind !== 'magnet' && task.kind !== 'torrent')) return;
+    setConfirmation({
+      taskId: task.id,
+      requiresConfirmation: true,
+      resources: (task.files ?? []).map((file) => ({
+        id: String(file.index), index: file.index, name: file.path,
+        size: `${formatBytes(file.completed_length)} / ${formatBytes(file.length)}`,
+        selected: file.selected
+      })),
+      processing: ['文件选择确认后调用本地 aria2 下载'],
+      isBitTorrent: true
+    });
+  }
+
   async function taskAction(id: string, action: 'pause' | 'resume' | 'cancel' | 'select' | 'skip') {
     setActionError(null);
     const parent = tasks.find((task) => task.id === id || task.children?.some((child) => child.id === id) || task.files?.some((file) => `${task.id}-file-${file.index}` === id));
+    if ((action === 'select' || action === 'skip') && parent?.status === 'awaiting_user') return;
     const file = parent?.files?.find((item) => `${parent.id}-file-${item.index}` === id) ?? parent?.children?.find((item) => item.id === id);
     const fileIndex = file && ('index' in file ? file.index : file.file_index);
     const nativeTask = action === 'select' || action === 'skip'
@@ -173,7 +189,7 @@ export function App() {
       </header>
       {actionError && <p className="action-error" role="alert">操作未完成：{actionError}</p>}
       <div className="workspace"><nav aria-label="主导航"><button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}>↓ 下载</button><button className={view === 'cloud' ? 'nav-active' : ''} onClick={() => setView('cloud')}>☁ 我的网盘</button><button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}>⚙ 设置</button><small>Windows Beta</small></nav>
-        {view === 'downloads' && <><section className="queue-area"><div className="queue-toolbar"><div><p className="eyebrow">本地下载引擎</p><h2>全部任务</h2></div><span>标准单文件会自动开始；目录与多文件需要确认。</span></div><DownloadQueue tasks={tasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onAction={taskAction} /></section><TaskDetails task={selectedTask} /></>}
+        {view === 'downloads' && <><section className="queue-area"><div className="queue-toolbar"><div><p className="eyebrow">本地下载引擎</p><h2>全部任务</h2></div><span>标准单文件会自动开始；目录与多文件需要确认。</span></div><DownloadQueue tasks={tasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onAction={taskAction} onConfirm={reopenTaskConfirmation} /></section><TaskDetails task={selectedTask} /></>}
         {view === 'cloud' && <section className="view-panel"><CloudManager provider="quark" /><CloudManager provider="pikpak" /></section>}
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={{ debugReports: false }} onChange={() => undefined} /></section>}
       </div>

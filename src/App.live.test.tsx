@@ -6,12 +6,13 @@ import type { QueueTask } from './lib/types';
 const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
-  listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn()
+  listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
+  confirm: vi.fn(), selectFiles: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
-  confirmDownload: vi.fn(), runTaskAction: vi.fn(), selectDownloadFiles: vi.fn()
+  confirmDownload: state.confirm, runTaskAction: vi.fn(), selectDownloadFiles: state.selectFiles
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -41,6 +42,8 @@ function deferred<T>() {
 beforeEach(() => {
   state.list.mockReset();
   state.parse.mockReset();
+  state.confirm.mockReset();
+  state.selectFiles.mockReset();
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -102,6 +105,27 @@ it('keeps a same-ID event update that arrives while a focus snapshot is pending'
 
   expect(screen.getByText(/40%/)).toBeVisible();
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
+});
+
+it('reopens awaiting magnet file confirmation and confirms only through the dialog', async () => {
+  const user = userEvent.setup();
+  const awaitingTask: QueueTask = {
+    id: 'magnet-awaiting', name: 'collection', kind: 'magnet', status: 'awaiting_user', progress: 0,
+    files: [{ index: 1, path: 'episode.mkv', length: 1024, completed_length: 0, selected: true }]
+  };
+  state.list.mockResolvedValueOnce([awaitingTask]);
+  state.confirm.mockResolvedValueOnce({ ...awaitingTask, status: 'queued' });
+  render(<App />);
+  await screen.findByRole('button', { name: '确认下载 collection' });
+  await user.click(screen.getByRole('button', { name: '确认下载 collection' }));
+
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
+  expect(screen.getByText('episode.mkv')).toBeVisible();
+  expect(state.selectFiles).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '下载已选 1 项' }));
+
+  expect(state.confirm).toHaveBeenCalledWith('magnet-awaiting', ['1']);
+  expect(state.selectFiles).not.toHaveBeenCalled();
 });
 
 it('fills a magnet confirmation dialog when its task files arrive later', async () => {
