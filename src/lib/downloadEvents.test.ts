@@ -38,6 +38,8 @@ describe('transfer formatters', () => {
   it('formats a speed value compactly enough for the 48px launcher', () => {
     expect(formatCompactSpeed(870_400)).toBe('850K');
     expect(formatCompactSpeed(1_258_291)).toBe('1.2M');
+    expect(formatCompactSpeed(1024 ** 3)).toBe('1.0G');
+    expect(formatCompactSpeed(1024 ** 4)).toBe('1.0T');
   });
 
   it('does not invent a percentage when aria2 reports an unknown total', () => {
