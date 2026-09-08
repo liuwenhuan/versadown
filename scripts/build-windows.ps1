@@ -5,6 +5,7 @@ $nodeBin = Join-Path $projectRoot '.tools\node-v24.20.0-win-x64'
 $installedNodeBin = Join-Path $env:LOCALAPPDATA 'Programs\nodejs'
 $cargoHome = Join-Path $projectRoot '.tools\cargo'
 $rustupHome = Join-Path $projectRoot '.tools\rustup'
+$installedCargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 
 if (Test-Path -LiteralPath $nodeBin) {
     $env:Path = "$nodeBin;$env:Path"
@@ -14,6 +15,8 @@ if (Test-Path -LiteralPath $nodeBin) {
 if (Test-Path -LiteralPath (Join-Path $cargoHome 'bin\cargo.exe')) {
     $env:CARGO_HOME = $cargoHome
     $env:Path = "$cargoHome\bin;$env:Path"
+} elseif (Test-Path -LiteralPath (Join-Path $installedCargoBin 'cargo.exe')) {
+    $env:Path = "$installedCargoBin;$env:Path"
 }
 if (Test-Path -LiteralPath $rustupHome) {
     $env:RUSTUP_HOME = $rustupHome
