@@ -151,7 +151,15 @@ async function run() {
     assert(launcherInteractions.state.menuRequests === 1, `Launcher right click did not request its native menu: ${JSON.stringify(launcherInteractions)}`);
     assert(launcherInteractions.compact && !launcherInteractions.expanded, `Drag or right click unexpectedly expanded the launcher: ${JSON.stringify(launcherInteractions)}`);
 
-    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('plugin:event|emit_to', { target: { kind: 'AnyLabel', label: 'main' }, event: 'launcher-navigate', payload: 'settings' })`);
+    await evaluate(manager, `window.__TAURI_INTERNALS__.invoke('hide_manager_for_test')`);
+    const hidden = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
+    assert(hidden.exists && !hidden.visible, 'Main window was destroyed or remained visible after hiding.');
+
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.open_manager' })`);
+    const shown = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
+    assert(shown.exists && shown.visible, 'Launcher could not reopen the hidden manager window.');
+
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.settings' })`);
     const settingsVisible = await waitForEvaluation(
       manager,
       `Boolean(document.querySelector('.settings-panel'))`,
@@ -182,7 +190,7 @@ async function run() {
     const restoredRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
     assert(restoredRegion && restoredRegion.width === restoredRegion.height, `Compact region was not restored after collapse: ${JSON.stringify(restoredRegion)}`);
 
-    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native circular region ${nativeRegion.width}px, drag/context menu/settings verified, expanded ${expanded.width}x${expanded.height}.\n`);
+    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native circular region ${nativeRegion.width}px, hide/reopen/settings verified without foreground activation, expanded ${expanded.width}x${expanded.height}.\n`);
   } finally {
     child.kill();
   }

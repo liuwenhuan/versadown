@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { DownloadQueue } from './components/DownloadQueue';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { TaskDetails } from './components/TaskDetails';
 import { CloudManager } from './components/CloudManager';
 import { SettingsPanel } from './components/SettingsPanel';
+import { WindowTitleBar } from './components/WindowTitleBar';
 import { confirmDownload, isTauriRuntime, listPersistedTasks, parseDownload, runTaskAction } from './lib/api';
+import { mainWindowIsMaximized, runMainWindowAction } from './lib/mainWindow';
 import { ParseResult, QueueTask } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 
@@ -14,6 +17,7 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ParseResult | null>(null);
   const [view, setView] = useState<ManagerView>('downloads');
+  const [maximized, setMaximized] = useState(false);
   const selectedTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === selectedTaskId), [selectedTaskId, tasks]);
 
   useEffect(() => {
@@ -21,6 +25,22 @@ export function App() {
     let active = true;
     listPersistedTasks().then((saved) => { if (active) setTasks(saved); }).catch(() => undefined);
     return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    const refreshMaximized = () => {
+      void mainWindowIsMaximized().then((value) => {
+        if (active) setMaximized(value);
+      }).catch(() => undefined);
+    };
+    refreshMaximized();
+    getCurrentWindow().onResized(refreshMaximized)
+      .then((stop) => { unlisten = stop; })
+      .catch(() => undefined);
+    return () => { active = false; unlisten?.(); };
   }, []);
 
   useEffect(() => {
@@ -66,6 +86,11 @@ export function App() {
 
   return (
     <main className="app-shell">
+      <WindowTitleBar
+        title="下载管理"
+        maximized={maximized}
+        onAction={(action) => { void runMainWindowAction(action); }}
+      />
       <header className="app-header">
         <div className="brand-mark" aria-hidden="true">↓</div>
         <div>

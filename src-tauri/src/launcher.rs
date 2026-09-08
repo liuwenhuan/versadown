@@ -23,6 +23,14 @@ pub struct LauncherInteractionSnapshot {
     pub menu_requests: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagerWindowSnapshot {
+    pub exists: bool,
+    pub visible: bool,
+    pub minimized: bool,
+}
+
 pub struct LauncherInteractionState {
     background_test: bool,
     drag_requests: AtomicUsize,
@@ -64,6 +72,18 @@ pub fn launcher_menu_entries() -> [(&'static str, &'static str); 3] {
         (OPEN_SETTINGS, "设置"),
         (QUIT, "退出"),
     ]
+}
+
+fn background_ui_test_enabled() -> bool {
+    std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST").as_deref() == Ok("1")
+}
+
+fn require_background_ui_test() -> Result<(), String> {
+    if background_ui_test_enabled() {
+        Ok(())
+    } else {
+        Err("窗口观测仅在后台测试模式可用".to_string())
+    }
 }
 
 pub fn launcher_circle_region(
@@ -172,6 +192,38 @@ pub fn launcher_interaction_snapshot(interaction: State<'_, LauncherInteractionS
     Ok(interaction.snapshot())
 }
 
+#[tauri::command]
+pub fn hide_manager_for_test(app: AppHandle) -> Result<(), String> {
+    require_background_ui_test()?;
+    let manager = app
+        .get_webview_window("main")
+        .ok_or_else(|| "下载管理器窗口不存在".to_string())?;
+    manager.hide().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn manager_window_snapshot(app: AppHandle) -> Result<ManagerWindowSnapshot, String> {
+    require_background_ui_test()?;
+    let manager = app
+        .get_webview_window("main")
+        .ok_or_else(|| "下载管理器窗口不存在".to_string())?;
+    Ok(ManagerWindowSnapshot {
+        exists: true,
+        visible: manager.is_visible().map_err(|error| error.to_string())?,
+        minimized: manager.is_minimized().map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn activate_launcher_menu_for_test(app: AppHandle, action: String) -> Result<(), String> {
+    require_background_ui_test()?;
+    if !launcher_menu_entries().iter().any(|(id, _)| *id == action) {
+        return Err("未知的悬浮窗菜单动作".to_string());
+    }
+    handle_launcher_menu_action(&app, &action);
+    Ok(())
+}
+
 pub fn handle_launcher_menu_action(app: &AppHandle, id: &str) {
     match id {
         OPEN_MANAGER => reveal_manager(app, None),
@@ -190,5 +242,7 @@ fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
     }
     let _ = manager.unminimize();
     let _ = manager.show();
-    let _ = manager.set_focus();
+    if !background_ui_test_enabled() {
+        let _ = manager.set_focus();
+    }
 }
