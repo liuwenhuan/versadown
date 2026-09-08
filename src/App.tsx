@@ -30,13 +30,12 @@ export function App() {
     taskEventVersions.current.set(task.id, taskEventEpoch.current);
   }
 
-  function refreshTaskSnapshot(kind: 'initial' | 'focus', disposed: () => boolean) {
+  function refreshTaskSnapshot(disposed: () => boolean) {
     const requestStartEpoch = taskEventEpoch.current;
     void listPersistedTasks().then((saved) => {
       if (disposed()) return;
-      const protectedIds = kind === 'initial'
-        ? new Set([...taskEventVersions.current].flatMap(([id, epoch]) => epoch > requestStartEpoch ? [id] : []))
-        : new Set<string>();
+      const protectedIds = new Set([...taskEventVersions.current]
+        .flatMap(([id, epoch]) => epoch > requestStartEpoch ? [id] : []));
       setTasks((current) => mergeTaskSnapshot(current, saved, protectedIds));
     }).catch((error: unknown) => { if (!disposed()) setActionError(String(error)); });
   }
@@ -45,7 +44,7 @@ export function App() {
     if (!isTauriRuntime() || !eventsReady) return;
     let disposed = false;
     let stopFocus: (() => void) | undefined;
-    const refreshTasks = () => { refreshTaskSnapshot('focus', () => disposed); };
+    const refreshTasks = () => { refreshTaskSnapshot(() => disposed); };
     getCurrentWindow().onFocusChanged(({ payload }) => { if (payload) refreshTasks(); })
       .then((stop) => { if (disposed) stop(); else stopFocus = stop; })
       .catch(() => undefined);
@@ -79,7 +78,7 @@ export function App() {
       else {
         unlisten = stop;
         setEventsReady(true);
-        refreshTaskSnapshot('initial', () => disposed);
+        refreshTaskSnapshot(() => disposed);
       }
     }).catch((error: unknown) => { if (!disposed) setActionError(String(error)); });
     return () => { disposed = true; unlisten?.(); };

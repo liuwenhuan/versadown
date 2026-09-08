@@ -90,6 +90,20 @@ it('reconciles an existing task from a later focus snapshot without dropping a n
   expect(within(screen.getByRole('region', { name: '下载队列' })).getByText('new.zip')).toBeVisible();
 });
 
+it('keeps a same-ID event update that arrives while a focus snapshot is pending', async () => {
+  const focusSnapshot = deferred<QueueTask[]>();
+  state.list.mockResolvedValueOnce([]).mockReturnValueOnce(focusSnapshot.promise);
+  render(<App />);
+  await waitFor(() => expect(state.onFocus).toBeDefined());
+  act(() => { state.onFocus?.({ payload: true }); });
+  await waitFor(() => expect(state.list).toHaveBeenCalledTimes(2));
+  act(() => { state.onTask?.(liveTask); });
+  await act(async () => { focusSnapshot.resolve([oldTask]); });
+
+  expect(screen.getByText(/40%/)).toBeVisible();
+  expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
+});
+
 it('fills a magnet confirmation dialog when its task files arrive later', async () => {
   state.list.mockResolvedValueOnce([]);
   state.parse.mockResolvedValueOnce({
