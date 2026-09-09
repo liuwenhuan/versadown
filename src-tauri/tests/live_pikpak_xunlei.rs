@@ -61,12 +61,54 @@ fn provider_step<T>(
     name: &str,
     operation: impl FnOnce() -> Result<T, QuarkError>,
 ) -> LiveResult<T> {
-    operation().map_err(|error| failure(format!("{name}: {}", error_kind(&error))))
+    operation().map_err(|error| {
+        // Cloud errors redact request URLs and credentials; retaining this
+        // normalized provider response is safe and identifies the boundary
+        // that rejected a live regression operation.
+        failure(format!("{name}: {} ({error})", error_kind(&error)))
+    })
 }
 
 impl CloudHttpTransport for LiveTransport {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
-        self.0.send(request)
+        let cache_probe = request.url.contains("usage=CACHE");
+        let response = self.0.send(request)?;
+        if cache_probe {
+            let cache_details = serde_json::from_str::<serde_json::Value>(&response.body)
+                .ok()
+                .map(|value| {
+                    let fields = value
+                        .as_object()
+                        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+                        .unwrap_or_else(|| "non-object".into());
+                    let link = match value["web_content_link"].as_str() {
+                        Some(raw) => url::Url::parse(raw)
+                            .ok()
+                            .map(|url| {
+                                format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""))
+                            })
+                            .unwrap_or_else(|| format!("non-url(len={})", raw.len())),
+                        None => "missing".into(),
+                    };
+                    let media_link = value["medias"]
+                        .as_array()
+                        .and_then(|media| media.first())
+                        .and_then(|media| media.pointer("/link/url"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|raw| url::Url::parse(raw).ok())
+                        .map(|url| format!("{}://{}", url.scheme(), url.host_str().unwrap_or("")))
+                        .unwrap_or_else(|| "missing-or-invalid".into());
+                    format!("keys={fields}; web_content_link={link}; first_media={media_link}")
+                })
+                .unwrap_or_else(|| "non-json".into());
+            // Keys only: the response can contain a signed link, which must
+            // never appear in a test log.
+            eprintln!(
+                "PikPak CACHE response: HTTP {}; {cache_details}",
+                response.status
+            );
+        }
+        Ok(response)
     }
 }
 
@@ -233,10 +275,11 @@ fn live_pikpak_directory_upload_rename_move_download_and_trash() -> LiveResult<(
             .ok_or_else(|| failure("PikPak is not currently authorized"))?,
     )?;
     eprintln!(
-        "PikPak live session: auth={:?}, access_expired={}, browser_client={}, device_present={}, captcha_present={}",
+        "PikPak live session: auth={:?}, access_expired={}, browser_client={}, client_is_android={}, device_present={}, captcha_present={}",
         session.auth_method,
         session.expires_at <= SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         session.client_id.is_some(),
+        session.client_id.as_deref() == Some("YNxT9w7GMdWvEOKa"),
         !session.device_id.is_empty(),
         !session.captcha_token.is_empty(),
     );
@@ -305,6 +348,53 @@ fn live_pikpak_directory_upload_rename_move_download_and_trash() -> LiveResult<(
                 Ok(())
             }
         }
+        (Err(test), Ok(())) => Err(test),
+        (Ok(()), Err(cleanup)) => Err(Box::new(cleanup)),
+        (Err(test), Err(cleanup)) => Err(failure(format!(
+            "test failed ({test}); cleanup of only its test directory also failed ({cleanup})"
+        ))),
+    }
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized PikPak account and creates only AllDownloader-IT-* test data"]
+fn live_pikpak_cache_downloads_uploaded_bytes_and_trashes_only_its_directory() -> LiveResult<()> {
+    require_live_authorization()?;
+    let store = session_store()?;
+    let http = LiveTransport::new()?;
+    let client = PikPakClient::new(&http, &store);
+    let (local_root, payload, expected) = local_artifact("pikpak-cache")?;
+    let base_name = test_name("pikpak-cache", "root");
+
+    let initial_root = client.list("0")?;
+    if initial_root.items.iter().any(|item| item.name == base_name) {
+        remove_local(&local_root);
+        return Err(failure("unexpected test-directory name collision"));
+    }
+    let base = client.mkdir("0", &base_name)?;
+    let result = (|| -> LiveResult<()> {
+        let uploaded = provider_step("PikPak cache-test upload", || {
+            client.upload_file(&base.id, &payload)
+        })?;
+        let (url, download_name) = provider_step("PikPak CACHE resolve download", || {
+            client.download(&uploaded.id)
+        })?;
+        if download_name != "payload.txt" {
+            return Err(failure(
+                "PikPak CACHE download metadata did not preserve payload name",
+            ));
+        }
+        if download_bytes(&url)? != expected {
+            return Err(failure(
+                "PikPak CACHE download bytes differ from uploaded payload",
+            ));
+        }
+        Ok(())
+    })();
+    let cleanup = client.trash(&[base.id.clone()]);
+    remove_local(&local_root);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
         (Err(test), Ok(())) => Err(test),
         (Ok(()), Err(cleanup)) => Err(Box::new(cleanup)),
         (Err(test), Err(cleanup)) => Err(failure(format!(

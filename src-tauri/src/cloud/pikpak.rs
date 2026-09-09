@@ -304,7 +304,20 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         if !s.user_id.is_empty() {
             meta["user_id"] = json!(s.user_id);
         }
-        let payload = json!({"action":format!("{method}:{}",action_url.path()),"captcha_token":s.captcha_token,"client_id":self.client_id,"device_id":s.device_id,"meta":meta,"redirect_uri":"xlaccsdk01://xbase.cloud/callback?state=harbor"});
+        // PikPak scopes a GET for an individual drive file to the collection
+        // captcha action. Sending the concrete id here yields an interactive
+        // challenge even with a freshly completed browser authorization.
+        let captcha_path = if matches!(method, "GET" | "PATCH")
+            && action_url
+                .path()
+                .strip_prefix("/drive/v1/files/")
+                .is_some_and(|id| !id.is_empty() && !id.contains(['/', ':']))
+        {
+            "/drive/v1/files/"
+        } else {
+            action_url.path()
+        };
+        let payload = json!({"action":format!("{method}:{captcha_path}"),"captcha_token":s.captcha_token,"client_id":self.client_id,"device_id":s.device_id,"meta":meta,"redirect_uri":"xlaccsdk01://xbase.cloud/callback?state=harbor"});
         let v = self
             .raw(
                 "POST",
@@ -418,16 +431,27 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok(())
     }
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
-        let v = self.request(
+        let cached = self.request(
+            "GET",
+            format!("{DRIVE}/drive/v1/files/{}?usage=CACHE", encoded(id)),
+            None,
+        )?;
+        if let Some(url) = cached["web_content_link"]
+            .as_str()
+            .filter(|url| url.starts_with("https://"))
+        {
+            return Ok((url.into(), required(&cached, "name")?));
+        }
+        let fetched = self.request(
             "GET",
             format!("{DRIVE}/drive/v1/files/{}?usage=FETCH", encoded(id)),
             None,
         )?;
-        let u = v["web_content_link"]
+        let url = fetched["web_content_link"]
             .as_str()
-            .filter(|u| u.starts_with("https://"))
+            .filter(|url| url.starts_with("https://"))
             .ok_or(QuarkError::InvalidResponse)?;
-        Ok((u.into(), required(&v, "name")?))
+        Ok((url.into(), required(&fetched, "name")?))
     }
 }
 fn root(p: &str) -> &str {

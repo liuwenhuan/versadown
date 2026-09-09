@@ -102,6 +102,98 @@ fn risk_limited_retry_is_bounded_and_interactive_challenge_stops_retry() {
         assert_eq!(http.0.lock().unwrap().1.len(), expected_requests);
     }
 }
+
+#[test]
+fn pikpak_download_refreshes_the_collection_captcha_action_before_retrying_fetch() {
+    // Catches sending a per-file action such as `GET:/drive/v1/files/file-1`.
+    // PikPak's drive captcha contract scopes a file fetch to the collection
+    // endpoint (`GET:/drive/v1/files/`), even though the request URL includes
+    // the concrete file id.
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"old-cap","client_id":"YNxT9w7GMdWvEOKa","user_id":"user-42"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"error":"riskLimited","error_code":9}"#,
+        r#"{"captcha_token":"fresh-cap","expires_in":300}"#,
+        r#"{"name":"payload.txt","web_content_link":"https://download.example/payload.txt"}"#,
+    ]);
+
+    let (url, name) = PikPakClient::new(&http, &store).download("file-1").unwrap();
+
+    assert_eq!(url, "https://download.example/payload.txt");
+    assert_eq!(name, "payload.txt");
+    let requests = &http.0.lock().unwrap().1;
+    let captcha: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(captcha["action"], "GET:/drive/v1/files/");
+    assert_eq!(requests[2].headers["X-Captcha-Token"], "fresh-cap");
+}
+
+#[test]
+fn pikpak_download_prefers_cache_usage_for_a_direct_file_link() {
+    // Catches forcing FETCH, which turns an ordinary local download into a
+    // separately captcha-gated action for browser-authorized sessions.
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"name":"payload.txt","web_content_link":"https://download.example/payload.txt"}"#,
+    ]);
+
+    let (url, name) = PikPakClient::new(&http, &store).download("file-1").unwrap();
+
+    assert_eq!(url, "https://download.example/payload.txt");
+    assert_eq!(name, "payload.txt");
+    assert!(http.0.lock().unwrap().1[0]
+        .url
+        .ends_with("/drive/v1/files/file-1?usage=CACHE"));
+}
+
+#[test]
+fn pikpak_download_falls_back_to_fetch_when_cache_has_no_direct_link() {
+    // Catches treating CACHE's empty link (common for non-media uploads) as
+    // an invalid response instead of trying the provider's raw-file path.
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"name":"payload.txt","web_content_link":""}"#,
+        r#"{"name":"payload.txt","web_content_link":"https://download.example/payload.txt"}"#,
+    ]);
+
+    let (url, name) = PikPakClient::new(&http, &store).download("file-1").unwrap();
+
+    assert_eq!(url, "https://download.example/payload.txt");
+    assert_eq!(name, "payload.txt");
+    let requests = &http.0.lock().unwrap().1;
+    assert!(requests[0]
+        .url
+        .ends_with("/drive/v1/files/file-1?usage=CACHE"));
+    assert!(requests[1]
+        .url
+        .ends_with("/drive/v1/files/file-1?usage=FETCH"));
+}
+
+#[test]
+fn pikpak_rename_refreshes_the_collection_captcha_action_before_retrying_file_patch() {
+    // Catches the same per-file action bug for mutations; otherwise a fresh
+    // action token obtained while downloading is rejected by a later rename.
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"old-cap","client_id":"YNxT9w7GMdWvEOKa","user_id":"user-42"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"error":"riskLimited","error_code":9}"#,
+        r#"{"captcha_token":"fresh-cap","expires_in":300}"#,
+        r#"{}"#,
+    ]);
+
+    PikPakClient::new(&http, &store)
+        .rename("file-1", "renamed.txt")
+        .unwrap();
+
+    let requests = &http.0.lock().unwrap().1;
+    let captcha: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(captcha["action"], "PATCH:/drive/v1/files/");
+    assert_eq!(requests[2].headers["X-Captcha-Token"], "fresh-cap");
+}
+
 impl Sequence {
     fn new(bodies: &[&str]) -> Self {
         Self(Mutex::new((
