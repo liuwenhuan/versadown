@@ -74,17 +74,16 @@ it('keeps a compact live-status indicator visible and moves the speed into the e
   expect(screen.getByText(/512 KB\/s/)).toBeVisible();
 });
 
-it('keeps the launcher as a simple ball when aria2 has no download traffic', async () => {
+it('shows the zero-speed status when aria2 still has an active task', async () => {
   state.getGlobalStat.mockResolvedValueOnce({ download_speed: 0, num_active: 1 });
   state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });
   render(<LauncherWindow />);
 
-  await waitFor(() => expect(state.getGlobalStat).toHaveBeenCalledOnce());
-  expect(screen.queryByLabelText('下载速度 0 KB/s')).not.toBeInTheDocument();
-  expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(false);
+  expect(await screen.findByLabelText('下载速度 0 KB/s')).toHaveTextContent('0K');
+  expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(true);
 });
 
-it('keeps only the ball visible for an active zero-speed task in download-only mode', async () => {
+it('shows the zero-speed status for an active task in download-only mode', async () => {
   state.getSettings.mockResolvedValueOnce({
     debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'downloading',
     proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }
@@ -94,9 +93,9 @@ it('keeps only the ball visible for an active zero-speed task in download-only m
   render(<LauncherWindow />);
 
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
-  expect(screen.queryByLabelText('下载速度 0 KB/s')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('下载速度 0 KB/s')).toHaveTextContent('0K');
   expect(setLauncherWindowVisible).toHaveBeenLastCalledWith(true);
-  expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(false);
+  expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(true);
 });
 
 it('uses the main task-menu visual system and reflects the current main-window visibility', async () => {

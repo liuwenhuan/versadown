@@ -20,9 +20,8 @@ export function LauncherWindow() {
   const statEventEpoch = useRef(0);
   const engineEventEpoch = useRef(0);
   const hasActiveDownload = activeCount > 0;
-  const hasDownloadTraffic = downloadSpeed > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
-  const liveSpeedVisible = shouldShowLauncher && hasDownloadTraffic;
+  const liveSpeedVisible = shouldShowLauncher && hasActiveDownload;
 
   useEffect(() => {
     void anchorLauncherToWorkArea().catch(() => undefined).finally(() => setAnchored(true));
