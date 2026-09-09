@@ -33,7 +33,7 @@ vi.mock('../lib/downloadEvents', () => ({
 }));
 
 import { LauncherWindow } from './LauncherWindow';
-import { setLauncherLiveSpeedVisible, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
+import { setLauncherContextMenuVisible, setLauncherLiveSpeedVisible, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
 
 beforeEach(() => {
   state.onGlobalStat = undefined;
@@ -109,6 +109,42 @@ it('keeps live-speed status interactive for the launcher context menu', async ()
   expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
   expect(screen.getByLabelText('下载速度 512 KB/s')).toBeVisible();
   expect(speed.closest('main')).toHaveClass('launcher-speed-active', 'launcher-menu-open');
+});
+
+it('waits for the native viewport before rendering the launcher context menu', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
+  state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });
+  let releaseNativeResize: (() => void) | undefined;
+  vi.mocked(setLauncherContextMenuVisible).mockImplementationOnce(() => new Promise<void>((resolve) => {
+    releaseNativeResize = resolve;
+  }));
+  render(<LauncherWindow />);
+
+  fireEvent.contextMenu(await screen.findByLabelText('下载速度 512 KB/s'));
+
+  expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument();
+  await act(async () => { releaseNativeResize?.(); });
+  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
+});
+
+it('waits for native menu collapse before restoring the live launcher canvas', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
+  state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });
+  render(<LauncherWindow />);
+
+  fireEvent.contextMenu(await screen.findByLabelText('下载速度 512 KB/s'));
+  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
+
+  let releaseNativeResize: (() => void) | undefined;
+  vi.mocked(setLauncherContextMenuVisible).mockImplementationOnce(() => new Promise<void>((resolve) => {
+    releaseNativeResize = resolve;
+  }));
+  vi.mocked(setLauncherLiveSpeedVisible).mockClear();
+  fireEvent.keyDown(window, { key: 'Escape' });
+
+  expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument();
+  expect(setLauncherLiveSpeedVisible).not.toHaveBeenCalled();
+  await act(async () => { releaseNativeResize?.(); });
 });
 
 it('opens the download input when clicking the live-speed status area', async () => {

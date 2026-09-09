@@ -6,12 +6,14 @@ import { isTauriRuntime } from './api';
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
 export const launcherDimensions = {
   compact: { width: 48, height: 48 },
-  live: { width: 192, height: 48 },
-  menu: { width: 272, height: 360 },
+  live: { width: 236, height: 90 },
+  menu: { width: 304, height: 392 },
   expanded: { width: 470, height: 300 }
 } as const;
 
 const launcherMargin = 24;
+const liveShadowOffset = 18;
+let launcherResizeQueue: Promise<void> = Promise.resolve();
 
 type WorkArea = { x: number; y: number; width: number; height: number };
 type NativeWindowSize = { width: number; height: number };
@@ -46,35 +48,59 @@ export function launcherCompactSize(hasLiveSpeed: boolean) {
   return hasLiveSpeed ? launcherDimensions.live : launcherDimensions.compact;
 }
 
-async function resizeLauncher(size: NativeWindowSize, useCompactShape: boolean) {
+async function resizeLauncherNow(size: NativeWindowSize, useCompactShape: boolean, logicalPositionOffset: number) {
   if (!isTauriRuntime()) return;
   const launcher = getCurrentWindow();
   const [position, currentSize, monitor] = await Promise.all([launcher.outerPosition(), launcher.outerSize(), currentMonitor()]);
-  if (!useCompactShape) await setLauncherCompactShape(false);
-  await launcher.setSize(new LogicalSize(size.width, size.height));
-  const nextSize = await launcher.outerSize();
   if (monitor) {
     const workArea = monitor.workArea;
-    const nextPosition = launcherResizedPosition(
+    const scaleFactor = monitor.scaleFactor;
+    const nextSize = {
+      width: Math.round(size.width * scaleFactor),
+      height: Math.round(size.height * scaleFactor)
+    };
+    const sizeChanged = currentSize.width !== nextSize.width || currentSize.height !== nextSize.height;
+    const offset = sizeChanged ? Math.round(logicalPositionOffset * scaleFactor) : 0;
+    const resizedPosition = launcherResizedPosition(
       position,
       currentSize,
       nextSize,
       { x: workArea.position.x, y: workArea.position.y, width: workArea.size.width, height: workArea.size.height }
     );
-    await launcher.setPosition(new PhysicalPosition(nextPosition.x, nextPosition.y));
+    const nextPosition = {
+      x: Math.min(Math.max(resizedPosition.x + offset, workArea.position.x), workArea.position.x + workArea.size.width - nextSize.width),
+      y: Math.min(Math.max(resizedPosition.y + offset, workArea.position.y), workArea.position.y + workArea.size.height - nextSize.height)
+    };
+    await invoke('set_launcher_bounds', {
+      x: nextPosition.x,
+      y: nextPosition.y,
+      width: nextSize.width,
+      height: nextSize.height,
+      compact: useCompactShape
+    });
+    return;
   }
+  if (!useCompactShape) await setLauncherCompactShape(false);
+  await launcher.setSize(new LogicalSize(size.width, size.height));
   if (useCompactShape) await setLauncherCompactShape(true);
+}
+
+function resizeLauncher(size: NativeWindowSize, useCompactShape: boolean, logicalPositionOffset = 0) {
+  const operation = launcherResizeQueue.then(() => resizeLauncherNow(size, useCompactShape, logicalPositionOffset));
+  launcherResizeQueue = operation.catch(() => undefined);
+  return operation;
 }
 
 export async function setLauncherExpanded(expanded: boolean, hasLiveSpeed = false) {
   await resizeLauncher(
     expanded ? launcherDimensions.expanded : launcherCompactSize(hasLiveSpeed),
-    !expanded && !hasLiveSpeed
+    !expanded && !hasLiveSpeed,
+    hasLiveSpeed ? (expanded ? -liveShadowOffset : liveShadowOffset) : 0
   );
 }
 
 export async function setLauncherLiveSpeedVisible(visible: boolean) {
-  await resizeLauncher(launcherCompactSize(visible), !visible);
+  await resizeLauncher(launcherCompactSize(visible), !visible, visible ? liveShadowOffset : -liveShadowOffset);
 }
 
 export async function setLauncherContextMenuVisible(visible: boolean, hasLiveSpeed = false) {

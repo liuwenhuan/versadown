@@ -122,52 +122,114 @@ pub fn set_launcher_compact_shape(
 ) -> Result<Option<LauncherRegion>, String> {
     #[cfg(windows)]
     {
-        use windows::Win32::Graphics::Gdi::{
-            CreateEllipticRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
-        };
-
-        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-        if !compact {
-            let result = unsafe { SetWindowRgn(hwnd, None, true) };
-            return if result == 0 {
-                Err("无法恢复悬浮窗矩形区域".to_string())
-            } else {
-                Ok(None)
-            };
-        }
-
-        let outer = window.outer_size().map_err(|error| error.to_string())?;
-        let inner = window.inner_size().map_err(|error| error.to_string())?;
-        let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-        let region = launcher_circle_region(
-            (outer.width, outer.height),
-            (inner.width, inner.height),
-            scale_factor,
-        );
-        let native_region = unsafe {
-            CreateEllipticRgn(
-                region.x,
-                region.y,
-                region.x + region.width,
-                region.y + region.height,
-            )
-        };
-        if native_region.0.is_null() {
-            return Err("无法创建悬浮球圆形区域".to_string());
-        }
-        if unsafe { SetWindowRgn(hwnd, Some(native_region), true) } == 0 {
-            unsafe {
-                let _ = DeleteObject(HGDIOBJ(native_region.0));
-            }
-            return Err("无法应用悬浮球圆形区域".to_string());
-        }
-        return Ok(Some(region));
+        return apply_launcher_shape(&window, compact, true);
     }
 
     #[cfg(not(windows))]
     {
         let _ = (window, compact);
         Ok(None)
+    }
+}
+
+#[cfg(windows)]
+fn apply_launcher_shape(
+    window: &WebviewWindow,
+    compact: bool,
+    redraw: bool,
+) -> Result<Option<LauncherRegion>, String> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateEllipticRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
+    };
+
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    if !compact {
+        let result = unsafe { SetWindowRgn(hwnd, None, redraw) };
+        return if result == 0 {
+            Err("无法恢复悬浮窗矩形区域".to_string())
+        } else {
+            Ok(None)
+        };
+    }
+
+    let outer = window.outer_size().map_err(|error| error.to_string())?;
+    let inner = window.inner_size().map_err(|error| error.to_string())?;
+    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
+    let region = launcher_circle_region(
+        (outer.width, outer.height),
+        (inner.width, inner.height),
+        scale_factor,
+    );
+    let native_region = unsafe {
+        CreateEllipticRgn(
+            region.x,
+            region.y,
+            region.x + region.width,
+            region.y + region.height,
+        )
+    };
+    if native_region.0.is_null() {
+        return Err("无法创建悬浮球圆形区域".to_string());
+    }
+    if unsafe { SetWindowRgn(hwnd, Some(native_region), redraw) } == 0 {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(native_region.0));
+        }
+        return Err("无法应用悬浮球圆形区域".to_string());
+    }
+    Ok(Some(region))
+}
+
+#[tauri::command]
+pub fn set_launcher_bounds(
+    window: WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    compact: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
+        };
+
+        apply_launcher_shape(&window, false, false)?;
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                x,
+                y,
+                width as i32,
+                height as i32,
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER,
+            )
+        }
+        .map_err(|error| format!("无法原子更新悬浮窗位置和尺寸: {error}"))?;
+        apply_launcher_shape(&window, compact, true)?;
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        use tauri::{PhysicalPosition, PhysicalSize};
+
+        if !compact {
+            set_launcher_compact_shape(window.clone(), false)?;
+        }
+        window
+            .set_size(PhysicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+        window
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| error.to_string())?;
+        if compact {
+            set_launcher_compact_shape(window, true)?;
+        }
+        Ok(())
     }
 }
 

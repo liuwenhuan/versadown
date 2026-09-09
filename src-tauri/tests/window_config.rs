@@ -38,6 +38,6 @@ fn main_window_opens_with_the_compact_desktop_dimensions() {
 fn launcher_window_leaves_room_for_the_context_menu_and_its_shadow() {
     let window = launcher_window();
 
-    assert!(window["maxWidth"].as_u64().unwrap_or_default() >= 272);
-    assert!(window["maxHeight"].as_u64().unwrap_or_default() >= 360);
+    assert!(window["maxWidth"].as_u64().unwrap_or_default() >= 304);
+    assert!(window["maxHeight"].as_u64().unwrap_or_default() >= 392);
 }

@@ -272,9 +272,9 @@ async function run() {
       return { width: innerWidth, height: innerHeight, left: menu.left, top: menu.top, right: menu.right, bottom: menu.bottom };
     })())`));
     assert(
-      menuGeometry.width >= 272 && menuGeometry.height >= 360
-        && menuGeometry.left >= 23 && menuGeometry.top >= 23
-        && menuGeometry.right <= menuGeometry.width - 23
+      menuGeometry.width >= 304 && menuGeometry.height >= 392
+        && menuGeometry.left >= 47 && menuGeometry.top >= 47
+        && menuGeometry.right <= menuGeometry.width - 31
         && menuGeometry.bottom <= menuGeometry.height - 71,
       `Launcher context menu does not leave a shadow-safe viewport: ${JSON.stringify(menuGeometry)}`
     );

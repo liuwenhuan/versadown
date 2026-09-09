@@ -13,6 +13,7 @@ export function LauncherWindow() {
   const [engineAvailable, setEngineAvailable] = useState(true);
   const [expanded, setExpanded] = useState(false);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [contextMenuTransitioning, setContextMenuTransitioning] = useState(false);
   const [managerVisible, setManagerVisible] = useState(true);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>('always');
   const [settingsReady, setSettingsReady] = useState(false);
@@ -41,11 +42,11 @@ export function LauncherWindow() {
   }, []);
 
   useEffect(() => {
-    if (!settingsReady || !anchored || expanded || contextMenuOpen) return;
+    if (!settingsReady || !anchored || expanded || contextMenuOpen || contextMenuTransitioning) return;
     void setLauncherLiveSpeedVisible(liveSpeedVisible)
       .then(() => setLauncherWindowVisible(shouldShowLauncher))
       .catch(() => undefined);
-  }, [anchored, contextMenuOpen, expanded, liveSpeedVisible, settingsReady, shouldShowLauncher]);
+  }, [anchored, contextMenuOpen, contextMenuTransitioning, expanded, liveSpeedVisible, settingsReady, shouldShowLauncher]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -83,17 +84,29 @@ export function LauncherWindow() {
   }, []);
 
   function openContextMenu() {
-    if (expanded) return;
-    setContextMenuOpen(true);
-    void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
-    void setLauncherContextMenuVisible(true, liveSpeedVisible).catch(() => undefined);
-    void showLauncherMenu().catch(() => undefined);
+    if (expanded || contextMenuOpen || contextMenuTransitioning) return;
+    setContextMenuTransitioning(true);
+    void (async () => {
+      try {
+        await setLauncherContextMenuVisible(true, liveSpeedVisible);
+        setContextMenuOpen(true);
+        void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
+        void showLauncherMenu().catch(() => undefined);
+      } catch {
+        // The transparent native viewport was not prepared, so do not render a clipped menu.
+      } finally {
+        setContextMenuTransitioning(false);
+      }
+    })();
   }
 
   function closeContextMenu() {
-    if (!contextMenuOpen) return;
+    if (!contextMenuOpen || contextMenuTransitioning) return;
+    setContextMenuTransitioning(true);
     setContextMenuOpen(false);
-    void setLauncherContextMenuVisible(false, liveSpeedVisible).catch(() => undefined);
+    void setLauncherContextMenuVisible(false, liveSpeedVisible)
+      .catch(() => undefined)
+      .finally(() => setContextMenuTransitioning(false));
   }
 
   function runContextAction(action: LauncherMenuAction) {

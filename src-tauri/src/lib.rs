@@ -232,6 +232,7 @@ pub fn run() {
             cloud::commands::cloud_upload_files,
             cloud::commands::cloud_logout,
             launcher::set_launcher_compact_shape,
+            launcher::set_launcher_bounds,
             launcher::set_launcher_window_visible,
             launcher::start_launcher_dragging,
             launcher::show_launcher_menu,

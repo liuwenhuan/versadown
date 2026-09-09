@@ -64,13 +64,13 @@ it('resizes around the launcher bottom-right corner and clamps it to the work ar
   expect(resized).toEqual({ x: 414, y: 373 });
 });
 
-it('uses a wider transparent compact window only while a live speed is visible', () => {
+it('reserves transparent padding around a live speed indicator for its shadow', () => {
   expect(launcherWindow.launcherCompactSize(false)).toEqual({ width: 48, height: 48 });
-  expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 192, height: 48 });
+  expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 236, height: 90 });
 });
 
 it('reserves a shadow-safe viewport for the launcher context menu', () => {
-  expect(launcherWindow.launcherDimensions.menu).toEqual({ width: 272, height: 360 });
+  expect(launcherWindow.launcherDimensions.menu).toEqual({ width: 304, height: 392 });
 });
 
 it('uses the native visibility command so background smoke runs cannot surface a launcher', async () => {
