@@ -2,6 +2,7 @@ use alldownloader_lib::cloud::{
     baidu::{BaiduClient, BaiduSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError, ReqwestTransport,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
@@ -47,6 +48,19 @@ impl CloudHttpTransport for RecordingHttp {
             .pop()
             .ok_or_else(|| QuarkError::Transport("unexpected request".into()))
     }
+}
+
+fn form_field(body: &str, wanted: &str) -> String {
+    url::form_urlencoded::parse(body.as_bytes())
+        .find_map(|(name, value)| (name == wanted).then(|| value.into_owned()))
+        .unwrap_or_default()
+}
+
+fn opaque_reference(path: &str) -> String {
+    format!(
+        "bdr_{}",
+        URL_SAFE_NO_PAD.encode(serde_json::json!({"fsid":"7","path":path}).to_string())
+    )
 }
 
 #[test]
@@ -134,6 +148,26 @@ fn baidu_rejects_malformed_references_before_transport() {
         client.mkdir("bad-reference", "new folder"),
         Err(QuarkError::InvalidResponse)
     ));
+    for path in [
+        "/./movie.mkv",
+        "/dir/../movie.mkv",
+        "/dir//movie.mkv",
+        "/dir/\u{0007}movie.mkv",
+    ] {
+        let reference = opaque_reference(path);
+        assert!(matches!(
+            client.download(&reference),
+            Err(QuarkError::InvalidResponse)
+        ));
+        assert!(matches!(
+            client.mkdir(&reference, "new folder"),
+            Err(QuarkError::InvalidResponse)
+        ));
+    }
+    assert!(matches!(
+        client.move_files(&[opaque_reference("/")], "/"),
+        Err(QuarkError::InvalidResponse)
+    ));
     assert!(
         http.requests().is_empty(),
         "malformed references must not reach the transport"
@@ -197,6 +231,19 @@ fn baidu_uses_a_fresh_web_token_and_path_payload_for_every_mutation() {
         .as_deref()
         .unwrap()
         .contains("path=%2Ftarget%2Fchild"));
+    assert!(requests[2].url.contains("a=commit"));
+    assert_eq!(
+        form_field(requests[2].body.as_deref().unwrap(), "path"),
+        "/target/child"
+    );
+    assert_eq!(
+        form_field(requests[2].body.as_deref().unwrap(), "isdir"),
+        "1"
+    );
+    assert_eq!(
+        form_field(requests[2].body.as_deref().unwrap(), "block_list"),
+        "[]"
+    );
     assert!(requests[4]
         .body
         .as_deref()
@@ -210,6 +257,14 @@ fn baidu_uses_a_fresh_web_token_and_path_payload_for_every_mutation() {
             .contains("%2Fmovie.mkv")
             && requests[6].body.as_deref().unwrap().contains("%2Ftarget")
     );
+    let moved: serde_json::Value = serde_json::from_str(&form_field(
+        requests[6].body.as_deref().unwrap(),
+        "filelist",
+    ))
+    .unwrap();
+    assert_eq!(moved[0]["path"], "/movie.mkv");
+    assert_eq!(moved[0]["dest"], "/target");
+    assert_eq!(moved[0]["newname"], "movie.mkv");
     assert!(
         requests[8]
             .body
@@ -218,6 +273,14 @@ fn baidu_uses_a_fresh_web_token_and_path_payload_for_every_mutation() {
             .contains("%2Fmovie.mkv")
             && requests[8].body.as_deref().unwrap().contains("%2Ftarget")
     );
+    let copied: serde_json::Value = serde_json::from_str(&form_field(
+        requests[8].body.as_deref().unwrap(),
+        "filelist",
+    ))
+    .unwrap();
+    assert_eq!(copied[0]["path"], "/movie.mkv");
+    assert_eq!(copied[0]["dest"], "/target");
+    assert_eq!(copied[0]["newname"], "movie.mkv");
     assert!(requests[10]
         .body
         .as_deref()

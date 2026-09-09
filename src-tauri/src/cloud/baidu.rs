@@ -200,8 +200,12 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         let token = self.web_token()?;
         self.web_form(
             "/api/create",
-            &write_query(&token, "isdir=1&rtype=0"),
-            form(&[("path", path)]),
+            &write_query(&token, "a=commit"),
+            form(&[
+                ("path", path),
+                ("isdir", "1".into()),
+                ("block_list", "[]".into()),
+            ]),
         )
         .map(|_| ())
     }
@@ -249,15 +253,18 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         if files.is_empty() {
             return Err(QuarkError::InvalidInput("请选择文件".into()));
         }
+        let filelist = files
+            .iter()
+            .map(|file| {
+                Ok(json!({
+                    "path": file.path,
+                    "dest": parent.path,
+                    "newname": basename(&file.path)?,
+                }))
+            })
+            .collect::<Result<Vec<_>, QuarkError>>()?;
         let token = self.web_token()?;
-        self.web_file_manager(
-            operation,
-            &token,
-            json!(files
-                .iter()
-                .map(|file| json!({"path": file.path, "dest": parent.path}))
-                .collect::<Vec<_>>()),
-        )
+        self.web_file_manager(operation, &token, json!(filelist))
     }
 
     /// Starts the official web precreate flow after obtaining a fresh token.
@@ -486,17 +493,39 @@ fn parse_file_reference(value: &str) -> Result<BaiduFileReference, QuarkError> {
 }
 
 fn validate_path(path: &str) -> Result<(), QuarkError> {
-    if !path.starts_with('/') || path.contains('\0') || path.contains(['?', '#']) {
+    if !path.starts_with('/') || path.contains(['?', '#']) || path.chars().any(char::is_control) {
         return Err(QuarkError::InvalidResponse);
+    }
+    if path != "/" {
+        if path.ends_with('/') {
+            return Err(QuarkError::InvalidResponse);
+        }
+        for segment in path.split('/').skip(1) {
+            if segment.is_empty() || matches!(segment, "." | "..") {
+                return Err(QuarkError::InvalidResponse);
+            }
+        }
     }
     Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), QuarkError> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+    {
         return Err(QuarkError::InvalidInput("文件名无效".into()));
     }
     Ok(())
+}
+
+fn basename(path: &str) -> Result<&str, QuarkError> {
+    validate_path(path)?;
+    path.rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .ok_or(QuarkError::InvalidResponse)
 }
 
 fn join_path(parent: &str, name: &str) -> Result<String, QuarkError> {
