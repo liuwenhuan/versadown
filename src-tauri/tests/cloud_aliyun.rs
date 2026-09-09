@@ -231,3 +231,52 @@ fn aliyun_upload_init_requires_https_part_urls_and_rename_uses_current_contract(
     assert_eq!(init["type"], "file");
     assert_eq!(init["part_info_list"][0]["part_number"], 1);
 }
+
+#[test]
+fn aliyun_upload_init_rejects_null_and_non_string_temporary_endpoints() {
+    // This catches treating a present-but-malformed endpoint as absent and handing
+    // an unusable or unsafe transfer response to the caller.
+    for endpoint in [serde_json::Value::Null, serde_json::json!(17)] {
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"r","access_token":"old","drive_id":"d1"}"#,
+            )
+            .unwrap();
+        let http = RecordingHttp::responses([
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"access_token":"fresh","refresh_token":"next","default_drive_id":"d1"}"#
+                    .into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"user_id":"u1","nick_name":"alice"}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"items":[]}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: serde_json::json!({
+                    "part_info_list": [{
+                        "part_number": 1,
+                        "upload_url": endpoint,
+                        "internal_upload_url": endpoint,
+                    }]
+                })
+                .to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        assert!(AliyunClient::new(&store, &http)
+            .upload_init("root", "broken.pdf", 5)
+            .is_err());
+    }
+}

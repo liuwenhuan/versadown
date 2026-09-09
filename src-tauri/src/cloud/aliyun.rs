@@ -370,12 +370,11 @@ fn validate_upload_urls(value: &Value) -> Result<(), QuarkError> {
         Value::Array(values) => values.iter().try_for_each(validate_upload_urls),
         Value::Object(values) => {
             for (key, value) in values {
-                if matches!(key.as_str(), "upload_url" | "internal_upload_url")
-                    && value
-                        .as_str()
-                        .is_some_and(|url| !url.starts_with("https://"))
-                {
-                    return Err(QuarkError::InvalidResponse);
+                if matches!(key.as_str(), "upload_url" | "internal_upload_url") {
+                    match value.as_str() {
+                        Some(url) if !url.is_empty() && url.starts_with("https://") => {}
+                        _ => return Err(QuarkError::InvalidResponse),
+                    }
                 }
                 validate_upload_urls(value)?;
             }
