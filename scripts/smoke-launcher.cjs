@@ -9,8 +9,10 @@ const WebSocket = require('ws');
 const projectRoot = path.resolve(__dirname, '..');
 const targetRoot = process.env.CARGO_TARGET_DIR
   ? path.resolve(projectRoot, process.env.CARGO_TARGET_DIR)
-  : path.join(projectRoot, 'src-tauri', 'target');
-const executable = path.join(targetRoot, 'release', 'alldownloader.exe');
+  : null;
+const executable = targetRoot
+  ? path.join(targetRoot, 'release', 'alldownloader.exe')
+  : path.join(projectRoot, 'artifacts', 'alldownloader.exe');
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
