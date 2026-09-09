@@ -105,16 +105,7 @@ pub fn handle_manager_window_event(
             let Some(manager) = app.get_webview_window("main") else {
                 return;
             };
-            let _ = manager.hide();
-            #[cfg(windows)]
-            if manager.is_visible().unwrap_or(true) {
-                const SW_HIDE: i32 = 0;
-                if let Ok(hwnd) = manager.hwnd() {
-                    unsafe {
-                        ShowWindow(hwnd.0, SW_HIDE);
-                    }
-                }
-            }
+            let _ = hide_window_immediately(&manager);
         });
     }
 }
@@ -134,6 +125,21 @@ pub fn show_manager_without_activation(window: &WebviewWindow) -> Result<(), Str
     {
         window.show().map_err(|error| error.to_string())
     }
+}
+
+pub fn hide_window_immediately(window: &WebviewWindow) -> Result<(), String> {
+    window.hide().map_err(|error| error.to_string())?;
+
+    #[cfg(windows)]
+    if window.is_visible().unwrap_or(false) {
+        const SW_HIDE: i32 = 0;
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+        unsafe {
+            ShowWindow(hwnd.0, SW_HIDE);
+        }
+    }
+
+    Ok(())
 }
 
 fn require_background_ui_test() -> Result<(), String> {

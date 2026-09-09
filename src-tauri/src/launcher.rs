@@ -34,6 +34,13 @@ pub struct ManagerWindowSnapshot {
     pub minimized: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitWindowSnapshot {
+    pub manager_visible: bool,
+    pub launcher_visible: bool,
+}
+
 pub struct LauncherInteractionState {
     background_test: bool,
     drag_requests: AtomicUsize,
@@ -267,13 +274,18 @@ pub fn manager_window_snapshot(app: AppHandle) -> Result<ManagerWindowSnapshot, 
 }
 
 #[tauri::command]
-pub fn activate_launcher_menu_for_test(app: AppHandle, action: String) -> Result<(), String> {
+pub fn activate_launcher_menu_for_test(
+    app: AppHandle,
+    action: String,
+) -> Result<Option<ExitWindowSnapshot>, String> {
     require_background_ui_test()?;
     if !launcher_menu_entries().iter().any(|(id, _)| *id == action) {
         return Err("未知的悬浮窗菜单动作".to_string());
     }
     handle_launcher_menu_action(&app, &action);
-    Ok(())
+    (action == QUIT)
+        .then(|| exit_window_snapshot(&app))
+        .transpose()
 }
 
 pub fn handle_launcher_menu_action(app: &AppHandle, id: &str) {
@@ -326,6 +338,7 @@ fn begin_application_exit(app: &AppHandle) {
     if let Some(lifecycle) = app.try_state::<std::sync::Arc<crate::ApplicationLifecycle>>() {
         lifecycle.begin_exit();
     }
+    hide_application_windows(app);
     let Some(state) = app.try_state::<crate::commands::AppState>() else {
         app.exit(0);
         return;
@@ -333,7 +346,28 @@ fn begin_application_exit(app: &AppHandle) {
     let runtime = std::sync::Arc::clone(&state.runtime);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _report = runtime.shutdown(std::time::Duration::from_secs(5)).await;
+        let _report = runtime.shutdown(std::time::Duration::from_secs(2)).await;
         app.exit(0);
     });
+}
+
+fn hide_application_windows(app: &AppHandle) {
+    for label in ["main", "launcher"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = crate::window_lifecycle::hide_window_immediately(&window);
+        }
+    }
+}
+
+fn exit_window_snapshot(app: &AppHandle) -> Result<ExitWindowSnapshot, String> {
+    let manager = app
+        .get_webview_window("main")
+        .ok_or_else(|| "下载管理器窗口不存在".to_string())?;
+    let launcher = app
+        .get_webview_window("launcher")
+        .ok_or_else(|| "悬浮窗不存在".to_string())?;
+    Ok(ExitWindowSnapshot {
+        manager_visible: manager.is_visible().map_err(|error| error.to_string())?,
+        launcher_visible: launcher.is_visible().map_err(|error| error.to_string())?,
+    })
 }

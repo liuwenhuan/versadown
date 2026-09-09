@@ -32,9 +32,12 @@ async function targetsAt(port) {
   return await response.json();
 }
 
-async function waitForTargets(port) {
+async function waitForTargets(port, child) {
   let lastError;
   for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (child?.exitCode !== null) {
+      throw new Error(`Application exited before exposing its WebView2 targets (exit code ${child.exitCode}).`);
+    }
     try {
       const targets = (await targetsAt(port)).filter((target) => target.type === 'page' && target.url !== 'about:blank');
       if (targets.length >= 2) return targets;
@@ -43,7 +46,8 @@ async function waitForTargets(port) {
     }
     await delay(200);
   }
-  throw lastError ?? new Error('Timed out waiting for both Tauri WebView2 targets.');
+  const failure = lastError?.message ?? 'Timed out waiting for both Tauri WebView2 targets.';
+  throw new Error(`${failure} (application exit code: ${child?.exitCode ?? 'still running'}).`);
 }
 
 async function evaluate(target, expression) {
@@ -188,7 +192,7 @@ async function run() {
   });
 
   try {
-    const targets = await waitForTargets(port);
+    const targets = await waitForTargets(port, child);
     let launcher;
     let manager;
     for (const target of targets) {
@@ -385,7 +389,11 @@ async function run() {
     const parsedTask = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('parse_download', { input: ${JSON.stringify(downloadFixture.url)} })`);
     assert(parsedTask && parsedTask.task && parsedTask.task.aria_gid, `Local fixture was not submitted to aria2: ${JSON.stringify(parsedTask)}`);
 
-    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.quit' })`);
+    const quitStartedAt = Date.now();
+    const hiddenAtQuit = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.quit' })`);
+    const hideElapsedMs = Date.now() - quitStartedAt;
+    assert(hideElapsedMs < 750, `Quit left application windows visible for ${hideElapsedMs}ms.`);
+    assert(hiddenAtQuit && !hiddenAtQuit.managerVisible && !hiddenAtQuit.launcherVisible, `Quit did not hide every application window: ${JSON.stringify(hiddenAtQuit)}`);
     const exitCode = await waitForChildExit(child, 8000);
     assert(exitCode === 0, `Application quit returned exit code ${exitCode}.`);
     await waitForProcessesToStop(ownedSidecarPids, 2000);
@@ -397,7 +405,7 @@ async function run() {
     assert(!session.includes('rpc-secret') && !session.includes('token:'), 'Saved aria2 session leaked RPC credentials.');
     completedQuitFlow = true;
 
-    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native launcher close stayed alive, manager custom/native close reopened without activation, and launcher.quit saved the active aria2 session then stopped owned sidecar ${ownedSidecarPids.join(', ')}.\n`);
+    process.stdout.write(`Launcher background smoke passed: compact ${compact.width}x${compact.height}, native launcher close stayed alive, manager custom/native close reopened without activation, and launcher.quit hid every window in ${hideElapsedMs}ms before saving the active aria2 session and stopping owned sidecar ${ownedSidecarPids.join(', ')}.\n`);
   } finally {
     downloadFixture.server.closeAllConnections?.();
     await new Promise((resolve) => downloadFixture.server.close(resolve));
