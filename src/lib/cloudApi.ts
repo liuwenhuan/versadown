@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
-import { cloudRootDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudFile, type CloudProvider } from './cloudTypes';
+import { cloudRootDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudDirectoryDownloadFailure, type CloudDirectoryDownloadOutcome, type CloudFile, type CloudProvider } from './cloudTypes';
 
 export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
 export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
@@ -16,8 +16,18 @@ export const trashCloudFiles = (provider: CloudProvider, fileIds: string[]) => i
 /** Permanently deletes files already displayed inside a provider recycle bin. */
 export const deleteCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_delete', { provider, fileIds });
 type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState };
+type NativeCloudDirectoryDownload = {
+  queuedCount: number;
+  tasks: NativeCloudDownload[];
+  failures: CloudDirectoryDownloadFailure[];
+};
+function cloudDownloadResult(result: NativeCloudDownload): TaskActionResult {
+  return result.duplicate ? { duplicate: { task: result, state: result.duplicate } } : { task: result };
+}
 export const downloadCloudFile = (provider: CloudProvider, fileId: string): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', { provider, fileId })
-  .then((result) => result.duplicate ? { duplicate: { task: result, state: result.duplicate } } : { task: result });
+  .then(cloudDownloadResult);
+export const downloadCloudDirectory = (provider: CloudProvider, directoryId: string, directoryName: string): Promise<CloudDirectoryDownloadOutcome> => invoke<NativeCloudDirectoryDownload>('cloud_download_directory', { provider, directoryId, directoryName })
+  .then((result) => ({ ...result, tasks: result.tasks.map(cloudDownloadResult) }));
 export const logoutCloud = (provider: CloudProvider) => invoke<void>('cloud_logout', { provider });
 export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[]) => invoke<CloudFile[]>('cloud_upload_files', { provider, parentId, paths: paths ?? null });
 export const pickAndUploadFiles = (provider: CloudProvider, parentId: string) => uploadCloudFiles(provider, parentId);

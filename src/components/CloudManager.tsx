@@ -1,8 +1,8 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { cloudRootDirectoryId, pikpakRecycleBinDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudFile, type CloudProvider } from '../lib/cloudTypes';
+import { cloudRootDirectoryId, pikpakRecycleBinDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudDirectoryDownloadFailure, type CloudDirectoryDownloadOutcome, type CloudFile, type CloudProvider } from '../lib/cloudTypes';
 
-export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
+export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
 export interface CloudManagerClient {
   getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
@@ -18,6 +18,7 @@ export interface CloudManagerClient {
   trashCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   deleteCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   downloadCloudFile(provider: CloudProvider, fileId: string): Promise<unknown>;
+  downloadCloudDirectory(provider: CloudProvider, directoryId: string, directoryName: string): Promise<CloudDirectoryDownloadOutcome>;
   logoutCloud(provider: CloudProvider): Promise<void>;
   pickAndUploadFiles(provider: CloudProvider, parentId: string): Promise<readonly CloudFile[] | void>;
 }
@@ -71,6 +72,7 @@ const unavailableClient: CloudManagerClient = {
   trashCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
   deleteCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
   downloadCloudFile: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  downloadCloudDirectory: () => Promise.reject(new Error('网盘连接器尚未接入')),
   logoutCloud: () => Promise.reject(new Error('网盘连接器尚未接入')),
   pickAndUploadFiles: () => Promise.reject(new Error('网盘连接器尚未接入'))
 };
@@ -586,8 +588,24 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   function downloadSelection() {
     if (!selected.length || selectedVirtualRecycleBin) return;
     void runOperation('下载', async () => {
-      const tasks = await Promise.all(selected.map((item) => client.downloadCloudFile(provider, item.id)));
-      tasks.forEach((task) => onDownloadTask?.(task));
+      const directoryFailures: CloudDirectoryDownloadFailure[] = [];
+      let queuedDirectoryFiles = 0;
+      await Promise.all(selected.map(async (item) => {
+        if (item.kind === 'folder') {
+          const outcome = await client.downloadCloudDirectory(provider, item.id, item.name);
+          outcome.tasks.forEach((task) => onDownloadTask?.(task));
+          directoryFailures.push(...outcome.failures);
+          queuedDirectoryFiles += outcome.queuedCount;
+          return;
+        }
+        const task = await client.downloadCloudFile(provider, item.id);
+        onDownloadTask?.(task);
+      }));
+      if (directoryFailures.length) {
+        const details = directoryFailures.slice(0, 5).map((failure) => `${failure.relativePath}：${failure.message}`).join('；');
+        const remaining = directoryFailures.length > 5 ? `；另有 ${directoryFailures.length - 5} 项失败` : '';
+        throw new Error(`目录下载已入队 ${queuedDirectoryFiles} 个文件；${details}${remaining}`);
+      }
     }, false);
   }
 
