@@ -1641,6 +1641,16 @@ mod tests {
         }
     }
 
+    struct OfflineTransport;
+
+    impl CloudHttpTransport for OfflineTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Err(QuarkError::Transport(
+                "private account endpoint unavailable".into(),
+            ))
+        }
+    }
+
     struct TianyiRootAcceptingTransport(Mutex<u8>);
 
     impl CloudHttpTransport for TianyiRootAcceptingTransport {
