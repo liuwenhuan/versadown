@@ -18,6 +18,8 @@ const PAN: &str = "https://pan.baidu.com";
 const PASSPORT: &str = "https://passport.baidu.com";
 const BAIDU_WEB_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
+const BAIDU_PAN_USER_AGENT: &str =
+    "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;";
 const REFERENCE_PREFIX: &str = "bdr_";
 const BAIDU_UPLOAD_HOST: &str = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2";
 const BAIDU_UPLOAD_BLOCK_SIZE: usize = 4 * 1024 * 1024;
@@ -127,7 +129,17 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         Self { session, http }
     }
 
-    fn headers(&self) -> BTreeMap<String, String> {
+    /// Native Pan endpoints reject a browser origin paired with the Netdisk
+    /// client signature. Keep this profile aligned with BaiduPCS-Go: its Pan
+    /// requests provide the Netdisk UA and authenticated cookie jar only.
+    fn pan_headers(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("Cookie".into(), self.session.cookie.clone()),
+            ("User-Agent".into(), BAIDU_PAN_USER_AGENT.into()),
+        ])
+    }
+
+    fn web_headers(&self) -> BTreeMap<String, String> {
         BTreeMap::from([
             ("Cookie".into(), self.session.cookie.clone()),
             ("Origin".into(), PAN.into()),
@@ -145,7 +157,22 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         let response = self.http.send(CloudHttpRequest {
             method,
             url,
-            headers: self.headers(),
+            headers: self.pan_headers(),
+            body: body.map(|value| value.to_string()),
+        })?;
+        baidu_json(&response)
+    }
+
+    fn web_request(
+        &self,
+        method: &'static str,
+        url: String,
+        body: Option<Value>,
+    ) -> Result<Value, QuarkError> {
+        let response = self.http.send(CloudHttpRequest {
+            method,
+            url,
+            headers: self.web_headers(),
             body: body.map(|value| value.to_string()),
         })?;
         baidu_json(&response)
@@ -178,14 +205,14 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
         let parent = parse_parent_reference(parent)?;
-        // A QR/browser sign-in yields the Pan web session, not an OAuth access
-        // token. Its directory endpoint is the same web endpoint used by the
-        // authenticated disk page; the `xpan/file?method=list` endpoint rejects
-        // that session with errno -6.
+        // BaiduPCS-Go's current directory implementation uses the Pan web
+        // listing route (not xpan/file) with this small, fixed query shape.
+        // Keeping the native Netdisk header profile is required for the
+        // browser-issued cookie jar to be accepted by that route.
         let value = self.request(
             "GET",
             format!(
-                "{PAN}/api/list?dir={}&page=1&num=100&order=name&desc=0&showempty=0&channel=chunlei&web=1&app_id=250528&clienttype=0",
+                "{PAN}/api/list?dir={}&order=name&desc=0&clienttype=0&num=100&page=1",
                 encoded(&parent.path)
             ),
             None,
@@ -434,12 +461,12 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
                 .and_then(Value::as_str)
                 .unwrap_or(&file.path)
                 .into(),
-            headers: self.headers(),
+            headers: self.pan_headers(),
         })
     }
 
     fn web_token(&self) -> Result<String, QuarkError> {
-        let value = self.request(
+        let value = self.web_request(
             "GET",
             format!(
                 "{PAN}/api/gettemplatevariable?clienttype=0&app_id=250528&web=1&fields=%5B%22bdstoken%22%5D"
@@ -473,7 +500,7 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
             .append_pair("partseq", &part.to_string());
         let url = super::https_transfer_url(url.as_str())?;
         let (content_type, body) = super::multipart_file(&[], "file", name, bytes)?;
-        let mut headers = self.headers();
+        let mut headers = self.web_headers();
         headers.insert("Content-Type".into(), content_type);
         Ok(UploadHttpRequest {
             method: "POST",
@@ -484,7 +511,7 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
     }
 
     fn web_form(&self, path: &str, query: &str, body: String) -> Result<Value, QuarkError> {
-        let mut headers = self.headers();
+        let mut headers = self.web_headers();
         headers.insert(
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),

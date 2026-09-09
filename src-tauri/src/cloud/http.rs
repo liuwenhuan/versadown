@@ -1,6 +1,6 @@
 use super::QuarkError;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 #[derive(Clone)]
 pub struct CloudHttpRequest {
     pub method: &'static str,
@@ -21,10 +21,20 @@ pub trait CloudHttpTransport: Send + Sync {
 }
 pub struct ReqwestTransport {
     pub(super) client: reqwest::blocking::Client,
+    jar: Arc<reqwest::cookie::Jar>,
 }
 impl ReqwestTransport {
     pub fn new() -> Result<Self, QuarkError> {
-        Ok(Self{client:reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30)).user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36").build().map_err(|_|QuarkError::Transport("无法初始化 HTTPS 客户端".into()))?})
+        let jar = Arc::new(reqwest::cookie::Jar::default());
+        Ok(Self {
+            client: reqwest::blocking::Client::builder()
+                .cookie_provider(Arc::clone(&jar))
+                .timeout(std::time::Duration::from_secs(30))
+                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
+                .build()
+                .map_err(|_| QuarkError::Transport("无法初始化 HTTPS 客户端".into()))?,
+            jar,
+        })
     }
 }
 impl CloudHttpTransport for ReqwestTransport {
@@ -37,8 +47,22 @@ impl CloudHttpTransport for ReqwestTransport {
             r.method.parse().map_err(|_| QuarkError::InvalidResponse)?,
             &r.url,
         );
+        let request_url = reqwest::Url::parse(&r.url).map_err(|_| QuarkError::InvalidResponse)?;
         for (k, v) in r.headers {
-            b = b.header(k, v)
+            if k.eq_ignore_ascii_case("Cookie") {
+                // Providers give us an encrypted session as a Cookie header.
+                // Seed the jar for this origin, then let reqwest retain any
+                // server-issued context cookies for subsequent requests.
+                for cookie in v
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    self.jar.add_cookie_str(cookie, &request_url);
+                }
+            } else {
+                b = b.header(k, v)
+            }
         }
         if let Some(body) = r.body {
             if !has_content_type {

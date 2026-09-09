@@ -219,6 +219,45 @@ fn reqwest_transport_preserves_the_explicit_form_content_type() {
 }
 
 #[test]
+fn reqwest_transport_reuses_response_cookies_across_cloud_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (headers_tx, headers_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nSet-Cookie: PANPSC=directory-context; Path=/\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+            }
+            headers_tx.send(String::from_utf8(request).unwrap()).unwrap();
+            stream.write_all(response).unwrap();
+        }
+    });
+    let transport = ReqwestTransport::new().unwrap();
+    for path in ["/account", "/directory"] {
+        transport
+            .send(CloudHttpRequest {
+                method: "GET",
+                url: format!("http://{address}{path}"),
+                headers: BTreeMap::new(),
+                body: None,
+            })
+            .unwrap();
+    }
+    let _first = headers_rx.recv().unwrap();
+    let second = headers_rx.recv().unwrap().to_ascii_lowercase();
+    server.join().unwrap();
+
+    assert!(second.contains("cookie: panpsc=directory-context"));
+}
+
+#[test]
 fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     let http = RecordingHttp::sequence(&[
         r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
@@ -234,19 +273,24 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     assert!(download.headers.contains_key("Cookie"));
 
     let requests = http.requests();
-    assert!(requests[0]
-        .url
-        .starts_with("https://pan.baidu.com/api/list?"));
+    assert!(requests[0].url.starts_with(
+        "https://pan.baidu.com/api/list?dir=%2F&order=name&desc=0&clienttype=0&num=100&page=1"
+    ));
     assert!(requests[1]
         .url
         .contains("/rest/2.0/xpan/multimedia?method=filemetas"));
     assert!(requests[1].url.contains("fsids=%5B7%5D"));
     assert!(requests[0].headers["Cookie"].contains("BDUSS=local"));
-    assert_eq!(requests[1].headers["Referer"], "https://pan.baidu.com/");
+    assert_eq!(
+        requests[1].headers["User-Agent"],
+        "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;"
+    );
+    assert!(!requests[1].headers.contains_key("Origin"));
+    assert!(!requests[1].headers.contains_key("Referer"));
 }
 
 #[test]
-fn baidu_directory_uses_the_web_disk_listing_endpoint_for_a_browser_session() {
+fn baidu_directory_uses_the_pan_listing_endpoint_for_a_secure_webview_session() {
     let http = RecordingHttp::sequence(&[
         r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
     ]);
@@ -255,9 +299,32 @@ fn baidu_directory_uses_the_web_disk_listing_endpoint_for_a_browser_session() {
     client.directory("/").unwrap();
 
     let request = http.requests().into_iter().next().unwrap();
-    assert!(request.url.starts_with("https://pan.baidu.com/api/list?"));
+    assert!(request.url.starts_with(
+        "https://pan.baidu.com/api/list?dir=%2F&order=name&desc=0&clienttype=0&num=100&page=1"
+    ));
     assert!(request.url.contains("dir=%2F"));
-    assert!(request.url.contains("channel=chunlei"));
+}
+
+#[test]
+fn baidu_directory_uses_the_pan_listing_endpoint_for_an_authenticated_session() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
+    ]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=browser-session"), &http);
+
+    client.directory("/").unwrap();
+
+    let request = http.requests().into_iter().next().unwrap();
+    assert!(request.url.starts_with(
+        "https://pan.baidu.com/api/list?dir=%2F&order=name&desc=0&clienttype=0&num=100&page=1"
+    ));
+    assert!(request.url.contains("dir=%2F"));
+    assert_eq!(
+        request.headers["User-Agent"],
+        "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;"
+    );
+    assert!(!request.headers.contains_key("Origin"));
+    assert!(!request.headers.contains_key("Referer"));
 }
 
 #[test]

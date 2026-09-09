@@ -13,6 +13,7 @@ use tauri_plugin_dialog::DialogExt;
 
 pub struct CloudState {
     pub store: DpapiCredentialStore,
+    http: ReqwestTransport,
     quark_operation: Mutex<()>,
     pikpak_operation: Mutex<()>,
     baidu_operation: Mutex<()>,
@@ -75,6 +76,7 @@ impl CloudState {
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         Ok(Self {
             store: DpapiCredentialStore::new(root)?,
+            http: ReqwestTransport::new()?,
             quark_operation: Mutex::new(()),
             pikpak_operation: Mutex::new(()),
             baidu_operation: Mutex::new(()),
@@ -118,7 +120,7 @@ async fn run<T: Send + 'static>(
 ) -> Result<T, QuarkError> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Arc<CloudState>>();
-        state.with_provider(provider, |_| work(&state, &ReqwestTransport::new()?))
+        state.with_provider(provider, |_| work(&state, &state.http))
     })
     .await
     .map_err(|_| QuarkError::Transport("网盘任务中断".into()))?
