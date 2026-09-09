@@ -42,10 +42,11 @@ it('leaves quick input to the independent native launcher window', async () => {
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
-it('keeps the download overview focused on transfer status instead of engine internals', async () => {
+it('keeps the total transfer speed at the right edge of the download tab row', async () => {
   render(<App />);
 
-  expect(screen.getByText('当前速度')).toBeVisible();
+  expect(screen.getByLabelText('当前总下载速度')).toHaveTextContent('0 B/s');
+  expect(screen.queryByText('当前速度')).not.toBeInTheDocument();
   expect(screen.queryByText(/本地下载引擎/)).not.toBeInTheDocument();
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });

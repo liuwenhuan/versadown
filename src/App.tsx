@@ -503,14 +503,14 @@ export function App() {
         <small>Windows Beta</small>
       </nav>
         {view === 'downloads' && <section className="downloads-view">
-          <header className="download-tabs" role="tablist" aria-label="下载任务">
-            <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
-            <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
+          <header className="download-tabs">
+            <div className="download-tab-list" role="tablist" aria-label="下载任务">
+              <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
+              <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
+            </div>
+            {downloadingTasks.length > 0 && <button className="bulk-pause" onClick={() => void Promise.all(downloadingTasks.map((task) => taskCommand(task.id, 'pause')))}>Ⅱ&nbsp; 全部暂停</button>}
+            <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
           </header>
-          <div className="transfer-summary">
-            <div className="speed-summary"><strong>{currentSpeed}</strong><span>当前速度</span></div>
-            {downloadingTasks.length > 0 && <button onClick={() => void Promise.all(downloadingTasks.map((task) => taskCommand(task.id, 'pause')))}>Ⅱ&nbsp; 全部暂停</button>}
-          </div>
           <section className="queue-area">
             <DownloadQueue tasks={visibleTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onConfirm={reopenTaskConfirmation} />
           </section>

@@ -16,7 +16,7 @@ it('keeps a folder as one row until the user expands it', async () => {
   expect(screen.getByText('episode-01.mkv')).toBeVisible();
 });
 
-it('shows a readable magnet name and keeps the raw link out of the task row', () => {
+it('keeps magnet metadata on the compact transfer-metrics row', () => {
   const source = 'magnet:?xt=urn:btih:46A00FD699618BC0319C45F7075C067D564A0819&dn=Lanterns.S01E04.1080p.HMAX.WEBRip.AAC5.1.10bits.x265-Rapta&tr=udp%3A%2F%2Ftracker.example';
   render(<DownloadQueue
     tasks={[{ id: 'magnet-1', name: source, source, kind: 'magnet', status: 'downloading', progress: 0, speed: '0 B/s', connections: 0 }]}
@@ -27,10 +27,13 @@ it('shows a readable magnet name and keeps the raw link out of the task row', ()
 
   expect(screen.getByText('Lanterns.S01E04.1080p.HMAX.WEBRip.AAC5.1.10bits.x265-Rapta')).toBeVisible();
   expect(screen.queryByText(source)).not.toBeInTheDocument();
-  expect(screen.getByText('磁力任务 · 正在获取文件信息')).toBeVisible();
+  const metadata = screen.getByText('磁力任务 · 正在获取文件信息');
+  expect(metadata).toBeVisible();
+  expect(metadata.closest('.transfer-metrics')).not.toBeNull();
+  expect(metadata.closest('.task-copy')).toBeNull();
 });
 
-it('shows the live magnet metadata stage instead of a generic zero-speed subtitle', () => {
+it('keeps the live magnet metadata stage in the transfer-metrics row', () => {
   render(<DownloadQueue
     tasks={[{ id: 'magnet-stage', name: '磁力下载', source: 'magnet:?xt=urn:btih:0123456789ABCDEF', kind: 'magnet', status: 'downloading', progress: 0, speed: '0 B/s', connections: 0, statusMessage: '正在获取种子信息，暂无节点连接' }]}
     selectedTaskId={null}
@@ -38,7 +41,9 @@ it('shows the live magnet metadata stage instead of a generic zero-speed subtitl
     onCommand={() => {}}
   />);
 
-  expect(screen.getByText('正在获取种子信息，暂无节点连接')).toBeVisible();
+  const metadata = screen.getByText('正在获取种子信息，暂无节点连接');
+  expect(metadata).toBeVisible();
+  expect(metadata.closest('.transfer-metrics')).not.toBeNull();
 });
 
 it('shows transferred bytes, live speed and ETA without exposing peer-count noise', () => {
