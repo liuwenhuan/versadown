@@ -45,6 +45,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   state.list.mockReset();
+  state.list.mockResolvedValue([]);
   state.parse.mockReset();
   state.confirm.mockReset();
   state.selectFiles.mockReset();
@@ -192,6 +193,24 @@ it('fills a magnet confirmation dialog when its task files arrive later', async 
   }); });
 
   expect(screen.getByText('episode.mkv')).toBeVisible();
+  expect(screen.queryByText('正在获取文件信息…')).not.toBeInTheDocument();
+});
+
+it('polls a pending magnet confirmation when a metadata event is missed', async () => {
+  state.list
+    .mockResolvedValueOnce([])
+    .mockResolvedValue([{
+      id: 'magnet-poll', name: 'collection', kind: 'magnet', status: 'awaiting_user', progress: 0,
+      files: [{ index: 1, path: 'episode.mkv', length: 1024, completed_length: 0, selected: true }]
+    }]);
+  state.parse.mockResolvedValueOnce({
+    confirmation: { taskId: 'magnet-poll', requiresConfirmation: true, resources: [], processing: [], isBitTorrent: true }
+  });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'magnet:?xt=urn:btih:poll' }); });
+
+  await waitFor(() => expect(screen.getByText('episode.mkv')).toBeVisible(), { timeout: 1200 });
   expect(screen.queryByText('正在获取文件信息…')).not.toBeInTheDocument();
 });
 

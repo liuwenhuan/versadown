@@ -44,33 +44,65 @@ impl BaiduSession {
     }
 }
 
-/// Extract only cookie pairs required by the official Pan web session.  Cookie
-/// attributes (including expiry and domain) never enter the saved session.
+fn native_api_cookie(cookie: String) -> String {
+    let mut has_legacy_bduss = false;
+    let mut secure_webview_bduss = None;
+    for pair in cookie.split(';').map(str::trim) {
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        match name {
+            "BDUSS" if !value.is_empty() => has_legacy_bduss = true,
+            "BDUSS_BFESS" if !value.is_empty() => secure_webview_bduss = Some(value),
+            _ => {}
+        }
+    }
+    if has_legacy_bduss {
+        return cookie;
+    }
+    let Some(value) = secure_webview_bduss else {
+        return cookie;
+    };
+    format!("{}; BDUSS={value}", cookie.trim_end_matches(';').trim())
+}
+
+/// Normalize the complete official Pan web session into a Cookie header.
+/// Cookie attributes (including expiry and domain) never enter the saved
+/// session.  The browser has already scoped this list to Baidu's domains; do
+/// not reduce it to a hand-maintained allowlist because Pan also relies on
+/// session-bound cookies such as `PANPSC` and `SCRC` for file operations.
 /// Chromium/WebView2 keeps the secure Baidu login credential under
-/// `BDUSS_BFESS`, so it must remain intact instead of being rewritten as the
-/// legacy `BDUSS` name.
+/// `BDUSS_BFESS`, so it must remain intact instead of being rewritten here.
 pub fn parse_baidu_web_session(cookies: &[String]) -> Result<BaiduSession, QuarkError> {
-    let mut pairs = Vec::new();
+    let mut pairs = BTreeMap::new();
     for raw in cookies {
         let pair = raw.split(';').next().unwrap_or("").trim();
         let Some((name, value)) = pair.split_once('=') else {
             continue;
         };
-        if matches!(
-            name,
-            "BDUSS" | "BDUSS_BFESS" | "STOKEN" | "PTOKEN" | "BDCLND" | "BAIDUID" | "BAIDUID_BFESS"
-        ) && !value.is_empty()
-        {
-            pairs.push(format!("{name}={value}"));
+        if valid_cookie_name(name) && !value.is_empty() && !value.chars().any(char::is_control) {
+            // Cookie names are unique in a Cookie header.  Later values are
+            // the current values when multiple browser URLs expose a pair.
+            pairs.insert(name, value);
         }
     }
-    if !pairs
-        .iter()
-        .any(|pair| pair.starts_with("BDUSS=") || pair.starts_with("BDUSS_BFESS="))
-    {
+    if !pairs.contains_key("BDUSS") && !pairs.contains_key("BDUSS_BFESS") {
         return Err(QuarkError::AuthorizationExpired);
     }
-    Ok(BaiduSession::cookie(pairs.join("; ")))
+    Ok(BaiduSession::cookie(
+        pairs
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    ))
+}
+
+fn valid_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +118,12 @@ pub struct BaiduClient<'a, T: CloudHttpTransport> {
 }
 
 impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
-    pub fn new(session: BaiduSession, http: &'a T) -> Self {
+    pub fn new(mut session: BaiduSession, http: &'a T) -> Self {
+        // WebView2 stores the current QR-login credential as BDUSS_BFESS,
+        // while Baidu's native xpan file API still expects the legacy BDUSS
+        // key. Keep the secure cookie and add a request-only compatibility
+        // alias so sessions saved by earlier releases keep working.
+        session.cookie = native_api_cookie(session.cookie);
         Self { session, http }
     }
 
@@ -112,20 +149,6 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
             body: body.map(|value| value.to_string()),
         })?;
         baidu_json(&response)
-    }
-
-    fn xpan(
-        &self,
-        method: &'static str,
-        operation: &str,
-        query: &str,
-        body: Option<Value>,
-    ) -> Result<Value, QuarkError> {
-        self.request(
-            method,
-            format!("{PAN}/rest/2.0/xpan/file?method={operation}&web=1{query}"),
-            body,
-        )
     }
 
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
@@ -155,10 +178,16 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
         let parent = parse_parent_reference(parent)?;
-        let value = self.xpan(
+        // A QR/browser sign-in yields the Pan web session, not an OAuth access
+        // token. Its directory endpoint is the same web endpoint used by the
+        // authenticated disk page; the `xpan/file?method=list` endpoint rejects
+        // that session with errno -6.
+        let value = self.request(
             "GET",
-            "list",
-            &format!("&dir={}&limit=100&order=name&desc=0", encoded(&parent.path)),
+            format!(
+                "{PAN}/api/list?dir={}&page=1&num=100&order=name&desc=0&showempty=0&channel=chunlei&web=1&app_id=250528&clienttype=0",
+                encoded(&parent.path)
+            ),
             None,
         )?;
         let files = value
@@ -651,6 +680,12 @@ fn baidu_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     let errno = value.get("errno").and_then(Value::as_i64).unwrap_or(0);
     if errno != 0 {
         if matches!(errno, -6 | -7 | -9 | 111) {
+            if std::env::var("ALLDOWNLOADER_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
+                return Err(QuarkError::Provider(format!(
+                    "百度授权拒绝（errno {errno}，HTTP {}）",
+                    response.status
+                )));
+            }
             return Err(QuarkError::AuthorizationExpired);
         }
         return Err(QuarkError::Provider("百度网盘拒绝请求".into()));

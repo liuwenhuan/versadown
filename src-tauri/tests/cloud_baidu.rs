@@ -109,7 +109,6 @@ fn baidu_accepts_the_secure_webview_session_cookie_after_browser_authorization()
         "BAIDUID=browser-identity".into(),
         "BDUSS_BFESS=secure-webview-session".into(),
         "STOKEN=netdisk-token".into(),
-        "unrelated=value".into(),
     ])
     .unwrap();
 
@@ -117,6 +116,63 @@ fn baidu_accepts_the_secure_webview_session_cookie_after_browser_authorization()
         session.cookie,
         "BAIDUID=browser-identity; BDUSS_BFESS=secure-webview-session; STOKEN=netdisk-token"
     );
+}
+
+#[test]
+fn baidu_web_session_retains_the_complete_browser_cookie_jar() {
+    let session = parse_baidu_web_session(&[
+        "BAIDUID=browser-identity".into(),
+        "BDUSS_BFESS=secure-webview-session".into(),
+        "PANPSC=netdisk-session".into(),
+        "PANWEB=web-context".into(),
+        "SCRC=anti-replay-context".into(),
+        "SBOXTKN=download-context".into(),
+    ])
+    .unwrap();
+
+    for pair in [
+        "BAIDUID=browser-identity",
+        "BDUSS_BFESS=secure-webview-session",
+        "PANPSC=netdisk-session",
+        "PANWEB=web-context",
+        "SCRC=anti-replay-context",
+        "SBOXTKN=download-context",
+    ] {
+        assert!(
+            session.cookie.split("; ").any(|saved| saved == pair),
+            "missing browser session cookie {pair}"
+        );
+    }
+}
+
+#[test]
+fn baidu_web_session_rejects_cookie_header_injection() {
+    let session = parse_baidu_web_session(&[
+        "BDUSS=authorized-session".into(),
+        "invalid\r\nX-Injected=value".into(),
+    ])
+    .unwrap();
+
+    assert_eq!(session.cookie, "BDUSS=authorized-session");
+}
+
+#[test]
+fn baidu_file_requests_alias_a_persisted_secure_webview_session_for_the_native_api() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
+    ]);
+    let client = BaiduClient::new(
+        BaiduSession::cookie(
+            "BAIDUID=browser-identity; BDUSS_BFESS=secure-webview-session; STOKEN=netdisk-token",
+        ),
+        &http,
+    );
+
+    client.directory("/").unwrap();
+
+    let request = http.requests().into_iter().next().unwrap();
+    assert!(request.headers["Cookie"].contains("BDUSS_BFESS=secure-webview-session"));
+    assert!(request.headers["Cookie"].contains("BDUSS=secure-webview-session"));
 }
 
 #[test]
@@ -178,13 +234,30 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     assert!(download.headers.contains_key("Cookie"));
 
     let requests = http.requests();
-    assert!(requests[0].url.contains("/rest/2.0/xpan/file?method=list"));
+    assert!(requests[0]
+        .url
+        .starts_with("https://pan.baidu.com/api/list?"));
     assert!(requests[1]
         .url
         .contains("/rest/2.0/xpan/multimedia?method=filemetas"));
     assert!(requests[1].url.contains("fsids=%5B7%5D"));
     assert!(requests[0].headers["Cookie"].contains("BDUSS=local"));
     assert_eq!(requests[1].headers["Referer"], "https://pan.baidu.com/");
+}
+
+#[test]
+fn baidu_directory_uses_the_web_disk_listing_endpoint_for_a_browser_session() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
+    ]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS_BFESS=browser-session"), &http);
+
+    client.directory("/").unwrap();
+
+    let request = http.requests().into_iter().next().unwrap();
+    assert!(request.url.starts_with("https://pan.baidu.com/api/list?"));
+    assert!(request.url.contains("dir=%2F"));
+    assert!(request.url.contains("channel=chunlei"));
 }
 
 #[test]

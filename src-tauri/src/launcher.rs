@@ -138,9 +138,7 @@ fn apply_launcher_shape(
     compact: bool,
     redraw: bool,
 ) -> Result<Option<LauncherRegion>, String> {
-    use windows::Win32::Graphics::Gdi::{
-        CreateEllipticRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
-    };
+    use windows::Win32::Graphics::Gdi::{CreateEllipticRgn, DeleteObject, SetWindowRgn, HGDIOBJ};
 
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
     if !compact {

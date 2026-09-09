@@ -192,6 +192,37 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const pendingMagnet = confirmation?.isBitTorrent && confirmation.resources.length === 0;
+    if (!pendingMagnet || !isTauriRuntime()) return;
+    let disposed = false;
+    const refreshMetadata = () => {
+      void listPersistedTasks().then((saved) => {
+        if (disposed) return;
+        const task = saved.find((item) => item.id === confirmation.taskId);
+        if (!task) return;
+        recordTaskEvent(task);
+        setTasks((current) => upsertTask(current, task));
+        const files = task.files;
+        if (!files?.length) return;
+        setConfirmation((current) => {
+          if (!current || current.taskId !== task.id) return current;
+          return {
+            ...current,
+            resources: files.map((file) => ({
+              id: String(file.index), index: file.index, name: file.path,
+              size: `${file.completed_length} B / ${file.length} B`,
+              selected: current.resources.find((resource) => resource.index === file.index || resource.id === String(file.index))?.selected ?? file.selected
+            }))
+          };
+        });
+      }).catch(() => undefined);
+    };
+    refreshMetadata();
+    const timer = window.setInterval(refreshMetadata, 500);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [confirmation?.isBitTorrent, confirmation?.resources.length, confirmation?.taskId]);
+
+  useEffect(() => {
     if (!isTauriRuntime() || !eventsReady) return;
     let disposed = false;
     let stopFocus: (() => void) | undefined;

@@ -445,6 +445,22 @@ pub fn authorization_result<T>(result: Result<T, QuarkError>) -> Result<T, Quark
     })
 }
 
+fn finalize_baidu_web_authorization(
+    session: baidu::BaiduSession,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<CloudAccount, QuarkError> {
+    let client = baidu::BaiduClient::new(session.clone(), http);
+    let account = authorization_result(client.account())?;
+    // Browser login is complete once the account endpoint accepts the newly
+    // captured session.  A root-list probe is a separate file-management
+    // concern: making it part of this handshake kept a successfully scanned
+    // QR login trapped in its authorization window whenever that optional
+    // request was delayed or rejected.
+    save_provider_session(CloudProvider::Baidu, store, &session)?;
+    Ok(account)
+}
+
 #[tauri::command]
 pub async fn cloud_complete_authorization(
     app: AppHandle,
@@ -491,10 +507,7 @@ pub async fn cloud_complete_authorization(
                     &window,
                     &["https://pan.baidu.com", "https://passport.baidu.com"],
                 )?)?;
-                let client = baidu::BaiduClient::new(session.clone(), http);
-                let account = authorization_result(client.account())?;
-                authorization_result(client.directory("/"))?;
-                save_provider_session(CloudProvider::Baidu, &state.store, &session)?;
+                let account = finalize_baidu_web_authorization(session, &state.store, http)?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -602,9 +615,7 @@ pub async fn cloud_login_password(
         CloudProvider::Quark
         | CloudProvider::Aliyun
         | CloudProvider::Xunlei
-        | CloudProvider::Uc => {
-            Err(QuarkError::WebAuthorizationRequired)
-        }
+        | CloudProvider::Uc => Err(QuarkError::WebAuthorizationRequired),
     })
     .await
 }
@@ -639,11 +650,10 @@ pub async fn cloud_list_directory(
         CloudProvider::Xunlei => {
             with_xunlei_client(&s.store, h, |client| client.directory(&parent_id))
         }
-        CloudProvider::Uc => uc::UcClient::new(
-            load_provider_session(CloudProvider::Uc, &s.store)?,
-            h,
-        )
-        .directory(&parent_id),
+        CloudProvider::Uc => {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                .directory(&parent_id)
+        }
     })
     .await
 }
@@ -721,12 +731,11 @@ pub async fn cloud_rename(
         CloudProvider::Xunlei => {
             with_xunlei_client(&s.store, h, |client| client.rename(&file_id, &name))
         }
-        CloudProvider::Uc => uc::UcClient::new(
-            load_provider_session(CloudProvider::Uc, &s.store)?,
-            h,
-        )
-        .rename(&file_id, &name)
-        .map(|_| ()),
+        CloudProvider::Uc => {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                .rename(&file_id, &name)
+                .map(|_| ())
+        }
     })
     .await
 }
@@ -758,12 +767,11 @@ pub async fn cloud_move(
         CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
             client.move_files(&file_ids, &target_parent_id)
         }),
-        CloudProvider::Uc => uc::UcClient::new(
-            load_provider_session(CloudProvider::Uc, &s.store)?,
-            h,
-        )
-        .move_files(&file_ids, &target_parent_id)
-        .map(|_| ()),
+        CloudProvider::Uc => {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                .move_files(&file_ids, &target_parent_id)
+                .map(|_| ())
+        }
     })
     .await
 }
@@ -795,12 +803,11 @@ pub async fn cloud_copy(
         CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
             client.copy_files(&file_ids, &target_parent_id)
         }),
-        CloudProvider::Uc => uc::UcClient::new(
-            load_provider_session(CloudProvider::Uc, &s.store)?,
-            h,
-        )
-        .copy_files(&file_ids, &target_parent_id)
-        .map(|_| ()),
+        CloudProvider::Uc => {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                .copy_files(&file_ids, &target_parent_id)
+                .map(|_| ())
+        }
     })
     .await
 }
@@ -825,12 +832,11 @@ pub async fn cloud_trash(
         }
         CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).trash(&file_ids),
         CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| client.trash(&file_ids)),
-        CloudProvider::Uc => uc::UcClient::new(
-            load_provider_session(CloudProvider::Uc, &s.store)?,
-            h,
-        )
-        .trash(&file_ids)
-        .map(|_| ()),
+        CloudProvider::Uc => {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                .trash(&file_ids)
+                .map(|_| ())
+        }
     })
     .await
 }
@@ -1118,11 +1124,9 @@ pub fn resolve_download(
             })
         }),
         CloudProvider::Uc => {
-            let download = uc::UcClient::new(
-                load_provider_session(CloudProvider::Uc, store)?,
-                http,
-            )
-            .download(file_id)?;
+            let download =
+                uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, http)
+                    .download(file_id)?;
             Ok(ResolvedCloudDownload {
                 url: download.url,
                 name: download.name,
@@ -1152,12 +1156,13 @@ pub(crate) fn safe_filename(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{collections::VecDeque, sync::Mutex};
 
     use super::{create_cloud_task, resolve_download};
     use crate::cloud::{
-        CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CredentialStore,
-        MemoryCredentialStore, QuarkError, QUARK_DESKTOP_USER_AGENT,
+        baidu::BaiduSession, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
+        CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
+        QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
 
@@ -1302,6 +1307,42 @@ mod tests {
         );
         assert_eq!(task.name, "fixture.jpg");
         assert_eq!(task.kind, "cloud");
+    }
+
+    struct SequenceTransport(Mutex<VecDeque<&'static str>>);
+
+    impl CloudHttpTransport for SequenceTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or(QuarkError::InvalidResponse)?
+                    .into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn baidu_web_authorization_persists_the_account_without_waiting_for_root_listing() {
+        let credentials = MemoryCredentialStore::default();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"errno":0,"user":{"uk":"b1","netdisk_name":"baidu"}}"#,
+        ])));
+
+        let account = super::finalize_baidu_web_authorization(
+            BaiduSession::cookie("BDUSS=browser-session"),
+            &credentials,
+            &transport,
+        )
+        .unwrap();
+
+        assert_eq!(account.id, "b1");
+        assert!(credentials.load("baidu").unwrap().is_some());
     }
 
     #[test]

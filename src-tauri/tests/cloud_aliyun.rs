@@ -94,10 +94,7 @@ fn aliyun_refreshes_bearer_token_lists_root_and_persists_only_session_fields() {
     let requests = http.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "POST");
-    assert_eq!(
-        requests[0].url,
-        "https://api.aliyundrive.com/token/refresh"
-    );
+    assert_eq!(requests[0].url, "https://api.aliyundrive.com/token/refresh");
     assert_eq!(requests[0].headers["X-Requested-With"], "XMLHttpRequest");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(requests[0].body.as_deref().unwrap()).unwrap(),

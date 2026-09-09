@@ -460,7 +460,8 @@ fn remove_recorded_download_file(path: &Path) -> Result<(), String> {
     }
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
-            fs::remove_file(path).map_err(|error| format!("无法删除下载文件 {}：{error}", path.display()))
+            fs::remove_file(path)
+                .map_err(|error| format!("无法删除下载文件 {}：{error}", path.display()))
         }
         Ok(_) => Err(format!("拒绝删除非文件下载项：{}", path.display())),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
