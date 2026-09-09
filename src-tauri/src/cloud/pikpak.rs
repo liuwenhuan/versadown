@@ -421,6 +421,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         parse_pikpak_file(v.get("file").unwrap_or(&v), parent)
     }
     pub fn rename(&self, id: &str, name: &str) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_source(id)?;
         self.request(
             "PATCH",
             format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
@@ -429,6 +430,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok(())
     }
     pub fn move_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_sources(ids)?;
         reject_pikpak_recycle_bin_target(parent)?;
         self.request(
             "POST",
@@ -438,6 +440,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok(())
     }
     pub fn copy_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_sources(ids)?;
         reject_pikpak_recycle_bin_target(parent)?;
         self.request(
             "POST",
@@ -447,6 +450,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok(())
     }
     pub fn trash(&self, ids: &[String]) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_sources(ids)?;
         self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files:batchTrash"),
@@ -456,7 +460,10 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
     }
     /// Permanently deletes items already present in PikPak's recycle bin.
     pub fn delete(&self, ids: &[String]) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_sources(ids)?;
         for id in ids {
+            // PikPak documents no conditional batch-delete request. Validate the
+            // current state immediately before sending the permanent-delete call.
             let file = self.request(
                 "GET",
                 format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
@@ -476,6 +483,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok(())
     }
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
+        reject_pikpak_recycle_bin_source(id)?;
         let cached = self.request(
             "GET",
             format!("{DRIVE}/drive/v1/files/{}?usage=CACHE", encoded(id)),
@@ -509,6 +517,24 @@ pub(crate) fn reject_pikpak_recycle_bin_target(parent: &str) -> Result<(), Quark
     Ok(())
 }
 
+fn reject_pikpak_recycle_bin_source(id: &str) -> Result<(), QuarkError> {
+    if id == PIKPAK_RECYCLE_BIN_ID {
+        return Err(QuarkError::InvalidInput(
+            "回收站仅可打开，不能作为文件操作对象".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_pikpak_recycle_bin_sources(ids: &[String]) -> Result<(), QuarkError> {
+    if ids.iter().any(|id| id == PIKPAK_RECYCLE_BIN_ID) {
+        return Err(QuarkError::InvalidInput(
+            "回收站仅可打开，不能作为文件操作对象".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Maps only the provider's explicit Regional Premium → Global Premium
 /// restriction wording from fixed JSON error fields. It never infers this
 /// from HTTP status, numeric codes, generic region wording, CAPTCHA, or
@@ -517,6 +543,19 @@ fn pikpak_regional_membership_restriction(response: &CloudHttpResponse) -> bool 
     let Ok(value) = serde_json::from_str::<Value>(&response.body) else {
         return false;
     };
+    let error = value["error"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let error_code = value["error_code"]
+        .as_i64()
+        .or_else(|| value["code"].as_i64());
+    // Preserve the provider's structured risk/CAPTCHA handling in response_json.
+    // Its text can include plan wording, but it is not proof of a membership-only
+    // restriction and must continue to trigger web authorization.
+    if matches!(error_code, Some(9 | 4031)) || error == "risklimited" {
+        return false;
+    }
     let mut texts = Vec::new();
     for key in ["error", "error_description", "message"] {
         if let Some(text) = value[key].as_str() {

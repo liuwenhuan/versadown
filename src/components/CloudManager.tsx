@@ -136,11 +136,13 @@ function CloudActionIcon({ action }: { action: CloudMenuAction | 'back' | 'clear
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
 
-function CloudContextMenu({ state, selectedCount, recycleBin, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
+function CloudContextMenu({ state, selectedCount, recycleBin, virtualRecycleBin, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualRecycleBin: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudMenuAction; label: string; danger?: boolean; separated?: boolean }> = state.kind === 'background'
     ? recycleBin ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传文件' }, { action: 'refresh', label: '刷新', separated: true }]
-    : recycleBin
+    : virtualRecycleBin
+      ? [{ action: 'open', label: '打开' }]
+      : recycleBin
       ? [{ action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '永久删除', danger: true, separated: true }]
       : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '删除', danger: true, separated: true }];
   const width = 210;
@@ -364,11 +366,14 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const selected = directory?.items.filter((item) => selectedIds.includes(item.id)) ?? [];
   const currentDirectoryId = directory?.id ?? breadcrumbs.at(-1)?.id ?? rootId;
   const isPikpakRecycleBin = provider === 'pikpak' && currentDirectoryId === pikpakRecycleBinDirectoryId;
+  const isVirtualRecycleBinItem = (item: CloudFile | undefined) => provider === 'pikpak' && item?.id === pikpakRecycleBinDirectoryId;
+  const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
+  const selectableItems = directory?.items.filter((item) => !isVirtualRecycleBinItem(item)) ?? [];
   const operationBusy = operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
   const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
   const logoutLabel = passwordSession ? '退出登录' : '退出授权';
-  const allSelected = Boolean(directory?.items.length) && selected.length === directory?.items.length;
+  const allSelected = Boolean(selectableItems.length) && selected.length === selectableItems.length;
 
   useEffect(() => {
     if (selectAllCheckbox.current) selectAllCheckbox.current.indeterminate = selected.length > 0 && !allSelected;
@@ -549,7 +554,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function openEditor(next: Exclude<Editor, null>) {
-    if (isPikpakRecycleBin) return;
+    if (isPikpakRecycleBin || selectedVirtualRecycleBin) return;
     setContextMenu(null);
     setEditor(next);
     setEditorValue(next === 'rename' ? selected[0]?.name ?? '' : '');
@@ -563,8 +568,8 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     if (event.shiftKey && selectionAnchor.current !== null && directory) {
       const from = Math.min(selectionAnchor.current, index);
       const to = Math.max(selectionAnchor.current, index);
-      const range = directory.items.slice(from, to + 1).map((entry) => entry.id);
-      setSelectedIds(event.ctrlKey || event.metaKey ? (current) => Array.from(new Set([...current, ...range])) : range);
+      const range = directory.items.slice(from, to + 1).filter((entry) => !isVirtualRecycleBinItem(entry)).map((entry) => entry.id);
+      setSelectedIds(event.ctrlKey || event.metaKey ? (current) => Array.from(new Set([...current.filter((id) => id !== pikpakRecycleBinDirectoryId), ...range])) : range);
     } else if (event.ctrlKey || event.metaKey) {
       toggleSelection(item.id);
     } else {
@@ -579,7 +584,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function downloadSelection() {
-    if (!selected.length) return;
+    if (!selected.length || selectedVirtualRecycleBin) return;
     void runOperation('下载', async () => {
       const tasks = await Promise.all(selected.map((item) => client.downloadCloudFile(provider, item.id)));
       tasks.forEach((task) => onDownloadTask?.(task));
@@ -598,6 +603,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   function runContextAction(action: CloudMenuAction) {
     const menu = contextMenu;
     setContextMenu(null);
+    if (menu?.kind === 'selection' && isVirtualRecycleBinItem(menu.item) && action !== 'open') return;
     if (action === 'open' && menu?.kind === 'selection') openFolder(menu.item);
     if (action === 'download') downloadSelection();
     if (action === 'rename' && !isPikpakRecycleBin) openEditor('rename');
@@ -619,6 +625,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   function runSelectionOverflowAction(action: CloudHeaderMenuAction) {
     setSelectionMenuAnchor(null);
     selectionMenuTrigger.current?.focus();
+    if (selectedVirtualRecycleBin) return;
     if (action === 'rename' && !isPikpakRecycleBin) openEditor('rename');
     if (action === 'move' && !isPikpakRecycleBin) setDestinationAction('move');
     if (action === 'copy' && !isPikpakRecycleBin) setDestinationAction('copy');
@@ -628,7 +635,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   function handleFileListKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
       event.preventDefault();
-      setSelectedIds(directory?.items.map((item) => item.id) ?? []);
+      setSelectedIds(selectableItems.map((item) => item.id));
       return;
     }
     if (event.key === 'Escape') {
@@ -641,12 +648,12 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       openFolder(selected[0]);
       return;
     }
-    if (event.key === 'F2' && !isPikpakRecycleBin && selected.length === 1) {
+    if (event.key === 'F2' && !isPikpakRecycleBin && !selectedVirtualRecycleBin && selected.length === 1) {
       event.preventDefault();
       openEditor('rename');
       return;
     }
-    if (event.key === 'Delete' && selected.length) {
+    if (event.key === 'Delete' && selected.length && !selectedVirtualRecycleBin) {
       event.preventDefault();
       setPendingTrash(true);
     }
@@ -654,7 +661,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   function submitEditor(event: FormEvent) {
     event.preventDefault();
-    if (!activeAccount || isPikpakRecycleBin || !editorValue.trim()) return;
+    if (!activeAccount || isPikpakRecycleBin || selectedVirtualRecycleBin || !editorValue.trim()) return;
     if (editor === 'create') void runOperation('新建目录', () => client.createCloudDirectory(provider, currentDirectoryId, editorValue.trim()).then(() => undefined));
     if (editor === 'rename' && selected[0]) void runOperation('重命名', () => client.renameCloudFile(provider, selected[0].id, editorValue.trim()));
   }
@@ -731,7 +738,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       onKeyDown={handleFileListKeyDown}
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
-      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? directory?.items.map((item) => item.id) ?? [] : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b><span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{isPikpakRecycleBin ? '永久删除' : '删除'}</button>{(!isPikpakRecycleBin || selected.length === 1) && <button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button>}</span><button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : '名称'}</span><span>大小</span><span>修改时间</span></div>
+      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin ? <span className="cloud-selection-hint">回收站仅可打开</span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{isPikpakRecycleBin ? '永久删除' : '删除'}</button>{(!isPikpakRecycleBin || selected.length === 1) && <button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button>}</span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : '名称'}</span><span>大小</span><span>修改时间</span></div>
       {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isPikpakRecycleBin ? '回收站为空' : '此目录为空'}</b><span>{isPikpakRecycleBin ? '没有可永久删除的项目' : '可在这里上传文件或新建目录'}</span></div> : directory?.items.map((item, index) => {
         const isSelected = selectedIds.includes(item.id);
         return <div
@@ -751,7 +758,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         </div>;
       })}
     </div>}
-    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isPikpakRecycleBin} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
+    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isPikpakRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isPikpakRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
     {detailsFile && <CloudFileDetails file={detailsFile} path={`/${breadcrumbs.slice(1).map((crumb) => crumb.name).join('/') || ''}`} onClose={() => setDetailsFile(null)} />}
     {destinationAction && <CloudDestinationPicker action={destinationAction} provider={provider} client={client} excludedIds={selectedIds} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}

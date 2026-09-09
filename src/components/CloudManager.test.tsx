@@ -629,6 +629,30 @@ it('excludes the PikPak recycle-bin virtual folder from move destinations', asyn
   expect(screen.queryByRole('button', { name: '打开 回收站' })).not.toBeInTheDocument();
 });
 
+it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
+  const user = userEvent.setup();
+  const recycleBinId = '__all_downloader_pikpak_recycle_bin__';
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [] }
+      : { id: '0', items: [{ id: recycleBinId, parentId: '0', name: '回收站', kind: 'folder' }] }))
+  });
+  render(<CloudManager provider="pikpak" client={client} initialAccounts={[{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  const recycleBin = await screen.findByText('回收站');
+  await user.click(recycleBin);
+  expect(screen.queryByRole('button', { name: '下载' })).not.toBeInTheDocument();
+  fireEvent.keyDown(screen.getByRole('tree', { name: 'PikPak网盘文件' }), { key: 'Delete' });
+  expect(screen.queryByRole('alertdialog', { name: '确认移入回收站' })).not.toBeInTheDocument();
+
+  fireEvent.contextMenu(recycleBin, { clientX: 300, clientY: 240 });
+  expect(screen.getByRole('menuitem', { name: '打开' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '删除' })).not.toBeInTheDocument();
+  fireEvent.doubleClick(recycleBin);
+  await waitFor(() => expect(client.listCloudDirectory).toHaveBeenLastCalledWith('pikpak', recycleBinId));
+});
+
 it('keeps the current file list visible when a cloud operation fails', async () => {
   const user = userEvent.setup();
   const client = createCloudFake({ downloadCloudFile: vi.fn().mockRejectedValue(new Error('网络断开')) });

@@ -194,6 +194,10 @@ fn pikpak_does_not_map_captcha_or_incomplete_membership_reasons() {
             r#"{"error":"unauthenticated","message":"Regional Premium is restricted; upgrade to Global Premium"}"#,
             r#"{"error":"forbidden"}"#,
         ],
+        vec![
+            r#"{"error":"riskLimited","error_code":4031,"error_description":"Regional Premium is restricted; upgrade to Global Premium"}"#,
+            r#"{"url":"https://user.mypikpak.com/verify"}"#,
+        ],
     ] {
         let error = PikPakClient::new(&Sequence::new(&bodies), &store)
             .list("0")
@@ -203,6 +207,39 @@ fn pikpak_does_not_map_captcha_or_incomplete_membership_reasons() {
             "captcha, authorization, and incomplete membership reasons must retain existing errors"
         );
     }
+}
+
+#[test]
+fn pikpak_rejects_the_virtual_recycle_bin_as_a_source_before_network() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let client = PikPakClient::new(&NoNetwork, &store);
+    let recycle = "__all_downloader_pikpak_recycle_bin__";
+
+    assert!(matches!(
+        client.rename(recycle, "name"),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        client.move_files(&[recycle.into()], "0"),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        client.copy_files(&[recycle.into()], "0"),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        client.trash(&[recycle.into()]),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        client.delete(&[recycle.into()]),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        client.download(recycle),
+        Err(QuarkError::InvalidInput(_))
+    ));
 }
 
 #[test]

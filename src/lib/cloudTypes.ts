@@ -19,4 +19,4 @@ export interface CloudDirectory { id: string; items: CloudFile[]; }
 export interface CloudAuthorization { provider: CloudProvider; windowLabel: string; instructions: string; }
 export interface CloudAuthorizationCapabilities { provider: CloudProvider; web: boolean; password: boolean; }
 export interface CloudCredentials { username: string; password: string; }
-export interface CloudError { code: 'not_authorized' | 'credentials_expired' | 'web_auth_required' | 'authorization_pending' | 'credential_storage_error' | 'invalid_response' | 'network_error' | 'provider_error' | 'invalid_input' | 'provider_unsupported'; message: string; }
+export interface CloudError { code: 'not_authorized' | 'credentials_expired' | 'web_auth_required' | 'authorization_pending' | 'credential_storage_error' | 'invalid_response' | 'network_error' | 'provider_error' | 'invalid_input' | 'provider_unsupported' | 'pikpak_regional_membership_restricted'; message: string; }
