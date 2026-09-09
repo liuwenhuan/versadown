@@ -60,7 +60,11 @@ async function evaluate(target, expression) {
       if (message.id !== 1) return;
       socket.close();
       if (message.error) reject(new Error(JSON.stringify(message.error)));
-      else if (message.result.exceptionDetails) reject(new Error(message.result.exceptionDetails.text));
+      else if (message.result.exceptionDetails) {
+        const details = message.result.exceptionDetails;
+        const description = details.exception?.description ?? details.exception?.value ?? JSON.stringify(details);
+        reject(new Error(`${details.text}: ${description}`));
+      }
       else resolve(message.result.result.value);
     });
   });
@@ -266,7 +270,7 @@ async function run() {
       `Native launcher close destroyed, hid, or exited the entry point: ${JSON.stringify({ launcherStillAlive, launcherVisibleAfterNativeClose, exitCode: child.exitCode })}.`
     );
 
-    await evaluate(manager, `document.querySelector('button[aria-label="关闭下载管理器"]').click()`);
+    await evaluate(manager, `document.querySelector('button[aria-label="关闭"]').click()`);
     const hiddenAfterCustomClose = JSON.parse(await waitForEvaluation(
       launcher,
       `(async () => JSON.stringify(await window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')))()`,

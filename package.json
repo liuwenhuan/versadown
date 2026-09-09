@@ -11,7 +11,7 @@
     "test:launcher": "node scripts/smoke-launcher.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:binary": "cargo build --manifest-path src-tauri/Cargo.toml --release",
+    "tauri:binary": "cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol",
     "tauri:build": "tauri build"
   },
   "dependencies": {

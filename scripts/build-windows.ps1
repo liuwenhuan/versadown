@@ -77,7 +77,7 @@ if ($Installer) {
         Write-Host 'Frontend unchanged; reusing dist.'
     }
 
-    $command = '"{0}" >nul && "{1}" build --manifest-path "{2}" --release' -f $vcvars, $cargoCommand, (Join-Path $projectRoot 'src-tauri\Cargo.toml')
+    $command = '"{0}" >nul && "{1}" build --manifest-path "{2}" --release --features custom-protocol' -f $vcvars, $cargoCommand, (Join-Path $projectRoot 'src-tauri\Cargo.toml')
 }
 & cmd.exe /d /s /c $command
 exit $LASTEXITCODE

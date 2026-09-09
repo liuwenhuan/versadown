@@ -46,4 +46,5 @@ tempfile = "3"
 windows = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_System_Memory"] }
 
 [features]
+custom-protocol = ["tauri/custom-protocol"]
 report-debug-tool = []
