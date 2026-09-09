@@ -29,6 +29,10 @@ impl ReqwestTransport {
 }
 impl CloudHttpTransport for ReqwestTransport {
     fn send(&self, r: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        let has_content_type = r
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("Content-Type"));
         let mut b = self.client.request(
             r.method.parse().map_err(|_| QuarkError::InvalidResponse)?,
             &r.url,
@@ -37,7 +41,10 @@ impl CloudHttpTransport for ReqwestTransport {
             b = b.header(k, v)
         }
         if let Some(body) = r.body {
-            b = b.header("Content-Type", "application/json").body(body)
+            if !has_content_type {
+                b = b.header("Content-Type", "application/json");
+            }
+            b = b.body(body)
         }
         // URL-bearing errors may disclose signed credentials.
         let response = b.send().map_err(|e| {

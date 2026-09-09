@@ -34,7 +34,7 @@ pub fn parse_tianyi_web_session(cookies: &[String]) -> Result<TianyiSession, Qua
         .filter_map(|raw| {
             let pair = raw.split(';').next()?.trim();
             let (name, value) = pair.split_once('=')?;
-            matches!(name, "COOKIE_LOGIN_USER" | "SESSION" | "LT")
+            (!value.is_empty() && matches!(name, "COOKIE_LOGIN_USER" | "SESSION" | "LT"))
                 .then(|| format!("{name}={value}"))
         })
         .collect::<Vec<_>>();
@@ -244,6 +244,10 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             method: "POST",
             url: format!("{LOGIN}/api/logbox/oauth2/loginSubmit.do"),
             headers: BTreeMap::from([
+                (
+                    "Content-Type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ),
                 ("Referer".into(), format!("{LOGIN}/")),
                 ("User-Agent".into(), TIANYI_WEB_USER_AGENT.into()),
             ]),

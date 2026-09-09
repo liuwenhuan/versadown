@@ -4,7 +4,7 @@ use super::{
     CloudHttpTransport, CloudProvider, QuarkError,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
@@ -178,24 +178,13 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
     }
 
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
-        let path = join_path(parent, name)?;
-        self.xpan(
-            "POST",
-            "create",
-            &format!("&path={}&isdir=1", encoded(&path)),
-            None,
-        )
-        .map(|_| ())
+        let _ = (parent, name);
+        Err(QuarkError::WebAuthorizationRequired)
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<(), QuarkError> {
-        self.xpan(
-            "POST",
-            "update",
-            "",
-            Some(json!({"fsid": id, "newname": name})),
-        )
-        .map(|_| ())
+        let _ = (id, name);
+        Err(QuarkError::WebAuthorizationRequired)
     }
 
     pub fn move_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
@@ -205,13 +194,8 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         self.file_manager("copy", ids, parent)
     }
     pub fn trash(&self, ids: &[String]) -> Result<(), QuarkError> {
-        self.xpan(
-            "POST",
-            "filemanager",
-            "&opera=delete",
-            Some(json!({"filelist": ids})),
-        )
-        .map(|_| ())
+        let _ = ids;
+        Err(QuarkError::WebAuthorizationRequired)
     }
 
     fn file_manager(
@@ -220,20 +204,13 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         ids: &[String],
         parent: &str,
     ) -> Result<(), QuarkError> {
-        if ids.is_empty() || parent.is_empty() {
-            return Err(QuarkError::InvalidInput("请选择文件和目标目录".into()));
-        }
-        self.xpan(
-            "POST",
-            "filemanager",
-            &format!("&opera={operation}"),
-            Some(json!({"filelist": ids, "dest": parent})),
-        )
-        .map(|_| ())
+        let _ = (operation, ids, parent);
+        Err(QuarkError::WebAuthorizationRequired)
     }
 
-    /// Starts the official precreate upload flow.  The command layer owns file
-    /// bytes and therefore never puts local paths or payloads in this adapter.
+    /// Writes require a live browser-derived bdstoken and a path map.  Neither
+    /// can be safely derived from an fsid-only session, so do not emit a write
+    /// request until the command layer can provide a validated web session.
     pub fn upload(
         &self,
         parent: &str,
@@ -241,14 +218,8 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         size: u64,
         content_md5: &str,
     ) -> Result<Value, QuarkError> {
-        let path = join_path(parent, name)?;
-        self.request(
-            "POST",
-            format!("{PAN}/api/precreate?web=1"),
-            Some(
-                json!({"path":path,"size":size,"isdir":0,"autoinit":1,"block_list":[content_md5]}),
-            ),
-        )
+        let _ = (parent, name, size, content_md5);
+        Err(QuarkError::WebAuthorizationRequired)
     }
 
     pub fn download(&self, id: &str) -> Result<BaiduDownload, QuarkError> {
@@ -300,6 +271,10 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
             method: "POST",
             url: format!("{PASSPORT}/v2/api/?login"),
             headers: BTreeMap::from([
+                (
+                    "Content-Type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ),
                 ("Referer".into(), format!("{PAN}/")),
                 ("User-Agent".into(), BAIDU_WEB_USER_AGENT.into()),
             ]),
@@ -361,14 +336,4 @@ fn string_or_number(value: &Value) -> Option<String> {
         .as_str()
         .map(str::to_owned)
         .or_else(|| value.as_u64().map(|number| number.to_string()))
-}
-fn join_path(parent: &str, name: &str) -> Result<String, QuarkError> {
-    if name.is_empty() || name.contains('/') || name.contains('\\') {
-        return Err(QuarkError::InvalidInput("文件名无效".into()));
-    }
-    Ok(if parent == "/" {
-        format!("/{name}")
-    } else {
-        format!("{}/{}", parent.trim_end_matches('/'), name)
-    })
 }

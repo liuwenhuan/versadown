@@ -1,8 +1,14 @@
 use alldownloader_lib::cloud::{
     baidu::{BaiduClient, BaiduSession},
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError, ReqwestTransport,
 };
-use std::sync::Mutex;
+use std::{
+    collections::BTreeMap,
+    io::{Read, Write},
+    net::TcpListener,
+    sync::{mpsc, Mutex},
+    thread,
+};
 
 struct RecordingHttp {
     replies: Mutex<Vec<CloudHttpResponse>>,
@@ -44,6 +50,49 @@ impl CloudHttpTransport for RecordingHttp {
 }
 
 #[test]
+fn reqwest_transport_preserves_the_explicit_form_content_type() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (headers_tx, headers_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..read]);
+        }
+        headers_tx
+            .send(String::from_utf8(request).unwrap())
+            .unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .unwrap();
+    });
+
+    ReqwestTransport::new()
+        .unwrap()
+        .send(CloudHttpRequest {
+            method: "POST",
+            url: format!("http://{address}/login"),
+            headers: BTreeMap::from([(
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            )]),
+            body: Some("username=alice".into()),
+        })
+        .unwrap();
+    let request = headers_rx.recv().unwrap().to_ascii_lowercase();
+    server.join().unwrap();
+
+    assert!(request.contains("content-type: application/x-www-form-urlencoded"));
+    assert!(
+        !request.contains("application/json"),
+        "an explicit form type must not be accompanied by a JSON type"
+    );
+}
+
+#[test]
 fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     let http = RecordingHttp::sequence(&[
         r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
@@ -66,14 +115,9 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
 }
 
 #[test]
-fn baidu_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
+fn baidu_rejects_non_https_dlinks_and_unsafe_mutations_before_transport() {
     let http = RecordingHttp::sequence(&[
         r#"{"errno":0,"list":[{"dlink":"http://download.example/file"}]}"#,
-        r#"{"errno":0}"#,
-        r#"{"errno":0}"#,
-        r#"{"errno":0}"#,
-        r#"{"errno":0}"#,
-        r#"{"errno":0}"#,
     ]);
     let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
 
@@ -81,23 +125,34 @@ fn baidu_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
         client.download("7"),
         Err(QuarkError::InvalidResponse)
     ));
-    client.mkdir("/", "new folder").unwrap();
-    client.rename("7", "renamed.mkv").unwrap();
-    client.move_files(&["7".into()], "/target").unwrap();
-    client.copy_files(&["7".into()], "/target").unwrap();
-    client.trash(&["7".into()]).unwrap();
-
-    let requests = http.requests();
-    assert!(requests[1].url.contains("method=create"));
-    assert!(requests[2].url.contains("method=update"));
-    assert!(
-        requests[3].url.contains("method=filemanager") && requests[3].url.contains("opera=move")
-    );
-    assert!(
-        requests[4].url.contains("method=filemanager") && requests[4].url.contains("opera=copy")
-    );
-    assert!(
-        requests[5].url.contains("method=filemanager") && requests[5].url.contains("opera=delete")
+    assert!(matches!(
+        client.mkdir("/", "new folder"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(matches!(
+        client.rename("7", "renamed.mkv"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(matches!(
+        client.move_files(&["7".into()], "/target"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(matches!(
+        client.copy_files(&["7".into()], "/target"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(matches!(
+        client.trash(&["7".into()]),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(matches!(
+        client.upload("/", "movie.mkv", 12, "md5"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert_eq!(
+        http.requests().len(),
+        1,
+        "unsafe writes must not reach the transport"
     );
 }
 
@@ -114,4 +169,8 @@ fn baidu_password_challenge_requires_web_authorization_without_a_session() {
         .as_deref()
         .unwrap()
         .contains("username=alice"));
+    assert_eq!(
+        http.requests()[0].headers["Content-Type"],
+        "application/x-www-form-urlencoded"
+    );
 }

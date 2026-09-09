@@ -1,5 +1,5 @@
 use alldownloader_lib::cloud::{
-    tianyi::{TianyiClient, TianyiSession},
+    tianyi::{parse_tianyi_web_session, TianyiClient, TianyiSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError,
 };
 use std::sync::Mutex;
@@ -105,8 +105,21 @@ fn tianyi_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
 
 #[test]
 fn tianyi_captcha_requests_web_authorization() {
+    let http = RecordingHttp::challenge();
     assert!(matches!(
-        TianyiClient::login_password("u", "p", &RecordingHttp::challenge()),
+        TianyiClient::login_password("u", "p", &http),
         Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert_eq!(
+        http.requests()[0].headers["Content-Type"],
+        "application/x-www-form-urlencoded"
+    );
+}
+
+#[test]
+fn tianyi_rejects_an_empty_login_cookie() {
+    assert!(matches!(
+        parse_tianyi_web_session(&["COOKIE_LOGIN_USER=; Path=/".into()]),
+        Err(QuarkError::AuthorizationExpired)
     ));
 }
