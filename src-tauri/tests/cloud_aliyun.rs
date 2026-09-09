@@ -288,6 +288,8 @@ fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
     let invalid = [
         serde_json::json!(""),
         serde_json::json!(false),
+        serde_json::Value::Null,
+        serde_json::json!(17),
         serde_json::json!("http://upload.example/part"),
     ];
     let cases = invalid
@@ -338,5 +340,11 @@ fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
         assert!(AliyunClient::new(&store, &http)
             .upload_init("root", "independent-check.pdf", 5)
             .is_err());
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[3].url,
+            "https://api.aliyundrive.com/v2/file/create"
+        );
     }
 }
