@@ -240,9 +240,7 @@ fn xunlei_web_context(
             }
         }
     }
-    if context.session_id.is_empty()
-        || (context.peer_id.is_empty() && context.device_id.is_empty())
-        || context.credit_key.is_empty()
+    if (context.peer_id.is_empty() && context.device_id.is_empty()) || context.credit_key.is_empty()
     {
         return Err(QuarkError::AuthorizationPending);
     }
@@ -638,6 +636,37 @@ fn finalize_tianyi_web_authorization(
     Ok(account)
 }
 
+fn finalize_xunlei_web_authorization(
+    mut session: xunlei::XunleiSession,
+    context: xunlei::XunleiWebContext,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<CloudAccount, QuarkError> {
+    session.web_context = context;
+    // Xunlei's official web bundle treats `sessionid` as optional when the
+    // current browser bearer exists. XunleiClient applies that fallback only
+    // after the narrow peer/device and credit-key context is present.
+    let client = xunlei::XunleiClient::new(session, http);
+    let account = authorization_result(client.web_account())?;
+    save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
+    Ok(account)
+}
+
+fn finalize_uc_web_authorization(
+    session: uc::UcSession,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<CloudAccount, QuarkError> {
+    let client = uc::UcClient::new(session.clone(), http);
+    // A cookie pair only says that the WebView completed part of its flow.
+    // Verify the exact first read the workspace needs before replacing the
+    // stored account and closing the official authorization window.
+    authorization_result(client.directory("0"))?;
+    let account = client.web_account()?;
+    save_provider_session(CloudProvider::Uc, store, &session)?;
+    Ok(account)
+}
+
 #[tauri::command]
 pub async fn cloud_complete_authorization(
     app: AppHandle,
@@ -713,19 +742,11 @@ pub async fn cloud_complete_authorization(
                 Ok(account)
             }
             CloudProvider::Xunlei => {
-                let mut session =
+                let session =
                     parse_xunlei_web_session(web_storage_tokens(&window, XUNLEI_WEB_TOKENS_JS)?)?;
-                session.web_context = xunlei_web_context(&window)?;
-                let access_token = session.access_token.clone();
-                session
-                    .web_context
-                    .use_access_token_for_missing_session_id(&access_token);
-                let client = xunlei::XunleiClient::new(session, http);
-                // The browser does not expose Xunlei's native client secret.
-                // Persist the valid web session and create its workspace
-                // without issuing a native refresh or an extra API probe.
-                let account = client.web_account()?;
-                save_provider_session(CloudProvider::Xunlei, &state.store, &client.session())?;
+                let context = xunlei_web_context(&window)?;
+                let account =
+                    finalize_xunlei_web_authorization(session, context, &state.store, http)?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -734,14 +755,7 @@ pub async fn cloud_complete_authorization(
                     &window,
                     &["https://drive.uc.cn", "https://pc-api.uc.cn"],
                 )?)?;
-                let client = uc::UcClient::new(session.clone(), http);
-                // Once the official browser window has yielded the complete
-                // session cookie pair, persist it and close immediately.
-                // Validating with UC's undocumented `member` endpoint here
-                // made a successful browser login appear to hang whenever
-                // that optional probe was rejected.
-                let account = client.web_account()?;
-                save_provider_session(CloudProvider::Uc, &state.store, &session)?;
+                let account = finalize_uc_web_authorization(session, &state.store, http)?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -1352,9 +1366,12 @@ mod tests {
 
     use super::{create_cloud_task, resolve_download};
     use crate::cloud::{
-        baidu::BaiduSession, tianyi::TianyiSession, CloudHttpRequest, CloudHttpResponse,
-        CloudHttpTransport, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
-        QUARK_DESKTOP_USER_AGENT,
+        baidu::BaiduSession,
+        tianyi::TianyiSession,
+        uc::UcSession,
+        xunlei::{XunleiClientProfile, XunleiSession, XunleiWebContext},
+        CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CredentialStore,
+        MemoryCredentialStore, QuarkError, QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
 
@@ -1663,6 +1680,68 @@ mod tests {
         assert_eq!(account.id, "tianyi-web");
         assert_eq!(account.provider, CloudProvider::Tianyi);
         assert!(credentials.load("tianyi").unwrap().is_some());
+    }
+
+    #[test]
+    fn xunlei_web_authorization_uses_bearer_when_the_cookie_context_has_no_session_id() {
+        // Break caught: rejecting a completed official browser login before
+        // the documented `sessionid || access_token` fallback can run leaves
+        // the authorization window polling forever.
+        let credentials = MemoryCredentialStore::default();
+        let session = XunleiSession::from_web_authorization(
+            "browser-access",
+            "browser-refresh",
+            "browser-user",
+            "",
+            XunleiClientProfile::default(),
+            0,
+        )
+        .unwrap();
+        let context = XunleiWebContext {
+            session_id: String::new(),
+            peer_id: "official-peer".into(),
+            device_id: String::new(),
+            credit_key: "official-credit".into(),
+        };
+
+        let account = super::finalize_xunlei_web_authorization(
+            session,
+            context,
+            &credentials,
+            &OfflineTransport,
+        )
+        .expect("a complete browser context can use its current bearer as session id");
+
+        assert_eq!(account.id, "browser-user");
+        let saved: XunleiSession = serde_json::from_slice(
+            &credentials
+                .load("xunlei")
+                .unwrap()
+                .expect("session is saved"),
+        )
+        .unwrap();
+        assert_eq!(saved.web_context.session_id, "browser-access");
+    }
+
+    #[test]
+    fn uc_web_authorization_keeps_unverified_browser_cookies_out_of_storage() {
+        // Break caught: saving immediately after merely seeing __pus/__puus
+        // creates an unusable tab when UC requires web verification for its
+        // first real directory request.
+        let credentials = MemoryCredentialStore::default();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"code":0,"status":200,"message":"verify in official browser"}"#,
+        ])));
+
+        let error = super::finalize_uc_web_authorization(
+            UcSession::cookie("__uid=browser-user; __pus=identity; __puus=session"),
+            &credentials,
+            &transport,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, QuarkError::AuthorizationPending));
+        assert!(credentials.load("uc").unwrap().is_none());
     }
 
     #[test]
