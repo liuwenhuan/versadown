@@ -99,22 +99,37 @@ fn proxy_url(proxy: &ProxySettings) -> Result<Option<String>, String> {
     Ok(Some(value.to_string()))
 }
 
-pub(crate) fn download_submission_options(
+fn validated_download_directory(value: &str) -> Result<PathBuf, String> {
+    let directory = PathBuf::from(value.trim());
+    if directory.as_os_str().is_empty() || !directory.is_absolute() {
+        return Err("下载目录必须是绝对路径".into());
+    }
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建下载目录：{error}"))?;
+    Ok(directory)
+}
+
+pub(crate) fn download_submission_options_for_directory(
     state: &AppState,
+    destination_directory: Option<&str>,
 ) -> Result<UriSubmissionOptions, String> {
     let settings = state
         .settings
         .lock()
         .map_err(|_| "设置锁不可用".to_string())?;
-    let directory = PathBuf::from(settings.download_directory.trim());
-    if !directory.is_absolute() {
-        return Err("下载目录必须是绝对路径".into());
-    }
+    let directory = destination_directory
+        .map(str::to_owned)
+        .unwrap_or_else(|| settings.download_directory.clone());
+    let proxy = proxy_url(&settings.proxy)?;
+    drop(settings);
     Ok(UriSubmissionOptions {
-        directory: Some(directory),
-        proxy: proxy_url(&settings.proxy)?,
+        directory: Some(validated_download_directory(&directory)?),
+        proxy,
         ..Default::default()
     })
+}
+
+pub(crate) fn download_submission_options(state: &AppState) -> Result<UriSubmissionOptions, String> {
+    download_submission_options_for_directory(state, None)
 }
 
 #[tauri::command]
@@ -227,6 +242,7 @@ fn parse_resources(store: &TaskStore, task_id: Uuid) -> Result<Vec<ParseResource
 pub async fn confirm_download_command(
     task_id: String,
     selected_ids: Vec<String>,
+    destination_directory: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
     let service = state
@@ -236,13 +252,14 @@ pub async fn confirm_download_command(
         .map_err(|error| error.to_string())?;
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
+    let options = download_submission_options_for_directory(&state, destination_directory.as_deref())?;
     if current.aria_gid.is_some() {
         let indices = selected_ids
             .into_iter()
             .map(|value| value.parse::<u32>().map_err(|_| "文件索引无效".to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         let task = service
-            .select_files(id, indices)
+            .select_files_with_options(id, indices, options)
             .await
             .map_err(|error| error.to_string())?;
         return task_payload(&state.store, task);
@@ -251,7 +268,6 @@ pub async fn confirm_download_command(
         return Err(error.to_string());
     }
     let task = confirm_download(id, &state.store).map_err(|error| error.to_string())?;
-    let options = download_submission_options(&state)?;
     let task = service
         .submit_uri_with_options(task.id, vec![task.source], options)
         .await

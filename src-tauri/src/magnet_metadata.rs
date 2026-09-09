@@ -4,6 +4,7 @@ use thiserror::Error;
 use crate::{downloader::load_torrent_base64, DownloadError, MagnetMetadataSettings};
 
 const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const METADATA_USER_AGENT: &str = "AllDownloader/0.1";
 
 #[derive(Debug, Error)]
 pub enum MagnetMetadataError {
@@ -44,6 +45,7 @@ pub async fn resolve_magnet_torrent(
         .join("api/v1/metadata")
         .map_err(|_| MagnetMetadataError::InvalidBaseUrl)?;
     let client = reqwest::Client::builder()
+        .user_agent(METADATA_USER_AGENT)
         .connect_timeout(METADATA_TIMEOUT.min(std::time::Duration::from_secs(8)))
         .read_timeout(METADATA_TIMEOUT)
         .timeout(METADATA_TIMEOUT)

@@ -479,8 +479,19 @@ impl DownloadService {
         task_id: Uuid,
         indices: Vec<u32>,
     ) -> Result<DownloadTask, DownloadServiceError> {
+        self.select_files_with_options(task_id, indices, Default::default())
+            .await
+    }
+
+    pub async fn select_files_with_options(
+        &self,
+        task_id: Uuid,
+        indices: Vec<u32>,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
-        self.select_files_unlocked(task_id, indices).await
+        self.select_files_with_options_unlocked(task_id, indices, options)
+            .await
     }
 
     /// Wait only up to the caller's UI deadline. Background synchronization continues
@@ -537,7 +548,17 @@ impl DownloadService {
     async fn select_files_unlocked(
         &self,
         task_id: Uuid,
+        indices: Vec<u32>,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        self.select_files_with_options_unlocked(task_id, indices, Default::default())
+            .await
+    }
+
+    async fn select_files_with_options_unlocked(
+        &self,
+        task_id: Uuid,
         mut indices: Vec<u32>,
+        options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
         self.ensure_accepting()?;
         let task = self.store.find(task_id)?;
@@ -560,9 +581,9 @@ impl DownloadService {
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",");
-        self.api()
-            .change_option(gid, BTreeMap::from([("select-file".into(), selection)]))
-            .await?;
+        let mut aria2_options = options.into_aria2_options()?;
+        aria2_options.insert("select-file".into(), selection);
+        self.api().change_option(gid, aria2_options).await?;
         if task.status == TaskStatus::AwaitingUser && !self.store.selection_confirmed(task_id)? {
             self.api().unpause(gid).await?;
         }

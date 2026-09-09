@@ -47,3 +47,31 @@ it('keeps selection controls hidden while BitTorrent metadata is loading', () =>
   expect(screen.getByText('正在获取文件信息…')).toBeVisible();
   expect(screen.queryByRole('checkbox', { name: '全选文件' })).not.toBeInTheDocument();
 });
+
+it('uses the torrent root as the title, hides the local path, formats byte sizes, and lets the user choose this task destination', async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  const browseDirectory = vi.fn().mockResolvedValue('E:\\Media');
+  render(<ParseConfirmDialog
+    result={{ ...result, title: 'magnet:?xt=urn:btih:fixture', resources: [
+      { id: 'a', name: 'D://合集/episode.mp4', size: '0 B / 168996012 B', selected: true },
+      { id: 'b', name: 'D://合集/readme.txt', size: '136 B', selected: true }
+    ], isBitTorrent: true }}
+    downloadDirectory={'D:\\'}
+    browseDirectory={browseDirectory}
+    onConfirm={onConfirm}
+    onSelectionChange={() => {}}
+    onClose={() => {}}
+  />);
+
+  expect(screen.getByText('合集')).toBeVisible();
+  expect(screen.getByText('episode.mp4')).toBeVisible();
+  expect(screen.queryByText('D://合集/episode.mp4')).not.toBeInTheDocument();
+  expect(screen.getByText('161.2 MB')).toBeVisible();
+
+  await user.click(screen.getByRole('button', { name: '选择下载目录' }));
+  expect(browseDirectory).toHaveBeenCalledWith('D:\\');
+  expect(await screen.findByText('E:\\Media')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: /立即下载 2/ }));
+  expect(onConfirm).toHaveBeenCalledWith(['a', 'b'], 'E:\\Media');
+});
