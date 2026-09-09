@@ -1,6 +1,6 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { cloudRootDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudFile, type CloudProvider } from '../lib/cloudTypes';
+import { cloudRootDirectoryId, pikpakRecycleBinDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudFile, type CloudProvider } from '../lib/cloudTypes';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
@@ -16,6 +16,7 @@ export interface CloudManagerClient {
   moveCloudFiles(provider: CloudProvider, fileIds: string[], targetParentId: string): Promise<void>;
   copyCloudFiles(provider: CloudProvider, fileIds: string[], targetParentId: string): Promise<void>;
   trashCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
+  deleteCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   downloadCloudFile(provider: CloudProvider, fileId: string): Promise<unknown>;
   logoutCloud(provider: CloudProvider): Promise<void>;
   pickAndUploadFiles(provider: CloudProvider, parentId: string): Promise<readonly CloudFile[] | void>;
@@ -68,6 +69,7 @@ const unavailableClient: CloudManagerClient = {
   moveCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
   copyCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
   trashCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  deleteCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
   downloadCloudFile: () => Promise.reject(new Error('网盘连接器尚未接入')),
   logoutCloud: () => Promise.reject(new Error('网盘连接器尚未接入')),
   pickAndUploadFiles: () => Promise.reject(new Error('网盘连接器尚未接入'))
@@ -134,11 +136,13 @@ function CloudActionIcon({ action }: { action: CloudMenuAction | 'back' | 'clear
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
 
-function CloudContextMenu({ state, selectedCount, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; onAction(action: CloudMenuAction): void; onClose(): void }) {
+function CloudContextMenu({ state, selectedCount, recycleBin, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudMenuAction; label: string; danger?: boolean; separated?: boolean }> = state.kind === 'background'
-    ? [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传文件' }, { action: 'refresh', label: '刷新', separated: true }]
-    : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '删除', danger: true, separated: true }];
+    ? recycleBin ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传文件' }, { action: 'refresh', label: '刷新', separated: true }]
+    : recycleBin
+      ? [{ action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '永久删除', danger: true, separated: true }]
+      : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '删除', danger: true, separated: true }];
   const width = 210;
   const estimatedHeight = items.length * 38 + 24;
   const left = Math.max(8, Math.min(state.x, window.innerWidth - width - 8));
@@ -179,13 +183,17 @@ function CloudContextMenu({ state, selectedCount, onAction, onClose }: { state: 
   </div>, document.body);
 }
 
-function CloudSelectionOverflowMenu({ anchor, singleSelection, disabled, onAction, onClose }: { anchor: { x: number; y: number }; singleSelection: boolean; disabled: boolean; onAction(action: CloudHeaderMenuAction): void; onClose(): void }) {
+function CloudSelectionOverflowMenu({ anchor, singleSelection, recycleBin, disabled, onAction, onClose }: { anchor: { x: number; y: number }; singleSelection: boolean; recycleBin: boolean; disabled: boolean; onAction(action: CloudHeaderMenuAction): void; onClose(): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudHeaderMenuAction; label: string; separated?: boolean }> = [
-    ...(singleSelection ? [{ action: 'rename' as const, label: '重命名' }] : []),
-    { action: 'move' as const, label: '移动', separated: singleSelection },
-    { action: 'copy' as const, label: '复制到' },
-    ...(singleSelection ? [{ action: 'details' as const, label: '文件详情', separated: true }] : [])
+    ...(recycleBin
+      ? singleSelection ? [{ action: 'details' as const, label: '文件详情' }] : []
+      : [
+        ...(singleSelection ? [{ action: 'rename' as const, label: '重命名' }] : []),
+        { action: 'move' as const, label: '移动', separated: singleSelection },
+        { action: 'copy' as const, label: '复制到' },
+        ...(singleSelection ? [{ action: 'details' as const, label: '文件详情', separated: true }] : [])
+      ])
   ];
   const width = 180;
   const estimatedHeight = items.length * 38 + 14;
@@ -296,7 +304,7 @@ function CloudDestinationPicker({ action, provider, client, excludedIds, onChoos
     void load(rootId, [{ id: rootId, name: '根目录' }]);
     return () => { requestSequence.current += 1; };
   }, [client, provider]);
-  const folders = directory?.items.filter((item) => item.kind === 'folder' && !excludedIds.includes(item.id)) ?? [];
+  const folders = directory?.items.filter((item) => item.kind === 'folder' && !excludedIds.includes(item.id) && !(provider === 'pikpak' && item.id === pikpakRecycleBinDirectoryId)) ?? [];
   return createPortal(<div className="cloud-confirm-backdrop">
     <section ref={dialogRef} className="cloud-destination-picker" role="dialog" aria-modal="true" aria-label={`选择${actionLabel}位置`}>
       <header><div><h3>选择{actionLabel}位置</h3><small>当前目录：{current.name}</small></div><button ref={closeRef} aria-label={`关闭${actionLabel}位置选择`} onClick={onClose}>×</button></header>
@@ -355,6 +363,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const activeAccount = accounts.find((account) => account.id === activeAccountId) ?? null;
   const selected = directory?.items.filter((item) => selectedIds.includes(item.id)) ?? [];
   const currentDirectoryId = directory?.id ?? breadcrumbs.at(-1)?.id ?? rootId;
+  const isPikpakRecycleBin = provider === 'pikpak' && currentDirectoryId === pikpakRecycleBinDirectoryId;
   const operationBusy = operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
   const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
@@ -540,6 +549,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function openEditor(next: Exclude<Editor, null>) {
+    if (isPikpakRecycleBin) return;
     setContextMenu(null);
     setEditor(next);
     setEditorValue(next === 'rename' ? selected[0]?.name ?? '' : '');
@@ -564,7 +574,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function openFolder(item: CloudFile) {
-    if (!activeAccount || item.kind !== 'folder' || operationBusy) return;
+    if (!activeAccount || isPikpakRecycleBin || item.kind !== 'folder' || operationBusy) return;
     void loadDirectory(activeAccount, item.id, [...breadcrumbs, { id: item.id, name: item.name }]);
   }
 
@@ -577,6 +587,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function uploadFiles() {
+    if (isPikpakRecycleBin) return;
     void runOperation('上传', () => client.pickAndUploadFiles(provider, currentDirectoryId));
   }
 
@@ -589,12 +600,12 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     setContextMenu(null);
     if (action === 'open' && menu?.kind === 'selection') openFolder(menu.item);
     if (action === 'download') downloadSelection();
-    if (action === 'rename') openEditor('rename');
-    if (action === 'move') setDestinationAction('move');
-    if (action === 'copy') setDestinationAction('copy');
+    if (action === 'rename' && !isPikpakRecycleBin) openEditor('rename');
+    if (action === 'move' && !isPikpakRecycleBin) setDestinationAction('move');
+    if (action === 'copy' && !isPikpakRecycleBin) setDestinationAction('copy');
     if (action === 'details' && menu?.kind === 'selection') setDetailsFile(menu.item);
     if (action === 'delete') setPendingTrash(true);
-    if (action === 'create') openEditor('create');
+    if (action === 'create' && !isPikpakRecycleBin) openEditor('create');
     if (action === 'upload') uploadFiles();
     if (action === 'refresh') refreshDirectory();
   }
@@ -608,9 +619,9 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   function runSelectionOverflowAction(action: CloudHeaderMenuAction) {
     setSelectionMenuAnchor(null);
     selectionMenuTrigger.current?.focus();
-    if (action === 'rename') openEditor('rename');
-    if (action === 'move') setDestinationAction('move');
-    if (action === 'copy') setDestinationAction('copy');
+    if (action === 'rename' && !isPikpakRecycleBin) openEditor('rename');
+    if (action === 'move' && !isPikpakRecycleBin) setDestinationAction('move');
+    if (action === 'copy' && !isPikpakRecycleBin) setDestinationAction('copy');
     if (action === 'details' && selected.length === 1) setDetailsFile(selected[0]);
   }
 
@@ -625,12 +636,12 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       setEditor(null);
       return;
     }
-    if (event.key === 'Enter' && selected.length === 1 && selected[0].kind === 'folder') {
+    if (event.key === 'Enter' && !isPikpakRecycleBin && selected.length === 1 && selected[0].kind === 'folder') {
       event.preventDefault();
       openFolder(selected[0]);
       return;
     }
-    if (event.key === 'F2' && selected.length === 1) {
+    if (event.key === 'F2' && !isPikpakRecycleBin && selected.length === 1) {
       event.preventDefault();
       openEditor('rename');
       return;
@@ -643,7 +654,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   function submitEditor(event: FormEvent) {
     event.preventDefault();
-    if (!activeAccount || !editorValue.trim()) return;
+    if (!activeAccount || isPikpakRecycleBin || !editorValue.trim()) return;
     if (editor === 'create') void runOperation('新建目录', () => client.createCloudDirectory(provider, currentDirectoryId, editorValue.trim()).then(() => undefined));
     if (editor === 'rename' && selected[0]) void runOperation('重命名', () => client.renameCloudFile(provider, selected[0].id, editorValue.trim()));
   }
@@ -700,14 +711,14 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         <div className="cloud-breadcrumbs" role="navigation" aria-label="当前目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1} onClick={() => void loadDirectory(activeAccount, crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label="文件操作">
-        <button className="cloud-toolbar-primary" aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传文件</button>
-        <button aria-label="新建目录" disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />新建文件夹</button>
+        {!isPikpakRecycleBin && <button className="cloud-toolbar-primary" aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传文件</button>}
+        {!isPikpakRecycleBin && <button aria-label="新建目录" disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />新建文件夹</button>}
         <button className="cloud-icon-button cloud-refresh-button" aria-label="刷新" title="刷新" disabled={operationBusy} onClick={refreshDirectory}><CloudActionIcon action="refresh" /></button>
       </div>
     </div>
 
     {editor && <form className="cloud-operation-editor" onSubmit={submitEditor} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setEditor(null); } }}><label>{editor === 'create' ? '目录名称' : '新名称'}<input aria-label={editor === 'create' ? '目录名称' : '新名称'} value={editorValue} onChange={(event) => setEditorValue(event.target.value)} autoFocus /></label><button className="primary" type="submit" disabled={operationBusy}>{editor === 'create' ? '确认新建目录' : '确认重命名'}</button><button type="button" className="secondary" disabled={operationBusy} onClick={() => setEditor(null)}>取消</button></form>}
-    {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label="确认移入回收站"><h3>确认移入回收站</h3><p>所选 {selected.length} 个项目将移入回收站，不会永久删除。</p><button className="secondary" onClick={() => setPendingTrash(false)}>取消</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation('删除', () => client.trashCloudFiles(provider, selectedIds.slice())); }}>移入回收站</button></section></div>}
+    {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={isPikpakRecycleBin ? '确认永久删除' : '确认移入回收站'}><h3>{isPikpakRecycleBin ? '确认永久删除' : '确认移入回收站'}</h3><p>{isPikpakRecycleBin ? `所选 ${selected.length} 个项目将被永久删除，不可恢复。` : `所选 ${selected.length} 个项目将移入回收站，不会永久删除。`}</p><button className="secondary" onClick={() => setPendingTrash(false)}>取消</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation(isPikpakRecycleBin ? '永久删除' : '删除', () => isPikpakRecycleBin ? client.deleteCloudFiles(provider, selectedIds.slice()) : client.trashCloudFiles(provider, selectedIds.slice())); }}>{isPikpakRecycleBin ? '永久删除' : '移入回收站'}</button></section></div>}
     {showSessionActions && logoutConfirmation()}
     {operation && <p className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}>{operation.message}</p>}
     {directoryState === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>正在加载文件…</span></div>}
@@ -720,8 +731,8 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       onKeyDown={handleFileListKeyDown}
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
-      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? directory?.items.map((item) => item.id) ?? [] : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b><span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span><button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : '名称'}</span><span>大小</span><span>修改时间</span></div>
-      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>此目录为空</b><span>可在这里上传文件或新建目录</span></div> : directory?.items.map((item, index) => {
+      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? directory?.items.map((item) => item.id) ?? [] : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b><span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{isPikpakRecycleBin ? '永久删除' : '删除'}</button>{(!isPikpakRecycleBin || selected.length === 1) && <button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button>}</span><button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : '名称'}</span><span>大小</span><span>修改时间</span></div>
+      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isPikpakRecycleBin ? '回收站为空' : '此目录为空'}</b><span>{isPikpakRecycleBin ? '没有可永久删除的项目' : '可在这里上传文件或新建目录'}</span></div> : directory?.items.map((item, index) => {
         const isSelected = selectedIds.includes(item.id);
         return <div
           className={`cloud-row cloud-file-row ${isSelected ? 'selected' : ''}`}
@@ -740,8 +751,8 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         </div>;
       })}
     </div>}
-    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
-    {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
+    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isPikpakRecycleBin} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
+    {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isPikpakRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
     {detailsFile && <CloudFileDetails file={detailsFile} path={`/${breadcrumbs.slice(1).map((crumb) => crumb.name).join('/') || ''}`} onClose={() => setDetailsFile(null)} />}
     {destinationAction && <CloudDestinationPicker action={destinationAction} provider={provider} client={client} excludedIds={selectedIds} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
   </section>;

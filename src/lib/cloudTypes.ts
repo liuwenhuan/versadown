@@ -11,6 +11,8 @@ export const cloudRootDirectoryId: Record<CloudProvider, string> = {
   uc: '0'
 };
 
+export const pikpakRecycleBinDirectoryId = '__all_downloader_pikpak_recycle_bin__';
+
 export interface CloudAccount { provider: CloudProvider; id: string; displayName: string; authMethod: CloudAuthMethod; expiresAt?: string; }
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; }
 export interface CloudDirectory { id: string; items: CloudFile[]; }

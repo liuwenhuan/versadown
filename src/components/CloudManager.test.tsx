@@ -22,6 +22,7 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     moveCloudFiles: vi.fn().mockResolvedValue(undefined),
     copyCloudFiles: vi.fn().mockResolvedValue(undefined),
     trashCloudFiles: vi.fn().mockResolvedValue(undefined),
+    deleteCloudFiles: vi.fn().mockResolvedValue(undefined),
     logoutCloud: vi.fn().mockResolvedValue(undefined),
     getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' })),
     ...overrides
@@ -558,6 +559,74 @@ it('requires a recycle-bin confirmation before deleting selected files', async (
   await user.click(screen.getByRole('button', { name: '移入回收站' }));
   expect(client.trashCloudFiles).toHaveBeenCalledWith('quark', ['file-1']);
   expect(await screen.findByRole('status')).toHaveTextContent('删除成功');
+});
+
+it('limits PikPak recycle-bin items to download and permanent deletion without folder navigation', async () => {
+  const user = userEvent.setup();
+  const recycleBinId = '__all_downloader_pikpak_recycle_bin__';
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [
+        { id: 'deleted-file', parentId: recycleBinId, name: '已删除文件.txt', kind: 'file', size: 12 },
+        { id: 'deleted-folder', parentId: recycleBinId, name: '已删除文件夹', kind: 'folder' }
+      ] }
+      : { id: '0', items: [
+        { id: recycleBinId, parentId: '0', name: '回收站', kind: 'folder' },
+        { id: 'live-file', parentId: '0', name: '仍在网盘的文件.txt', kind: 'file', size: 10 }
+      ] }))
+  });
+  render(<CloudManager provider="pikpak" client={client} initialAccounts={[{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('回收站');
+  fireEvent.doubleClick(screen.getByText('回收站'));
+  const tree = await screen.findByRole('tree', { name: 'PikPak网盘文件' });
+  await screen.findByText('已删除文件.txt');
+  expect(screen.queryByRole('button', { name: '上传' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '新建目录' })).not.toBeInTheDocument();
+
+  fireEvent.contextMenu(tree, { clientX: 260, clientY: 220 });
+  expect(screen.queryByRole('menuitem', { name: '新建目录' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '上传文件' })).not.toBeInTheDocument();
+  expect(screen.getByRole('menuitem', { name: '刷新' })).toBeVisible();
+
+  const deletedFolder = screen.getByTitle('已删除文件夹');
+  fireEvent.contextMenu(deletedFolder, { clientX: 300, clientY: 240 });
+  expect(screen.queryByRole('menuitem', { name: '打开' })).not.toBeInTheDocument();
+  expect(screen.getByRole('menuitem', { name: '永久删除' })).toBeVisible();
+  client.listCloudDirectory.mockClear();
+  fireEvent.doubleClick(deletedFolder);
+  fireEvent.keyDown(tree, { key: 'Enter' });
+  expect(client.listCloudDirectory).not.toHaveBeenCalled();
+
+  await user.click(screen.getByText('已删除文件.txt'));
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  const permanentDeleteDialog = screen.getByRole('alertdialog', { name: '确认永久删除' });
+  expect(permanentDeleteDialog).toHaveTextContent('不可恢复');
+  expect(client.deleteCloudFiles).not.toHaveBeenCalled();
+  await user.click(within(permanentDeleteDialog).getByRole('button', { name: '永久删除', exact: true }));
+  expect(client.deleteCloudFiles).toHaveBeenCalledWith('pikpak', ['deleted-file']);
+  expect(client.trashCloudFiles).not.toHaveBeenCalled();
+});
+
+it('excludes the PikPak recycle-bin virtual folder from move destinations', async () => {
+  const user = userEvent.setup();
+  const recycleBinId = '__all_downloader_pikpak_recycle_bin__';
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
+      { id: recycleBinId, parentId: '0', name: '回收站', kind: 'folder' },
+      { id: 'live-file', parentId: '0', name: '仍在网盘的文件.txt', kind: 'file', size: 10 }
+    ] })
+  });
+  render(<CloudManager provider="pikpak" client={client} initialAccounts={[{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('仍在网盘的文件.txt');
+  await user.click(screen.getByText('仍在网盘的文件.txt'));
+  await user.click(screen.getByRole('button', { name: '更多文件操作' }));
+  await user.click(screen.getByRole('menuitem', { name: '移动' }));
+
+  const picker = await screen.findByRole('dialog', { name: '选择移动位置' });
+  expect(picker).not.toHaveTextContent('回收站');
+  expect(screen.queryByRole('button', { name: '打开 回收站' })).not.toBeInTheDocument();
 });
 
 it('keeps the current file list visible when a cloud operation fails', async () => {
