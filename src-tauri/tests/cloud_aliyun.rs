@@ -109,6 +109,27 @@ fn aliyun_browser_session_uses_the_current_web_bearer_before_refreshing() {
 }
 
 #[test]
+fn aliyun_browser_session_falls_back_when_nick_name_is_empty() {
+    // The current official web account endpoint can return an empty nickname
+    // alongside a populated user_name.  That is still a completed login.
+    let store = MemoryCredentialStore::default();
+    let http = RecordingHttp::sequence([r#"{"user_id":"u1","nick_name":"","user_name":"alice"}"#]);
+    let client = AliyunClient::new(&store, &http);
+
+    let account = client
+        .authorize_browser_session(AliyunSession {
+            refresh_token: "browser-refresh".into(),
+            access_token: "browser-access".into(),
+            drive_id: "browser-drive".into(),
+            browser_access_ready: false,
+        })
+        .unwrap();
+
+    assert_eq!(account.id, "u1");
+    assert_eq!(account.display_name, "alice");
+}
+
+#[test]
 fn aliyun_browser_session_lists_the_root_with_the_same_current_bearer() {
     let store = MemoryCredentialStore::default();
     let http = RecordingHttp::sequence([

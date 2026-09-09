@@ -270,19 +270,16 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
 
     fn account_with(&self, session: &AliyunSession) -> Result<CloudAccount, QuarkError> {
         let value = self.api(session, "/adrive/v2/user/get", json!({}))?;
-        let id = value
-            .get("user_id")
-            .or_else(|| value.get("id"))
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or(QuarkError::InvalidResponse)?;
-        let display_name = value
-            .get("nick_name")
-            .or_else(|| value.get("name"))
-            .or_else(|| value.get("user_name"))
-            .or_else(|| value.get("phone"))
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
+        let non_empty = |keys: &[&str]| {
+            keys.iter().find_map(|key| {
+                value
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .filter(|field| !field.is_empty())
+            })
+        };
+        let id = non_empty(&["user_id", "id"]).ok_or(QuarkError::InvalidResponse)?;
+        let display_name = non_empty(&["nick_name", "name", "user_name", "phone"])
             .ok_or(QuarkError::InvalidResponse)?;
         Ok(CloudAccount {
             provider: CloudProvider::Aliyun,
