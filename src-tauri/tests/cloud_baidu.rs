@@ -100,8 +100,10 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     ]);
     let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local; STOKEN=token"), &http);
 
-    assert_eq!(client.directory("/").unwrap().items[0].name, "movie.mkv");
-    let download = client.download("7").unwrap();
+    let directory = client.directory("/").unwrap();
+    assert_eq!(directory.items[0].name, "movie.mkv");
+    assert_ne!(directory.items[0].id, "7", "ids must remain opaque");
+    let download = client.download(&directory.items[0].id).unwrap();
     assert!(download.url.starts_with("https://"));
     assert!(download.headers.contains_key("Cookie"));
 
@@ -110,50 +112,127 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     assert!(requests[1]
         .url
         .contains("/rest/2.0/xpan/multimedia?method=filemetas"));
+    assert!(requests[1].url.contains("fsids=%5B7%5D"));
     assert!(requests[0].headers["Cookie"].contains("BDUSS=local"));
     assert_eq!(requests[1].headers["Referer"], "https://pan.baidu.com/");
 }
 
 #[test]
-fn baidu_rejects_non_https_dlinks_and_unsafe_mutations_before_transport() {
-    let http = RecordingHttp::sequence(&[
-        r#"{"errno":0,"list":[{"dlink":"http://download.example/file"}]}"#,
-    ]);
+fn baidu_rejects_malformed_references_before_transport() {
+    let http = RecordingHttp::sequence(&[]);
     let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
 
     assert!(matches!(
-        client.download("7"),
+        client.download("bad-reference"),
         Err(QuarkError::InvalidResponse)
     ));
     assert!(matches!(
-        client.mkdir("/", "new folder"),
-        Err(QuarkError::WebAuthorizationRequired)
+        client.rename("bad-reference", "renamed.mkv"),
+        Err(QuarkError::InvalidResponse)
     ));
     assert!(matches!(
-        client.rename("7", "renamed.mkv"),
-        Err(QuarkError::WebAuthorizationRequired)
+        client.mkdir("bad-reference", "new folder"),
+        Err(QuarkError::InvalidResponse)
     ));
-    assert!(matches!(
-        client.move_files(&["7".into()], "/target"),
-        Err(QuarkError::WebAuthorizationRequired)
-    ));
-    assert!(matches!(
-        client.copy_files(&["7".into()], "/target"),
-        Err(QuarkError::WebAuthorizationRequired)
-    ));
-    assert!(matches!(
-        client.trash(&["7".into()]),
-        Err(QuarkError::WebAuthorizationRequired)
-    ));
-    assert!(matches!(
-        client.upload("/", "movie.mkv", 12, "md5"),
-        Err(QuarkError::WebAuthorizationRequired)
-    ));
-    assert_eq!(
-        http.requests().len(),
-        1,
-        "unsafe writes must not reach the transport"
+    assert!(
+        http.requests().is_empty(),
+        "malformed references must not reach the transport"
     );
+}
+
+#[test]
+fn baidu_uses_a_fresh_web_token_and_path_payload_for_every_mutation() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0},{"fs_id":8,"path":"/target","isdir":1}]}"#,
+        r#"{"errno":0,"result":{"bdstoken":"token-1"}}"#,
+        r#"{"errno":0}"#,
+        r#"{"errno":0,"result":{"bdstoken":"token-2"}}"#,
+        r#"{"errno":0}"#,
+        r#"{"errno":0,"result":{"bdstoken":"token-3"}}"#,
+        r#"{"errno":0}"#,
+        r#"{"errno":0,"result":{"bdstoken":"token-4"}}"#,
+        r#"{"errno":0}"#,
+        r#"{"errno":0,"result":{"bdstoken":"token-5"}}"#,
+        r#"{"errno":0}"#,
+        r#"{"errno":0,"result":{"bdstoken":"token-6"}}"#,
+        r#"{"errno":0}"#,
+    ]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+    let directory = client.directory("/").unwrap();
+    let file = directory
+        .items
+        .iter()
+        .find(|item| item.name == "movie.mkv")
+        .unwrap()
+        .id
+        .clone();
+    let target = directory
+        .items
+        .iter()
+        .find(|item| item.name == "target")
+        .unwrap()
+        .id
+        .clone();
+
+    client.mkdir(&target, "child").unwrap();
+    client.rename(&file, "renamed.mkv").unwrap();
+    client.move_files(&[file.clone()], &target).unwrap();
+    client.copy_files(&[file.clone()], &target).unwrap();
+    client.trash(&[file.clone()]).unwrap();
+    client.upload(&target, "upload.mkv", 12, "md5").unwrap();
+
+    let requests = http.requests();
+    for index in (1..requests.len()).step_by(2) {
+        assert!(requests[index].url.contains("/api/gettemplatevariable"));
+        assert!(requests[index + 1]
+            .url
+            .contains(&format!("bdstoken=token-{}", (index + 1) / 2)));
+        assert_eq!(
+            requests[index + 1].headers["Content-Type"],
+            "application/x-www-form-urlencoded"
+        );
+    }
+    assert!(requests[2]
+        .body
+        .as_deref()
+        .unwrap()
+        .contains("path=%2Ftarget%2Fchild"));
+    assert!(requests[4]
+        .body
+        .as_deref()
+        .unwrap()
+        .contains("%2Fmovie.mkv"));
+    assert!(
+        requests[6]
+            .body
+            .as_deref()
+            .unwrap()
+            .contains("%2Fmovie.mkv")
+            && requests[6].body.as_deref().unwrap().contains("%2Ftarget")
+    );
+    assert!(
+        requests[8]
+            .body
+            .as_deref()
+            .unwrap()
+            .contains("%2Fmovie.mkv")
+            && requests[8].body.as_deref().unwrap().contains("%2Ftarget")
+    );
+    assert!(requests[10]
+        .body
+        .as_deref()
+        .unwrap()
+        .contains("%2Fmovie.mkv"));
+    assert!(requests[12]
+        .body
+        .as_deref()
+        .unwrap()
+        .contains("path=%2Ftarget%2Fupload.mkv"));
+    assert!(!requests.iter().skip(1).any(|request| request
+        .body
+        .as_deref()
+        .unwrap_or("")
+        .contains("%227%22")));
 }
 
 #[test]

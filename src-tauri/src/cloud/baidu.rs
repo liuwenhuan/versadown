@@ -3,8 +3,9 @@ use super::{
     CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest, CloudHttpResponse,
     CloudHttpTransport, CloudProvider, QuarkError,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
@@ -12,6 +13,13 @@ const PAN: &str = "https://pan.baidu.com";
 const PASSPORT: &str = "https://passport.baidu.com";
 const BAIDU_WEB_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
+const REFERENCE_PREFIX: &str = "bdr_";
+
+#[derive(Clone, Deserialize, Serialize)]
+struct BaiduFileReference {
+    fsid: String,
+    path: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BaiduSession {
@@ -130,26 +138,35 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
+        let parent = parse_parent_reference(parent)?;
         let value = self.xpan(
             "GET",
             "list",
-            &format!("&dir={}&limit=100&order=name&desc=0", encoded(parent)),
+            &format!("&dir={}&limit=100&order=name&desc=0", encoded(&parent.path)),
             None,
         )?;
         let files = value
             .get("list")
             .and_then(Value::as_array)
             .ok_or(QuarkError::InvalidResponse)?;
+        let directory_id = if parent.path == "/" {
+            "/".into()
+        } else {
+            encode_reference(parent.clone())?
+        };
         let items = files
             .iter()
             .map(|file| {
                 Ok(CloudFile {
-                    id: file
-                        .get("fs_id")
-                        .or_else(|| file.get("fsid"))
-                        .and_then(string_or_number)
-                        .ok_or(QuarkError::InvalidResponse)?,
-                    parent_id: parent.into(),
+                    id: encode_reference(BaiduFileReference {
+                        fsid: file
+                            .get("fs_id")
+                            .or_else(|| file.get("fsid"))
+                            .and_then(string_or_number)
+                            .ok_or(QuarkError::InvalidResponse)?,
+                        path: required(file, "path")?,
+                    })?,
+                    parent_id: directory_id.clone(),
                     name: required(file, "server_filename")
                         .or_else(|_| required(file, "name"))
                         .or_else(|_| {
@@ -172,45 +189,78 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
             })
             .collect::<Result<Vec<_>, QuarkError>>()?;
         Ok(CloudDirectory {
-            id: parent.into(),
+            id: directory_id,
             items,
         })
     }
 
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
-        let _ = (parent, name);
-        Err(QuarkError::WebAuthorizationRequired)
+        let parent = parse_parent_reference(parent)?;
+        let path = join_path(&parent.path, name)?;
+        let token = self.web_token()?;
+        self.web_form(
+            "/api/create",
+            &write_query(&token, "isdir=1&rtype=0"),
+            form(&[("path", path)]),
+        )
+        .map(|_| ())
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<(), QuarkError> {
-        let _ = (id, name);
-        Err(QuarkError::WebAuthorizationRequired)
+        let file = parse_file_reference(id)?;
+        validate_name(name)?;
+        let token = self.web_token()?;
+        self.web_file_manager(
+            "rename",
+            &token,
+            json!([{ "path": file.path, "newname": name }]),
+        )
     }
 
     pub fn move_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
-        self.file_manager("move", ids, parent)
+        self.file_manager_operation("move", ids, parent)
     }
     pub fn copy_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
-        self.file_manager("copy", ids, parent)
+        self.file_manager_operation("copy", ids, parent)
     }
     pub fn trash(&self, ids: &[String]) -> Result<(), QuarkError> {
-        let _ = ids;
-        Err(QuarkError::WebAuthorizationRequired)
+        let paths = ids
+            .iter()
+            .map(|id| parse_file_reference(id).map(|reference| reference.path))
+            .collect::<Result<Vec<_>, _>>()?;
+        if paths.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择文件".into()));
+        }
+        let token = self.web_token()?;
+        self.web_file_manager("delete", &token, json!(paths))
     }
 
-    fn file_manager(
+    fn file_manager_operation(
         &self,
         operation: &str,
         ids: &[String],
         parent: &str,
     ) -> Result<(), QuarkError> {
-        let _ = (operation, ids, parent);
-        Err(QuarkError::WebAuthorizationRequired)
+        let parent = parse_parent_reference(parent)?;
+        let files = ids
+            .iter()
+            .map(|id| parse_file_reference(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        if files.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择文件".into()));
+        }
+        let token = self.web_token()?;
+        self.web_file_manager(
+            operation,
+            &token,
+            json!(files
+                .iter()
+                .map(|file| json!({"path": file.path, "dest": parent.path}))
+                .collect::<Vec<_>>()),
+        )
     }
 
-    /// Writes require a live browser-derived bdstoken and a path map.  Neither
-    /// can be safely derived from an fsid-only session, so do not emit a write
-    /// request until the command layer can provide a validated web session.
+    /// Starts the official web precreate flow after obtaining a fresh token.
     pub fn upload(
         &self,
         parent: &str,
@@ -218,16 +268,32 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
         size: u64,
         content_md5: &str,
     ) -> Result<Value, QuarkError> {
-        let _ = (parent, name, size, content_md5);
-        Err(QuarkError::WebAuthorizationRequired)
+        let parent = parse_parent_reference(parent)?;
+        let path = join_path(&parent.path, name)?;
+        if content_md5.is_empty() {
+            return Err(QuarkError::InvalidInput("文件校验值无效".into()));
+        }
+        let token = self.web_token()?;
+        self.web_form(
+            "/api/precreate",
+            &write_query(&token, ""),
+            form(&[
+                ("path", path),
+                ("size", size.to_string()),
+                ("isdir", "0".into()),
+                ("autoinit", "1".into()),
+                ("block_list", json!([content_md5]).to_string()),
+            ]),
+        )
     }
 
     pub fn download(&self, id: &str) -> Result<BaiduDownload, QuarkError> {
+        let file = parse_file_reference(id)?;
         let value = self.request(
             "GET",
             format!(
                 "{PAN}/rest/2.0/xpan/multimedia?method=filemetas&web=1&dlink=1&fsids={}",
-                encoded(&format!("[{id}]"))
+                encoded(&format!("[{}]", file.fsid))
             ),
             None,
         )?;
@@ -245,10 +311,53 @@ impl<'a, T: CloudHttpTransport> BaiduClient<'a, T> {
             name: item
                 .get("server_filename")
                 .and_then(Value::as_str)
-                .unwrap_or(id)
+                .unwrap_or(&file.path)
                 .into(),
             headers: self.headers(),
         })
+    }
+
+    fn web_token(&self) -> Result<String, QuarkError> {
+        let value = self.request(
+            "GET",
+            format!(
+                "{PAN}/api/gettemplatevariable?clienttype=0&app_id=250528&web=1&fields=%5B%22bdstoken%22%5D"
+            ),
+            None,
+        )?;
+        required(
+            value.get("result").ok_or(QuarkError::InvalidResponse)?,
+            "bdstoken",
+        )
+    }
+
+    fn web_form(&self, path: &str, query: &str, body: String) -> Result<Value, QuarkError> {
+        let mut headers = self.headers();
+        headers.insert(
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        );
+        let response = self.http.send(CloudHttpRequest {
+            method: "POST",
+            url: format!("{PAN}{path}?{query}"),
+            headers,
+            body: Some(body),
+        })?;
+        baidu_json(&response)
+    }
+
+    fn web_file_manager(
+        &self,
+        operation: &str,
+        token: &str,
+        filelist: Value,
+    ) -> Result<(), QuarkError> {
+        self.web_form(
+            "/api/filemanager",
+            &write_query(token, &format!("opera={operation}&async=2&onnest=fail")),
+            form(&[("filelist", filelist.to_string())]),
+        )
+        .map(|_| ())
     }
 
     /// Password login is deliberately single-shot: CAPTCHA, SMS and risk
@@ -336,4 +445,85 @@ fn string_or_number(value: &Value) -> Option<String> {
         .as_str()
         .map(str::to_owned)
         .or_else(|| value.as_u64().map(|number| number.to_string()))
+}
+
+fn encode_reference(reference: BaiduFileReference) -> Result<String, QuarkError> {
+    if reference.fsid.is_empty() || !reference.fsid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(QuarkError::InvalidResponse);
+    }
+    validate_path(&reference.path)?;
+    let bytes = serde_json::to_vec(&reference).map_err(|_| QuarkError::InvalidResponse)?;
+    Ok(format!(
+        "{REFERENCE_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(bytes)
+    ))
+}
+
+fn parse_parent_reference(value: &str) -> Result<BaiduFileReference, QuarkError> {
+    if value == "/" {
+        return Ok(BaiduFileReference {
+            fsid: String::new(),
+            path: "/".into(),
+        });
+    }
+    parse_file_reference(value)
+}
+
+fn parse_file_reference(value: &str) -> Result<BaiduFileReference, QuarkError> {
+    let encoded = value
+        .strip_prefix(REFERENCE_PREFIX)
+        .ok_or(QuarkError::InvalidResponse)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| QuarkError::InvalidResponse)?;
+    let reference: BaiduFileReference =
+        serde_json::from_slice(&bytes).map_err(|_| QuarkError::InvalidResponse)?;
+    if reference.fsid.is_empty() || !reference.fsid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(QuarkError::InvalidResponse);
+    }
+    validate_path(&reference.path)?;
+    Ok(reference)
+}
+
+fn validate_path(path: &str) -> Result<(), QuarkError> {
+    if !path.starts_with('/') || path.contains('\0') || path.contains(['?', '#']) {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<(), QuarkError> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return Err(QuarkError::InvalidInput("文件名无效".into()));
+    }
+    Ok(())
+}
+
+fn join_path(parent: &str, name: &str) -> Result<String, QuarkError> {
+    validate_name(name)?;
+    Ok(if parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{}/{}", parent.trim_end_matches('/'), name)
+    })
+}
+
+fn form(fields: &[(&str, String)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in fields {
+        serializer.append_pair(name, value);
+    }
+    serializer.finish()
+}
+
+fn write_query(token: &str, operation: &str) -> String {
+    let mut query = format!(
+        "bdstoken={}&clienttype=0&app_id=250528&web=1",
+        encoded(token)
+    );
+    if !operation.is_empty() {
+        query.push('&');
+        query.push_str(operation);
+    }
+    query
 }
