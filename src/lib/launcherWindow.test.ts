@@ -63,6 +63,11 @@ it('resizes around the launcher bottom-right corner and clamps it to the work ar
   expect(resized).toEqual({ x: 414, y: 373 });
 });
 
+it('uses a wider transparent compact window only while a live speed is visible', () => {
+  expect(launcherWindow.launcherCompactSize(false)).toEqual({ width: 48, height: 48 });
+  expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 192, height: 48 });
+});
+
 it('restores and reveals the main window before forwarding launcher input', async () => {
   await launcherWindow.sendLauncherInput('https://example.test/file.zip');
 

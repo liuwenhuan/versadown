@@ -281,7 +281,7 @@ async function run() {
     ));
     assert(hiddenAfterCustomClose.exists && !hiddenAfterCustomClose.visible, 'Custom close destroyed or left the main window visible.');
 
-    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.open_manager' })`);
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.hide_manager' })`);
     const shownAfterCustomClose = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
     assert(shownAfterCustomClose.exists && shownAfterCustomClose.visible, 'Launcher could not reopen the custom-hidden manager window.');
     const foregroundAfterCustomReopen = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('foreground_window_handle_for_test')`);
@@ -305,7 +305,7 @@ async function run() {
     assert(hiddenAfterNativeClose.exists && !hiddenAfterNativeClose.visible, 'Native close destroyed or left the main window visible.');
     assert(closeRequestsAfterNativeClose === closeRequestsBeforeNativeClose + 1, 'Native close did not reach the lifecycle handler.');
 
-    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.open_manager' })`);
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.hide_manager' })`);
     const shownAfterNativeClose = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('manager_window_snapshot')`);
     assert(shownAfterNativeClose.exists && shownAfterNativeClose.visible, 'Launcher could not reopen the native-close-hidden manager window.');
     const foregroundAfterNativeReopen = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('foreground_window_handle_for_test')`);
@@ -318,6 +318,15 @@ async function run() {
       Boolean
     );
     assert(settingsVisible, 'Launcher settings action did not navigate the manager to Settings.');
+
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', { action: 'launcher.new_download' })`);
+    const newDownloadVisible = await waitForEvaluation(
+      manager,
+      `Boolean(document.querySelector('.new-download-dialog.modal[role="dialog"]'))`,
+      Boolean
+    );
+    assert(newDownloadVisible, 'Launcher new-download action did not open the manager download dialog.');
+    await evaluate(manager, `document.querySelector('button[aria-label="关闭新建下载"]').click()`);
 
     await evaluate(launcher, 'document.querySelector("button[aria-label=\\"打开下载输入\\"]").click()');
     const expanded = JSON.parse(await waitForEvaluation(

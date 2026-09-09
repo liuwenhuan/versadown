@@ -16,7 +16,7 @@ vi.mock('../lib/api', () => ({
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
 vi.mock('../lib/launcherWindow', () => ({
   anchorLauncherToWorkArea: vi.fn().mockResolvedValue(undefined), sendLauncherInput: vi.fn(),
-  setLauncherCompactShape: vi.fn(), setLauncherExpanded: vi.fn(), showLauncherMenu: vi.fn(), startLauncherDragging: vi.fn()
+  setLauncherCompactShape: vi.fn(), setLauncherExpanded: vi.fn(), setLauncherLiveSpeedVisible: vi.fn(), showLauncherMenu: vi.fn(), startLauncherDragging: vi.fn()
 }));
 vi.mock('../lib/downloadEvents', () => ({
   formatCompactSpeed: (value: number) => `${Math.round(value / 1024)}K`,
@@ -27,6 +27,7 @@ vi.mock('../lib/downloadEvents', () => ({
 }));
 
 import { LauncherWindow } from './LauncherWindow';
+import { setLauncherLiveSpeedVisible } from '../lib/launcherWindow';
 
 beforeEach(() => {
   state.onGlobalStat = undefined;
@@ -42,6 +43,7 @@ it('requests an initial global-stat snapshot after subscribing so startup events
 
   expect(await screen.findByLabelText('下载速度 512 KB/s')).toHaveTextContent('512K');
   expect(state.getGlobalStat).toHaveBeenCalledOnce();
+  expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(true);
 });
 
 it('keeps a compact live-status indicator visible and moves the speed into the expanded panel', async () => {
@@ -53,6 +55,16 @@ it('keeps a compact live-status indicator visible and moves the speed into the e
   await act(async () => { state.onGlobalStat?.({ download_speed: 524_288, num_active: 2 }); });
 
   expect(screen.getByLabelText('下载速度 512 KB/s')).toHaveTextContent('512K');
+  expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(true);
   await user.click(screen.getByRole('button', { name: '打开下载输入' }));
   expect(screen.getByText(/512 KB\/s/)).toBeVisible();
+});
+
+it('keeps the speed capsule visible from the moment aria2 has an active download, including at zero speed', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 0, num_active: 1 });
+  state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });
+  render(<LauncherWindow />);
+
+  expect(await screen.findByLabelText('下载速度 0 KB/s')).toHaveTextContent('0K');
+  expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(true);
 });

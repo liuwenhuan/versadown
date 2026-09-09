@@ -6,6 +6,7 @@ import { isTauriRuntime } from './api';
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
 export const launcherDimensions = {
   compact: { width: 48, height: 48 },
+  live: { width: 192, height: 48 },
   expanded: { width: 470, height: 300 }
 } as const;
 
@@ -40,12 +41,15 @@ export function isLauncherWindow() {
   return isTauriRuntime() && getCurrentWindow().label === LAUNCHER_WINDOW_LABEL;
 }
 
-export async function setLauncherExpanded(expanded: boolean) {
+export function launcherCompactSize(hasLiveSpeed: boolean) {
+  return hasLiveSpeed ? launcherDimensions.live : launcherDimensions.compact;
+}
+
+async function resizeLauncher(size: NativeWindowSize, useCompactShape: boolean) {
   if (!isTauriRuntime()) return;
-  const size = expanded ? launcherDimensions.expanded : launcherDimensions.compact;
   const launcher = getCurrentWindow();
   const [position, currentSize, monitor] = await Promise.all([launcher.outerPosition(), launcher.outerSize(), currentMonitor()]);
-  if (expanded) await setLauncherCompactShape(false);
+  if (!useCompactShape) await setLauncherCompactShape(false);
   await launcher.setSize(new LogicalSize(size.width, size.height));
   const nextSize = await launcher.outerSize();
   if (monitor) {
@@ -58,7 +62,18 @@ export async function setLauncherExpanded(expanded: boolean) {
     );
     await launcher.setPosition(new PhysicalPosition(nextPosition.x, nextPosition.y));
   }
-  if (!expanded) await setLauncherCompactShape(true);
+  if (useCompactShape) await setLauncherCompactShape(true);
+}
+
+export async function setLauncherExpanded(expanded: boolean, hasLiveSpeed = false) {
+  await resizeLauncher(
+    expanded ? launcherDimensions.expanded : launcherCompactSize(hasLiveSpeed),
+    !expanded && !hasLiveSpeed
+  );
+}
+
+export async function setLauncherLiveSpeedVisible(visible: boolean) {
+  await resizeLauncher(launcherCompactSize(visible), !visible);
 }
 
 export async function anchorLauncherToWorkArea() {

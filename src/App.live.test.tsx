@@ -7,12 +7,12 @@ const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
-  confirm: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn()
+  confirm: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
-  confirmDownload: state.confirm, runTaskAction: vi.fn(), selectDownloadFiles: state.selectFiles,
+  confirmDownload: state.confirm, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } },
   getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } }),
@@ -51,6 +51,7 @@ beforeEach(() => {
   state.getEngineState.mockReset();
   state.getEngineState.mockResolvedValue({ available: true, retrying: false });
   state.retryEngine.mockReset();
+  state.taskAction.mockReset();
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -98,6 +99,29 @@ it('upserts a parsed task that already arrived through a live event', async () =
   await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://example.test/archive.iso' }); });
 
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
+});
+
+it('opens the normal new-download dialog from the floating-ball menu command', async () => {
+  state.list.mockResolvedValueOnce([]);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
+
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+});
+
+it('uses the existing native task action for floating-ball batch resume', async () => {
+  const pausedTask: QueueTask = { ...oldTask, id: 'paused-task', status: 'paused' };
+  state.list.mockResolvedValueOnce([pausedTask]);
+  state.taskAction.mockResolvedValueOnce({ task: { ...pausedTask, status: 'downloading' } });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+  await screen.findByText('archive.iso');
+
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'resume-all' }); });
+
+  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('paused-task', 'resume'));
 });
 
 it('reconciles an existing task from a later focus snapshot without dropping a new event task', async () => {

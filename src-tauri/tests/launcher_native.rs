@@ -22,9 +22,13 @@ fn launcher_context_menu_contains_the_required_actions() {
     assert_eq!(
         launcher_menu_entries(),
         [
-            ("launcher.open_manager", "打开下载管理器"),
-            ("launcher.settings", "设置"),
-            ("launcher.quit", "退出"),
+            ("launcher.hide_manager", "隐藏主界面"),
+            ("launcher.new_download", "新建下载"),
+            ("launcher.start_all", "开始全部任务"),
+            ("launcher.pause_all", "暂停全部任务"),
+            ("launcher.settings", "悬浮球设置"),
+            ("launcher.hide", "本次隐藏悬浮球"),
+            ("launcher.quit", "退出万能下载"),
         ]
     );
 }

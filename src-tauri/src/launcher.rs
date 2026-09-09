@@ -3,8 +3,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tauri::{menu::MenuBuilder, AppHandle, Emitter, Manager, State, WebviewWindow};
 
-pub const OPEN_MANAGER: &str = "launcher.open_manager";
+pub const HIDE_MANAGER: &str = "launcher.hide_manager";
+pub const NEW_DOWNLOAD: &str = "launcher.new_download";
+pub const START_ALL: &str = "launcher.start_all";
+pub const PAUSE_ALL: &str = "launcher.pause_all";
 pub const OPEN_SETTINGS: &str = "launcher.settings";
+pub const HIDE_LAUNCHER: &str = "launcher.hide";
 pub const QUIT: &str = "launcher.quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -66,11 +70,15 @@ impl LauncherInteractionState {
     }
 }
 
-pub fn launcher_menu_entries() -> [(&'static str, &'static str); 3] {
+pub fn launcher_menu_entries() -> [(&'static str, &'static str); 7] {
     [
-        (OPEN_MANAGER, "打开下载管理器"),
-        (OPEN_SETTINGS, "设置"),
-        (QUIT, "退出"),
+        (HIDE_MANAGER, "隐藏主界面"),
+        (NEW_DOWNLOAD, "新建下载"),
+        (START_ALL, "开始全部任务"),
+        (PAUSE_ALL, "暂停全部任务"),
+        (OPEN_SETTINGS, "悬浮球设置"),
+        (HIDE_LAUNCHER, "本次隐藏悬浮球"),
+        (QUIT, "退出万能下载"),
     ]
 }
 
@@ -183,11 +191,17 @@ pub fn show_launcher_menu(
     if interaction.is_background_test() {
         return Ok(());
     }
-    let mut builder = MenuBuilder::new(&app);
-    for (id, label) in launcher_menu_entries() {
-        builder = builder.text(id, label);
-    }
-    let menu = builder.build().map_err(|error| error.to_string())?;
+    let menu = MenuBuilder::new(&app)
+        .text(HIDE_MANAGER, "隐藏主界面")
+        .text(NEW_DOWNLOAD, "新建下载")
+        .text(START_ALL, "开始全部任务")
+        .text(PAUSE_ALL, "暂停全部任务")
+        .text(OPEN_SETTINGS, "悬浮球设置")
+        .text(HIDE_LAUNCHER, "本次隐藏悬浮球")
+        .separator()
+        .text(QUIT, "退出万能下载")
+        .build()
+        .map_err(|error| error.to_string())?;
     window.popup_menu(&menu).map_err(|error| error.to_string())
 }
 
@@ -235,10 +249,36 @@ pub fn activate_launcher_menu_for_test(app: AppHandle, action: String) -> Result
 
 pub fn handle_launcher_menu_action(app: &AppHandle, id: &str) {
     match id {
-        OPEN_MANAGER => reveal_manager(app, None),
+        HIDE_MANAGER => toggle_manager_visibility(app),
+        NEW_DOWNLOAD => {
+            reveal_manager(app, Some("downloads"));
+            let _ = app.emit_to("main", "launcher-command", "new-download");
+        }
+        START_ALL => {
+            let _ = app.emit_to("main", "launcher-command", "resume-all");
+        }
+        PAUSE_ALL => {
+            let _ = app.emit_to("main", "launcher-command", "pause-all");
+        }
         OPEN_SETTINGS => reveal_manager(app, Some("settings")),
+        HIDE_LAUNCHER => {
+            if let Some(launcher) = app.get_webview_window("launcher") {
+                let _ = launcher.hide();
+            }
+        }
         QUIT => begin_application_exit(app),
         _ => {}
+    }
+}
+
+fn toggle_manager_visibility(app: &AppHandle) {
+    let Some(manager) = app.get_webview_window("main") else {
+        return;
+    };
+    if manager.is_visible().unwrap_or(false) {
+        let _ = manager.hide();
+    } else {
+        reveal_manager(app, None);
     }
 }
 

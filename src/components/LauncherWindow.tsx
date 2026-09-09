@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { FloatingLauncher } from './FloatingLauncher';
-import { anchorLauncherToWorkArea, sendLauncherInput, setLauncherCompactShape, setLauncherExpanded, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, sendLauncherInput, setLauncherExpanded, setLauncherLiveSpeedVisible, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
 import { getDownloadEngineState, getDownloadGlobalStat, isTauriRuntime } from '../lib/api';
 import { formatCompactSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadEngineState, DownloadGlobalStat } from '../lib/types';
@@ -13,9 +13,17 @@ export function LauncherWindow() {
   const [expanded, setExpanded] = useState(false);
   const statEventEpoch = useRef(0);
   const engineEventEpoch = useRef(0);
+  const hasLiveDownload = activeCount > 0;
+  const compactLiveSpeedVisible = useRef(false);
+  compactLiveSpeedVisible.current = !expanded && hasLiveDownload;
+
   useEffect(() => {
-    void anchorLauncherToWorkArea().then(() => setLauncherCompactShape(true));
+    void anchorLauncherToWorkArea().then(() => setLauncherLiveSpeedVisible(compactLiveSpeedVisible.current));
   }, []);
+
+  useEffect(() => {
+    if (!expanded) void setLauncherLiveSpeedVisible(hasLiveDownload);
+  }, [expanded, hasLiveDownload]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -53,17 +61,17 @@ export function LauncherWindow() {
   }, []);
 
   return (
-    <main className="launcher-shell" aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${hasLiveDownload && !expanded ? 'launcher-speed-active' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
         activeCount={activeCount}
         onParse={(input) => { void sendLauncherInput(input); }}
-        onExpandedChange={(nextExpanded) => { setExpanded(nextExpanded); void setLauncherExpanded(nextExpanded); }}
+        onExpandedChange={(nextExpanded) => { setExpanded(nextExpanded); void setLauncherExpanded(nextExpanded, hasLiveDownload); }}
         onDragStart={() => { void startLauncherDragging(); }}
         onContextMenu={() => { void showLauncherMenu(); }}
       />
-      {downloadSpeed > 0 && (expanded
+      {hasLiveDownload && (expanded
         ? <span className="launcher-live-speed">↓ {Math.round(downloadSpeed / 1024)} KB/s</span>
-        : <span className="launcher-live-indicator" aria-label={`下载速度 ${Math.round(downloadSpeed / 1024)} KB/s`}>{formatCompactSpeed(downloadSpeed)}</span>)}
+        : <span className="launcher-live-indicator" aria-label={`下载速度 ${Math.round(downloadSpeed / 1024)} KB/s`}><span>↓</span>{formatCompactSpeed(downloadSpeed)}<small>/s</small></span>)}
       {!engineAvailable && <span className="launcher-engine-offline" aria-label="下载引擎不可用">!</span>}
     </main>
   );

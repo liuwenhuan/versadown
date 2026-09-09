@@ -91,6 +91,8 @@ export function App() {
   const taskEventEpoch = useRef(0);
   const taskEventVersions = useRef(new Map<string, number>());
   const engineEventEpoch = useRef(0);
+  const tasksRef = useRef<QueueTask[]>(tasks);
+  tasksRef.current = tasks;
 
   function recordTaskEvent(task: QueueTask) {
     taskEventEpoch.current += 1;
@@ -194,6 +196,24 @@ export function App() {
     void updateSettings(next).then(setSettings).catch(() => undefined);
   }
 
+  async function runLauncherBatchAction(command: 'pause' | 'resume') {
+    const targets = tasksRef.current.filter((task) => command === 'pause' ? task.status === 'downloading' : task.status === 'paused');
+    if (!targets.length) return;
+    const results = await Promise.allSettled(targets.map((task) => runTaskAction(task.id, command)));
+    let failure: unknown;
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        failure ??= result.reason;
+        continue;
+      }
+      if (result.value.task) {
+        recordTaskEvent(result.value.task);
+        setTasks((current) => upsertTask(current, result.value.task!));
+      }
+    }
+    if (failure) setNotice({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) });
+  }
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let disposed = false;
@@ -201,6 +221,22 @@ export function App() {
     listen<unknown>('launcher-navigate', (event) => {
       const destination = managerViewFromLauncherPayload(event.payload);
       if (destination) setView(destination);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listen<'new-download' | 'resume-all' | 'pause-all'>('launcher-command', (event) => {
+      if (event.payload === 'new-download') {
+        setView('downloads');
+        setDownloadTab('active');
+        setNewDownloadOpen(true);
+      }
+      if (event.payload === 'resume-all') void runLauncherBatchAction('resume');
+      if (event.payload === 'pause-all') void runLauncherBatchAction('pause');
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
     return () => { disposed = true; unlisten?.(); };
   }, []);
