@@ -138,6 +138,18 @@ it('adds a Quark file tab after web authorization without moving authorization a
   expect(screen.queryByText('退出授权')).not.toBeInTheDocument();
 });
 
+it('automatically adds the Aliyun workspace tab after web authorization completes', async () => {
+  const user = userEvent.setup();
+  const client = createClient();
+  render(<CloudWorkspace client={client as never} />);
+
+  const aliyunAuthorization = await screen.findByRole('region', { name: '阿里账号授权' });
+  await user.click(within(aliyunAuthorization).getByRole('button', { name: '使用网页授权' }));
+
+  expect(await screen.findByRole('tab', { name: '阿里网盘' }, { timeout: 1_500 })).toHaveAttribute('aria-selected', 'false');
+  expect(client.completeCloudAuthorization).toHaveBeenCalledWith('aliyun');
+});
+
 it('recovers accounts into tabs while still opening on cloud management', async () => {
   const client = createClient({ quark: { id: 'q-1', displayName: 'q-alice', provider: 'quark', authMethod: 'web' } });
   render(<CloudWorkspace client={client} />);

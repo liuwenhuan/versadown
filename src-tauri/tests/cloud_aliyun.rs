@@ -1,7 +1,7 @@
 use alldownloader_lib::cloud::{
-    aliyun::AliyunClient, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
-    CloudUploadTransport, CredentialStore, MemoryCredentialStore, QuarkError, UploadHttpRequest,
-    UploadHttpResponse,
+    aliyun::{AliyunClient, AliyunSession},
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, CredentialStore,
+    MemoryCredentialStore, QuarkError, UploadHttpRequest, UploadHttpResponse,
 };
 use std::{collections::VecDeque, io::Write, sync::Mutex};
 
@@ -69,6 +69,71 @@ impl CloudUploadTransport for RecordingHttp {
             .pop_front()
             .ok_or(QuarkError::InvalidResponse)
     }
+}
+
+#[test]
+fn aliyun_browser_session_uses_the_current_web_bearer_before_refreshing() {
+    // A just-completed official web login already supplies a valid bearer token.
+    // The authorization handshake must use it directly, so a transient refresh
+    // endpoint failure cannot keep the authorization window open.
+    let store = MemoryCredentialStore::default();
+    let http = RecordingHttp::sequence([r#"{"user_id":"u1","nick_name":"alice"}"#]);
+    let client = AliyunClient::new(&store, &http);
+
+    let account = client
+        .authorize_browser_session(AliyunSession {
+            refresh_token: "browser-refresh".into(),
+            access_token: "browser-access".into(),
+            drive_id: "browser-drive".into(),
+            browser_access_ready: false,
+        })
+        .unwrap();
+
+    assert_eq!(account.id, "u1");
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.aliyundrive.com/adrive/v2/user/get"
+    );
+    assert_eq!(
+        requests[0].headers["Authorization"],
+        "Bearer browser-access"
+    );
+    drop(requests);
+    let persisted = String::from_utf8(store.load("aliyun").unwrap().unwrap()).unwrap();
+    assert!(persisted.contains("browser-refresh"));
+    assert!(persisted.contains("browser-access"));
+    assert!(persisted.contains("browser-drive"));
+    assert!(persisted.contains("browser_access_ready"));
+}
+
+#[test]
+fn aliyun_browser_session_lists_the_root_with_the_same_current_bearer() {
+    let store = MemoryCredentialStore::default();
+    let http = RecordingHttp::sequence([
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[{"file_id":"f1","parent_file_id":"root","name":"from-web.txt","type":"file"}]}"#,
+    ]);
+    let client = AliyunClient::new(&store, &http);
+    client
+        .authorize_browser_session(AliyunSession {
+            refresh_token: "browser-refresh".into(),
+            access_token: "browser-access".into(),
+            drive_id: "browser-drive".into(),
+            browser_access_ready: false,
+        })
+        .unwrap();
+
+    let root = client.directory("root").unwrap();
+
+    assert_eq!(root.items[0].name, "from-web.txt");
+    let requests = http.requests.lock().unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| !request.url.ends_with("/token/refresh")));
+    assert_eq!(requests.len(), 3);
 }
 
 #[test]

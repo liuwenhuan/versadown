@@ -331,17 +331,22 @@ const WEB_TOKENS_JS: &str = r#"(() => {
 const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
  if (location.protocol !== 'https:' || !(['aliyundrive.com','alipan.com'].some(h => location.hostname === h || location.hostname.endsWith('.' + h)))) return null;
  const out = {}; const seen = new Set();
+ const fields = {
+  access_token: ['access_token', 'accessToken'], refresh_token: ['refresh_token', 'refreshToken'],
+  default_drive_id: ['default_drive_id', 'defaultDriveId', 'drive_id', 'driveId']
+ };
  function inspect(v, depth) {
   if (!v || depth > 6) return;
   if (typeof v === 'string') { try { inspect(JSON.parse(v), depth + 1); } catch (_) {} return; }
   if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
   for (const [k, x] of Object.entries(v)) {
-   if (['refresh_token','refreshToken'].includes(k) && typeof x === 'string') out.refresh_token = x;
+   const target = Object.entries(fields).find(([, names]) => names.includes(k));
+   if (target && typeof x === 'string' && x) out[target[0]] = x;
    else if (!/password/i.test(k)) inspect(x, depth + 1);
   }
  }
  for (const storage of [localStorage, sessionStorage]) for (let i = 0; i < storage.length; i++) inspect({[storage.key(i)]: storage.getItem(storage.key(i))}, 0);
- return out.refresh_token ? out : null;
+ return out.access_token && out.refresh_token && out.default_drive_id ? out : null;
 })()"#;
 
 const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
@@ -372,8 +377,21 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
  return out.access_token && out.refresh_token && out.client_id && out.device_id && out.client_version && out.package_name && out.user_agent ? out : null;
 })()"#;
 
-fn parse_aliyun_web_refresh_token(value: serde_json::Value) -> Result<String, QuarkError> {
-    required(&value, "refresh_token").map_err(|_| QuarkError::AuthorizationPending)
+fn parse_aliyun_web_session(value: serde_json::Value) -> Result<aliyun::AliyunSession, QuarkError> {
+    let required_field = |names: &[&str]| {
+        names
+            .iter()
+            .find_map(|name| value.get(*name).and_then(serde_json::Value::as_str))
+            .filter(|field| !field.is_empty())
+            .map(str::to_owned)
+            .ok_or(QuarkError::AuthorizationPending)
+    };
+    Ok(aliyun::AliyunSession {
+        access_token: required_field(&["access_token", "accessToken"])?,
+        refresh_token: required_field(&["refresh_token", "refreshToken"])?,
+        drive_id: required_field(&["default_drive_id", "defaultDriveId", "drive_id", "driveId"])?,
+        browser_access_ready: false,
+    })
 }
 
 fn find_created_directory(directory: CloudDirectory, name: &str) -> Result<CloudFile, QuarkError> {
@@ -528,12 +546,9 @@ pub async fn cloud_complete_authorization(
             CloudProvider::Aliyun => {
                 let temporary = MemoryCredentialStore::default();
                 let client = aliyun::AliyunClient::new(&temporary, http);
-                let refresh_token = parse_aliyun_web_refresh_token(web_storage_tokens(
-                    &window,
-                    ALIYUN_WEB_TOKENS_JS,
-                )?)?;
-                let account =
-                    authorization_result(client.authorize_browser_refresh_token(&refresh_token))?;
+                let session =
+                    parse_aliyun_web_session(web_storage_tokens(&window, ALIYUN_WEB_TOKENS_JS)?)?;
+                let account = authorization_result(client.authorize_browser_session(session))?;
                 state.store.save(
                     CloudProvider::Aliyun.key(),
                     &temporary
@@ -1363,6 +1378,20 @@ mod tests {
 
         assert!(session.profile.client_secret.is_empty());
         assert_eq!(session.user_id, "browser-user");
+    }
+
+    #[test]
+    fn aliyun_browser_token_keeps_the_current_bearer_and_default_drive() {
+        let session = super::parse_aliyun_web_session(serde_json::json!({
+            "access_token": "browser-access",
+            "refresh_token": "browser-refresh",
+            "default_drive_id": "browser-drive",
+        }))
+        .unwrap();
+
+        assert_eq!(session.access_token, "browser-access");
+        assert_eq!(session.refresh_token, "browser-refresh");
+        assert_eq!(session.drive_id, "browser-drive");
     }
 }
 

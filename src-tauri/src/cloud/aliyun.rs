@@ -24,6 +24,9 @@ pub struct AliyunSession {
     pub refresh_token: String,
     pub access_token: String,
     pub drive_id: String,
+    /// The current bearer was captured immediately after the official web login.
+    #[serde(default)]
+    pub browser_access_ready: bool,
 }
 
 pub struct AliyunClient<'a, S: CredentialStore, T: CloudHttpTransport> {
@@ -43,7 +46,10 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
             .ok_or(QuarkError::AuthorizationExpired)?;
         let session: AliyunSession =
             serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
-        if session.refresh_token.is_empty() || session.drive_id.is_empty() {
+        if session.refresh_token.is_empty()
+            || session.access_token.is_empty()
+            || session.drive_id.is_empty()
+        {
             return Err(QuarkError::AuthorizationExpired);
         }
         Ok(session)
@@ -131,6 +137,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
                 .filter(|id| !id.is_empty())
                 .unwrap_or(&previous.drive_id)
                 .to_owned(),
+            browser_access_ready: false,
         })
     }
 
@@ -206,8 +213,29 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
             refresh_token: refresh_token.into(),
             access_token: String::new(),
             drive_id: String::new(),
+            browser_access_ready: false,
         })?;
         let (account, _) = self.validate(&session)?;
+        self.save(&session)?;
+        Ok(account)
+    }
+
+    /// Accept an official browser session before rotating its refresh token.
+    /// The access token was just issued by the authenticated web page, and
+    /// validating it directly prevents a needless first refresh from trapping a
+    /// successful login in its authorization window.
+    pub fn authorize_browser_session(
+        &self,
+        mut session: AliyunSession,
+    ) -> Result<CloudAccount, QuarkError> {
+        if session.refresh_token.trim().is_empty()
+            || session.access_token.trim().is_empty()
+            || session.drive_id.trim().is_empty()
+        {
+            return Err(QuarkError::InvalidInput("网页登录会话不完整".into()));
+        }
+        let account = self.account_with(&session)?;
+        session.browser_access_ready = true;
         self.save(&session)?;
         Ok(account)
     }
@@ -217,7 +245,15 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     fn refreshed_validated_session(
         &self,
     ) -> Result<(AliyunSession, CloudAccount, CloudDirectory), QuarkError> {
-        let session = self.refresh(&self.stored()?)?;
+        let previous = self.stored()?;
+        if previous.browser_access_ready {
+            match self.validate(&previous) {
+                Ok((account, root)) => return Ok((previous, account, root)),
+                Err(QuarkError::AuthorizationExpired) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let session = self.refresh(&previous)?;
         let (account, root) = self.validate(&session)?;
         self.save(&session)?;
         Ok((session, account, root))
