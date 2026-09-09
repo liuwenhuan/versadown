@@ -1,5 +1,7 @@
 use alldownloader_lib::cloud::{
-    xunlei::{XunleiClient, XunleiClientProfile, XunleiResumableUpload, XunleiSession},
+    xunlei::{
+        XunleiClient, XunleiClientProfile, XunleiResumableUpload, XunleiSession, XunleiWebContext,
+    },
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
     UploadHttpRequest, UploadHttpResponse,
 };
@@ -84,6 +86,15 @@ fn profile() -> XunleiClientProfile {
     }
 }
 
+fn web_context() -> XunleiWebContext {
+    XunleiWebContext {
+        session_id: "web-session".into(),
+        peer_id: "official-peer".into(),
+        device_id: "official-device".into(),
+        credit_key: "official-credit".into(),
+    }
+}
+
 // Break caught: omitting the native refresh exchange, token rotation, or either
 // required authenticated-drive header makes the directory request invalid.
 #[test]
@@ -149,6 +160,12 @@ fn xunlei_expiry_codes_map_to_authorization_expired_before_generic_json_mapping(
 fn xunlei_sensitive_debug_output_is_redacted() {
     let mut session = XunleiSession::with_access("access-secret", "refresh-secret", profile());
     session.security_token = "captcha-secret".into();
+    session.web_context = XunleiWebContext {
+        session_id: "session-cookie-secret".into(),
+        peer_id: "peer-cookie-secret".into(),
+        device_id: "device-cookie-secret".into(),
+        credit_key: "credit-cookie-secret".into(),
+    };
     let upload = XunleiResumableUpload {
         upload_type: "UPLOAD_TYPE_RESUMABLE".into(),
         kind: "drive#resumable".into(),
@@ -168,6 +185,10 @@ fn xunlei_sensitive_debug_output_is_redacted() {
         "refresh-secret",
         "browser-client-secret",
         "captcha-secret",
+        "session-cookie-secret",
+        "peer-cookie-secret",
+        "device-cookie-secret",
+        "credit-cookie-secret",
         "access-key-secret",
         "upload-key-secret",
         "upload-security-secret",
@@ -203,7 +224,7 @@ fn xunlei_web_session_without_native_profile_uses_the_current_browser_bearer() {
     // does not expose its native client identity.  A completed browser login
     // must still be storable and use its current bearer for the first drive
     // request instead of remaining permanently pending.
-    let session = XunleiSession::from_web_authorization(
+    let mut session = XunleiSession::from_web_authorization(
         "current-browser-access",
         "browser-refresh",
         "web-user-42",
@@ -212,6 +233,7 @@ fn xunlei_web_session_without_native_profile_uses_the_current_browser_bearer() {
         0,
     )
     .expect("official browser session without native identity is usable");
+    session.web_context = web_context();
     let http = RecordingHttp::sequence(&[r#"{"files":[],"next_page_token":""}"#]);
     let client = XunleiClient::new(session, &http);
 
@@ -225,6 +247,108 @@ fn xunlei_web_session_without_native_profile_uses_the_current_browser_bearer() {
 }
 
 #[test]
+fn xunlei_old_web_session_without_browser_cookie_context_requires_reauthorization() {
+    // A pre-cookie-capture session must fail closed. Sending guessed peer or
+    // session headers reaches Xunlei but is rejected as `invalid_argument`.
+    let session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        XunleiClientProfile::default(),
+        0,
+    )
+    .unwrap();
+    let http = RecordingHttp::sequence(&[r#"{"files":[],"next_page_token":""}"#]);
+
+    assert!(matches!(
+        XunleiClient::new(session, &http).directory("0"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(http.requests().is_empty());
+}
+
+#[test]
+fn xunlei_old_web_session_without_browser_cookie_context_cannot_restore_an_account() {
+    let session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        XunleiClientProfile::default(),
+        0,
+    )
+    .unwrap();
+    let http = RecordingHttp::sequence(&[]);
+
+    assert!(matches!(
+        XunleiClient::new(session, &http).web_account(),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(http.requests().is_empty());
+}
+
+#[test]
+fn xunlei_web_session_replays_only_its_captured_browser_context() {
+    let mut session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        XunleiClientProfile {
+            user_agent: "OfficialBrowser/1.0".into(),
+            ..XunleiClientProfile::default()
+        },
+        0,
+    )
+    .unwrap();
+    session.web_context = XunleiWebContext {
+        session_id: "web-session".into(),
+        peer_id: "official-peer".into(),
+        device_id: "official-device".into(),
+        credit_key: "official-credit".into(),
+    };
+    let http = RecordingHttp::sequence(&[r#"{"files":[],"next_page_token":""}"#]);
+
+    XunleiClient::new(session, &http).directory("0").unwrap();
+
+    let request = http.requests().pop().unwrap();
+    assert_eq!(
+        request.headers.get("Peer-Id"),
+        Some(&"official-peer".into())
+    );
+    assert_eq!(
+        request.headers.get("Guid"),
+        Some(&format!("{:x}", md5::compute(b"official-peer")))
+    );
+    assert_eq!(request.headers.get("User-Id"), Some(&"web-user-42".into()));
+    assert_eq!(
+        request.headers.get("Session-Id"),
+        Some(&"web-session".into())
+    );
+    assert_eq!(
+        request.headers.get("Credit-Key"),
+        Some(&"official-credit".into())
+    );
+    assert_eq!(request.headers.get("Version-Code"), Some(&"1.92.98".into()));
+    assert_eq!(
+        request.headers.get("User-Agent"),
+        Some(&"OfficialBrowser/1.0".into())
+    );
+    assert!(!request.headers.contains_key("Cookie"));
+    let query = url::Url::parse(&request.url)
+        .unwrap()
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    assert!(query.contains(&("_sessid".into(), "web-session".into())));
+    assert!(query.contains(&("_uid".into(), "web-user-42".into())));
+    assert!(query
+        .iter()
+        .any(|(key, value)| key == "_h[]" && value == "Credit-Key: official-credit"));
+}
+
+#[test]
 fn xunlei_web_session_with_real_browser_identity_but_no_secret_uses_current_bearer() {
     // The official web client may expose its browser device/profile without
     // exposing a native refresh secret. That identity must be forwarded to
@@ -232,7 +356,7 @@ fn xunlei_web_session_with_real_browser_identity_but_no_secret_uses_current_bear
     // look refreshable or expired.
     let mut web_profile = profile();
     web_profile.client_secret.clear();
-    let session = XunleiSession::from_web_authorization(
+    let mut session = XunleiSession::from_web_authorization(
         "current-browser-access",
         "browser-refresh",
         "web-user-42",
@@ -241,6 +365,7 @@ fn xunlei_web_session_with_real_browser_identity_but_no_secret_uses_current_bear
         0,
     )
     .expect("official web identity without a native secret is usable");
+    session.web_context = web_context();
     let http = RecordingHttp::sequence(&[r#"{"files":[],"next_page_token":""}"#]);
     let client = XunleiClient::new(session, &http);
 
@@ -262,7 +387,7 @@ fn xunlei_web_session_builds_a_display_account_without_network_or_refresh() {
     // native refresh requiring a secret that the web client never exposes.
     let mut web_profile = profile();
     web_profile.client_secret.clear();
-    let session = XunleiSession::from_web_authorization(
+    let mut session = XunleiSession::from_web_authorization(
         "current-browser-access",
         "browser-refresh",
         "web-user-42",
@@ -271,6 +396,7 @@ fn xunlei_web_session_builds_a_display_account_without_network_or_refresh() {
         0,
     )
     .unwrap();
+    session.web_context = web_context();
     let http = RecordingHttp::sequence(&[]);
     let client = XunleiClient::new(session, &http);
 

@@ -25,6 +25,7 @@ use std::{
 
 const AUTH: &str = "https://xluser-ssl.xunlei.com";
 const DRIVE: &str = "https://api-pan.xunlei.com";
+const WEB_VERSION_CODE: &str = "1.92.98";
 /// Non-secret identity values captured from the official browser/QR flow.
 /// They are retained because Xunlei binds refresh and drive calls to that
 /// profile; callers must never fabricate a replacement profile.
@@ -39,6 +40,39 @@ pub struct XunleiClientProfile {
     pub client_version: String,
     pub package_name: String,
     pub user_agent: String,
+}
+
+/// Browser-only context selected from the official Xunlei web session. These
+/// values remain inside the encrypted provider session and are never logged.
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct XunleiWebContext {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub peer_id: String,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub credit_key: String,
+}
+
+impl XunleiWebContext {
+    fn is_complete(&self) -> bool {
+        !self.session_id.is_empty()
+            && (!self.peer_id.is_empty() || !self.device_id.is_empty())
+            && !self.credit_key.is_empty()
+    }
+}
+
+impl fmt::Debug for XunleiWebContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XunleiWebContext")
+            .field("session_id", &"<redacted>")
+            .field("peer_id", &"<redacted>")
+            .field("device_id", &"<redacted>")
+            .field("credit_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl XunleiClientProfile {
@@ -88,6 +122,9 @@ pub struct XunleiSession {
     /// It is sent only to Xunlei and is never logged or placed in task sources.
     #[serde(default)]
     pub security_token: String,
+    /// The narrow cookie allowlist required by the official web drive API.
+    #[serde(default)]
+    pub web_context: XunleiWebContext,
     #[serde(default)]
     pub auth_method: CloudAuthMethod,
 }
@@ -101,6 +138,7 @@ impl fmt::Debug for XunleiSession {
             .field("profile", &self.profile)
             .field("user_id", &self.user_id)
             .field("security_token", &"<redacted>")
+            .field("web_context", &self.web_context)
             .field("auth_method", &self.auth_method)
             .finish()
     }
@@ -115,6 +153,7 @@ impl XunleiSession {
             profile,
             user_id: String::new(),
             security_token: String::new(),
+            web_context: XunleiWebContext::default(),
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -131,6 +170,7 @@ impl XunleiSession {
             profile,
             user_id: String::new(),
             security_token: String::new(),
+            web_context: XunleiWebContext::default(),
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -151,6 +191,7 @@ impl XunleiSession {
             profile,
             user_id: user_id.into(),
             security_token: security_token.into(),
+            web_context: XunleiWebContext::default(),
             auth_method: CloudAuthMethod::Web,
         };
         if session.access_token.is_empty() || session.refresh_token.is_empty() {
@@ -255,6 +296,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         if session.access_token.is_empty() || session.user_id.is_empty() {
             return Err(QuarkError::AuthorizationPending);
         }
+        if Self::is_browser_bearer_session(&session) && !session.web_context.is_complete() {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
         let id = (!session.user_id.is_empty())
             .then_some(session.user_id)
             .ok_or(QuarkError::AuthorizationPending)?;
@@ -274,6 +318,42 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             ("User-Agent".into(), profile.user_agent.clone()),
             ("Accept".into(), "application/json;charset=UTF-8".into()),
         ])
+    }
+
+    fn browser_protocol_headers(&self, session: &XunleiSession) -> Vec<(String, String)> {
+        let peer_id = if session.web_context.peer_id.is_empty() {
+            session.web_context.device_id.clone()
+        } else {
+            session.web_context.peer_id.clone()
+        };
+        vec![
+            ("Peer-Id".into(), peer_id.clone()),
+            (
+                "Guid".into(),
+                format!("{:x}", md5::compute(peer_id.as_bytes())),
+            ),
+            ("User-Id".into(), session.user_id.clone()),
+            ("Session-Id".into(), session.web_context.session_id.clone()),
+            ("Version-Code".into(), WEB_VERSION_CODE.into()),
+            ("Credit-Key".into(), session.web_context.credit_key.clone()),
+        ]
+    }
+
+    fn drive_url(&self, path: &str) -> String {
+        let session = self.session();
+        let raw = format!("{DRIVE}{path}");
+        if !Self::is_browser_bearer_session(&session) {
+            return raw;
+        }
+        let mut url = url::Url::parse(&raw).expect("Xunlei drive URL is constant");
+        let mut query = url.query_pairs_mut();
+        query.append_pair("_sessid", &session.web_context.session_id);
+        query.append_pair("_uid", &session.user_id);
+        for (name, value) in self.browser_protocol_headers(&session) {
+            query.append_pair("_h[]", &format!("{name}: {value}"));
+        }
+        drop(query);
+        url.into()
     }
 
     fn challenge(value: &Value, status: u16) -> bool {
@@ -394,6 +474,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         {
             return Err(QuarkError::AuthorizationExpired);
         }
+        if Self::is_browser_bearer_session(session) && !session.web_context.is_complete() {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
         let mut headers = session
             .profile
             .is_drive_complete()
@@ -405,6 +488,17 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         );
         if !session.security_token.is_empty() {
             headers.insert("X-Captcha-Token".into(), session.security_token.clone());
+        }
+        if Self::is_browser_bearer_session(session) {
+            headers.extend(self.browser_protocol_headers(session));
+            headers.insert("Origin".into(), "https://pan.xunlei.com".into());
+            headers.insert("Referer".into(), "https://pan.xunlei.com/".into());
+            headers
+                .entry("Accept".into())
+                .or_insert_with(|| "application/json;charset=UTF-8".into());
+            if !session.profile.user_agent.is_empty() {
+                headers.insert("User-Agent".into(), session.profile.user_agent.clone());
+            }
         }
         self.value(self.http.send(CloudHttpRequest {
             method,
@@ -462,15 +556,20 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         let mut items = Vec::new();
         let mut page_token = String::new();
         let mut pages = HashSet::new();
+        let request_parent = if Self::is_browser_bearer_session(&self.session()) && parent == "0" {
+            ""
+        } else {
+            parent
+        };
         loop {
             let value = self.request(
                 "GET",
-                format!(
-                    "{DRIVE}/drive/v1/files?space=&__type=drive&refresh=true&__sync=true&parent_id={}&page_token={}&with_audit=true&limit=100&filters={}",
-                    encoded(parent),
+                self.drive_url(&format!(
+                    "/drive/v1/files?space=&__type=drive&refresh=true&__sync=true&parent_id={}&page_token={}&with_audit=true&limit=100&filters={}",
+                    encoded(request_parent),
                     encoded(&page_token),
                     encoded(r#"{"phase":{"eq":"PHASE_TYPE_COMPLETE"},"trashed":{"eq":false}}"#),
-                ),
+                )),
                 None,
             )?;
             for file in value["files"]
@@ -520,7 +619,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
         self.request(
             "POST",
-            format!("{DRIVE}/drive/v1/files"),
+            self.drive_url("/drive/v1/files"),
             Some(json!({"kind":"drive#folder","parent_id":parent,"name":name})),
         )?;
         Ok(())
@@ -529,7 +628,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     pub fn rename(&self, id: &str, name: &str) -> Result<(), QuarkError> {
         self.request(
             "PATCH",
-            format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
+            self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
             Some(json!({"name":name})),
         )?;
         Ok(())
@@ -538,7 +637,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     pub fn move_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
         self.request(
             "POST",
-            format!("{DRIVE}/drive/v1/files:batchMove"),
+            self.drive_url("/drive/v1/files:batchMove"),
             Some(json!({"ids":ids,"to":{"parent_id":parent}})),
         )?;
         Ok(())
@@ -547,7 +646,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     pub fn copy_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
         self.request(
             "POST",
-            format!("{DRIVE}/drive/v1/files:batchCopy"),
+            self.drive_url("/drive/v1/files:batchCopy"),
             Some(json!({"ids":ids,"to":{"parent_id":parent}})),
         )?;
         Ok(())
@@ -557,7 +656,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         for id in ids {
             self.request(
                 "PATCH",
-                format!("{DRIVE}/drive/v1/files/{}/trash", encoded(id)),
+                self.drive_url(&format!("/drive/v1/files/{}/trash", encoded(id))),
                 Some(json!({})),
             )?;
         }
@@ -579,7 +678,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         }
         let value = self.request(
             "POST",
-            format!("{DRIVE}/drive/v1/files"),
+            self.drive_url("/drive/v1/files"),
             Some(json!({
                 "kind":"drive#file",
                 "parent_id":parent,
@@ -600,7 +699,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
         let value = self.request(
             "GET",
-            format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
+            self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
             None,
         )?;
         let file = value.get("data").unwrap_or(&value);
@@ -634,7 +733,7 @@ impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
         let gcid = xunlei_gcid(path, size)?;
         let value = self.request(
             "POST",
-            format!("{DRIVE}/drive/v1/files"),
+            self.drive_url("/drive/v1/files"),
             Some(json!({
                 "kind":"drive#file",
                 "parent_id":parent,

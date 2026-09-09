@@ -213,6 +213,42 @@ fn browser_cookies(
         .collect())
 }
 
+// The official Xunlei web bundle reads only these cookie names to construct
+// its drive headers. Keep the native bridge equally narrow: values outside
+// this allowlist never leave the WebView cookie store.
+const XUNLEI_WEB_COOKIE_ALLOWLIST: [&str; 4] = ["sessionid", "peerid", "deviceid", "creditkey"];
+
+fn xunlei_web_context(
+    window: &tauri::WebviewWindow,
+) -> Result<xunlei::XunleiWebContext, QuarkError> {
+    let mut context = xunlei::XunleiWebContext::default();
+    for url in ["https://pan.xunlei.com", "https://api-pan.xunlei.com"] {
+        for cookie in window
+            .cookies_for_url(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
+            .map_err(|_| QuarkError::WebAuthorizationRequired)?
+        {
+            if !XUNLEI_WEB_COOKIE_ALLOWLIST.contains(&cookie.name()) {
+                continue;
+            }
+            let value = cookie.value().to_owned();
+            match cookie.name() {
+                "sessionid" => context.session_id = value,
+                "peerid" => context.peer_id = value,
+                "deviceid" => context.device_id = value,
+                "creditkey" => context.credit_key = value,
+                _ => continue,
+            }
+        }
+    }
+    if context.session_id.is_empty()
+        || (context.peer_id.is_empty() && context.device_id.is_empty())
+        || context.credit_key.is_empty()
+    {
+        return Err(QuarkError::AuthorizationPending);
+    }
+    Ok(context)
+}
+
 fn web_value(raw: &str) -> Result<serde_json::Value, QuarkError> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|_| QuarkError::AuthorizationPending)?;
@@ -677,8 +713,9 @@ pub async fn cloud_complete_authorization(
                 Ok(account)
             }
             CloudProvider::Xunlei => {
-                let session =
+                let mut session =
                     parse_xunlei_web_session(web_storage_tokens(&window, XUNLEI_WEB_TOKENS_JS)?)?;
+                session.web_context = xunlei_web_context(&window)?;
                 let client = xunlei::XunleiClient::new(session, http);
                 // The browser does not expose Xunlei's native client secret.
                 // Persist the valid web session and create its workspace
@@ -1679,6 +1716,20 @@ mod tests {
         assert!(source.contains("'userId','userid','userID','id'"));
         assert!(source.contains("'user_security_token'"));
         assert!(source.contains("window.__NUXT__?.state?.users?.curUser"));
+    }
+
+    #[test]
+    fn xunlei_web_capture_has_a_strict_cookie_allowlist() {
+        let source = include_str!("commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes its tests");
+
+        assert!(source.contains("XUNLEI_WEB_COOKIE_ALLOWLIST"));
+        for name in ["sessionid", "peerid", "deviceid", "creditkey"] {
+            assert!(source.contains(&format!("\"{name}\"")));
+        }
+        assert!(source.contains("fn xunlei_web_context("));
     }
 
     #[test]
