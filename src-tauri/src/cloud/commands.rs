@@ -628,10 +628,11 @@ fn finalize_tianyi_web_authorization(
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
     let client = tianyi::TianyiClient::new(session.clone(), http);
+    // The web window owns login, but a candidate session must prove it can
+    // read the drive before replacing a previously usable stored session.
+    // The caller only closes the authorization window after this succeeds.
+    client.directory("-11")?;
     let account = client.web_account()?;
-    // The official browser session is the authorization boundary. Keep both
-    // private account and root-directory requests in normal file-management
-    // flow: either can fail independently despite a completed browser login.
     save_provider_session(CloudProvider::Tianyi, store, &session)?;
     Ok(account)
 }
@@ -1635,13 +1636,28 @@ mod tests {
         }
     }
 
-    struct OfflineTransport;
+    struct TianyiRootAcceptingTransport(Mutex<u8>);
 
-    impl CloudHttpTransport for OfflineTransport {
+    impl CloudHttpTransport for TianyiRootAcceptingTransport {
         fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
-            Err(QuarkError::Transport(
-                "private account endpoint unavailable".into(),
-            ))
+            *self.0.lock().unwrap() += 1;
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: r#"{"res_code":0,"fileListAO":{"fileList":[{"id":"root-fixture","name":"fixture","isFolder":false}]}}"#.into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct TianyiRootRejectingTransport;
+
+    impl CloudHttpTransport for TianyiRootRejectingTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Ok(CloudHttpResponse {
+                status: 400,
+                body: r#"{"success":false,"errorCode":"session_not_accepted"}"#.into(),
+                ..Default::default()
+            })
         }
     }
 
@@ -1664,22 +1680,35 @@ mod tests {
     }
 
     #[test]
-    fn tianyi_web_authorization_persists_the_browser_session_without_a_private_probe() {
-        // The official WebView already proved the user completed login. A
-        // separately failing private account endpoint must not keep that
-        // authorization window open or prevent its workspace tab.
+    fn tianyi_web_authorization_persists_a_session_after_root_directory_validates() {
         let credentials = MemoryCredentialStore::default();
+        let transport = TianyiRootAcceptingTransport(Mutex::new(0));
 
         let account = super::finalize_tianyi_web_authorization(
             TianyiSession::cookie("SSON=official-browser-session"),
             &credentials,
-            &OfflineTransport,
+            &transport,
         )
-        .expect("an official Tianyi browser session can complete authorization offline");
+        .expect("a browser session with a readable root directory should authorize");
 
         assert_eq!(account.id, "tianyi-web");
         assert_eq!(account.provider, CloudProvider::Tianyi);
+        assert_eq!(*transport.0.lock().unwrap(), 1);
         assert!(credentials.load("tianyi").unwrap().is_some());
+    }
+
+    #[test]
+    fn tianyi_web_authorization_does_not_persist_a_session_when_root_is_unreadable() {
+        let credentials = MemoryCredentialStore::default();
+
+        let result = super::finalize_tianyi_web_authorization(
+            TianyiSession::cookie("SSON=browser-session"),
+            &credentials,
+            &TianyiRootRejectingTransport,
+        );
+
+        assert!(matches!(result, Err(QuarkError::Provider(_))));
+        assert!(credentials.load("tianyi").unwrap().is_none());
     }
 
     #[test]
