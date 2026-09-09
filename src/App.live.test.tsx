@@ -85,7 +85,7 @@ it('keeps a live snapshot when the initial list returns an older copy', async ()
   act(() => { state.onTask?.(liveTask); });
   await act(async () => { initial.resolve([oldTask]); });
 
-  expect(screen.getByText(/40%/)).toBeVisible();
+  expect(screen.getByRole('progressbar', { name: 'archive.iso 下载进度' })).toHaveAttribute('aria-valuenow', '40');
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
 });
 
@@ -126,7 +126,7 @@ it('keeps a same-ID event update that arrives while a focus snapshot is pending'
   act(() => { state.onTask?.(liveTask); });
   await act(async () => { focusSnapshot.resolve([oldTask]); });
 
-  expect(screen.getByText(/40%/)).toBeVisible();
+  expect(screen.getByRole('progressbar', { name: 'archive.iso 下载进度' })).toHaveAttribute('aria-valuenow', '40');
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
 });
 

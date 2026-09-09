@@ -41,6 +41,14 @@ it('leaves quick input to the independent native launcher window', async () => {
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
+it('keeps the download overview focused on transfer status instead of engine internals', async () => {
+  render(<App />);
+
+  expect(screen.getByText('当前速度')).toBeVisible();
+  expect(screen.queryByText(/本地下载引擎/)).not.toBeInTheDocument();
+  await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
+});
+
 it('lets the user switch between automatic, light and dark themes', async () => {
   const user = userEvent.setup();
   render(<App />);

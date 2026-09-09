@@ -8,7 +8,10 @@ export default defineConfig({
     outDir: 'visual-dist',
     emptyOutDir: true,
     rollupOptions: {
-      input: resolve(__dirname, 'visual-tests/cloud-authorization.html')
+      input: {
+        'cloud-authorization': resolve(__dirname, 'visual-tests/cloud-authorization.html'),
+        'download-queue': resolve(__dirname, 'visual-tests/download-queue.html')
+      }
     }
   }
 });

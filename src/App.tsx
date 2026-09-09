@@ -415,7 +415,6 @@ export function App() {
           </header>
           <div className="transfer-summary">
             <div className="speed-summary"><strong>{currentSpeed}</strong><span>当前速度</span></div>
-            <p><b>aria2</b> 本地下载引擎 · 标准单文件自动开始，目录与多文件解析后确认</p>
             {downloadingTasks.length > 0 && <button onClick={() => void Promise.all(downloadingTasks.map((task) => taskCommand(task.id, 'pause')))}>Ⅱ&nbsp; 全部暂停</button>}
           </div>
           <section className="queue-area">

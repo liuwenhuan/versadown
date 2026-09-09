@@ -41,6 +41,41 @@ it('shows the live magnet metadata stage instead of a generic zero-speed subtitl
   expect(screen.getByText('正在获取种子信息，暂无节点连接')).toBeVisible();
 });
 
+it('shows transferred bytes, live speed and ETA without exposing peer-count noise', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'transfer-1', name: 'movie.mkv', kind: 'file', status: 'downloading', progress: 25,
+      completed_length: 1024 * 1024, total_length: 4 * 1024 * 1024,
+      download_speed: 512 * 1024, eta_seconds: 61, connections: 99
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('1 MB / 4 MB')).toBeVisible();
+  expect(screen.getByText('512 KB/s')).toBeVisible();
+  expect(screen.getByText('剩余 1 分 1 秒')).toBeVisible();
+  expect(screen.queryByText('99 个连接')).not.toBeInTheDocument();
+});
+
+it('keeps destructive cancellation in the menu while the row exposes pause and more actions', async () => {
+  const user = userEvent.setup();
+  render(<DownloadQueue
+    tasks={[{ id: 'active-actions', name: 'game.zip', kind: 'file', status: 'downloading', progress: 25 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByRole('button', { name: '暂停 game.zip' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '更多操作 game.zip' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '取消 game.zip' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '更多操作 game.zip' }));
+  expect(screen.getByRole('menu', { name: 'game.zip 任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '取消任务' })).toBeVisible();
+});
+
 it('offers real state-aware commands when an active task is right-clicked', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();

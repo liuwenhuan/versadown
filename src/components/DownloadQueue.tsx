@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { QueueTask, TaskCommand, TaskStatus } from '../lib/types';
-import { formatEta, formatSpeed } from '../lib/downloadEvents';
+import { formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
 
 interface DownloadQueueProps {
   tasks: readonly QueueTask[];
@@ -36,16 +36,15 @@ export function displayTaskName(task: QueueTask): string {
   return candidate || '未命名下载任务';
 }
 
-function taskSubtitle(task: QueueTask): string {
+function taskSubtitle(task: QueueTask): string | undefined {
   if (task.error) return task.error;
   if (task.statusMessage) return task.statusMessage;
-  if (task.size) return task.size;
   const fileCount = task.children?.length ?? task.files?.length ?? 0;
   if (task.kind === 'magnet') return `磁力任务 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
   if (task.kind === 'torrent') return `BT 种子 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
   if (task.kind === 'folder') return `目录任务 · ${fileCount} 个文件`;
   if (task.kind === 'cloud') return '网盘下载任务';
-  try { return task.source ? new URL(task.source).host : '本地下载任务'; } catch { return '本地下载任务'; }
+  return undefined;
 }
 
 function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
@@ -54,8 +53,12 @@ function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 
-function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' }) {
-  return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause' ? <><path d="M8 5v14" /><path d="M16 5v14" /></> : action === 'resume' ? <path d="m9 6 9 6-9 6z" /> : <><path d="m7 7 10 10" /><path d="m17 7-10 10" /></>}</svg>;
+function ActionIcon({ action }: { action: 'pause' | 'resume' | 'retry' | 'more' }) {
+  return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause'
+    ? <><path d="M8 5v14" /><path d="M16 5v14" /></>
+    : action === 'resume' ? <path d="m9 6 9 6-9 6z" />
+      : action === 'retry' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
+        : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
 }
 
 interface ContextMenuState { task: QueueTask; x: number; y: number }
@@ -67,7 +70,7 @@ function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: 
   if (task.status === 'failed' || task.status === 'cancelled') commands.push({ command: 'retry', label: '重新下载' });
   commands.push({ command: 'open_directory', label: '打开下载目录', separated: commands.length > 0 });
   commands.push({ command: 'details', label: '查看任务详情' });
-  commands.push({ command: 'copy_link', label: '复制下载链接' });
+  if (task.source) commands.push({ command: 'copy_link', label: '复制下载链接' });
   if (['downloading', 'paused', 'queued', 'awaiting_user'].includes(task.status)) commands.push({ command: 'cancel', label: '取消任务', danger: true, separated: true });
   if (['completed', 'failed', 'cancelled'].includes(task.status)) commands.push({ command: 'remove_record', label: '移除任务记录…', danger: true, separated: true });
   return commands;
@@ -132,6 +135,10 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeContextMenu = () => setContextMenu(null);
   function runCommand(taskId: string, command: TaskCommand) { closeContextMenu(); onCommand(taskId, command); }
+  function openContextMenu(task: QueueTask, x: number, y: number) {
+    onSelect(task.id);
+    setContextMenu({ task, x, y });
+  }
   return (
     <section className="download-queue" aria-label="下载队列" onContextMenu={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
       <div className="queue-heading"><span>任务</span><span>进度</span><span>状态</span></div>
@@ -151,19 +158,25 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
         const taskName = displayTaskName(task);
         const speed = task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed);
         const eta = task.eta ?? (task.eta_seconds !== undefined ? formatEta(task.eta_seconds) : undefined);
+        const hasSpeed = task.speed !== undefined || task.speedBytes !== undefined || task.download_speed !== undefined;
+        const transferSize = task.total_length !== undefined || task.completed_length !== undefined ? transferProgress(task) : task.size;
+        const subtitle = taskSubtitle(task);
+        const primaryAction = task.status === 'downloading' ? 'pause' as const
+          : task.status === 'paused' ? 'resume' as const
+            : task.status === 'failed' || task.status === 'cancelled' ? 'retry' as const : null;
+        const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : '重新下载';
         return <div className="task-group" key={task.id}>
-          <article className={`task-row ${selectedTaskId === task.id ? 'selected' : ''}`} onClick={() => onSelect(task.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onSelect(task.id); setContextMenu({ task, x: event.clientX, y: event.clientY }); }}>
+          <article className={`task-row ${selectedTaskId === task.id ? 'selected' : ''}`} onClick={() => onSelect(task.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
-              <span className="task-copy"><b title={taskName}>{taskName}</b><small className={task.error ? 'task-error' : ''} title={taskSubtitle(task)}>{taskSubtitle(task)}</small></span>
+              <span className="task-copy"><b title={taskName}>{taskName}</b>{subtitle && <small className={task.error ? 'task-error' : ''} title={subtitle}>{subtitle}</small>}</span>
             </div>
-            <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics"><strong>{task.progress}%</strong><span>{speed}</span>{eta && <span>剩余 {eta}</span>}<span>{task.connections ?? 0} 个连接</span></div></div>
+            <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}<span className="transfer-live">{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</span></div></div>
             <div className="task-actions"><em className={task.status}>{statusText[task.status]}</em>
               {task.status === 'awaiting_user' && (task.kind === 'magnet' || task.kind === 'torrent') && onConfirm && <button aria-label={`确认下载 ${taskName}`} title="确认下载内容" onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认</button>}
-              {task.status === 'downloading' && <button aria-label={`暂停 ${taskName}`} title="暂停" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'pause'); }}><ActionIcon action="pause" /></button>}
-              {task.status === 'paused' && <button aria-label={`继续 ${taskName}`} title="继续" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'resume'); }}><ActionIcon action="resume" /></button>}
-              {!['completed', 'cancelled'].includes(task.status) && <button aria-label={`取消 ${taskName}`} title="取消" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'cancel'); }}><ActionIcon action="cancel" /></button>}
+              {primaryAction && <button aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} /></button>}
+              <button className="task-more-button" aria-label={`更多操作 ${taskName}`} title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>
             </div>
           </article>
           {hasChildren && isExpanded && <div className="children">{taskChildren!.map((child) => <article className="child-row" key={child.id}>
