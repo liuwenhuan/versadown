@@ -89,7 +89,53 @@ fn safe_provider_failure(name: &str, error: &QuarkError) -> String {
 impl CloudHttpTransport for LiveTransport {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         let cache_probe = request.url.contains("usage=CACHE");
+        let xunlei_method =
+            (safe_host(&request.url) == "api-pan.xunlei.com").then_some(request.method);
+        let xunlei_detail = request.method == "GET"
+            && url::Url::parse(&request.url).is_ok_and(|url| {
+                matches!(url.host_str(), Some("api-pan.xunlei.com" | "x-api-pan.xunlei.com"))
+                    && url.path().starts_with("/drive/v1/files/")
+            });
         let response = self.0.send(request)?;
+        if xunlei_detail {
+            let value: serde_json::Value = serde_json::from_str(&response.body).unwrap_or_default();
+            let file = value.get("data").unwrap_or(&value);
+            let phase = match file["phase"].as_str() {
+                Some("PHASE_TYPE_COMPLETE") => "complete",
+                Some("PHASE_TYPE_PENDING") => "pending",
+                Some("PHASE_TYPE_RUNNING") => "running",
+                Some("PHASE_TYPE_ERROR") => "error",
+                _ => "other",
+            };
+            let link_state = |key: &str| match file[key].as_str() {
+                None => "missing",
+                Some("") => "empty",
+                Some(raw) => match url::Url::parse(raw).ok().as_ref().map(url::Url::scheme) {
+                    Some("https") => "https",
+                    Some("http") => "http",
+                    _ => "other",
+                },
+            };
+            eprintln!("Xunlei detail: phase={phase}, web_link={}, download_link={}",
+                link_state("web_content_link"), link_state("download_url"));
+        }
+        if let Some(method) = xunlei_method {
+            let v: serde_json::Value = serde_json::from_str(&response.body).unwrap_or_default();
+            let code = v["error_code"]
+                .as_i64()
+                .or_else(|| v["code"].as_i64())
+                .unwrap_or_default();
+            if response.status >= 400 || code != 0 {
+                eprintln!(
+                    "Xunlei API failure: method={method}, HTTP={}, code={code}, error={:?}",
+                    response.status,
+                    v["error"]
+                        .as_str()
+                        .filter(|s| s.len() < 80
+                            && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                );
+            }
+        }
         if cache_probe {
             let cache_details = serde_json::from_str::<serde_json::Value>(&response.body)
                 .ok()
@@ -132,18 +178,17 @@ impl CloudHttpTransport for LiveTransport {
 impl CloudUploadTransport for LiveTransport {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
         let method = request.method;
-        let host = safe_host(&request.url);
         match self.0.send_upload(request) {
             Ok(response) => {
                 eprintln!(
-                    "live object transfer: {method} {host} -> HTTP {}",
+                    "live object transfer: {method} -> HTTP {}",
                     response.status
                 );
                 Ok(response)
             }
             Err(error) => {
                 eprintln!(
-                    "live object transfer: {method} {host} -> {}",
+                    "live object transfer: {method} -> {}",
                     error_kind(&error)
                 );
                 Err(error)
@@ -166,6 +211,13 @@ fn require_live_authorization() -> LiveResult<()> {
 }
 
 fn session_store() -> LiveResult<DpapiCredentialStore> {
+    // An isolated test app can authorize without replacing the user's normal
+    // account store. This is an explicit opt-in test-data path, not APPDATA.
+    if let Some(data_dir) = std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR") {
+        return Ok(DpapiCredentialStore::new(
+            PathBuf::from(data_dir).join("cloud-sessions"),
+        )?);
+    }
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
     Ok(DpapiCredentialStore::new(
@@ -208,17 +260,30 @@ fn find_named(directory: &[CloudFile], name: &str, kind: &str) -> LiveResult<Clo
 }
 
 fn download_bytes(url: &str) -> LiveResult<Vec<u8>> {
+    download_bytes_with_headers(url, &[])
+}
+
+fn download_bytes_with_headers(url: &str, headers: &[(&str, &str)]) -> LiveResult<Vec<u8>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
-    let response = client.get(url).send()?;
+    let mut request = client.get(url);
+    for (key, value) in headers {
+        request = request.header(*key, *value);
+    }
+    let response = request
+        .send()
+        .map_err(|_| failure("provider direct download transport failed"))?;
     if !response.status().is_success() {
         return Err(failure(format!(
             "provider direct download returned HTTP {}",
             response.status()
         )));
     }
-    Ok(response.bytes()?.to_vec())
+    Ok(response
+        .bytes()
+        .map_err(|_| failure("provider direct download body read failed"))?
+        .to_vec())
 }
 
 fn remove_local(root: &Path) {
@@ -439,35 +504,73 @@ fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<(
         !session.profile.client_version.is_empty(),
         !session.profile.package_name.is_empty(),
         !session.profile.user_agent.is_empty(),
-        !session.security_token.is_empty(),
+        !session.security_token.is_empty() || !session.web_security.captcha_token.is_empty(),
     );
     let http = LiveTransport::new()?;
     let client = XunleiClient::new(session, &http);
-    let (local_root, payload, expected) = local_artifact("xunlei")?;
+    let (local_root, payload, mut expected) = local_artifact("xunlei")?;
+    // Avoid reusing a previously indexed GCID when investigating readiness
+    // immediately after a genuinely new object-store upload.
+    expected.resize(32768, 0);
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut expected);
+    fs::write(&payload, &expected)?;
     let base_name = test_name("xunlei", "root");
     let target_name = test_name("xunlei", "move-target");
     let renamed_name = test_name("xunlei", "renamed.txt");
 
     // This first request is intentionally mutation-free and is also the
     // real-world probe for headers carried by browser-bearer authorization.
-    let initial_root = client.directory("0")?;
+    let initial_root = provider_step("Xunlei root", || client.directory("0"))?;
     if initial_root.items.iter().any(|item| item.name == base_name) {
         remove_local(&local_root);
         return Err(failure("unexpected test-directory name collision"));
     }
-    client.mkdir("0", &base_name)?;
-    let base = find_named(&client.directory("0")?.items, &base_name, "folder")?;
+    provider_step("Xunlei create test root", || client.mkdir("0", &base_name))?;
+    let base = find_named(
+        &provider_step("Xunlei locate test root", || client.directory("0"))?.items,
+        &base_name,
+        "folder",
+    )?;
     let result = (|| -> LiveResult<()> {
-        client.mkdir(&base.id, &target_name)?;
-        let target = find_named(&client.directory(&base.id)?.items, &target_name, "folder")?;
-        let uploaded = client.upload_file(&base.id, &payload)?;
-        client.rename(&uploaded.id, &renamed_name)?;
+        provider_step("Xunlei create destination", || {
+            client.mkdir(&base.id, &target_name)
+        })?;
+        let target = find_named(
+            &provider_step("Xunlei locate destination", || client.directory(&base.id))?.items,
+            &target_name,
+            "folder",
+        )?;
+        let uploaded = provider_step("Xunlei upload", || client.upload_file(&base.id, &payload))?;
+        // OSS transfer completion precedes the drive's asynchronous file
+        // finalization; renaming a pending object returns file_rename_uncompleted.
+        let mut upload_ready = false;
+        for _ in 0..30 {
+            if provider_step("Xunlei wait upload completion", || {
+                client.directory(&base.id)
+            })?
+            .items
+            .iter()
+            .any(|file| file.id == uploaded.id)
+            {
+                upload_ready = true;
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+        if !upload_ready {
+            return Err(failure(
+                "Xunlei uploaded object was not finalized within 30 seconds",
+            ));
+        }
+        provider_step("Xunlei rename", || {
+            client.rename(&uploaded.id, &renamed_name)
+        })?;
 
         // Xunlei hides non-complete files from ordinary directory results;
         // wait for the provider's asynchronous completion before moving it.
         let mut renamed = None;
         for _ in 0..30 {
-            let files = client.directory(&base.id)?;
+            let files = provider_step("Xunlei verify rename", || client.directory(&base.id))?;
             if let Some(file) = files
                 .items
                 .into_iter()
@@ -480,19 +583,53 @@ fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<(
         }
         let renamed =
             renamed.ok_or_else(|| failure("Xunlei upload did not reach complete state"))?;
-        client.move_files(&[renamed.id.clone()], &target.id)?;
-        let moved = find_named(&client.directory(&target.id)?.items, &renamed_name, "file")?;
-        let (url, download_name) = client.download(&moved.id)?;
+        provider_step("Xunlei move", || {
+            client.move_files(&[renamed.id.clone()], &target.id)
+        })?;
+        let moved = find_named(
+            &provider_step("Xunlei verify move", || client.directory(&target.id))?.items,
+            &renamed_name,
+            "file",
+        )?;
+        provider_step("Xunlei copy", || {
+            client.copy_files(&[moved.id.clone()], &base.id)
+        })?;
+        let copied = find_named(
+            &provider_step("Xunlei verify copy", || client.directory(&base.id))?.items,
+            &renamed_name,
+            "file",
+        )?;
+        provider_step("Xunlei resolve immediate copied download", || client.download(&copied.id))?;
+        let (url, download_name) =
+            provider_step("Xunlei resolve download", || client.download(&moved.id))?;
         if download_name != renamed_name {
             return Err(failure(
                 "Xunlei download metadata did not preserve the renamed file",
             ));
         }
-        if download_bytes(&url)? != expected {
+        let session = client.session();
+        if download_bytes_with_headers(
+            &url,
+            &[
+                ("User-Agent", session.profile.user_agent.as_str()),
+                ("Referer", "https://pan.xunlei.com/"),
+            ],
+        )? != expected
+        {
             return Err(failure(
                 "Xunlei downloaded bytes differ from the uploaded test file",
             ));
         }
+        if copied.id == moved.id {
+            return Err(failure("Xunlei copy returned the source object"));
+        }
+        for _ in 0..2 {
+            provider_step("Xunlei resolve newly copied download", || client.download(&copied.id))?;
+            provider_step("Xunlei resolve moved download again", || client.download(&moved.id))?;
+        }
+        provider_step("Xunlei trash copied fixture", || {
+            client.trash(&[copied.id.clone()])
+        })?;
         Ok(())
     })();
 
@@ -508,7 +645,10 @@ fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<(
     remove_local(&local_root);
     match (result, cleanup) {
         (Ok(()), Ok(())) => {
-            if contains_id(&client.directory("0")?.items, &base.id) {
+            if contains_id(
+                &provider_step("Xunlei verify trash", || client.directory("0"))?.items,
+                &base.id,
+            ) {
                 Err(failure(
                     "Xunlei test directory remained visible after trash",
                 ))
@@ -517,9 +657,10 @@ fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<(
             }
         }
         (Err(test), Ok(())) => Err(test),
-        (Ok(()), Err(cleanup)) => Err(Box::new(cleanup)),
+        (Ok(()), Err(cleanup)) => Err(failure(safe_provider_failure("Xunlei cleanup", &cleanup))),
         (Err(test), Err(cleanup)) => Err(failure(format!(
-            "test failed ({test}); cleanup of only its test directory also failed ({cleanup})"
+            "test failed ({test}); {}",
+            safe_provider_failure("Xunlei cleanup of its test directory", &cleanup)
         ))),
     }
 }

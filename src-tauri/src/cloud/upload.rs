@@ -143,16 +143,16 @@ pub fn pikpak_hash(path: &Path) -> Result<String, QuarkError> {
     }
     Ok(format!("{:X}", Sha1::digest(hashes.as_bytes())))
 }
-struct Oss {
-    endpoint: String,
-    bucket: String,
-    key: String,
-    id: String,
-    secret: String,
-    token: String,
+pub(crate) struct Oss {
+    pub(crate) endpoint: String,
+    pub(crate) bucket: String,
+    pub(crate) key: String,
+    pub(crate) id: String,
+    pub(crate) secret: String,
+    pub(crate) token: String,
 }
 impl Oss {
-    fn request(
+    pub(crate) fn request(
         &self,
         method: &'static str,
         query: &str,

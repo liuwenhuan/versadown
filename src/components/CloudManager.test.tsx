@@ -706,7 +706,10 @@ it('keeps the current file list visible when a cloud operation fails', async () 
   expect(screen.getByText('报告.pdf')).toBeVisible();
 });
 
-it('offers PikPak reauthorization after a download requires official web verification', async () => {
+it.each([
+  ['pikpak', 'PikPak'],
+  ['xunlei', '迅雷']
+] as const)('offers %s reauthorization after a download requires official web verification', async (provider, label) => {
   const user = userEvent.setup();
   const client = createCloudFake({
     downloadCloudFile: vi.fn().mockRejectedValue({
@@ -714,19 +717,149 @@ it('offers PikPak reauthorization after a download requires official web verific
       message: '此登录方式需要网页验证，请点击网页授权完成登录'
     })
   });
-  render(<CloudManager provider="pikpak" client={client} initialAccounts={[
-    { id: 'account-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }
+  render(<CloudManager provider={provider} client={client} initialAccounts={[
+    { id: 'account-1', displayName: 'alice', provider, authMethod: 'web' }
   ]} restoreOnMount={false} />);
 
-  await screen.findByRole('tree', { name: 'PikPak网盘文件' });
+  await screen.findByRole('tree', { name: `${label}网盘文件` });
   await user.click(screen.getByText('报告.pdf'));
   await user.click(screen.getByRole('button', { name: '下载' }));
 
   expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
   await user.click(screen.getByRole('button', { name: '重新网页授权' }));
-  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('pikpak');
-  expect(await screen.findByRole('tab', { name: 'alice · PikPak' })).toHaveAttribute('aria-selected', 'true');
-  await waitFor(() => expect(client.completeCloudAuthorization).toHaveBeenCalledWith('pikpak'));
+  expect(client.beginCloudAuthorization).toHaveBeenCalledWith(provider);
+  expect(await screen.findByRole('tab', { name: `alice · ${label}` })).toHaveAttribute('aria-selected', 'true');
+  await waitFor(() => expect(client.completeCloudAuthorization).toHaveBeenCalledWith(provider));
+});
+
+it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
+  'stops Xunlei authorization polling after %s until the user starts it again', async (code) => {
+    vi.useFakeTimers();
+    try {
+      const client = createCloudFake({ completeCloudAuthorization: vi.fn()
+        .mockRejectedValueOnce({ code, message: '迅雷授权验证失败，请重新授权。' })
+        .mockResolvedValue({ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }) });
+      const onAccountAuthorized = vi.fn();
+      render(<CloudManager provider="xunlei" client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
+
+      fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_400); });
+
+      expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
+      expect(onAccountAuthorized).not.toHaveBeenCalled();
+      expect(screen.getByRole('status')).toHaveTextContent('迅雷授权验证失败，请重新授权。');
+      expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(2);
+      expect(onAccountAuthorized).toHaveBeenCalledWith({ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' });
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+);
+
+it('preserves the Xunlei account, directory and rejection when renewed authorization stops', async () => {
+  vi.useFakeTimers();
+  try {
+    const client = createCloudFake({
+      downloadCloudFile: vi.fn().mockRejectedValue({ code: 'web_auth_required', message: '需要网页验证' }),
+      completeCloudAuthorization: vi.fn().mockRejectedValue({ code: 'provider_error', message: '迅雷拒绝了本次授权验证。' })
+    });
+    const onAccountLoggedOut = vi.fn();
+    render(<CloudManager provider="xunlei" client={client} initialAccounts={[
+      { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
+    ]} restoreOnMount={false} showSessionActions={false} onAccountLoggedOut={onAccountLoggedOut} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByText('报告.pdf'));
+    fireEvent.click(screen.getByRole('button', { name: '下载' }));
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('button', { name: '重新网页授权' }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_400); });
+
+    expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('报告.pdf')).toBeVisible();
+    expect(screen.getByRole('alert')).toHaveTextContent('迅雷拒绝了本次授权验证。');
+    expect(screen.getByRole('button', { name: '重新网页授权' })).toBeVisible();
+    expect(client.logoutCloud).not.toHaveBeenCalled();
+    expect(onAccountLoggedOut).not.toHaveBeenCalled();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each(['web_auth_required', 'credentials_expired'])('recovers Xunlei initial directory %s with session actions hidden', async (code) => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ listCloudDirectory: vi.fn()
+    .mockRejectedValueOnce({ code, message: '网盘需要重新授权' })
+    .mockResolvedValue({ id: '0', items: [{ id: 'file-2', parentId: '0', name: '恢复后的文件.txt', kind: 'file' }] }) });
+  render(<CloudManager provider="xunlei" client={client} initialAccounts={[
+    { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
+  ]} restoreOnMount={false} showSessionActions={false} />);
+
+  await user.click(await screen.findByRole('button', { name: '重新网页授权' }));
+  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
+  expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByText('恢复后的文件.txt', {}, { timeout: 2_000 })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
+});
+
+it.each(['web_auth_required', 'credentials_expired'])('preserves the Xunlei directory after refresh returns %s', async (code) => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="xunlei" client={client} initialAccounts={[
+    { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
+  ]} restoreOnMount={false} showSessionActions={false} />);
+
+  await screen.findByText('报告.pdf');
+  client.listCloudDirectory.mockRejectedValueOnce({ code, message: '网盘需要重新授权' });
+  await user.click(screen.getByRole('button', { name: '刷新' }));
+  expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
+  expect(screen.getByText('报告.pdf')).toBeVisible();
+  expect(screen.getByRole('tree', { name: '迅雷网盘文件' })).toBeVisible();
+  expect(screen.getByRole('alert')).toHaveTextContent('网页验证');
+});
+
+it.each(['web_auth_required', 'credentials_expired'])('keeps the Xunlei account and directory during pending renewal after %s', async (code) => {
+  vi.useFakeTimers();
+  try {
+    const client = createCloudFake({
+      downloadCloudFile: vi.fn().mockRejectedValue({ code, message: '网盘需要重新授权' }),
+      completeCloudAuthorization: vi.fn()
+        .mockRejectedValueOnce({ code: 'authorization_pending', message: '正在等待登录' })
+        .mockResolvedValue({ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' })
+    });
+    const onAccountLoggedOut = vi.fn();
+    render(<CloudManager provider="xunlei" client={client} initialAccounts={[
+      { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
+    ]} restoreOnMount={false} showSessionActions={false} onAccountLoggedOut={onAccountLoggedOut} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByText('报告.pdf'));
+    fireEvent.click(screen.getByRole('button', { name: '下载' }));
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('button', { name: '重新网页授权' }));
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+
+    expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText('报告.pdf')).toBeVisible();
+    expect(client.logoutCloud).not.toHaveBeenCalled();
+    expect(onAccountLoggedOut).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_800); });
+    expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tree', { name: '迅雷网盘文件' })).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it('surfaces the message from a structured Tauri command error', async () => {

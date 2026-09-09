@@ -26,6 +26,30 @@ use std::{
 const AUTH: &str = "https://xluser-ssl.xunlei.com";
 const DRIVE: &str = "https://api-pan.xunlei.com";
 const WEB_VERSION_CODE: &str = "1.92.98";
+const WEB_CLIENT_ID: &str = "Xqp0kJBXWhwaTpB6";
+const WEB_PACKAGE: &str = "pan.xunlei.com";
+// Verified 2026-09-10 against the official module1618 signer and module25's
+// pub1iwjKbiXrwP9i86t19Ao0HtnZnkjCjZk chain, using independent JS vectors.
+// Source: utils-async.413fd3b1f17c7388b322.js and
+// utils-initial.38a2added9b0686c9067.js on static-pan.xunlei.com.
+// This is the public `filters` algorithm, not the separate dynamic-salt branch.
+const WEB_SIGNATURE_SALTS: [&str; 15] = [
+    "rgui",
+    "GBbHjL+W3+IJcgUgydd8zuV2hrhnID9yPI",
+    "KRDkNzr29JqPNUq2mxw+YFtueKYZlzmWJIaHkj3NSh/ogclHVm",
+    "JMGo+UYkPo6/I4s1enZg",
+    "ZcfXzUZq+yx9VKk1fV4xAQhq+TwyE42MP7JXORDQy",
+    "Z",
+    "WCvfOrvOIFJWrKDen7WBq17dX",
+    "3J07h/7",
+    "Im3qdyHl9DZH",
+    "Jg",
+    "Y+KS",
+    "/1lcxUF8",
+    "C",
+    "GVEo",
+    "8k4v5dntCyPof87pZ0gc/EixX3qv5RxoaGzZ",
+];
 /// Non-secret identity values captured from the official browser/QR flow.
 /// They are retained because Xunlei binds refresh and drive calls to that
 /// profile; callers must never fabricate a replacement profile.
@@ -89,6 +113,35 @@ impl fmt::Debug for XunleiWebContext {
 }
 
 impl XunleiClientProfile {
+    pub fn is_modern_web(&self) -> bool {
+        self.client_id == WEB_CLIENT_ID && self.package_name == WEB_PACKAGE
+    }
+
+    /// Returns the version-pinned official webpage signature, when supported.
+    /// Unknown versions require the official bridge's fresh signing metadata.
+    pub fn web_captcha_signature(&self, timestamp: &str) -> Option<String> {
+        if !self.supports_web_signature()
+            || timestamp.is_empty()
+            || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let mut current = format!(
+            "{}{}{}{}{}",
+            self.client_id, self.client_version, WEB_PACKAGE, self.device_id, timestamp
+        );
+        for salt in WEB_SIGNATURE_SALTS {
+            current.push_str(salt);
+            current = format!("{:x}", md5::compute(current.as_bytes()));
+        }
+        Some(format!("1.{current}"))
+    }
+
+    fn supports_web_signature(&self) -> bool {
+        self.is_modern_web()
+            && self.client_version == WEB_VERSION_CODE
+            && !self.device_id.is_empty()
+    }
     /// Headers accepted by the drive APIs.  The official browser does not
     /// expose a client secret, but it does supply these identity fields with a
     /// current bearer token.
@@ -100,11 +153,10 @@ impl XunleiClientProfile {
             && !self.user_agent.is_empty()
     }
 
-    /// Refreshing is deliberately stricter than using a browser-issued access
-    /// token: native refresh requires the client secret, which the official
-    /// web application does not place in storage.
+    /// The public web OAuth client omits client_secret; native identities
+    /// retain their original confidential-client refresh requirement.
     fn can_refresh(&self) -> bool {
-        self.is_drive_complete() && !self.client_secret.is_empty()
+        self.is_drive_complete() && (self.is_modern_web() || !self.client_secret.is_empty())
     }
 }
 
@@ -117,6 +169,37 @@ impl fmt::Debug for XunleiClientProfile {
             .field("client_version", &self.client_version)
             .field("package_name", &self.package_name)
             .field("user_agent", &self.user_agent)
+            .finish()
+    }
+}
+
+/// Captured from the official captcha service for the same account/device.
+/// Rust can renew signatures for the verified webpage version. Other versions
+/// retain the bridge's signature with its original timestamp for bounded reuse.
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct XunleiWebSecurity {
+    pub captcha_token: String,
+    /// Unix seconds; the bridge converts the official storage date to seconds.
+    pub expires_at: u64,
+    /// Empty for an official globally cached token, otherwise METHOD:/path.
+    pub action: String,
+    pub captcha_sign: String,
+    pub timestamp: String,
+    pub client_version: String,
+    pub package_name: String,
+    pub verification_url: String,
+}
+
+impl fmt::Debug for XunleiWebSecurity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XunleiWebSecurity")
+            .field("captcha_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("action", &self.action)
+            .field("captcha_sign", &"<redacted>")
+            .field("timestamp", &self.timestamp)
+            .field("verification_url", &"<redacted>")
             .finish()
     }
 }
@@ -139,6 +222,8 @@ pub struct XunleiSession {
     #[serde(default)]
     pub web_context: XunleiWebContext,
     #[serde(default)]
+    pub web_security: XunleiWebSecurity,
+    #[serde(default)]
     pub auth_method: CloudAuthMethod,
 }
 
@@ -152,6 +237,7 @@ impl fmt::Debug for XunleiSession {
             .field("user_id", &self.user_id)
             .field("security_token", &"<redacted>")
             .field("web_context", &self.web_context)
+            .field("web_security", &self.web_security)
             .field("auth_method", &self.auth_method)
             .finish()
     }
@@ -167,6 +253,7 @@ impl XunleiSession {
             user_id: String::new(),
             security_token: String::new(),
             web_context: XunleiWebContext::default(),
+            web_security: XunleiWebSecurity::default(),
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -184,6 +271,7 @@ impl XunleiSession {
             user_id: String::new(),
             security_token: String::new(),
             web_context: XunleiWebContext::default(),
+            web_security: XunleiWebSecurity::default(),
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -205,17 +293,17 @@ impl XunleiSession {
             user_id: user_id.into(),
             security_token: security_token.into(),
             web_context: XunleiWebContext::default(),
+            web_security: XunleiWebSecurity::default(),
             auth_method: CloudAuthMethod::Web,
         };
         if session.access_token.is_empty() || session.user_id.is_empty() {
             return Err(QuarkError::AuthorizationPending);
         }
-        // The current official web client grants a bearer session via its
-        // in-memory user state, but never reveals the native client profile
-        // required by the token refresh endpoint.  Keep that bearer usable
-        // for the current browser session instead of pretending to refresh it
-        // with fabricated native fields.
-        if session.refresh_token.is_empty() || !session.profile.is_drive_complete() {
+        // Preserve historical incomplete browser sessions for migration. The
+        // explicit modern profile keeps its actual expiry and can refresh.
+        if !session.profile.is_modern_web()
+            && (session.refresh_token.is_empty() || !session.profile.is_drive_complete())
+        {
             session.expires_at = u64::MAX;
         }
         Ok(session)
@@ -273,9 +361,11 @@ pub struct XunleiClient<'a, T: CloudHttpTransport> {
 impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     pub fn new(mut session: XunleiSession, http: &'a T) -> Self {
         let access_token = session.access_token.clone();
-        session
-            .web_context
-            .use_access_token_for_missing_session_id(&access_token);
+        if !session.profile.is_modern_web() {
+            session
+                .web_context
+                .use_access_token_for_missing_session_id(&access_token);
+        }
         Self {
             session: RefCell::new(session),
             http,
@@ -287,7 +377,8 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     }
 
     fn is_browser_bearer_session(session: &XunleiSession) -> bool {
-        session.auth_method == CloudAuthMethod::Web
+        !session.profile.is_modern_web()
+            && session.auth_method == CloudAuthMethod::Web
             && !session.access_token.is_empty()
             && !session.user_id.is_empty()
             // A web session can expose its genuine browser device/profile
@@ -299,15 +390,15 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
 
     /// Builds the account used to finish an official browser authorization.
     ///
-    /// This deliberately does not probe Xunlei or refresh the token: browser
-    /// storage does not expose the native client secret required for refresh.
-    /// The saved session can therefore create its workspace immediately, while
-    /// ordinary requests fail closed with reauthorization once its bearer token
-    /// has expired.
+    /// This only formats identity. The command layer must successfully read
+    /// the root directory before considering the authorization complete.
     pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
         let session = self.session();
         if session.access_token.is_empty() || session.user_id.is_empty() {
             return Err(QuarkError::AuthorizationPending);
+        }
+        if session.profile.is_modern_web() && !session.profile.is_drive_complete() {
+            return Err(QuarkError::WebAuthorizationRequired);
         }
         if Self::is_browser_bearer_session(&session) && !session.web_context.is_complete() {
             return Err(QuarkError::WebAuthorizationRequired);
@@ -369,18 +460,17 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         url.into()
     }
 
-    fn challenge(value: &Value, status: u16) -> bool {
+    fn challenge(value: &Value, _status: u16) -> bool {
         let error = value
             .get("error")
             .or_else(|| value.get("error_description"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_ascii_lowercase();
-        status == 403
-            || value
-                .get("url")
-                .and_then(Value::as_str)
-                .is_some_and(|url| !url.is_empty())
+        value
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|url| !url.is_empty())
             || value
                 .get("captcha_url")
                 .and_then(Value::as_str)
@@ -401,6 +491,44 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             .or_else(|| parsed.get("code"))
             .and_then(Value::as_i64)
             .unwrap_or_default();
+        if self.session.borrow().profile.is_modern_web() {
+            let error = parsed["error"].as_str().unwrap_or("");
+            if response.status == 401
+                || code == 16
+                || matches!(
+                    error,
+                    "unauthenticated" | "invalid_grant" | "invalid_token" | "unauthorized_client"
+                )
+            {
+                return Err(QuarkError::AuthorizationExpired);
+            }
+            if matches!(code, 4001 | 4002)
+                || matches!(error, "captcha_required" | "captcha_invalid")
+            {
+                return Err(QuarkError::WebAuthorizationRequired);
+            }
+            if Self::challenge(&parsed, response.status) && error.is_empty() {
+                if let Some(url) = parsed["url"].as_str() {
+                    self.session.borrow_mut().web_security.verification_url = url.into();
+                }
+                return Err(QuarkError::WebAuthorizationRequired);
+            }
+            if !(200..300).contains(&response.status) || code != 0 || !error.is_empty() {
+                return Err(QuarkError::Provider(format!(
+                    "迅雷服务拒绝请求（HTTP {} / code {}）",
+                    response.status, code
+                )));
+            }
+            return if parsed.is_null() {
+                if response.body.is_empty() {
+                    Ok(json!({}))
+                } else {
+                    Err(QuarkError::InvalidResponse)
+                }
+            } else {
+                Ok(parsed)
+            };
+        }
         if matches!(code, 4121 | 10) {
             return Err(QuarkError::AuthorizationExpired);
         }
@@ -418,22 +546,26 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             return Err(QuarkError::AuthorizationExpired);
         }
         let mut headers = Self::profile_headers(&previous.profile);
-        if !previous.security_token.is_empty() {
+        if previous.profile.is_modern_web() {
+            headers.insert("X-Sdk-Version".into(), "3.4.20".into());
+            headers.insert("X-Protocol-Version".into(), "301".into());
+            headers.insert("X-Action".into(), "401".into());
+        } else if !previous.security_token.is_empty() {
             headers.insert("X-Captcha-Token".into(), previous.security_token.clone());
+        }
+        let mut body = json!({
+            "grant_type": "refresh_token",
+            "refresh_token": previous.refresh_token,
+            "client_id": previous.profile.client_id,
+        });
+        if !previous.profile.is_modern_web() {
+            body["client_secret"] = previous.profile.client_secret.clone().into();
         }
         let response = self.http.send(CloudHttpRequest {
             method: "POST",
             url: format!("{AUTH}/v1/auth/token"),
             headers,
-            body: Some(
-                json!({
-                    "grant_type": "refresh_token",
-                    "refresh_token": previous.refresh_token,
-                    "client_id": previous.profile.client_id,
-                    "client_secret": previous.profile.client_secret,
-                })
-                .to_string(),
-            ),
+            body: Some(body.to_string()),
         })?;
         let value = self.value(response)?;
         let mut refreshed = previous;
@@ -447,6 +579,12 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         {
+            if refreshed.profile.is_modern_web()
+                && !refreshed.user_id.is_empty()
+                && refreshed.user_id != id
+            {
+                return Err(QuarkError::AuthorizationExpired);
+            }
             refreshed.user_id = id.into();
         }
         if let Some(token) = value
@@ -499,7 +637,18 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             "Authorization".into(),
             format!("Bearer {}", session.access_token),
         );
-        if !session.security_token.is_empty() {
+        if session.profile.is_modern_web() {
+            if !session.web_security.captcha_token.is_empty()
+                && session.web_security.expires_at > now()
+            {
+                headers.insert(
+                    "X-Captcha-Token".into(),
+                    session.web_security.captcha_token.clone(),
+                );
+            }
+            headers.insert("Origin".into(), "https://pan.xunlei.com".into());
+            headers.insert("Referer".into(), "https://pan.xunlei.com/".into());
+        } else if !session.security_token.is_empty() {
             headers.insert("X-Captcha-Token".into(), session.security_token.clone());
         }
         if Self::is_browser_bearer_session(session) {
@@ -527,13 +676,132 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         url: String,
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
-        let session = self.ready_session()?;
+        let mut session = self.ready_session()?;
+        if session.profile.is_modern_web() {
+            let parsed = url::Url::parse(&url).map_err(|_| QuarkError::InvalidResponse)?;
+            let action = format!("{method}:{}", parsed.path());
+            let security = &session.web_security;
+            let mut renewed = false;
+            if (session.profile.supports_web_signature()
+                || !security.captcha_token.is_empty()
+                || !security.captcha_sign.is_empty())
+                && (security.expires_at <= now().saturating_add(30)
+                    || (!security.action.is_empty() && security.action != action))
+            {
+                session = self.refresh_web_captcha(&action)?;
+                renewed = true;
+            }
+            let mut refreshed = false;
+            loop {
+                match self.raw(method, url.clone(), body.clone(), &session) {
+                    Err(QuarkError::AuthorizationExpired)
+                        if !refreshed && session.profile.can_refresh() =>
+                    {
+                        session = self.refresh(session)?;
+                        refreshed = true;
+                    }
+                    Err(QuarkError::WebAuthorizationRequired) if !renewed => {
+                        session = self.refresh_web_captcha(&action)?;
+                        renewed = true;
+                    }
+                    result => return result,
+                }
+            }
+        }
         match self.raw(method, url.clone(), body.clone(), &session) {
             Err(QuarkError::AuthorizationExpired) if session.profile.can_refresh() => {
                 let refreshed = self.refresh(session)?;
                 self.raw(method, url, body, &refreshed)
             }
             result => result,
+        }
+    }
+
+    fn refresh_web_captcha(&self, action: &str) -> Result<XunleiSession, QuarkError> {
+        let mut session = self.session();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .to_string();
+        if let Some(signature) = session.profile.web_captcha_signature(&timestamp) {
+            session.web_security.captcha_sign = signature;
+            session.web_security.timestamp = timestamp;
+            session.web_security.client_version = session.profile.client_version.clone();
+            session.web_security.package_name = session.profile.package_name.clone();
+        }
+        let security = &session.web_security;
+        if security.captcha_sign.is_empty()
+            || security.timestamp.is_empty()
+            || security.client_version.is_empty()
+            || security.package_name != session.profile.package_name
+        {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        // A local conservative reuse bound for unknown versions, not a claim
+        // about the provider's TTL. Supported profiles just generated a fresh
+        // pair; other profiles require a recent pair from the official bridge.
+        let signed_at = security
+            .timestamp
+            .parse::<u64>()
+            .map(|millis| millis / 1000)
+            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        if signed_at > now().saturating_add(30) || now().saturating_sub(signed_at) > 300 {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let response = self.http.send(CloudHttpRequest {
+            method: "POST",
+            url: format!("{AUTH}/v1/shield/captcha/init"),
+            headers: BTreeMap::from([
+                ("Content-Type".into(), "application/json".into()),
+                ("User-Agent".into(), session.profile.user_agent.clone()),
+                ("Origin".into(), "https://pan.xunlei.com".into()),
+            ]),
+            body: Some(
+                json!({
+                    "client_id": session.profile.client_id,
+                    "device_id": session.profile.device_id,
+                    "action": action,
+                    "captcha_token": security.captcha_token,
+                    "meta": {
+                        "package_name": security.package_name,
+                        "client_version": security.client_version,
+                        "captcha_sign": security.captcha_sign,
+                        "timestamp": security.timestamp,
+                        "user_id": session.user_id,
+                        "username": "", "phone_number": "", "email": ""
+                    }
+                })
+                .to_string(),
+            ),
+        })?;
+        let parsed: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+        if let Some(url) = parsed["url"].as_str().filter(|url| !url.is_empty()) {
+            session.web_security.verification_url = url.into();
+            *self.session.borrow_mut() = session;
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let value = self.value(response)?;
+        session.web_security.captcha_token = required(&value, "captcha_token")?;
+        let expires_in = value["expires_in"]
+            .as_u64()
+            .filter(|value| *value > 30)
+            .ok_or(QuarkError::InvalidResponse)?;
+        session.web_security.expires_at = now().saturating_add(expires_in);
+        session.web_security.action = action.into();
+        session.web_security.verification_url.clear();
+        *self.session.borrow_mut() = session.clone();
+        Ok(session)
+    }
+
+    fn request_parent<'b>(&self, parent: &'b str) -> &'b str {
+        if parent == "0"
+            && (self.session.borrow().profile.is_modern_web()
+                || Self::is_browser_bearer_session(&self.session()))
+        {
+            ""
+        } else {
+            parent
         }
     }
 
@@ -569,16 +837,17 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         let mut items = Vec::new();
         let mut page_token = String::new();
         let mut pages = HashSet::new();
-        let request_parent = if Self::is_browser_bearer_session(&self.session()) && parent == "0" {
+        let request_parent = self.request_parent(parent);
+        let extras = if self.session.borrow().profile.is_modern_web() {
             ""
         } else {
-            parent
+            "__type=drive&refresh=true&__sync=true&"
         };
         loop {
             let value = self.request(
                 "GET",
                 self.drive_url(&format!(
-                    "/drive/v1/files?space=&__type=drive&refresh=true&__sync=true&parent_id={}&page_token={}&with_audit=true&limit=100&filters={}",
+                    "/drive/v1/files?space=&{extras}parent_id={}&page_token={}&with_audit=true&limit=100&filters={}",
                     encoded(request_parent),
                     encoded(&page_token),
                     encoded(r#"{"phase":{"eq":"PHASE_TYPE_COMPLETE"},"trashed":{"eq":false}}"#),
@@ -611,7 +880,11 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         let kind = required(value, "kind")?;
         Ok(CloudFile {
             id: required(value, "id")?,
-            parent_id: value["parent_id"].as_str().unwrap_or(parent).into(),
+            parent_id: value["parent_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(parent)
+                .into(),
             name: required(value, "name")?,
             kind: if matches!(kind.as_str(), "drive#folder" | "FOLDER") {
                 "folder"
@@ -633,7 +906,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         self.request(
             "POST",
             self.drive_url("/drive/v1/files"),
-            Some(json!({"kind":"drive#folder","parent_id":parent,"name":name})),
+            Some(
+                json!({"kind":"drive#folder","parent_id":self.request_parent(parent),"name":name}),
+            ),
         )?;
         Ok(())
     }
@@ -651,7 +926,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         self.request(
             "POST",
             self.drive_url("/drive/v1/files:batchMove"),
-            Some(json!({"ids":ids,"to":{"parent_id":parent}})),
+            Some(json!({"ids":ids,"to":{"parent_id":self.request_parent(parent)}})),
         )?;
         Ok(())
     }
@@ -660,7 +935,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         self.request(
             "POST",
             self.drive_url("/drive/v1/files:batchCopy"),
-            Some(json!({"ids":ids,"to":{"parent_id":parent}})),
+            Some(json!({"ids":ids,"to":{"parent_id":self.request_parent(parent)}})),
         )?;
         Ok(())
     }
@@ -692,14 +967,13 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         let value = self.request(
             "POST",
             self.drive_url("/drive/v1/files"),
-            Some(json!({
-                "kind":"drive#file",
-                "parent_id":parent,
-                "name":name,
-                "size":size,
-                "hash":gcid,
-                "upload_type":"UPLOAD_TYPE_RESUMABLE",
-            })),
+            Some(upload_request_body(
+                self.request_parent(parent),
+                name,
+                size,
+                gcid,
+                self.session().profile.is_modern_web(),
+            )),
         )?;
         let upload = resumable_upload(&value)?;
         if upload.upload_type != "UPLOAD_TYPE_RESUMABLE" || upload.kind != "drive#resumable" {
@@ -710,26 +984,74 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
 
     /// Retrieves a short-lived direct link afresh for every download request.
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
-        let value = self.request(
-            "GET",
-            self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
-            None,
-        )?;
-        let file = value.get("data").unwrap_or(&value);
-        let url = file
-            .get("web_content_link")
-            .or_else(|| file.get("download_url"))
-            .and_then(Value::as_str)
-            .filter(|url| url.starts_with("https://"))
-            .map(str::to_owned)
-            .ok_or(QuarkError::InvalidResponse)?;
-        Ok((url, required(file, "name")?))
+        let modern_web = self.session().profile.is_modern_web();
+        let started = std::time::Instant::now();
+        loop {
+            if modern_web {
+                download_poll_delay(started.elapsed())?;
+            }
+            let value = self.request(
+                "GET",
+                self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
+                None,
+            )?;
+            let file = value.get("data").unwrap_or(&value);
+            let name = required(file, "name")?;
+            let link = file.get("web_content_link").or_else(|| file.get("download_url"));
+            match link {
+                Some(Value::String(link)) if !link.is_empty() => {
+                    if !link.starts_with("https://") {
+                        return Err(QuarkError::InvalidResponse);
+                    }
+                    return Ok((link.clone(), name));
+                }
+                None | Some(Value::Null | Value::String(_)) => {}
+                _ => return Err(QuarkError::InvalidResponse),
+            }
+            // Modern web metadata can report COMPLETE before (or between)
+            // requests with a generated link. Only this known empty-link
+            // state is transient; protocol, auth and transport errors escape.
+            if !modern_web
+                || !matches!(file["phase"].as_str(), Some(
+                    "PHASE_TYPE_COMPLETE" | "PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING"
+                ))
+            {
+                return Err(QuarkError::InvalidResponse);
+            }
+            std::thread::sleep(download_poll_delay(started.elapsed())?);
+        }
+    }
+}
+
+fn download_poll_delay(elapsed: std::time::Duration) -> Result<std::time::Duration, QuarkError> {
+    let remaining = std::time::Duration::from_secs(30).saturating_sub(elapsed);
+    if remaining.is_zero() {
+        return Err(QuarkError::Provider(
+            "文件可见但下载链接仍在生成，请稍后重试。".into(),
+        ));
+    }
+    Ok(remaining.min(std::time::Duration::from_millis(250)))
+}
+
+#[cfg(test)]
+mod download_poll_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn xunlei_download_poll_delay_rejects_deadline_and_caps_last_sleep() {
+        assert_eq!(download_poll_delay(Duration::ZERO).unwrap(), Duration::from_millis(250));
+        assert_eq!(download_poll_delay(Duration::from_millis(29_999)).unwrap(), Duration::from_millis(1));
+        for elapsed in [Duration::from_secs(30), Duration::from_secs(31)] {
+            assert!(matches!(download_poll_delay(elapsed), Err(QuarkError::Provider(message))
+                if message == "文件可见但下载链接仍在生成，请稍后重试。"));
+        }
     }
 }
 
 impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
     /// Computes the provider's GCID, obtains one-shot STS credentials, and
-    /// completes an AWS Signature V4 multipart upload.  The STS credentials
+    /// completes the negotiated OSS or AWS multipart upload. The STS credentials
     /// and upload URLs live only on this stack and are never serialized.
     pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
         let metadata = std::fs::symlink_metadata(path)
@@ -747,29 +1069,74 @@ impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
         let value = self.request(
             "POST",
             self.drive_url("/drive/v1/files"),
-            Some(json!({
-                "kind":"drive#file",
-                "parent_id":parent,
-                "name":name,
-                "size":size,
-                "hash":gcid,
-                "upload_type":"UPLOAD_TYPE_RESUMABLE",
-            })),
+            Some(upload_request_body(
+                self.request_parent(parent),
+                &name,
+                size,
+                &gcid,
+                self.session().profile.is_modern_web(),
+            )),
         )?;
+        let file_value = value.get("file").ok_or(QuarkError::InvalidResponse)?;
+        let file = Self::file(file_value, parent)?;
+        // The official web upload flow returns a completed file before
+        // examining upload_type or any object-storage credentials.
+        if file_value["phase"] == "PHASE_TYPE_COMPLETE" {
+            return Ok(file);
+        }
         let upload = resumable_upload(&value)?;
-        if upload.upload_type != "UPLOAD_TYPE_RESUMABLE"
-            || upload.kind != "drive#resumable"
-            || upload.provider != "aws"
-        {
+        if upload.upload_type != "UPLOAD_TYPE_RESUMABLE" || upload.kind != "drive#resumable" {
             return Err(QuarkError::InvalidResponse);
         }
-        let file = Self::file(
-            value.get("file").ok_or(QuarkError::InvalidResponse)?,
-            parent,
-        )?;
-        AwsMultipart::from_upload(&upload)?.upload(self.http, path, size)?;
+        match upload.provider.as_str() {
+            "aws" => AwsMultipart::from_upload(&upload)?.upload(self.http, path, size)?,
+            "PROVIDER_ALIYUN" => upload_oss(&upload, self.http, path, size)?,
+            _ => return Err(QuarkError::InvalidResponse),
+        }
+        if self.session().profile.is_modern_web() {
+            return self.wait_for_uploaded_file(&file.id, parent);
+        }
         Ok(file)
     }
+
+    fn wait_for_uploaded_file(&self, id: &str, parent: &str) -> Result<CloudFile, QuarkError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err(QuarkError::Provider(
+                    "数据已上传但云盘仍在处理，请稍后刷新目录。".into(),
+                ));
+            }
+            let value = self.request(
+                "GET",
+                self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
+                None,
+            )?;
+            match value["phase"].as_str() {
+                Some("PHASE_TYPE_COMPLETE") => return Self::file(&value, parent),
+                Some("PHASE_TYPE_ERROR") => {
+                    return Err(QuarkError::Provider(
+                        "上传数据的云盘处理失败，请在迅雷网页中查看详情。".into(),
+                    ));
+                }
+                Some("PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING") => {}
+                _ => return Err(QuarkError::InvalidResponse),
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(remaining.min(std::time::Duration::from_millis(250)));
+        }
+    }
+}
+
+fn upload_request_body(parent: &str, name: &str, size: u64, gcid: &str, modern_web: bool) -> Value {
+    let mut body = json!({
+        "kind":"drive#file", "parent_id":parent, "name":name,
+        "size":size, "hash":gcid, "upload_type":"UPLOAD_TYPE_RESUMABLE",
+    });
+    if modern_web {
+        body["resumable"] = json!({"supported_providers":["PROVIDER_ALIYUN"]});
+    }
+    body
 }
 
 fn resumable_upload(value: &Value) -> Result<XunleiResumableUpload, QuarkError> {
@@ -802,35 +1169,8 @@ struct AwsMultipart {
 
 impl AwsMultipart {
     fn from_upload(upload: &XunleiResumableUpload) -> Result<Self, QuarkError> {
-        let mut endpoint =
-            url::Url::parse(&upload.endpoint).map_err(|_| QuarkError::InvalidResponse)?;
-        if endpoint.scheme() != "https"
-            || endpoint.host_str().is_none()
-            || !endpoint.username().is_empty()
-            || endpoint.password().is_some()
-            || endpoint.query().is_some()
-            || endpoint.fragment().is_some()
-            || endpoint.path() != "/"
-            || upload.bucket.is_empty()
-            || upload.key.is_empty()
-            || !upload
-                .bucket
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let host = endpoint
-            .host_str()
-            .ok_or(QuarkError::InvalidResponse)?
-            .to_owned();
-        if let Some(host) = host.strip_prefix(&format!("{}.", upload.bucket)) {
-            endpoint
-                .set_host(Some(host))
-                .map_err(|_| QuarkError::InvalidResponse)?;
-        }
         Ok(Self {
-            endpoint,
+            endpoint: object_storage_endpoint(upload)?,
             bucket: upload.bucket.clone(),
             key: upload.key.clone(),
             access_key_id: upload.access_key_id.clone(),
@@ -929,59 +1269,145 @@ impl AwsMultipart {
         path: &Path,
         size: u64,
     ) -> Result<(), QuarkError> {
-        if size == 0 {
-            let response = http.send_upload(self.request("PUT", "", "", Vec::new())?)?;
-            return aws_checked(response).map(|_| ());
-        }
-        let started = aws_checked(http.send_upload(self.request(
-            "POST",
-            "uploads",
-            "uploads=",
-            Vec::new(),
-        )?)?)?;
-        let upload_id = xml_tag(&started.body, "UploadId")?;
-        let mut file = std::fs::File::open(path)
-            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-        let mut remaining = size;
-        let mut parts = Vec::new();
-        let mut number = 1_u64;
-        while remaining > 0 {
-            let length = remaining.min(AWS_PART_SIZE) as usize;
-            let mut body = vec![0; length];
-            file.read_exact(&mut body)
-                .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-            remaining = remaining.saturating_sub(length as u64);
-            let encoded_upload = aws_percent(&upload_id);
-            let query = format!("partNumber={number}&uploadId={encoded_upload}");
-            let response =
-                aws_checked(http.send_upload(self.request("PUT", &query, &query, body)?)?)?;
-            let etag = response
-                .headers
-                .iter()
-                .find(|(key, value)| key.eq_ignore_ascii_case("etag") && !value.is_empty())
-                .map(|(_, value)| value.clone())
-                .ok_or(QuarkError::InvalidResponse)?;
-            parts.push((number, etag));
-            number += 1;
-        }
-        let mut complete = String::from("<CompleteMultipartUpload>");
-        for (number, etag) in parts {
-            complete.push_str(&format!(
-                "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
-                xml_escape(&etag)
-            ));
-        }
-        complete.push_str("</CompleteMultipartUpload>");
-        let encoded_upload = aws_percent(&upload_id);
-        let query = format!("uploadId={encoded_upload}");
-        aws_checked(http.send_upload(self.request(
-            "POST",
-            &query,
-            &query,
-            complete.into_bytes(),
-        )?)?)?;
-        Ok(())
+        upload_multipart(http, path, size, |method, raw_query, canonical_query, body| {
+            self.request(method, raw_query, canonical_query, body)
+        })
     }
+}
+
+fn object_storage_endpoint(upload: &XunleiResumableUpload) -> Result<url::Url, QuarkError> {
+    // Xunlei's official Aliyun contract can return a bare DNS endpoint,
+    // including a custom Xunlei host. The web SDK's secure option uses HTTPS.
+    // Preserve the existing strict absolute-HTTPS contract for other providers.
+    let bare_dns = !upload.endpoint.is_empty()
+        && upload.endpoint.len() <= 253
+        && upload.endpoint.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        });
+    let endpoint_value = if upload.provider == "PROVIDER_ALIYUN" && bare_dns {
+        format!("https://{}", upload.endpoint)
+    } else {
+        upload.endpoint.clone()
+    };
+    let mut endpoint = url::Url::parse(&endpoint_value).map_err(|_| QuarkError::InvalidResponse)?;
+    if endpoint.scheme() != "https"
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.path() != "/"
+        || upload.bucket.is_empty()
+        || upload.key.is_empty()
+        || !upload
+            .bucket
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let host = endpoint
+        .host_str()
+        .ok_or(QuarkError::InvalidResponse)?
+        .to_owned();
+    if let Some(host) = host.strip_prefix(&format!("{}.", upload.bucket)) {
+        endpoint
+            .set_host(Some(host))
+            .map_err(|_| QuarkError::InvalidResponse)?;
+    }
+    Ok(endpoint)
+}
+
+fn upload_oss(
+    upload: &XunleiResumableUpload,
+    http: &impl CloudUploadTransport,
+    path: &Path,
+    size: u64,
+) -> Result<(), QuarkError> {
+    let mut endpoint = object_storage_endpoint(upload)?;
+    let host = endpoint.host_str().ok_or(QuarkError::InvalidResponse)?;
+    endpoint
+        .set_host(Some(&format!("{}.{host}", upload.bucket)))
+        .map_err(|_| QuarkError::InvalidResponse)?;
+    let oss = super::upload::Oss {
+        endpoint: endpoint.into(),
+        bucket: upload.bucket.clone(),
+        key: upload.key.clone(),
+        id: upload.access_key_id.clone(),
+        secret: upload.access_key_secret.clone(),
+        token: upload.security_token.clone(),
+    };
+    upload_multipart(http, path, size, |method, raw_query, _, body| {
+        let query = if raw_query.is_empty() {
+            String::new()
+        } else {
+            format!("?{raw_query}")
+        };
+        oss.request(method, &query, body)
+    })
+}
+
+fn upload_multipart(
+    http: &impl CloudUploadTransport,
+    path: &Path,
+    size: u64,
+    request: impl Fn(&'static str, &str, &str, Vec<u8>) -> Result<UploadHttpRequest, QuarkError>,
+) -> Result<(), QuarkError> {
+    if size == 0 {
+        let response = http.send_upload(request("PUT", "", "", Vec::new())?)?;
+        return aws_checked(response).map(|_| ());
+    }
+    let started = aws_checked(http.send_upload(request(
+        "POST",
+        "uploads",
+        "uploads=",
+        Vec::new(),
+    )?)?)?;
+    let upload_id = xml_tag(&started.body, "UploadId")?;
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+    let mut remaining = size;
+    let mut parts = Vec::new();
+    let mut number = 1_u64;
+    while remaining > 0 {
+        let length = remaining.min(AWS_PART_SIZE) as usize;
+        let mut body = vec![0; length];
+        file.read_exact(&mut body)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        remaining = remaining.saturating_sub(length as u64);
+        let encoded_upload = aws_percent(&upload_id);
+        let query = format!("partNumber={number}&uploadId={encoded_upload}");
+        let response = aws_checked(http.send_upload(request("PUT", &query, &query, body)?)?)?;
+        let etag = response
+            .headers
+            .iter()
+            .find(|(key, value)| key.eq_ignore_ascii_case("etag") && !value.is_empty())
+            .map(|(_, value)| value.clone())
+            .ok_or(QuarkError::InvalidResponse)?;
+        parts.push((number, etag));
+        number += 1;
+    }
+    let mut complete = String::from("<CompleteMultipartUpload>");
+    for (number, etag) in parts {
+        complete.push_str(&format!(
+            "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
+            xml_escape(&etag)
+        ));
+    }
+    complete.push_str("</CompleteMultipartUpload>");
+    let encoded_upload = aws_percent(&upload_id);
+    let query = format!("uploadId={encoded_upload}");
+    aws_checked(http.send_upload(request(
+        "POST",
+        &query,
+        &query,
+        complete.into_bytes(),
+    )?)?)?;
+    Ok(())
 }
 
 fn aws_checked(response: UploadHttpResponse) -> Result<UploadHttpResponse, QuarkError> {
@@ -1043,7 +1469,7 @@ fn xml_escape(value: &str) -> String {
 
 fn xunlei_gcid(path: &Path, size: u64) -> Result<String, QuarkError> {
     let mut block = 0x40000_u64;
-    while size / block > 0x200 && block < 0x200000 {
+    while size > block * 0x200 && block < 0x200000 {
         block <<= 1;
     }
     let mut file = std::fs::File::open(path)

@@ -93,6 +93,10 @@ function isAuthorizationWindowUnavailable(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'web_auth_required';
 }
 
+function isTerminalWebAuthorizationError(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && ['provider_error', 'invalid_response', 'credentials_expired'].includes(String((error as { code?: unknown }).code));
+}
+
 function errorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
@@ -396,6 +400,13 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       setBreadcrumbs(nextBreadcrumbs);
       setDirectoryState(next.items.length ? 'ready' : 'empty');
     } catch (error) {
+      if (provider === 'xunlei' && (isAuthorizationWindowUnavailable(error) || isCredentialExpired(error))) {
+        setReauthorizationRequired(true);
+        setAuthorizationStatus(errorMessage(error, '读取目录需要网页验证。'));
+        setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
+        if (directory) setOperation({ kind: 'error', message: '读取目录需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重试。' });
+        return;
+      }
       setDirectory(null);
       setDirectoryState(isCredentialExpired(error) ? 'expired' : 'error');
       setAuthorizationStatus(errorMessage(error, '无法读取此目录'));
@@ -454,6 +465,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     setPassword('');
     setWebAuthorization(null);
     setReauthorizationRequired(false);
+    if (provider === 'xunlei' && reauthorizationRequired) setOperation(null);
     onAccountAuthorized?.(account);
     if (!authorizationOnly) await loadDirectory(account, rootId, [{ id: rootId, name: '根目录' }]);
   }
@@ -496,7 +508,17 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         setAuthorizationStatus('正在等待你在授权窗口中完成登录…');
         return;
       }
-      setAuthorizationStatus(errorMessage(error, '网页授权未完成。'));
+      const message = errorMessage(error, '网页授权未完成。');
+      setAuthorizationStatus(message);
+      if (provider === 'xunlei' && isTerminalWebAuthorizationError(error)) {
+        // A rejected verification must not automatically start another captcha.
+        // Keep the account and let the user explicitly reopen authorization.
+        setWebAuthorization(null);
+        if (activeAccount) {
+          setReauthorizationRequired(true);
+          setOperation({ kind: 'error', message });
+        }
+      }
       if (fromPolling && isAuthorizationWindowUnavailable(error)) setWebAuthorization(null);
     } finally {
       authorizationCompletionInFlight.current = false;
@@ -536,11 +558,11 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       setEditor(null);
       setEditorValue('');
     } catch (error) {
-      if (isCredentialExpired(error)) {
+      if (isCredentialExpired(error) && provider !== 'xunlei') {
         setDirectory(null);
         setDirectoryState('expired');
         setAuthorizationStatus(errorMessage(error, '登录凭据已过期。'));
-      } else if (provider === 'pikpak' && isAuthorizationWindowUnavailable(error)) {
+      } else if ((provider === 'pikpak' || provider === 'xunlei') && (isAuthorizationWindowUnavailable(error) || (provider === 'xunlei' && isCredentialExpired(error)))) {
         // Keep the existing account and directory alive while the official
         // browser proves the requested action. `cloud_begin_authorization`
         // only opens the WebView; the saved session is replaced later, after
@@ -702,7 +724,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function sessionActions() {
-    return <div className="cloud-session-actions"><button className="cloud-auth-state" disabled>{authorizedLabel}</button>{provider === 'pikpak' && reauthorizationRequired && effectiveAuthorizationCapabilities.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}<button className="secondary" disabled={operationBusy} onClick={() => setPendingLogout(true)}>{logoutLabel}</button></div>;
+    return <div className="cloud-session-actions"><button className="cloud-auth-state" disabled>{authorizedLabel}</button>{(provider === 'pikpak' || provider === 'xunlei') && reauthorizationRequired && effectiveAuthorizationCapabilities.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}<button className="secondary" disabled={operationBusy} onClick={() => setPendingLogout(true)}>{logoutLabel}</button></div>;
   }
 
   function logoutConfirmation() {
@@ -746,6 +768,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={isPikpakRecycleBin ? '确认永久删除' : '确认移入回收站'}><h3>{isPikpakRecycleBin ? '确认永久删除' : '确认移入回收站'}</h3><p>{isPikpakRecycleBin ? `所选 ${selected.length} 个项目将被永久删除，不可恢复。` : `所选 ${selected.length} 个项目将移入回收站，不会永久删除。`}</p><button className="secondary" onClick={() => setPendingTrash(false)}>取消</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation(isPikpakRecycleBin ? '永久删除' : '删除', () => isPikpakRecycleBin ? client.deleteCloudFiles(provider, selectedIds.slice()) : client.trashCloudFiles(provider, selectedIds.slice())); }}>{isPikpakRecycleBin ? '永久删除' : '移入回收站'}</button></section></div>}
     {showSessionActions && logoutConfirmation()}
     {operation && <p className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}>{operation.message}</p>}
+    {!showSessionActions && provider === 'xunlei' && reauthorizationRequired && effectiveAuthorizationCapabilities.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}
     {directoryState === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>正在加载文件…</span></div>}
     {directoryState === 'error' && <div className="cloud-state cloud-error" role="alert"><b>加载失败</b><span>{authorizationStatus}</span><button className="secondary" onClick={refreshDirectory}>重试</button></div>}
     {(directoryState === 'ready' || directoryState === 'empty') && <div
