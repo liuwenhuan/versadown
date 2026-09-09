@@ -185,6 +185,20 @@ async function authorizationPageState(port) {
   })()`).then((session) => ({ ...session, viewport }));
 }
 
+async function hasGoogleOAuthPopup(port) {
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+  const targets = await response.json();
+  return targets.some((target) => {
+    if (target.type !== 'page') return false;
+    try {
+      const hostname = new URL(target.url).hostname;
+      return hostname === 'accounts.google.com' || hostname.endsWith('.accounts.google.com');
+    } catch (_) {
+      return false;
+    }
+  });
+}
+
 function safeError(error) {
   if (typeof error === 'string') return error.slice(0, 300);
   if (error && typeof error === 'object') {
@@ -237,8 +251,12 @@ async function removeTemporaryDirectory(directory) {
 async function run() {
   if (!fs.existsSync(executable)) throw new Error(`未找到发布二进制：${executable}`);
   const viewportOnly = process.env.ALLDOWNLOADER_VERIFY_AUTH_VIEWPORT_ONLY === '1';
-  if (!viewportOnly && provider !== 'aliyun') {
-    throw new Error('完整网页登录验证当前仅支持 aliyun；其他网盘请设置 ALLDOWNLOADER_VERIFY_AUTH_VIEWPORT_ONLY=1');
+  const popupOnly = process.env.ALLDOWNLOADER_VERIFY_OAUTH_POPUP_ONLY === '1';
+  if (!viewportOnly && !popupOnly && provider !== 'aliyun') {
+    throw new Error('完整网页登录验证当前仅支持 aliyun；其他网盘请设置视口或 OAuth 弹窗测试模式');
+  }
+  if (popupOnly && provider !== 'pikpak') {
+    throw new Error('OAuth 弹窗测试当前仅支持 pikpak');
   }
 
   const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-aliyun-live-'));
@@ -262,12 +280,22 @@ async function run() {
     const begin = await invoke(manager, 'cloud_begin_authorization', { provider });
     if (!begin.ok) throw new Error(`${providerLabels[provider]}授权窗口无法打开：${safeError(begin.error)}`);
 
-    process.stdout.write(`${providerLabels[provider]}官方授权窗口已打开。请在该窗口完成登录；后台将自动验证账号与根目录读取。\n`);
+    process.stdout.write(popupOnly
+      ? `${providerLabels[provider]}官方授权窗口已打开。请点击“通过 Google 登录”；后台将确认 Google OAuth 窗口出现。\n`
+      : `${providerLabels[provider]}官方授权窗口已打开。请在该窗口完成登录；后台将自动验证账号与根目录读取。\n`);
     const deadline = Date.now() + (10 * 60 * 1000);
     let sessionDetected = false;
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`应用在授权完成前退出（${child.exitCode}）`);
       const authorization = await authorizationPageState(port).catch(() => ({ open: false, sessionReady: false }));
+      if (popupOnly) {
+        if (await hasGoogleOAuthPopup(port).catch(() => false)) {
+          process.stdout.write('PikPak Google OAuth 弹窗验证通过：accounts.google.com 已在独立窗口打开。\n');
+          return;
+        }
+        await delay(500);
+        continue;
+      }
       if (viewportOnly && authorization.open && authorization.viewport) {
         const { x, y, maxX } = authorization.viewport;
         if (y === 0 && Math.abs(x - maxX) <= 1) {

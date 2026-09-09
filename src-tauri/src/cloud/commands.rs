@@ -8,7 +8,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use tauri::{webview::PageLoadEvent, AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    webview::{NewWindowResponse, PageLoadEvent},
+    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+};
 use tauri_plugin_dialog::DialogExt;
 
 pub struct CloudState {
@@ -279,6 +282,10 @@ const AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS: &str = r#"(() => {
   for (const delay of [120, 480, 1000]) setTimeout(scrollToTopRight, delay);
 })()"#;
 
+fn allows_cloud_authorization_popup(url: &url::Url) -> bool {
+    url.scheme() == "https" || url.as_str() == "about:blank"
+}
+
 #[tauri::command]
 pub async fn cloud_begin_authorization(
     app: AppHandle,
@@ -308,6 +315,13 @@ pub async fn cloud_begin_authorization(
         .title(format!("{} 网页授权", provider.key()))
         .inner_size(1024.0, 760.0)
         .incognito(true)
+        .on_new_window(|url, _features| {
+            if allows_cloud_authorization_popup(&url) {
+                NewWindowResponse::Allow
+            } else {
+                NewWindowResponse::Deny
+            }
+        })
         .on_page_load(|window, payload| {
             if payload.event() == PageLoadEvent::Finished {
                 let _ = window.eval(AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS);
@@ -1216,6 +1230,34 @@ mod tests {
         assert!(source.contains("PageLoadEvent::Finished"));
         assert!(source.contains("window.eval(AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS)"));
         assert!(source.contains("window.scrollTo({ left: maxLeft, top: 0"));
+    }
+
+    #[test]
+    fn cloud_authorization_window_allows_safe_oauth_popups() {
+        // Social OAuth, including PikPak's Google sign-in, is launched with
+        // window.open.  The shared authorization WebView must explicitly let
+        // safe popup URLs reach WebView2 instead of silently handling them.
+        let source = include_str!("commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes its tests");
+        assert!(source.contains(".on_new_window(|url, _features|"));
+        assert!(source.contains("allows_cloud_authorization_popup(&url)"));
+        assert!(source.contains("NewWindowResponse::Allow"));
+        assert!(source.contains("NewWindowResponse::Deny"));
+
+        assert!(super::allows_cloud_authorization_popup(
+            &url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap()
+        ));
+        assert!(super::allows_cloud_authorization_popup(
+            &url::Url::parse("about:blank").unwrap()
+        ));
+        assert!(!super::allows_cloud_authorization_popup(
+            &url::Url::parse("file:///C:/private.txt").unwrap()
+        ));
+        assert!(!super::allows_cloud_authorization_popup(
+            &url::Url::parse("javascript:alert(1)").unwrap()
+        ));
     }
 
     #[test]
