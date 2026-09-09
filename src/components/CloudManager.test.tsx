@@ -28,15 +28,17 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
   };
 }
 
-it('shows only the authorization boundary before a provider has an account', () => {
+it('keeps the unauthenticated provider card focused on the available sign-in action', () => {
   render(<CloudManager provider="quark" client={createCloudFake()} />);
 
   expect(screen.getByRole('region', { name: '夸克账号授权' })).toBeVisible();
-  expect(screen.getByText(/夸克未提供可用的账号密码开放登录接口/)).toBeVisible();
+  expect(screen.queryByText('自有网盘 · 本地会话')).not.toBeInTheDocument();
+  expect(screen.queryByText(/授权完成前不会显示或加载任何文件/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/夸克未提供可用的账号密码开放登录接口/)).not.toBeInTheDocument();
   expect(screen.queryByLabelText('夸克账号')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '登录夸克账号' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
-  expect(screen.getByRole('status')).toHaveTextContent('未授权');
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
   expect(screen.queryByRole('tree', { name: '夸克网盘文件' })).not.toBeInTheDocument();
   expect(screen.queryByText('下载示例.txt')).not.toBeInTheDocument();
 });
@@ -106,7 +108,8 @@ it.each([
   render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
 
   await waitFor(() => expect(screen.queryByRole('button', { name: '登录百度账号' })).not.toBeInTheDocument());
-  expect(screen.getByText(/百度未提供可用的账号密码登录接口/)).toBeVisible();
+  expect(screen.queryByText(/百度未提供可用的账号密码登录接口/)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
 });
 
 it('fails closed while a provider change waits for its capability response', async () => {
@@ -121,7 +124,7 @@ it('fails closed while a provider change waits for its capability response', asy
   rerender(<CloudManager provider={'aliyun' as never} client={client} authorizationOnly />);
 
   expect(screen.queryByRole('button', { name: '登录阿里账号' })).not.toBeInTheDocument();
-  expect(screen.getByText(/阿里未提供可用的账号密码登录接口/)).toBeVisible();
+  expect(screen.queryByText(/阿里未提供可用的账号密码登录接口/)).not.toBeInTheDocument();
 });
 
 it('fails closed while a same-provider client change waits for its capability response', async () => {
@@ -134,7 +137,7 @@ it('fails closed while a same-provider client change waits for its capability re
   rerender(<CloudManager provider={'baidu' as never} client={pendingClient} authorizationOnly />);
 
   expect(screen.queryByRole('button', { name: '登录百度账号' })).not.toBeInTheDocument();
-  expect(screen.getByText(/百度未提供可用的账号密码登录接口/)).toBeVisible();
+  expect(screen.queryByText(/百度未提供可用的账号密码登录接口/)).not.toBeInTheDocument();
 });
 
 it('recovers an existing account on mount before loading its root directory', async () => {

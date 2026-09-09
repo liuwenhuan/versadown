@@ -580,21 +580,19 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function authorizationView(expired = false) {
-    const noPasswordLoginHint = provider === 'quark'
-      ? '夸克未提供可用的账号密码开放登录接口，请在官方网页窗口中登录。'
-      : `${label}未提供可用的账号密码登录接口，请在官方网页窗口中登录。`;
+    const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
+    const showAuthorizationFeedback = authorizationStatus !== initialAuthorizationStatus;
     return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading"><div><p className="eyebrow">自有网盘 · 本地会话</p><h2>{label}网盘</h2><span>{expired ? '凭据失效后必须重新授权，文件列表不会继续显示。' : '授权完成前不会显示或加载任何文件。'}</span></div></header>
+      <header className="cloud-heading"><h2>{label}网盘</h2></header>
       {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {effectiveAuthorizationCapabilities.password && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label>{label}密码<input aria-label={`${label}密码`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <button className="primary" type="submit">登录{label}账号</button></>}
-        {!effectiveAuthorizationCapabilities.password && <p className="cloud-login-hint">{noPasswordLoginHint}</p>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
       </form>
-      <p className="authorization-note" role="status"><b>{expired ? '凭据已过期' : '授权状态'}</b><span>{authorizationStatus}</span></p>
+      {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${expired ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}
     </section>;
   }
 
@@ -608,7 +606,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   function accountManagementView() {
     return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading"><div><p className="eyebrow">自有网盘 · 本地会话</p><h2>{label}网盘</h2><span>账号已连接，文件管理功能可从上方的“{label}网盘”标签进入。</span></div></header>
+      <header className="cloud-heading"><h2>{label}网盘</h2></header>
       <div className="cloud-account-summary"><span className="cloud-account-avatar" aria-hidden="true">{label.slice(0, 1)}</span><div><b>{activeAccount?.displayName}</b><small>{passwordSession ? '账号密码登录' : '官方网页授权'} · 凭据仅保存在本机</small></div></div>
       {sessionActions()}
       {logoutConfirmation()}
@@ -618,7 +616,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   if (authorizationOnly && activeAccount) return accountManagementView();
   if (authorizationOnly || !activeAccount) return authorizationView();
-  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={`${label}文件管理器`}><header className="cloud-heading"><div><p className="eyebrow">自有网盘 · 本地会话</p><h2>{label}网盘</h2></div></header><p className="cloud-state cloud-error" role="alert">登录凭据已过期，请前往“网盘管理”重新授权。</p></section>;
+  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={`${label}文件管理器`}><header className="cloud-heading"><h2>{label}网盘</h2></header><p className="cloud-state cloud-error" role="alert">登录凭据已过期，请前往“网盘管理”重新授权。</p></section>;
   if (directoryState === 'expired') return authorizationView(true);
 
   const parent = breadcrumbs.at(-2);
