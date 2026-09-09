@@ -60,6 +60,19 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     }
 
     fn response(&self, response: &CloudHttpResponse) -> Result<Value, QuarkError> {
+        // Token refresh failures use a 400 body with string error codes. Parse it
+        // before the shared numeric-code mapper turns it into a generic provider
+        // error, so callers can return to the official web authorization flow.
+        if response.status == 400 {
+            if let Ok(value) = serde_json::from_str::<Value>(&response.body) {
+                if matches!(
+                    value.get("code").and_then(Value::as_str),
+                    Some("RefreshTokenExpired" | "InvalidParameter.RefreshToken")
+                ) {
+                    return Err(QuarkError::AuthorizationExpired);
+                }
+            }
+        }
         let value = response_json(response)?;
         let code = value.get("code").and_then(Value::as_str).unwrap_or("");
         if matches!(
@@ -134,10 +147,6 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         )
     }
 
-    fn refreshed_stored(&self) -> Result<AliyunSession, QuarkError> {
-        self.refresh(&self.stored()?)
-    }
-
     fn directory_with(
         &self,
         session: &AliyunSession,
@@ -192,10 +201,29 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
             access_token: String::new(),
             drive_id: String::new(),
         })?;
-        let account = self.account_with(&session)?;
-        self.directory_with(&session, "root")?;
+        let (account, _) = self.validate(&session)?;
         self.save(&session)?;
         Ok(account)
+    }
+
+    /// A refresh token may be single-use. Validate the refreshed replacement
+    /// completely and persist it exactly once before any caller-visible operation.
+    fn refreshed_validated_session(
+        &self,
+    ) -> Result<(AliyunSession, CloudAccount, CloudDirectory), QuarkError> {
+        let session = self.refresh(&self.stored()?)?;
+        let (account, root) = self.validate(&session)?;
+        self.save(&session)?;
+        Ok((session, account, root))
+    }
+
+    fn validate(
+        &self,
+        session: &AliyunSession,
+    ) -> Result<(CloudAccount, CloudDirectory), QuarkError> {
+        let account = self.account_with(session)?;
+        let root = self.directory_with(session, "root")?;
+        Ok((account, root))
     }
 
     fn account_with(&self, session: &AliyunSession) -> Result<CloudAccount, QuarkError> {
@@ -223,25 +251,21 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     }
 
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
-        let session = self.refreshed_stored()?;
-        let account = self.account_with(&session)?;
-        self.save(&session)?;
+        let (_, account, _) = self.refreshed_validated_session()?;
         Ok(account)
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
-        let session = self.refreshed_stored()?;
-        let directory = self.directory_with(&session, parent)?;
-        // A successful root listing proves the refreshed browser session works, so
-        // it is safe to retain a rotated refresh token at this point.
+        let (session, _, root) = self.refreshed_validated_session()?;
         if parent == "root" {
-            self.save(&session)?;
+            Ok(root)
+        } else {
+            self.directory_with(&session, parent)
         }
-        Ok(directory)
     }
 
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<CloudFile, QuarkError> {
-        let session = self.refreshed_stored()?;
+        let (session, _, _) = self.refreshed_validated_session()?;
         let value = self.api(
             &session,
             "/v2/file/create",
@@ -257,11 +281,11 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<(), QuarkError> {
-        let session = self.refreshed_stored()?;
+        let (session, _, _) = self.refreshed_validated_session()?;
         self.api(
             &session,
-            "/v2/file/update",
-            json!({"drive_id":session.drive_id,"file_id":id,"name":name}),
+            "/v3/file/update",
+            json!({"drive_id":session.drive_id,"file_id":id,"name":name,"check_name_mode":"refuse"}),
         )?;
         Ok(())
     }
@@ -275,7 +299,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         if ids.is_empty() {
             return Err(QuarkError::InvalidInput("请选择至少一个文件".into()));
         }
-        let session = self.refreshed_stored()?;
+        let (session, _, _) = self.refreshed_validated_session()?;
         for id in ids {
             let mut body = json!({"drive_id":session.drive_id,"file_id":id});
             if let Some(parent) = parent {
@@ -301,8 +325,8 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     /// Initialize a one-part upload; the caller transfers returned upload URLs and
     /// completes the upload separately, keeping those transient URLs out of storage.
     pub fn upload_init(&self, parent: &str, name: &str, size: u64) -> Result<Value, QuarkError> {
-        let session = self.refreshed_stored()?;
-        self.api(
+        let (session, _, _) = self.refreshed_validated_session()?;
+        let value = self.api(
             &session,
             "/v2/file/create",
             json!({
@@ -314,7 +338,9 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
                 "check_name_mode": "refuse",
                 "part_info_list": [{"part_number": 1}],
             }),
-        )
+        )?;
+        validate_upload_urls(&value)?;
+        Ok(value)
     }
 
     pub fn upload(&self, parent: &str, name: &str, size: u64) -> Result<Value, QuarkError> {
@@ -323,7 +349,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
 
     /// Always asks the service for a fresh short-lived download URL.
     pub fn download(&self, id: &str) -> Result<String, QuarkError> {
-        let session = self.refreshed_stored()?;
+        let (session, _, _) = self.refreshed_validated_session()?;
         let value = self.api(
             &session,
             "/v2/file/get_download_url",
@@ -336,6 +362,26 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
             .filter(|url| url.starts_with("https://"))
             .map(str::to_owned)
             .ok_or(QuarkError::InvalidResponse)
+    }
+}
+
+fn validate_upload_urls(value: &Value) -> Result<(), QuarkError> {
+    match value {
+        Value::Array(values) => values.iter().try_for_each(validate_upload_urls),
+        Value::Object(values) => {
+            for (key, value) in values {
+                if matches!(key.as_str(), "upload_url" | "internal_upload_url")
+                    && value
+                        .as_str()
+                        .is_some_and(|url| !url.starts_with("https://"))
+                {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                validate_upload_urls(value)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
