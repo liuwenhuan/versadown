@@ -601,14 +601,19 @@ pub fn plan_cloud_directory_download(
     let mut files = Vec::new();
     let mut visited_directories = HashSet::new();
     let mut visited_files = HashSet::new();
-    let mut pending = vec![(root_id.to_owned(), vec![safe_directory_component(root_name)])];
+    let mut pending = vec![(
+        root_id.to_owned(),
+        vec![safe_directory_component(root_name)],
+    )];
 
     while let Some((directory_id, relative_directory)) = pending.pop() {
         if visited_directories.len() >= MAX_DIRECTORY_DOWNLOAD_DIRECTORIES {
             return Err(QuarkError::InvalidInput("目录下载包含过多子目录".into()));
         }
         if !visited_directories.insert(directory_id.clone()) {
-            return Err(QuarkError::InvalidInput("目录下载检测到循环或重复目录".into()));
+            return Err(QuarkError::InvalidInput(
+                "目录下载检测到循环或重复目录".into(),
+            ));
         }
 
         let directory = list_directory(&directory_id)?;
@@ -707,7 +712,9 @@ fn list_cloud_directory(
                 .directory(parent_id)
         }
         CloudProvider::Aliyun => aliyun::AliyunClient::new(store, http).directory(parent_id),
-        CloudProvider::Xunlei => with_xunlei_client(store, http, |client| client.directory(parent_id)),
+        CloudProvider::Xunlei => {
+            with_xunlei_client(store, http, |client| client.directory(parent_id))
+        }
         CloudProvider::Uc => {
             uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, http)
                 .directory(parent_id)
@@ -1383,7 +1390,10 @@ async fn submit_cloud_file(
         .service()
         .await
         .map_err(|error| QuarkError::Transport(error.to_string()))?;
-    let task = match service.submit_uri_with_options(task.id, vec![signed_url], options).await {
+    let task = match service
+        .submit_uri_with_options(task.id, vec![signed_url], options)
+        .await
+    {
         Ok(task) => task,
         Err(error) => {
             let message = format!("aria2 未能接受网盘下载任务：{error}");
@@ -1447,9 +1457,10 @@ fn directory_download_failure(
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
             ("provider_unsupported", "当前网盘不支持该下载")
         }
-        QuarkError::PikpakRegionalMembershipRestricted => {
-            ("pikpak_regional_membership_restricted", "PikPak 当前地区下载受限")
-        }
+        QuarkError::PikpakRegionalMembershipRestricted => (
+            "pikpak_regional_membership_restricted",
+            "PikPak 当前地区下载受限",
+        ),
     };
     CloudDirectoryDownloadFailure {
         relative_path: planned_relative_path(file),
@@ -1507,21 +1518,22 @@ pub async fn cloud_download_directory(
 
     for file in plan.files {
         let relative_path = planned_relative_path(&file);
-        let output_directory = match directory_download_output_directory(
-            &base_directory,
-            &file.relative_directory,
-        ) {
-            Ok(directory) => directory,
-            Err(error) => {
-                outcome.failures.push(directory_download_failure(&file, &error));
-                continue;
-            }
-        };
+        let output_directory =
+            match directory_download_output_directory(&base_directory, &file.relative_directory) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    outcome
+                        .failures
+                        .push(directory_download_failure(&file, &error));
+                    continue;
+                }
+            };
         let mut options = configured.clone();
         options.directory = Some(output_directory);
         options.output_name = Some(file.output_name.clone());
 
-        match submit_cloud_file(app.clone(), &state, provider, file.file_id.clone(), options).await {
+        match submit_cloud_file(app.clone(), &state, provider, file.file_id.clone(), options).await
+        {
             Ok(CloudFileSubmission::Queued(task)) => {
                 outcome.queued_count += 1;
                 outcome.tasks.push(task);
@@ -1533,7 +1545,9 @@ pub async fn cloud_download_directory(
                     message: "已存在下载任务，未重复入队",
                 });
             }
-            Err(error) => outcome.failures.push(directory_download_failure(&file, &error)),
+            Err(error) => outcome
+                .failures
+                .push(directory_download_failure(&file, &error)),
         }
     }
 

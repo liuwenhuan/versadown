@@ -1,11 +1,14 @@
 use alldownloader_lib::cloud::{
-    commands::{plan_cloud_directory_download, CloudDownloadSourceGate}, CloudDirectory, CloudFile,
-    CloudProvider, QuarkError,
+    commands::{plan_cloud_directory_download, CloudDownloadSourceGate},
+    CloudDirectory, CloudFile, CloudProvider, QuarkError,
 };
 use std::{sync::Arc, time::Duration};
 
 fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
-    CloudDirectory { id: id.into(), items }
+    CloudDirectory {
+        id: id.into(),
+        items,
+    }
 }
 
 fn file(id: &str, parent_id: &str, name: &str) -> CloudFile {
@@ -32,30 +35,31 @@ fn folder(id: &str, parent_id: &str, name: &str) -> CloudFile {
 
 #[test]
 fn plans_nested_directory_files_under_a_safe_root_relative_path() {
-    let plan = plan_cloud_directory_download(
-        CloudProvider::Quark,
-        "root-folder",
-        "课程/资料",
-        |id| match id {
-            "root-folder" => Ok(directory(
-                id,
-                vec![
-                    file("overview", id, "概览.txt"),
-                    folder("chapter-1", id, "第一章"),
-                ],
-            )),
-            "chapter-1" => Ok(directory(id, vec![file("lesson", id, "讲义.pdf")])),
-            _ => Err(QuarkError::InvalidResponse),
-        },
-    )
-    .expect("a non-empty folder tree should produce download entries");
+    let plan =
+        plan_cloud_directory_download(CloudProvider::Quark, "root-folder", "课程/资料", |id| {
+            match id {
+                "root-folder" => Ok(directory(
+                    id,
+                    vec![
+                        file("overview", id, "概览.txt"),
+                        folder("chapter-1", id, "第一章"),
+                    ],
+                )),
+                "chapter-1" => Ok(directory(id, vec![file("lesson", id, "讲义.pdf")])),
+                _ => Err(QuarkError::InvalidResponse),
+            }
+        })
+        .expect("a non-empty folder tree should produce download entries");
 
     assert_eq!(plan.files.len(), 2);
     assert_eq!(plan.files[0].file_id, "overview");
     assert_eq!(plan.files[0].relative_directory, vec!["课程_资料"]);
     assert_eq!(plan.files[0].output_name, "概览.txt");
     assert_eq!(plan.files[1].file_id, "lesson");
-    assert_eq!(plan.files[1].relative_directory, vec!["课程_资料", "第一章"]);
+    assert_eq!(
+        plan.files[1].relative_directory,
+        vec!["课程_资料", "第一章"]
+    );
     assert_eq!(plan.files[1].output_name, "讲义.pdf");
 }
 
@@ -69,12 +73,20 @@ fn rejects_empty_cycles_duplicate_files_and_pikpak_recycle_bin() {
     let cycle = plan_cloud_directory_download(CloudProvider::Quark, "root", "循环", |id| {
         Ok(directory(id, vec![folder("root", id, "又回来了")]))
     });
-    assert!(matches!(cycle, Err(QuarkError::InvalidInput(message)) if message.contains("循环或重复目录")));
+    assert!(
+        matches!(cycle, Err(QuarkError::InvalidInput(message)) if message.contains("循环或重复目录"))
+    );
 
-    let duplicate_file = plan_cloud_directory_download(CloudProvider::Quark, "root", "重复", |id| {
-        Ok(directory(id, vec![file("same", id, "a.txt"), file("same", id, "b.txt")]))
-    });
-    assert!(matches!(duplicate_file, Err(QuarkError::InvalidInput(message)) if message.contains("重复文件")));
+    let duplicate_file =
+        plan_cloud_directory_download(CloudProvider::Quark, "root", "重复", |id| {
+            Ok(directory(
+                id,
+                vec![file("same", id, "a.txt"), file("same", id, "b.txt")],
+            ))
+        });
+    assert!(
+        matches!(duplicate_file, Err(QuarkError::InvalidInput(message)) if message.contains("重复文件"))
+    );
 
     let recycle_bin = plan_cloud_directory_download(
         CloudProvider::Pikpak,
@@ -82,7 +94,9 @@ fn rejects_empty_cycles_duplicate_files_and_pikpak_recycle_bin() {
         "回收站",
         |_| panic!("the virtual recycle bin must not be listed"),
     );
-    assert!(matches!(recycle_bin, Err(QuarkError::InvalidInput(message)) if message.contains("回收站")));
+    assert!(
+        matches!(recycle_bin, Err(QuarkError::InvalidInput(message)) if message.contains("回收站"))
+    );
 }
 
 #[test]
@@ -99,57 +113,70 @@ fn rejects_directory_trees_beyond_the_bounded_traversal_limit() {
         ))
     });
 
-    assert!(matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("过多子目录")));
+    assert!(
+        matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("过多子目录"))
+    );
 }
 
 #[test]
 fn rejects_windows_normalized_output_path_collisions_before_queueing() {
-    let normalized_file_name = plan_cloud_directory_download(
-        CloudProvider::Quark,
-        "root",
-        "资料",
-        |id| Ok(directory(id, vec![file("one", id, "a:b.txt"), file("two", id, "a?b.txt")])),
+    let normalized_file_name =
+        plan_cloud_directory_download(CloudProvider::Quark, "root", "资料", |id| {
+            Ok(directory(
+                id,
+                vec![file("one", id, "a:b.txt"), file("two", id, "a?b.txt")],
+            ))
+        });
+    assert!(
+        matches!(normalized_file_name, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突"))
     );
-    assert!(matches!(normalized_file_name, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
 
-    let case_insensitive_name = plan_cloud_directory_download(
-        CloudProvider::Quark,
-        "root",
-        "资料",
-        |id| Ok(directory(id, vec![file("one", id, "Readme.txt"), file("two", id, "README.TXT")])),
+    let case_insensitive_name =
+        plan_cloud_directory_download(CloudProvider::Quark, "root", "资料", |id| {
+            Ok(directory(
+                id,
+                vec![file("one", id, "Readme.txt"), file("two", id, "README.TXT")],
+            ))
+        });
+    assert!(
+        matches!(case_insensitive_name, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突"))
     );
-    assert!(matches!(case_insensitive_name, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
 
-    let normalized_directory = plan_cloud_directory_download(
-        CloudProvider::Quark,
-        "root",
-        "资料",
-        |id| match id {
-            "root" => Ok(directory(id, vec![folder("first", id, "2026:笔记"), folder("second", id, "2026?笔记")])),
-            "first" | "second" => Ok(directory(id, vec![file(&format!("{id}-file"), id, "说明.txt")])),
+    let normalized_directory =
+        plan_cloud_directory_download(CloudProvider::Quark, "root", "资料", |id| match id {
+            "root" => Ok(directory(
+                id,
+                vec![
+                    folder("first", id, "2026:笔记"),
+                    folder("second", id, "2026?笔记"),
+                ],
+            )),
+            "first" | "second" => Ok(directory(
+                id,
+                vec![file(&format!("{id}-file"), id, "说明.txt")],
+            )),
             _ => Err(QuarkError::InvalidResponse),
-        },
+        });
+    assert!(
+        matches!(normalized_directory, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突"))
     );
-    assert!(matches!(normalized_directory, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
 }
 
 #[test]
 fn rejects_a_file_that_is_a_windows_normalized_ancestor_of_another_target() {
-    let result = plan_cloud_directory_download(
-        CloudProvider::Quark,
-        "root",
-        "资料",
-        |id| match id {
-            "root" => Ok(directory(
-                id,
-                vec![file("root-file", id, "a"), folder("subtree", id, "A")],
-            )),
-            "subtree" => Ok(directory(id, vec![file("nested-file", id, "x.txt")])),
-            _ => Err(QuarkError::InvalidResponse),
-        },
-    );
+    let result = plan_cloud_directory_download(CloudProvider::Quark, "root", "资料", |id| match id
+    {
+        "root" => Ok(directory(
+            id,
+            vec![file("root-file", id, "a"), folder("subtree", id, "A")],
+        )),
+        "subtree" => Ok(directory(id, vec![file("nested-file", id, "x.txt")])),
+        _ => Err(QuarkError::InvalidResponse),
+    });
 
-    assert!(matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
+    assert!(
+        matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突"))
+    );
 }
 
 #[tokio::test]

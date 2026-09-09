@@ -197,11 +197,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                 "destFolderName",
             )
         } else {
-            (
-                "/api/open/file/renameFile.action",
-                "fileId",
-                "destFileName",
-            )
+            ("/api/open/file/renameFile.action", "fileId", "destFileName")
         };
         self.form_request("POST", path, &[(id_key, id), (name_key, name)])
             .map(|_| ())
@@ -237,8 +233,8 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                 })
             })
             .collect::<Vec<_>>();
-        let task_infos = serde_json::to_string(&task_infos)
-            .map_err(|_| QuarkError::InvalidResponse)?;
+        let task_infos =
+            serde_json::to_string(&task_infos).map_err(|_| QuarkError::InvalidResponse)?;
         self.form_request(
             "POST",
             "/api/open/batch/createBatchTask.action",
@@ -540,11 +536,13 @@ fn bool_value(value: Option<&Value>) -> bool {
     value
         .and_then(|value| {
             value.as_bool().or_else(|| {
-                value.as_str().and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
-                    "true" | "1" | "yes" => Some(true),
-                    "false" | "0" | "no" => Some(false),
-                    _ => None,
-                })
+                value
+                    .as_str()
+                    .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+                        "true" | "1" | "yes" => Some(true),
+                        "false" | "0" | "no" => Some(false),
+                        _ => None,
+                    })
             })
         })
         .unwrap_or(false)
@@ -643,7 +641,8 @@ impl XmlNode {
             return Value::String(text.into());
         }
         if !text.is_empty() {
-            self.children.insert("#text".into(), Value::String(text.into()));
+            self.children
+                .insert("#text".into(), Value::String(text.into()));
         }
         Value::Object(self.children)
     }
@@ -684,7 +683,10 @@ fn tianyi_xml_value(body: &str) -> Result<Value, QuarkError> {
     let mut stack = Vec::<XmlNode>::new();
     let mut root: Option<(String, Value)> = None;
     loop {
-        match reader.read_event().map_err(|_| QuarkError::InvalidResponse)? {
+        match reader
+            .read_event()
+            .map_err(|_| QuarkError::InvalidResponse)?
+        {
             Event::Start(event) => stack.push(XmlNode::new(xml_name(event.name().as_ref())?)),
             Event::Empty(event) => {
                 let node = XmlNode::new(xml_name(event.name().as_ref())?);

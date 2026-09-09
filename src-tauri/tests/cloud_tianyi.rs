@@ -166,7 +166,10 @@ fn tianyi_rejects_null_or_scalar_directory_listings() {
         let http = RecordingHttp::sequence(&[body]);
         let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
 
-        assert!(matches!(client.directory("-11"), Err(QuarkError::InvalidResponse)));
+        assert!(matches!(
+            client.directory("-11"),
+            Err(QuarkError::InvalidResponse)
+        ));
     }
 }
 
@@ -265,7 +268,9 @@ fn tianyi_renames_a_folder_with_the_official_form_endpoint() {
     client.rename("d1", "new").unwrap();
 
     let requests = http.requests();
-    assert!(requests[1].url.contains("/api/open/file/renameFolder.action"));
+    assert!(requests[1]
+        .url
+        .contains("/api/open/file/renameFolder.action"));
     assert!(requests[1]
         .body
         .as_deref()
