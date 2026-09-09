@@ -1,5 +1,5 @@
 use alldownloader_lib::cloud::{
-    xunlei::{XunleiClient, XunleiClientProfile, XunleiSession},
+    xunlei::{XunleiClient, XunleiClientProfile, XunleiResumableUpload, XunleiSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError,
 };
 use std::sync::Mutex;
@@ -50,6 +50,7 @@ impl CloudHttpTransport for RecordingHttp {
 fn profile() -> XunleiClientProfile {
     XunleiClientProfile {
         client_id: "official-browser-client".into(),
+        client_secret: "browser-client-secret".into(),
         device_id: "device-1".into(),
         client_version: "1.0.0".into(),
         package_name: "com.xunlei.pan.web".into(),
@@ -77,17 +78,76 @@ fn xunlei_refreshes_with_official_client_profile_and_sends_native_headers() {
         serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(refresh["grant_type"], "refresh_token");
     assert_eq!(refresh["client_id"], "official-browser-client");
+    assert_eq!(refresh["client_secret"], "browser-client-secret");
     assert_eq!(
         requests[0].headers["X-Client-Id"],
         "official-browser-client"
     );
     assert_eq!(requests[0].headers["X-Client-Version"], "1.0.0");
+    assert_eq!(requests[0].headers["X-Device-Id"], "device-1");
     assert_eq!(
         requests[0].headers["User-Agent"],
         "Mozilla/5.0 XunleiBrowser/1.0"
     );
     assert_eq!(requests[1].headers["Authorization"], "Bearer access");
     assert_eq!(requests[1].headers["X-Device-Id"], "device-1");
+    assert_eq!(
+        requests[1].headers["X-Client-Id"],
+        "official-browser-client"
+    );
+    assert_eq!(requests[1].headers["X-Client-Version"], "1.0.0");
+    assert_eq!(
+        requests[1].headers["User-Agent"],
+        "Mozilla/5.0 XunleiBrowser/1.0"
+    );
+}
+
+// Break caught: Xunlei-specific expired-session codes would otherwise leak as
+// generic provider errors and prevent the one native refresh retry.
+#[test]
+fn xunlei_expiry_codes_map_to_authorization_expired_before_generic_json_mapping() {
+    for code in [4121, 10] {
+        let http =
+            RecordingHttp::sequence(&[&format!(r#"{{"error_code":{code},"error":"expired"}}"#)]);
+        assert!(matches!(
+            XunleiClient::new(XunleiSession::with_access("access", "", profile()), &http)
+                .directory("0"),
+            Err(QuarkError::AuthorizationExpired)
+        ));
+    }
+}
+
+// Break caught: diagnostics must not disclose session tokens, client secrets,
+// or one-shot resumable-upload credentials.
+#[test]
+fn xunlei_sensitive_debug_output_is_redacted() {
+    let mut session = XunleiSession::with_access("access-secret", "refresh-secret", profile());
+    session.security_token = "captcha-secret".into();
+    let upload = XunleiResumableUpload {
+        upload_type: "UPLOAD_TYPE_RESUMABLE".into(),
+        kind: "drive#resumable".into(),
+        provider: "aws".into(),
+        access_key_id: "access-key-secret".into(),
+        access_key_secret: "upload-key-secret".into(),
+        bucket: "bucket".into(),
+        endpoint: "https://oss.xunlei.example".into(),
+        expiration: "2030-01-01T00:00:00Z".into(),
+        key: "object-key".into(),
+        security_token: "upload-security-secret".into(),
+    };
+
+    let debug = format!("{session:?} {upload:?}");
+    for sensitive in [
+        "access-secret",
+        "refresh-secret",
+        "browser-client-secret",
+        "captcha-secret",
+        "access-key-secret",
+        "upload-key-secret",
+        "upload-security-secret",
+    ] {
+        assert!(!debug.contains(sensitive));
+    }
 }
 
 // Break caught: treating an interactive security challenge as an ordinary

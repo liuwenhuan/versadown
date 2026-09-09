@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashSet},
+    fmt,
 };
 
 const AUTH: &str = "https://xluser-ssl.xunlei.com";
@@ -22,9 +23,13 @@ const DRIVE: &str = "https://api-pan.xunlei.com";
 /// Non-secret identity values captured from the official browser/QR flow.
 /// They are retained because Xunlei binds refresh and drive calls to that
 /// profile; callers must never fabricate a replacement profile.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct XunleiClientProfile {
     pub client_id: String,
+    /// Sensitive client credential captured by the official authorization flow.
+    /// Task 7 persists this only in the encrypted session store.
+    #[serde(default)]
+    pub client_secret: String,
     pub device_id: String,
     pub client_version: String,
     pub package_name: String,
@@ -38,10 +43,24 @@ impl XunleiClientProfile {
             && !self.client_version.is_empty()
             && !self.package_name.is_empty()
             && !self.user_agent.is_empty()
+            && !self.client_secret.is_empty()
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+impl fmt::Debug for XunleiClientProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XunleiClientProfile")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("device_id", &self.device_id)
+            .field("client_version", &self.client_version)
+            .field("package_name", &self.package_name)
+            .field("user_agent", &self.user_agent)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct XunleiSession {
     pub access_token: String,
     pub refresh_token: String,
@@ -57,6 +76,20 @@ pub struct XunleiSession {
     pub security_token: String,
     #[serde(default)]
     pub auth_method: CloudAuthMethod,
+}
+
+impl fmt::Debug for XunleiSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XunleiSession")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("profile", &self.profile)
+            .field("user_id", &self.user_id)
+            .field("security_token", &"<redacted>")
+            .field("auth_method", &self.auth_method)
+            .finish()
+    }
 }
 
 impl XunleiSession {
@@ -116,7 +149,7 @@ impl XunleiSession {
 /// Credentials required to start the provider's resumable object upload.
 /// This is deliberately not serializable: it contains short-lived upload
 /// credentials and must be consumed immediately by the upload executor.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct XunleiResumableUpload {
     pub upload_type: String,
     pub kind: String,
@@ -128,6 +161,23 @@ pub struct XunleiResumableUpload {
     pub expiration: String,
     pub key: String,
     pub security_token: String,
+}
+
+impl fmt::Debug for XunleiResumableUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("XunleiResumableUpload")
+            .field("upload_type", &self.upload_type)
+            .field("kind", &self.kind)
+            .field("provider", &self.provider)
+            .field("access_key_id", &"<redacted>")
+            .field("access_key_secret", &"<redacted>")
+            .field("bucket", &self.bucket)
+            .field("endpoint", &self.endpoint)
+            .field("expiration", &self.expiration)
+            .field("key", &self.key)
+            .field("security_token", &"<redacted>")
+            .finish()
+    }
 }
 
 fn now() -> u64 {
@@ -193,6 +243,14 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
 
     fn value(&self, response: CloudHttpResponse) -> Result<Value, QuarkError> {
         let parsed: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+        let code = parsed
+            .get("error_code")
+            .or_else(|| parsed.get("code"))
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
+        if matches!(code, 4121 | 10) {
+            return Err(QuarkError::AuthorizationExpired);
+        }
         if Self::challenge(&parsed, response.status) {
             return Err(QuarkError::WebAuthorizationRequired);
         }
@@ -219,6 +277,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                     "grant_type": "refresh_token",
                     "refresh_token": previous.refresh_token,
                     "client_id": previous.profile.client_id,
+                    "client_secret": previous.profile.client_secret,
                 })
                 .to_string(),
             ),
