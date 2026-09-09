@@ -504,7 +504,7 @@ export function App() {
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
-            <div className="download-tab-list" role="tablist" aria-label="下载任务">
+            <div className="download-tab-list workspace-tab-list" role="tablist" aria-label="下载任务">
               <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
             </div>

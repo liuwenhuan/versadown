@@ -73,7 +73,7 @@ export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) 
   }
 
   return <section className="cloud-workspace" aria-label="我的网盘工作区">
-    <div className="cloud-workspace-tabs" role="tablist" aria-label="我的网盘标签">
+    <div className="cloud-workspace-tabs workspace-tab-list" role="tablist" aria-label="我的网盘标签">
       <button role="tab" aria-selected={activeTab === 'management'} onClick={() => setActiveTab('management')}>网盘管理</button>
       {accounts.map((account) => <button key={account.provider} role="tab" aria-selected={activeTab === account.provider} onClick={() => setActiveTab(account.provider)}>{providerLabel[account.provider]}网盘</button>)}
     </div>
