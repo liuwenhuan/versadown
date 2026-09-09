@@ -1,12 +1,15 @@
 use alldownloader_lib::cloud::{
-    aliyun::AliyunClient, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CredentialStore,
-    MemoryCredentialStore, QuarkError,
+    aliyun::AliyunClient, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
+    CloudUploadTransport, CredentialStore, MemoryCredentialStore, QuarkError, UploadHttpRequest,
+    UploadHttpResponse,
 };
-use std::{collections::VecDeque, sync::Mutex};
+use std::{collections::VecDeque, io::Write, sync::Mutex};
 
 struct RecordingHttp {
     responses: Mutex<VecDeque<CloudHttpResponse>>,
     requests: Mutex<Vec<CloudHttpRequest>>,
+    upload_responses: Mutex<VecDeque<UploadHttpResponse>>,
+    upload_requests: Mutex<Vec<UploadHttpRequest>>,
 }
 
 impl RecordingHttp {
@@ -23,6 +26,8 @@ impl RecordingHttp {
                     .collect(),
             ),
             requests: Mutex::new(Vec::new()),
+            upload_responses: Mutex::new(VecDeque::new()),
+            upload_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -30,7 +35,17 @@ impl RecordingHttp {
         Self {
             responses: Mutex::new(responses.into_iter().collect()),
             requests: Mutex::new(Vec::new()),
+            upload_responses: Mutex::new(VecDeque::new()),
+            upload_requests: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_upload_responses(
+        mut self,
+        responses: impl IntoIterator<Item = UploadHttpResponse>,
+    ) -> Self {
+        self.upload_responses = Mutex::new(responses.into_iter().collect());
+        self
     }
 }
 
@@ -38,6 +53,17 @@ impl CloudHttpTransport for RecordingHttp {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         self.requests.lock().unwrap().push(request);
         self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(QuarkError::InvalidResponse)
+    }
+}
+
+impl CloudUploadTransport for RecordingHttp {
+    fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        self.upload_requests.lock().unwrap().push(request);
+        self.upload_responses
             .lock()
             .unwrap()
             .pop_front()
@@ -70,8 +96,9 @@ fn aliyun_refreshes_bearer_token_lists_root_and_persists_only_session_fields() {
     assert_eq!(requests[0].method, "POST");
     assert_eq!(
         requests[0].url,
-        "https://auth.aliyundrive.com/v2/account/token"
+        "https://api.aliyundrive.com/token/refresh"
     );
+    assert_eq!(requests[0].headers["X-Requested-With"], "XMLHttpRequest");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(requests[0].body.as_deref().unwrap()).unwrap(),
         serde_json::json!({"grant_type":"refresh_token","refresh_token":"refresh"})
@@ -144,7 +171,7 @@ fn aliyun_persists_a_validated_rotation_before_the_next_operation() {
     let requests = http.requests.lock().unwrap();
     let refreshes = requests
         .iter()
-        .filter(|request| request.url.contains("account/token"))
+        .filter(|request| request.url.ends_with("/token/refresh"))
         .collect::<Vec<_>>();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(refreshes[0].body.as_deref().unwrap()).unwrap()
@@ -291,6 +318,7 @@ fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
         serde_json::Value::Null,
         serde_json::json!(17),
         serde_json::json!("http://upload.example/part"),
+        serde_json::json!("https://upload.example/part#fragment"),
     ];
     let cases = invalid
         .iter()
@@ -347,4 +375,56 @@ fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
             "https://api.aliyundrive.com/v2/file/create"
         );
     }
+}
+
+#[test]
+fn aliyun_upload_file_transfers_https_part_then_completes_without_persisting_temporary_url() {
+    let mut local = tempfile::NamedTempFile::new().unwrap();
+    local.write_all(b"cloud-bytes").unwrap();
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"old","drive_id":"drive"}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"access_token":"access","refresh_token":"rotated","default_drive_id":"drive"}"#,
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[]}"#,
+        r#"{"file_id":"file-1","parent_file_id":"root","name":"upload.bin","type":"file","upload_id":"upload-1","part_info_list":[{"part_number":1,"upload_url":"https://upload.example/part?temporary=secret"}]}"#,
+        r#"{}"#,
+    ])
+    .with_upload_responses([UploadHttpResponse {
+        status: 200,
+        headers: Default::default(),
+        body: String::new(),
+    }]);
+
+    let file = AliyunClient::new(&store, &http)
+        .upload_file("root", local.path())
+        .unwrap();
+
+    assert_eq!(file.id, "file-1");
+    let uploads = http.upload_requests.lock().unwrap();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].method, "PUT");
+    assert_eq!(
+        uploads[0].url,
+        "https://upload.example/part?temporary=secret"
+    );
+    assert_eq!(uploads[0].body, b"cloud-bytes");
+    drop(uploads);
+    let requests = http.requests.lock().unwrap();
+    let complete = requests.last().unwrap();
+    assert_eq!(complete.url, "https://api.aliyundrive.com/v2/file/complete");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(complete.body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"drive_id":"drive","file_id":"file-1","upload_id":"upload-1"})
+    );
+    drop(requests);
+    let persisted = String::from_utf8(store.load("aliyun").unwrap().unwrap()).unwrap();
+    assert!(persisted.contains("rotated"));
+    assert!(!persisted.contains("upload.example"));
+    assert!(!persisted.contains("temporary=secret"));
 }

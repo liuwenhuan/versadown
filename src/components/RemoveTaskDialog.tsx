@@ -1,7 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-export function RemoveTaskDialog({ taskName, onConfirm, onClose }: { taskName: string; onConfirm(): void; onClose(): void }) {
+export function RemoveTaskDialog({ taskNames, onConfirm, onClose }: { taskNames: readonly string[]; onConfirm(deleteFiles: boolean): void; onClose(): void }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const [deleteFiles, setDeleteFiles] = useState(false);
+  const isBatch = taskNames.length > 1;
+  const subject = isBatch ? `${taskNames.length} 个任务` : `“${taskNames[0] ?? '未命名任务'}”`;
   useEffect(() => {
     cancelRef.current?.focus();
     const closeForEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
@@ -11,8 +14,8 @@ export function RemoveTaskDialog({ taskName, onConfirm, onClose }: { taskName: s
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="remove-task-dialog" role="dialog" aria-modal="true" aria-labelledby="remove-task-title">
       <div className="dialog-warning" aria-hidden="true">!</div>
-      <div><h2 id="remove-task-title">移除任务记录</h2><p>确定从列表中移除“{taskName}”吗？</p><small>只会移除任务记录，不会删除已经下载的文件。</small></div>
-      <footer><button ref={cancelRef} onClick={onClose}>取消</button><button className="danger-button" onClick={onConfirm}>移除记录</button></footer>
+      <div><h2 id="remove-task-title">彻底删除任务</h2><p>确定彻底删除{subject}吗？</p><label className="delete-files-option"><input aria-label="同时删除下载文件" type="checkbox" checked={deleteFiles} onChange={(event) => setDeleteFiles(event.target.checked)} /> <span>同时删除下载文件</span></label><small>任务将从回收站永久移除；勾选后会一并删除记录中的本地下载文件。</small></div>
+      <footer><button ref={cancelRef} onClick={onClose}>取消</button><button className="danger-button" onClick={() => onConfirm(deleteFiles)}>彻底删除</button></footer>
     </section>
   </div>;
 }

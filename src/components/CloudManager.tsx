@@ -1,6 +1,6 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
+import { cloudRootDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudFile, type CloudProvider } from '../lib/cloudTypes';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
@@ -42,16 +42,16 @@ interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'download' | 'rename' | 'move' | 'copy' | 'details' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
 
-const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷' };
+const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷', uc: 'UC' };
 const fallbackCapabilities: Record<CloudProvider, CloudAuthorizationCapabilities> = {
   quark: { provider: 'quark', web: true, password: false },
   pikpak: { provider: 'pikpak', web: true, password: false },
   baidu: { provider: 'baidu', web: true, password: false },
   tianyi: { provider: 'tianyi', web: true, password: false },
   aliyun: { provider: 'aliyun', web: true, password: false },
-  xunlei: { provider: 'xunlei', web: true, password: false }
+  xunlei: { provider: 'xunlei', web: true, password: false },
+  uc: { provider: 'uc', web: true, password: false }
 };
-const rootId = '0';
 const authorizationInitialPollMs = 800;
 const authorizationPollMs = 1_800;
 
@@ -224,6 +224,7 @@ function CloudFileDetails({ file, path, onClose }: { file: CloudFile; path: stri
 }
 
 function CloudDestinationPicker({ action, provider, client, excludedIds, onChoose, onClose }: { action: DestinationAction; provider: CloudProvider; client: CloudManagerClient; excludedIds: readonly string[]; onChoose(parentId: string): void; onClose(): void }) {
+  const rootId = cloudRootDirectoryId[provider];
   const [directory, setDirectory] = useState<CloudDirectory | null>(null);
   const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -278,6 +279,7 @@ function CloudDestinationPicker({ action, provider, client, excludedIds, onChoos
 
 export function CloudManager({ provider, client = unavailableClient, initialAccounts = [], onDownloadTask, authorizationOnly = false, restoreOnMount = true, showAccountTabs = true, showSessionActions = true, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const label = providerLabel[provider];
+  const rootId = cloudRootDirectoryId[provider];
   const providerAccounts = initialAccounts.filter((account) => account.provider === provider);
   const [accounts, setAccounts] = useState<readonly CloudAccount[]>(providerAccounts);
   const [activeAccountId, setActiveAccountId] = useState<string | null>(providerAccounts[0]?.id ?? null);

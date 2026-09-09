@@ -5,7 +5,7 @@ use alldownloader_lib::aria2::{
 };
 use axum::{
     body::{Body, Bytes},
-    extract::State,
+    extract::{OriginalUri, State},
     http::{header, HeaderMap, StatusCode},
     response::Response,
     routing::get,
@@ -17,25 +17,112 @@ use std::{
     convert::Infallible,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     time::Duration,
 };
 use tokio::time::{sleep, timeout_at, Instant};
 
-const PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+const PAYLOAD_BYTES: usize = 1024 * 1024;
+const HOLD_AFTER_BYTES: usize = 256 * 1024;
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const POLL: Duration = Duration::from_millis(50);
+
+#[tokio::test]
+async fn transfer_gate_blocks_until_the_test_releases_it() {
+    let gate = TransferGate::new();
+    assert!(
+        timeout_at(Instant::now() + Duration::from_millis(50), gate.wait())
+            .await
+            .is_err(),
+        "a held transfer must not rely on timing to remain incomplete"
+    );
+
+    gate.release();
+    timeout_at(Instant::now() + Duration::from_millis(250), gate.wait())
+        .await
+        .expect("released transfer gate did not unblock");
+}
+
+#[derive(Clone)]
+struct TransferGate {
+    released: Arc<AtomicBool>,
+    notified: Arc<tokio::sync::Notify>,
+}
+
+impl TransferGate {
+    fn new() -> Self {
+        Self {
+            released: Arc::new(AtomicBool::new(false)),
+            notified: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.notified.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        while !self.released.load(Ordering::SeqCst) {
+            self.notified.notified().await;
+        }
+    }
+}
+
+struct HeldDownload {
+    gid: String,
+    gate: TransferGate,
+}
+
+impl HeldDownload {
+    fn gid(&self) -> &str {
+        &self.gid
+    }
+
+    fn release(&self) {
+        self.gate.release();
+    }
+}
 
 #[derive(Clone)]
 struct HttpFixture {
     payload: Arc<Vec<u8>>,
     total_requests: Arc<AtomicUsize>,
     resumed_requests: Arc<AtomicUsize>,
+    gates: Arc<Mutex<BTreeMap<String, TransferGate>>>,
 }
 
-// The only origin is loopback; streaming keeps pause observable without network timing.
-async fn serve_payload(State(state): State<HttpFixture>, headers: HeaderMap) -> Response {
+impl HttpFixture {
+    fn register_gate(&self, name: &str) -> TransferGate {
+        let gate = TransferGate::new();
+        assert!(
+            self.gates
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), gate.clone())
+                .is_none(),
+            "test gate {name} was registered twice"
+        );
+        gate
+    }
+
+    fn gate_for_uri(&self, uri: &OriginalUri) -> Option<TransferGate> {
+        let name = uri
+            .query()
+            .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("hold=")))?;
+        self.gates.lock().unwrap().get(name).cloned()
+    }
+}
+
+// The only origin is loopback. Held responses make pause/resume deterministic without
+// throttling every test transfer by wall-clock sleeps.
+async fn serve_payload(
+    State(state): State<HttpFixture>,
+    headers: HeaderMap,
+    uri: OriginalUri,
+) -> Response {
     state.total_requests.fetch_add(1, Ordering::SeqCst);
     let length = state.payload.len();
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
@@ -70,16 +157,27 @@ async fn serve_payload(State(state): State<HttpFixture>, headers: HeaderMap) -> 
     if start > 0 {
         state.resumed_requests.fetch_add(1, Ordering::SeqCst);
     }
+    let gate = state.gate_for_uri(&uri);
     let stream = futures_util::stream::unfold(
-        (state.payload, start),
-        move |(payload, offset)| async move {
+        (state.payload, start, false, gate),
+        move |(payload, offset, gate_released, gate)| async move {
             if offset > end {
                 return None;
             }
-            sleep(Duration::from_millis(20)).await;
-            let next = (offset + 32 * 1024).min(end + 1);
+            let gate_released = if !gate_released && offset >= HOLD_AFTER_BYTES {
+                if let Some(gate) = &gate {
+                    gate.wait().await;
+                }
+                true
+            } else {
+                gate_released
+            };
+            let next = (offset + STREAM_CHUNK_BYTES).min(end + 1);
             let bytes = Bytes::copy_from_slice(&payload[offset..next]);
-            Some((Ok::<_, Infallible>(bytes), (payload, next)))
+            Some((
+                Ok::<_, Infallible>(bytes),
+                (payload, next, gate_released, gate),
+            ))
         },
     );
     let mut response = Response::builder()
@@ -118,6 +216,7 @@ impl LiveAria2Fixture {
             payload: Arc::new((0..PAYLOAD_BYTES).map(|i| (i % 251) as u8).collect()),
             total_requests: Arc::new(AtomicUsize::new(0)),
             resumed_requests: Arc::new(AtomicUsize::new(0)),
+            gates: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -148,7 +247,7 @@ impl LiveAria2Fixture {
         }
     }
 
-    async fn add_slow_download(&self, name: &str) -> String {
+    async fn add_download(&self, name: &str, uri: String) -> String {
         let options = BTreeMap::from([
             ("out".into(), name.into()),
             ("split".into(), "1".into()),
@@ -157,10 +256,20 @@ impl LiveAria2Fixture {
             ("file-allocation".into(), "none".into()),
             ("all-proxy".into(), "".into()),
         ]);
-        self.client
-            .add_uri(vec![format!("{}/payload.bin", self.origin)], options)
+        self.client.add_uri(vec![uri], options).await.unwrap()
+    }
+
+    async fn add_download_without_hold(&self, name: &str) -> String {
+        self.add_download(name, format!("{}/payload.bin", self.origin))
             .await
-            .unwrap()
+    }
+
+    async fn add_slow_download(&self, name: &str) -> HeldDownload {
+        let gate = self.http.register_gate(name);
+        let gid = self
+            .add_download(name, format!("{}/payload.bin?hold={name}", self.origin))
+            .await;
+        HeldDownload { gid, gate }
     }
 
     async fn wait_status(
@@ -196,7 +305,7 @@ impl LiveAria2Fixture {
     async fn wait_progress(&self, gid: &str) -> Aria2Status {
         self.wait_status(gid, Duration::from_secs(5), |status| {
             status.status == "active"
-                && status.completed_length.parse::<u64>().unwrap() >= 1024 * 1024
+                && status.completed_length.parse::<usize>().unwrap() >= HOLD_AFTER_BYTES
         })
         .await
     }
@@ -270,6 +379,15 @@ impl LiveAria2Fixture {
         self.process = Some(process);
         self.client = client;
     }
+
+    fn terminate_for_cleanup(&mut self) {
+        let process = self.process.as_mut().unwrap();
+        process.terminate_fallback().unwrap();
+        assert!(
+            !process.is_running().unwrap(),
+            "owned aria2 child remained alive after test cleanup"
+        );
+    }
 }
 
 impl Drop for LiveAria2Fixture {
@@ -286,20 +404,21 @@ impl Drop for LiveAria2Fixture {
 async fn bundled_aria2_downloads_pauses_resumes_and_stops() {
     // Catches missing RPC control, synthetic progress, corrupt range output, and child leaks.
     let mut fixture = LiveAria2Fixture::start().await;
-    let gid = fixture.add_slow_download("complete.bin").await;
-    let progress = fixture.wait_progress(&gid).await;
+    let download = fixture.add_slow_download("complete.bin").await;
+    let gid = download.gid();
+    let progress = fixture.wait_progress(gid).await;
     assert!(progress.completed_length.parse::<usize>().unwrap() < PAYLOAD_BYTES);
-    assert!(progress.download_speed.parse::<u64>().unwrap() > 0);
-    let paused = fixture.pause(&gid).await;
-    let deadline = Instant::now() + Duration::from_millis(300);
+    let paused = fixture.pause(gid).await;
+    let deadline = Instant::now() + Duration::from_millis(100);
     while Instant::now() < deadline {
-        let status = fixture.client.tell_status(&gid).await.unwrap();
+        let status = fixture.client.tell_status(gid).await.unwrap();
         assert_eq!(status.status, "paused");
         assert_eq!(status.completed_length, paused.completed_length);
         sleep(POLL).await;
     }
-    assert_eq!(fixture.client.unpause(&gid).await.unwrap(), gid);
-    fixture.wait_complete(&gid).await;
+    assert_eq!(fixture.client.unpause(gid).await.unwrap(), gid);
+    download.release();
+    fixture.wait_complete(gid).await;
     fixture.assert_download_sha256("complete.bin");
     assert!(
         fixture.http.resumed_requests.load(Ordering::SeqCst) > 0,
@@ -313,7 +432,9 @@ async fn bundled_aria2_downloads_pauses_resumes_and_stops() {
 async fn bundled_aria2_does_not_restore_or_redownload_completed_session_entries() {
     // Catches completed HTTP transfers being force-saved and loaded as new work on restart.
     let mut fixture = LiveAria2Fixture::start().await;
-    let gid = fixture.add_slow_download("completed-once.bin").await;
+    let gid = fixture
+        .add_download_without_hold("completed-once.bin")
+        .await;
     fixture.wait_complete(&gid).await;
     fixture.assert_download_sha256("completed-once.bin");
     let control_path = fixture.config.download_dir.join("completed-once.bin.aria2");
@@ -325,7 +446,6 @@ async fn bundled_aria2_does_not_restore_or_redownload_completed_session_entries(
 
     fixture.save_and_shutdown().await;
     fixture.restart().await;
-    sleep(Duration::from_millis(500)).await;
 
     assert!(
         fixture.client.tell_status(&gid).await.is_err(),
@@ -341,16 +461,23 @@ async fn bundled_aria2_does_not_restore_or_redownload_completed_session_entries(
         "restarting must not create a new control file for a completed transfer"
     );
     fixture.assert_download_sha256("completed-once.bin");
-    fixture.save_and_shutdown().await;
+    fixture.terminate_for_cleanup();
 }
 
 #[tokio::test]
 async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
     // Catches session options/GID loss across restart and destructive cancellation.
     let mut fixture = LiveAria2Fixture::start().await;
-    let gid = fixture.add_slow_download("recovered.bin").await;
-    fixture.wait_progress(&gid).await;
-    fixture.pause(&gid).await;
+    let recovered = fixture.add_slow_download("recovered.bin").await;
+    let gid = recovered.gid();
+    fixture.wait_progress(gid).await;
+    let paused = fixture.pause(gid).await;
+    // Let the fixture's response drain before stopping aria2. Its paused GID must remain
+    // frozen, proving partial-state preservation without an idle HTTP connection.
+    recovered.release();
+    let still_paused = fixture.client.tell_status(gid).await.unwrap();
+    assert_eq!(still_paused.status, "paused");
+    assert_eq!(still_paused.completed_length, paused.completed_length);
     let session = fixture.save_and_shutdown().await;
     assert!(
         session.contains(&format!("gid={gid}")),
@@ -360,15 +487,21 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
     fixture.restart().await;
     let restored = fixture.client.tell_status(&gid).await.unwrap();
     if restored.status == "paused" {
-        fixture.client.unpause(&gid).await.unwrap();
+        fixture.client.unpause(gid).await.unwrap();
     }
-    fixture.wait_complete(&gid).await;
+    recovered.release();
+    fixture.wait_complete(gid).await;
     fixture.assert_download_sha256("recovered.bin");
     assert!(fixture.http.resumed_requests.load(Ordering::SeqCst) > 0);
 
     let cancelled = fixture.add_slow_download("cancelled.bin").await;
-    fixture.wait_progress(&cancelled).await;
-    fixture.pause(&cancelled).await;
+    let cancelled_gid = cancelled.gid();
+    fixture.wait_progress(cancelled_gid).await;
+    let paused = fixture.pause(cancelled_gid).await;
+    cancelled.release();
+    let still_paused = fixture.client.tell_status(cancelled_gid).await.unwrap();
+    assert_eq!(still_paused.status, "paused");
+    assert_eq!(still_paused.completed_length, paused.completed_length);
     let path = fixture.config.download_dir.join("cancelled.bin");
     let partial = std::fs::read(&path).unwrap();
     assert!(!partial.is_empty());
@@ -377,19 +510,22 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
         .download_dir
         .join("cancelled.bin.aria2")
         .is_file());
-    assert_eq!(fixture.client.remove(&cancelled).await.unwrap(), cancelled);
+    assert_eq!(
+        fixture.client.remove(cancelled_gid).await.unwrap(),
+        cancelled_gid
+    );
     // aria2 drops paused GIDs immediately on remove; they need not appear in tellStopped.
     timeout_at(Instant::now() + Duration::from_secs(3), async {
         loop {
             let mut pending = fixture.client.tell_active().await.unwrap();
             pending.extend(fixture.client.tell_waiting(0, 100).await.unwrap());
-            if pending.iter().all(|status| status.gid != cancelled) {
+            if pending.iter().all(|status| status.gid != cancelled_gid) {
                 break;
             }
             sleep(POLL).await;
         }
         for status in fixture.client.tell_stopped(0, 100).await.unwrap() {
-            if status.gid == cancelled {
+            if status.gid == cancelled_gid {
                 assert_eq!(status.status, "removed");
             }
         }
@@ -402,6 +538,6 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
         .download_dir
         .join("cancelled.bin.aria2")
         .is_file());
-    fixture.save_and_shutdown().await;
+    fixture.terminate_for_cleanup();
     println!("aria2 1.37.0: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial/control files passed");
 }

@@ -10,7 +10,10 @@ fn legacy_pikpak_password_session_recovers_its_login_method() {
     store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","client_id":"YNxT9w7GMdWvEOKa"}"#).unwrap();
     let http = Sequence::new(&[r#"{"sub":"42","name":"alice"}"#]);
     let account = PikPakClient::new(&http, &store).account().unwrap();
-    assert_eq!(account.auth_method, alldownloader_lib::cloud::CloudAuthMethod::Password);
+    assert_eq!(
+        account.auth_method,
+        alldownloader_lib::cloud::CloudAuthMethod::Password
+    );
 }
 
 #[cfg(windows)]
@@ -269,7 +272,8 @@ fn pikpak_copy_uses_the_native_batch_copy_endpoint_and_destination() {
 
     let requests = &http.0.lock().unwrap().1;
     assert!(requests[0].url.ends_with("/drive/v1/files:batchCopy"));
-    let body: serde_json::Value = serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
     assert_eq!(body["ids"], serde_json::json!(["file-1", "folder-2"]));
     assert_eq!(body["to"]["parent_id"], "target-folder");
 }

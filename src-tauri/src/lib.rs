@@ -23,6 +23,7 @@ pub use downloader::{
     aria2_binary_name, confirm_download, prepare_download, DownloadError, ParseOutcome,
     ParseResource,
 };
+pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
@@ -31,10 +32,9 @@ pub use launcher::{
     LauncherInteractionState, LauncherRegion,
 };
 pub use models::{
-    may_transition, AppSettings, DownloadTask, DuplicateDownloadState, LauncherVisibility,
-    NewTask, ProxySettings, TaskStatus,
+    may_transition, AppSettings, DownloadTask, DuplicateDownloadState, LauncherVisibility, NewTask,
+    ProxySettings, TaskStatus,
 };
-pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
@@ -210,6 +210,8 @@ pub fn run() {
             commands::resolve_duplicate_download,
             commands::open_task_directory,
             commands::remove_task_record,
+            commands::recycle_task,
+            commands::purge_recycled_tasks,
             commands::select_files,
             commands::get_download_engine_state,
             commands::retry_download_engine,

@@ -3,12 +3,13 @@ import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { RemoveTaskDialog } from './RemoveTaskDialog';
 
-it('explains that removing a task keeps downloaded files before confirmation', async () => {
+it('asks whether downloaded files should be deleted before permanent removal', async () => {
   const user = userEvent.setup();
   const onConfirm = vi.fn();
-  render(<RemoveTaskDialog taskName="finished.iso" onConfirm={onConfirm} onClose={() => {}} />);
+  render(<RemoveTaskDialog taskNames={['finished.iso']} onConfirm={onConfirm} onClose={() => {}} />);
 
-  expect(screen.getByRole('dialog', { name: '移除任务记录' })).toHaveTextContent('不会删除已经下载的文件');
-  await user.click(screen.getByRole('button', { name: '移除记录' }));
-  expect(onConfirm).toHaveBeenCalledOnce();
+  expect(screen.getByRole('dialog', { name: '彻底删除任务' })).toHaveTextContent('同时删除下载文件');
+  await user.click(screen.getByRole('checkbox', { name: '同时删除下载文件' }));
+  await user.click(screen.getByRole('button', { name: '彻底删除' }));
+  expect(onConfirm).toHaveBeenCalledWith(true);
 });

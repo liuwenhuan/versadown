@@ -55,6 +55,7 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Cancelled,
+    Recycled,
     Paused,
 }
 
@@ -84,6 +85,7 @@ impl TaskStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Recycled => "recycled",
             Self::Paused => "paused",
         }
     }
@@ -99,6 +101,7 @@ impl TaskStatus {
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
+            "recycled" => Self::Recycled,
             "paused" => Self::Paused,
             _ => return None,
         })
@@ -135,6 +138,10 @@ pub fn may_transition(from: TaskStatus, to: TaskStatus) -> bool {
             | (
                 TaskStatus::Processing,
                 TaskStatus::Completed | TaskStatus::Failed
+            )
+            | (
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled,
+                TaskStatus::Recycled
             )
     )
 }

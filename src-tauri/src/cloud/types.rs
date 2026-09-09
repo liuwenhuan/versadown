@@ -9,6 +9,7 @@ pub enum CloudProvider {
     Tianyi,
     Aliyun,
     Xunlei,
+    Uc,
 }
 impl CloudProvider {
     pub fn key(self) -> &'static str {
@@ -19,6 +20,7 @@ impl CloudProvider {
             Self::Tianyi => "tianyi",
             Self::Aliyun => "aliyun",
             Self::Xunlei => "xunlei",
+            Self::Uc => "uc",
         }
     }
 }
@@ -38,12 +40,13 @@ pub fn provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapab
                 password: true,
             }
         }
-        CloudProvider::Aliyun | CloudProvider::Xunlei | CloudProvider::Quark => {
-            CloudAuthorizationCapabilities {
-                web: true,
-                password: false,
-            }
-        }
+        CloudProvider::Aliyun
+        | CloudProvider::Xunlei
+        | CloudProvider::Quark
+        | CloudProvider::Uc => CloudAuthorizationCapabilities {
+            web: true,
+            password: false,
+        },
     }
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

@@ -236,6 +236,9 @@ impl DownloadService {
         // A torrent must remain paused until the user has reviewed aria2's real
         // file list and `select-file` has been applied.
         options.insert("pause".into(), "true".into());
+        // Existing torrent payloads must be verified against the torrent's piece
+        // hashes before aria2 decides whether they can be resumed or are complete.
+        options.insert("check-integrity".into(), "true".into());
         let gid = self
             .api()
             .add_torrent(torrent_base64, web_seed_uris, options)
@@ -321,7 +324,10 @@ impl DownloadService {
             TaskStatus::Processing
             | TaskStatus::Completed
             | TaskStatus::Failed
-            | TaskStatus::Cancelled => {
+            | TaskStatus::Cancelled
+            // This state is local-only, but treating it as terminal protects
+            // against a malformed/internal snapshot entering this code path.
+            | TaskStatus::Recycled => {
                 if snapshot.status == TaskStatus::Failed && snapshot.error_message.is_none() {
                     snapshot.error_message =
                         Some(format!("aria2 种子任务以 {aria_status} 状态结束"));
@@ -451,6 +457,10 @@ impl DownloadService {
         }
         let mut options = options.into_aria2_options()?;
         options.insert("pause-metadata".into(), "true".into());
+        // A magnet resolves to a torrent after metadata retrieval. Keep this on
+        // the metadata task so its followed download verifies an existing payload
+        // before retrying network pieces.
+        options.insert("check-integrity".into(), "true".into());
         let gid = self.api().add_uri(vec![magnet], options).await?;
         let current = match self.store.bind_metadata_gid(task_id, &gid) {
             Ok(task) => task,
@@ -567,7 +577,10 @@ impl DownloadService {
             .store
             .list()?
             .into_iter()
-            .filter(|task| task.aria_gid.is_some() && task.status != TaskStatus::Cancelled)
+            .filter(|task| {
+                task.aria_gid.is_some()
+                    && !matches!(task.status, TaskStatus::Cancelled | TaskStatus::Recycled)
+            })
             .collect();
         let mut first_error = None;
         for chunk in tasks.chunks(100) {

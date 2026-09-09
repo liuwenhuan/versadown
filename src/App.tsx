@@ -11,16 +11,16 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace } from './components/CloudWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listPersistedTasks, openTaskDirectory, parseDownload, removeTaskRecord, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateSettings } from './lib/api';
+import { confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import { getThemeMode, setThemeMode as setAppThemeMode, subscribeTheme, ThemeMode } from './lib/theme';
 
-type DownloadTab = 'active' | 'completed';
+type DownloadTab = 'active' | 'completed' | 'failed' | 'recycle';
 
-const terminalStatuses = new Set<QueueTask['status']>(['completed', 'cancelled']);
+const inactiveStatuses = new Set<QueueTask['status']>(['completed', 'failed', 'cancelled', 'recycled']);
 const cloudClient: CloudManagerClient = cloudApi;
 
 function isQueueTask(value: unknown): value is QueueTask {
@@ -90,17 +90,24 @@ export function App() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
-  const [pendingRemovalId, setPendingRemovalId] = useState<string | null>(null);
+  const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
-  const activeTasks = useMemo(() => tasks.filter((task) => !terminalStatuses.has(task.status)), [tasks]);
-  const completedTasks = useMemo(() => tasks.filter((task) => terminalStatuses.has(task.status)), [tasks]);
-  const visibleTasks = downloadTab === 'active' ? activeTasks : completedTasks;
+  const activeTasks = useMemo(() => tasks.filter((task) => !inactiveStatuses.has(task.status)), [tasks]);
+  const completedTasks = useMemo(() => tasks.filter((task) => task.status === 'completed'), [tasks]);
+  const failedTasks = useMemo(() => tasks.filter((task) => task.status === 'failed'), [tasks]);
+  const recycledTasks = useMemo(() => tasks.filter((task) => task.status === 'recycled' || task.status === 'cancelled'), [tasks]);
+  const visibleTasks = downloadTab === 'active' ? activeTasks
+    : downloadTab === 'completed' ? completedTasks
+      : downloadTab === 'failed' ? failedTasks : recycledTasks;
   const detailsTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, tasks]);
   const downloadingTasks = tasks.filter((task) => task.status === 'downloading');
   const currentSpeed = formatSpeed(downloadingTasks.reduce((total, task) => total + (task.speedBytes ?? task.download_speed ?? 0), 0));
-  const pendingRemovalTask = tasks.find((task) => task.id === pendingRemovalId);
+  const pendingPurgeTasks = (pendingPurgeTaskIds ?? []).flatMap((id) => {
+    const task = tasks.find((item) => item.id === id);
+    return task ? [task] : [];
+  });
   const [eventsReady, setEventsReady] = useState(false);
   const [engineState, setEngineState] = useState<DownloadEngineState>({ available: true, retrying: false });
   const taskEventEpoch = useRef(0);
@@ -355,8 +362,16 @@ export function App() {
     const task = tasks.find((item) => item.id === id);
     if (!task) return;
     if (command === 'details') { setSelectedTaskId(id); setDetailsTaskId(id); return; }
-    if (command === 'remove_record') { setPendingRemovalId(id); return; }
+    if (command === 'remove_record') { setPendingPurgeTaskIds([id]); return; }
     try {
+      if (command === 'move_to_recycle') {
+        const recycled = await moveTaskToRecycle(id);
+        if (recycled) {
+          recordTaskEvent(recycled);
+          setTasks((current) => upsertTask(current, recycled));
+        }
+        return;
+      }
       if (command === 'open_directory') {
         await openTaskDirectory(id);
         return;
@@ -387,19 +402,24 @@ export function App() {
     }
   }
 
-  async function confirmTaskRemoval() {
-    if (!pendingRemovalId) return;
-    const id = pendingRemovalId;
+  async function confirmTaskRemoval(deleteFiles: boolean) {
+    const ids = pendingPurgeTaskIds ?? [];
+    if (!ids.length) return;
     try {
-      await removeTaskRecord(id);
-      setTasks((current) => current.filter((task) => task.id !== id));
-      if (selectedTaskId === id) setSelectedTaskId(null);
-      if (detailsTaskId === id) setDetailsTaskId(null);
-      setPendingRemovalId(null);
-      setNotice({ kind: 'success', message: '任务记录已移除，下载文件已保留' });
+      await purgeRecycledTasks(ids, deleteFiles);
+      const removed = new Set(ids);
+      setTasks((current) => current.filter((task) => !removed.has(task.id)));
+      if (selectedTaskId && removed.has(selectedTaskId)) setSelectedTaskId(null);
+      if (detailsTaskId && removed.has(detailsTaskId)) setDetailsTaskId(null);
+      setPendingPurgeTaskIds(null);
+      setNotice({ kind: 'success', message: deleteFiles ? '任务和下载文件已彻底删除' : '任务已从回收站彻底删除，下载文件已保留' });
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
     }
+  }
+
+  function requestRecycleClear() {
+    if (recycledTasks.length) setPendingPurgeTaskIds(recycledTasks.map((task) => task.id));
   }
 
   async function submitDownload() {
@@ -507,6 +527,8 @@ export function App() {
             <div className="download-tab-list workspace-tab-list" role="tablist" aria-label="下载任务">
               <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
+              <button role="tab" aria-selected={downloadTab === 'failed'} onClick={() => selectDownloadTab('failed')}>失败 <b>{failedTasks.length}</b></button>
+              <span className="recycle-tab-control"><button role="tab" aria-selected={downloadTab === 'recycle'} onClick={() => selectDownloadTab('recycle')}>回收站 <b>{recycledTasks.length}</b></button>{downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="recycle-clear" onClick={requestRecycleClear}>清空</button>}</span>
             </div>
             {downloadingTasks.length > 0 && <button className="bulk-pause" onClick={() => void Promise.all(downloadingTasks.map((task) => taskCommand(task.id, 'pause')))}>Ⅱ&nbsp; 全部暂停</button>}
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
@@ -536,7 +558,7 @@ export function App() {
         setDownloadTab('active');
       }} onClose={() => setNewDownloadOpen(false)} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
-      {pendingRemovalTask && <RemoveTaskDialog taskName={displayTaskName(pendingRemovalTask)} onConfirm={() => void confirmTaskRemoval()} onClose={() => setPendingRemovalId(null)} />}
+      {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}
     </main>
   );

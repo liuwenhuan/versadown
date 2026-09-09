@@ -194,12 +194,14 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
     }
     .to_string();
     if let Some(task) = store.find_by_source(&new_task.source)? {
-        return Ok(ParseOutcome {
-            duplicate: Some(duplicate_state(store, &task)?),
-            task,
-            requires_confirmation: false,
-            resources: Vec::new(),
-        });
+        if task.status != TaskStatus::Recycled {
+            return Ok(ParseOutcome {
+                duplicate: Some(duplicate_state(store, &task)?),
+                task,
+                requires_confirmation: false,
+                resources: Vec::new(),
+            });
+        }
     }
     let initial = store.create(new_task)?;
     if candidate.auto_start {
@@ -251,6 +253,28 @@ mod tests {
             repeated.duplicate,
             Some(crate::DuplicateDownloadState::OverwriteRequired)
         );
+    }
+
+    #[test]
+    fn a_recycled_task_does_not_block_a_new_submission_for_the_same_source() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let first = prepare_download("https://example.test/recycled.bin", &store)
+            .unwrap()
+            .task;
+        let completed = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                ..first
+            })
+            .unwrap();
+        store
+            .transition(completed.id, TaskStatus::Recycled)
+            .unwrap();
+
+        let repeated = prepare_download("https://example.test/recycled.bin", &store).unwrap();
+
+        assert_ne!(repeated.task.id, completed.id);
+        assert_eq!(repeated.duplicate, None);
     }
 
     #[tokio::test]

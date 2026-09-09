@@ -13,7 +13,7 @@ interface DownloadQueueProps {
 
 const statusText: Record<TaskStatus, string> = {
   draft: '草稿', parsing: '解析中', awaiting_user: '等待确认', queued: '等待下载', downloading: '下载中',
-  processing: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消', paused: '已暂停'
+  processing: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消', recycled: '已移入回收站', paused: '已暂停'
 };
 
 function magnetName(value: string): string {
@@ -67,12 +67,13 @@ function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: 
   const commands: Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
   if (task.status === 'paused') commands.push({ command: 'resume', label: '继续下载' });
-  if (task.status === 'failed' || task.status === 'cancelled') commands.push({ command: 'retry', label: '重新下载' });
+  if (task.status === 'failed') commands.push({ command: 'retry', label: '重新下载' });
   commands.push({ command: 'open_directory', label: '打开下载目录', separated: commands.length > 0 });
   commands.push({ command: 'details', label: '查看任务详情' });
   if (task.source) commands.push({ command: 'copy_link', label: '复制下载链接' });
   if (['downloading', 'paused', 'queued', 'awaiting_user'].includes(task.status)) commands.push({ command: 'cancel', label: '取消任务', danger: true, separated: true });
-  if (['completed', 'failed', 'cancelled'].includes(task.status)) commands.push({ command: 'remove_record', label: '移除任务记录…', danger: true, separated: true });
+  if (task.status === 'recycled' || task.status === 'cancelled') commands.push({ command: 'remove_record', label: '彻底删除…', danger: true, separated: true });
+  if (['completed', 'failed'].includes(task.status)) commands.push({ command: 'move_to_recycle', label: '移入回收站', danger: true, separated: true });
   return commands;
 }
 
@@ -82,7 +83,9 @@ function MenuIcon({ command }: { command: TaskCommand }) {
     cancel: <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>, retry: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     open_directory: <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>,
     copy_link: <><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
-    details: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5M12 8h.01" /></>, remove_record: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /></>,
+    details: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5M12 8h.01" /></>,
+    move_to_recycle: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="M18.5 4.5 20 6" /></>,
+    remove_record: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="m7.5 7.5 9 9M16.5 7.5l-9 9" /></>,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[command]}</svg>;
 }
@@ -163,7 +166,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
         const subtitle = taskSubtitle(task);
         const primaryAction = task.status === 'downloading' ? 'pause' as const
           : task.status === 'paused' ? 'resume' as const
-            : task.status === 'failed' || task.status === 'cancelled' ? 'retry' as const : null;
+            : task.status === 'failed' ? 'retry' as const : null;
         const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : '重新下载';
         return <div className="task-group" key={task.id}>
           <article className={`task-row ${hasChildren ? 'has-children' : ''} ${selectedTaskId === task.id ? 'selected' : ''}`} onClick={() => onSelect(task.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>

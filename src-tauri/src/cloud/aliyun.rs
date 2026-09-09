@@ -4,14 +4,17 @@
 //! Signed download URLs are requested immediately before use and never written here.
 use super::{
     http::response_json, types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile,
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CredentialStore,
-    QuarkError,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudUploadTransport,
+    CredentialStore, QuarkError, UploadHttpRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Read, path::Path};
 
-const TOKEN_URL: &str = "https://auth.aliyundrive.com/v2/account/token";
+// The current official web client renews the browser-granted `token` entry
+// through this endpoint.  The legacy auth.aliyundrive.com endpoint rejects
+// otherwise valid refresh tokens created by the contemporary web login flow.
+const TOKEN_URL: &str = "https://api.aliyundrive.com/token/refresh";
 const API: &str = "https://api.aliyundrive.com";
 const WEB_REFERER: &str = "https://www.aliyundrive.com/";
 
@@ -110,7 +113,10 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         let value = self.send(
             "POST",
             TOKEN_URL.into(),
-            BTreeMap::from([("Referer".into(), WEB_REFERER.into())]),
+            BTreeMap::from([
+                ("Referer".into(), WEB_REFERER.into()),
+                ("X-Requested-With".into(), "XMLHttpRequest".into()),
+            ]),
             Some(json!({
                 "grant_type": "refresh_token",
                 "refresh_token": previous.refresh_token,
@@ -348,8 +354,14 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     }
 
     /// Always asks the service for a fresh short-lived download URL.
-    pub fn download(&self, id: &str) -> Result<String, QuarkError> {
+    pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
         let (session, _, _) = self.refreshed_validated_session()?;
+        let metadata = self.api(
+            &session,
+            "/v2/file/get",
+            json!({"drive_id":session.drive_id,"file_id":id}),
+        )?;
+        let name = required(&metadata, "name")?;
         let value = self.api(
             &session,
             "/v2/file/get_download_url",
@@ -361,8 +373,128 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
             .and_then(Value::as_str)
             .filter(|url| url.starts_with("https://"))
             .map(str::to_owned)
+            .map(|url| (url, name))
             .ok_or(QuarkError::InvalidResponse)
     }
+}
+
+impl<'a, S: CredentialStore, T: CloudHttpTransport + CloudUploadTransport> AliyunClient<'a, S, T> {
+    /// Upload a regular local file through the short-lived HTTPS part URLs, then
+    /// tell Aliyun Drive to publish the completed object.  The temporary URLs are
+    /// intentionally scoped to this call and never enter the credential store.
+    pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(QuarkError::InvalidInput("请选择普通文件上传".into()));
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let size = metadata.len();
+        let parts = upload_part_count(size)?;
+        let (session, _, _) = self.refreshed_validated_session()?;
+        let init = self.api(
+            &session,
+            "/v2/file/create",
+            json!({
+                "drive_id": session.drive_id,
+                "parent_file_id": parent,
+                "name": name,
+                "type": "file",
+                "size": size,
+                "check_name_mode": "refuse",
+                "part_info_list": (1..=parts).map(|part_number| json!({"part_number": part_number})).collect::<Vec<_>>(),
+            }),
+        )?;
+        validate_upload_urls(&init)?;
+        let file_id = required(&init, "file_id")?;
+        let upload_id = required(&init, "upload_id")?;
+        let urls = upload_urls(&init, parts)?;
+
+        let mut input = std::fs::File::open(path)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        let mut remaining = size;
+        for url in urls {
+            let length = remaining.min(ALIYUN_PART_SIZE) as usize;
+            let mut body = vec![0; length];
+            input
+                .read_exact(&mut body)
+                .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+            remaining = remaining.saturating_sub(length as u64);
+            let response = self.http.send_upload(UploadHttpRequest {
+                method: "PUT",
+                url,
+                headers: BTreeMap::from([(
+                    "Content-Type".into(),
+                    "application/octet-stream".into(),
+                )]),
+                body,
+            })?;
+            if !(200..300).contains(&response.status) {
+                return Err(QuarkError::Provider(format!(
+                    "阿里云盘上传分片失败（HTTP {}），请重试",
+                    response.status
+                )));
+            }
+        }
+        if remaining != 0 {
+            return Err(QuarkError::InvalidInput("无法读取选中的本地文件".into()));
+        }
+        self.api(
+            &session,
+            "/v2/file/complete",
+            json!({"drive_id": session.drive_id, "file_id": file_id, "upload_id": upload_id}),
+        )?;
+        parse_file(&init, parent)
+    }
+}
+
+const ALIYUN_PART_SIZE: u64 = 10 * 1024 * 1024;
+
+fn upload_part_count(size: u64) -> Result<u64, QuarkError> {
+    let count = size.saturating_add(ALIYUN_PART_SIZE - 1) / ALIYUN_PART_SIZE;
+    let count = count.max(1);
+    if count > 10_000 {
+        return Err(QuarkError::InvalidInput(
+            "文件过大，无法安全分片上传".into(),
+        ));
+    }
+    Ok(count)
+}
+
+fn upload_urls(value: &Value, expected_parts: u64) -> Result<Vec<String>, QuarkError> {
+    let parts = value
+        .get("part_info_list")
+        .and_then(Value::as_array)
+        .filter(|parts| parts.len() == expected_parts as usize)
+        .ok_or(QuarkError::InvalidResponse)?;
+    let mut urls = Vec::with_capacity(parts.len());
+    for (index, part) in parts.iter().enumerate() {
+        if part.get("part_number").and_then(Value::as_u64) != Some(index as u64 + 1) {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let url = part
+            .get("upload_url")
+            .and_then(Value::as_str)
+            .filter(|url| secure_temporary_url(url))
+            .ok_or(QuarkError::InvalidResponse)?;
+        urls.push(url.into());
+    }
+    Ok(urls)
+}
+
+fn secure_temporary_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
 }
 
 fn validate_upload_urls(value: &Value) -> Result<(), QuarkError> {
@@ -372,7 +504,7 @@ fn validate_upload_urls(value: &Value) -> Result<(), QuarkError> {
             for (key, value) in values {
                 if matches!(key.as_str(), "upload_url" | "internal_upload_url") {
                     match value.as_str() {
-                        Some(url) if !url.is_empty() && url.starts_with("https://") => {}
+                        Some(url) if secure_temporary_url(url) => {}
                         _ => return Err(QuarkError::InvalidResponse),
                     }
                 }

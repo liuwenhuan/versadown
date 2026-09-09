@@ -10,12 +10,17 @@ use super::{
     types::{encoded, required},
     *,
 };
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashSet},
     fmt,
+    io::Read,
+    path::Path,
 };
 
 const AUTH: &str = "https://xluser-ssl.xunlei.com";
@@ -37,13 +42,22 @@ pub struct XunleiClientProfile {
 }
 
 impl XunleiClientProfile {
-    fn is_complete(&self) -> bool {
+    /// Headers accepted by the drive APIs.  The official browser does not
+    /// expose a client secret, but it does supply these identity fields with a
+    /// current bearer token.
+    fn is_drive_complete(&self) -> bool {
         !self.client_id.is_empty()
             && !self.device_id.is_empty()
             && !self.client_version.is_empty()
             && !self.package_name.is_empty()
             && !self.user_agent.is_empty()
-            && !self.client_secret.is_empty()
+    }
+
+    /// Refreshing is deliberately stricter than using a browser-issued access
+    /// token: native refresh requires the client secret, which the official
+    /// web application does not place in storage.
+    fn can_refresh(&self) -> bool {
+        self.is_drive_complete() && !self.client_secret.is_empty()
     }
 }
 
@@ -139,7 +153,10 @@ impl XunleiSession {
             security_token: security_token.into(),
             auth_method: CloudAuthMethod::Web,
         };
-        if session.refresh_token.is_empty() || !session.profile.is_complete() {
+        if session.access_token.is_empty()
+            || session.refresh_token.is_empty()
+            || !session.profile.is_drive_complete()
+        {
             return Err(QuarkError::AuthorizationPending);
         }
         Ok(session)
@@ -206,6 +223,29 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         self.session.borrow().clone()
     }
 
+    /// Builds the account used to finish an official browser authorization.
+    ///
+    /// This deliberately does not probe Xunlei or refresh the token: browser
+    /// storage does not expose the native client secret required for refresh.
+    /// The saved session can therefore create its workspace immediately, while
+    /// ordinary requests fail closed with reauthorization once its bearer token
+    /// has expired.
+    pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
+        let session = self.session();
+        if session.access_token.is_empty() || !session.profile.is_drive_complete() {
+            return Err(QuarkError::AuthorizationPending);
+        }
+        let id = (!session.user_id.is_empty())
+            .then_some(session.user_id)
+            .ok_or(QuarkError::AuthorizationPending)?;
+        Ok(CloudAccount {
+            provider: CloudProvider::Xunlei,
+            display_name: id.clone(),
+            id,
+            auth_method: CloudAuthMethod::Web,
+        })
+    }
+
     fn profile_headers(profile: &XunleiClientProfile) -> BTreeMap<String, String> {
         BTreeMap::from([
             ("X-Device-Id".into(), profile.device_id.clone()),
@@ -261,7 +301,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     }
 
     fn refresh(&self, previous: XunleiSession) -> Result<XunleiSession, QuarkError> {
-        if previous.refresh_token.is_empty() || !previous.profile.is_complete() {
+        if previous.refresh_token.is_empty() || !previous.profile.can_refresh() {
             return Err(QuarkError::AuthorizationExpired);
         }
         let mut headers = Self::profile_headers(&previous.profile);
@@ -314,6 +354,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         if !session.access_token.is_empty() && session.expires_at > now().saturating_add(60) {
             return Ok(session);
         }
+        if !session.profile.can_refresh() {
+            return Err(QuarkError::AuthorizationExpired);
+        }
         self.refresh(session)
     }
 
@@ -324,7 +367,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         body: Option<Value>,
         session: &XunleiSession,
     ) -> Result<Value, QuarkError> {
-        if session.access_token.is_empty() || !session.profile.is_complete() {
+        if session.access_token.is_empty() || !session.profile.is_drive_complete() {
             return Err(QuarkError::AuthorizationExpired);
         }
         let mut headers = Self::profile_headers(&session.profile);
@@ -351,7 +394,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     ) -> Result<Value, QuarkError> {
         let session = self.ready_session()?;
         match self.raw(method, url.clone(), body.clone(), &session) {
-            Err(QuarkError::AuthorizationExpired) => {
+            Err(QuarkError::AuthorizationExpired) if session.profile.can_refresh() => {
                 let refreshed = self.refresh(session)?;
                 self.raw(method, url, body, &refreshed)
             }
@@ -518,20 +561,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 "upload_type":"UPLOAD_TYPE_RESUMABLE",
             })),
         )?;
-        let resumable = &value["resumable"];
-        let params = &resumable["params"];
-        let upload = XunleiResumableUpload {
-            upload_type: required(&value, "upload_type")?,
-            kind: required(resumable, "kind")?,
-            provider: required(resumable, "provider")?,
-            access_key_id: required(params, "access_key_id")?,
-            access_key_secret: required(params, "access_key_secret")?,
-            bucket: required(params, "bucket")?,
-            endpoint: required(params, "endpoint")?,
-            expiration: required(params, "expiration")?,
-            key: required(params, "key")?,
-            security_token: required(params, "security_token")?,
-        };
+        let upload = resumable_upload(&value)?;
         if upload.upload_type != "UPLOAD_TYPE_RESUMABLE" || upload.kind != "drive#resumable" {
             return Err(QuarkError::InvalidResponse);
         }
@@ -555,4 +585,367 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             .ok_or(QuarkError::InvalidResponse)?;
         Ok((url, required(file, "name")?))
     }
+}
+
+impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
+    /// Computes the provider's GCID, obtains one-shot STS credentials, and
+    /// completes an AWS Signature V4 multipart upload.  The STS credentials
+    /// and upload URLs live only on this stack and are never serialized.
+    pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(QuarkError::InvalidInput("请选择普通文件上传".into()));
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let size = metadata.len();
+        let gcid = xunlei_gcid(path, size)?;
+        let value = self.request(
+            "POST",
+            format!("{DRIVE}/drive/v1/files"),
+            Some(json!({
+                "kind":"drive#file",
+                "parent_id":parent,
+                "name":name,
+                "size":size,
+                "hash":gcid,
+                "upload_type":"UPLOAD_TYPE_RESUMABLE",
+            })),
+        )?;
+        let upload = resumable_upload(&value)?;
+        if upload.upload_type != "UPLOAD_TYPE_RESUMABLE"
+            || upload.kind != "drive#resumable"
+            || upload.provider != "aws"
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let file = Self::file(
+            value.get("file").ok_or(QuarkError::InvalidResponse)?,
+            parent,
+        )?;
+        AwsMultipart::from_upload(&upload)?.upload(self.http, path, size)?;
+        Ok(file)
+    }
+}
+
+fn resumable_upload(value: &Value) -> Result<XunleiResumableUpload, QuarkError> {
+    let resumable = &value["resumable"];
+    let params = &resumable["params"];
+    Ok(XunleiResumableUpload {
+        upload_type: required(value, "upload_type")?,
+        kind: required(resumable, "kind")?,
+        provider: required(resumable, "provider")?,
+        access_key_id: required(params, "access_key_id")?,
+        access_key_secret: required(params, "access_key_secret")?,
+        bucket: required(params, "bucket")?,
+        endpoint: required(params, "endpoint")?,
+        expiration: required(params, "expiration")?,
+        key: required(params, "key")?,
+        security_token: required(params, "security_token")?,
+    })
+}
+
+const AWS_PART_SIZE: u64 = 8 * 1024 * 1024;
+
+struct AwsMultipart {
+    endpoint: url::Url,
+    bucket: String,
+    key: String,
+    access_key_id: String,
+    access_key_secret: String,
+    security_token: String,
+}
+
+impl AwsMultipart {
+    fn from_upload(upload: &XunleiResumableUpload) -> Result<Self, QuarkError> {
+        let mut endpoint =
+            url::Url::parse(&upload.endpoint).map_err(|_| QuarkError::InvalidResponse)?;
+        if endpoint.scheme() != "https"
+            || endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || endpoint.path() != "/"
+            || upload.bucket.is_empty()
+            || upload.key.is_empty()
+            || !upload
+                .bucket
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let host = endpoint
+            .host_str()
+            .ok_or(QuarkError::InvalidResponse)?
+            .to_owned();
+        if let Some(host) = host.strip_prefix(&format!("{}.", upload.bucket)) {
+            endpoint
+                .set_host(Some(host))
+                .map_err(|_| QuarkError::InvalidResponse)?;
+        }
+        Ok(Self {
+            endpoint,
+            bucket: upload.bucket.clone(),
+            key: upload.key.clone(),
+            access_key_id: upload.access_key_id.clone(),
+            access_key_secret: upload.access_key_secret.clone(),
+            security_token: upload.security_token.clone(),
+        })
+    }
+
+    fn object_path(&self) -> String {
+        format!(
+            "/{}",
+            self.key
+                .split('/')
+                .map(aws_percent)
+                .collect::<Vec<_>>()
+                .join("/")
+        )
+    }
+
+    fn object_host(&self) -> Result<String, QuarkError> {
+        let host = self
+            .endpoint
+            .host_str()
+            .ok_or(QuarkError::InvalidResponse)?;
+        if host.contains(':') {
+            return Err(QuarkError::InvalidResponse);
+        }
+        Ok(match self.endpoint.port() {
+            Some(port) => format!("{}.{}:{port}", self.bucket, host),
+            None => format!("{}.{}", self.bucket, host),
+        })
+    }
+
+    fn request(
+        &self,
+        method: &'static str,
+        raw_query: &str,
+        canonical_query: &str,
+        body: Vec<u8>,
+    ) -> Result<UploadHttpRequest, QuarkError> {
+        let timestamp = aws_timestamp();
+        let date = &timestamp[..8];
+        let payload_hash = hex(&Sha256::digest(&body));
+        let host = self.object_host()?;
+        let canonical_headers = format!(
+            "host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{timestamp}\nx-amz-security-token:{}\n",
+            self.security_token
+        );
+        let signed_headers = "host;x-amz-content-sha256;x-amz-date;x-amz-security-token";
+        let canonical = format!(
+            "{method}\n{}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
+            self.object_path()
+        );
+        let scope = format!("{date}/xunlei/s3/aws4_request");
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{}",
+            hex(&Sha256::digest(canonical.as_bytes()))
+        );
+        let date_key = hmac_sha256(
+            format!("AWS4{}", self.access_key_secret).as_bytes(),
+            date.as_bytes(),
+        )?;
+        let region_key = hmac_sha256(&date_key, b"xunlei")?;
+        let service_key = hmac_sha256(&region_key, b"s3")?;
+        let signing_key = hmac_sha256(&service_key, b"aws4_request")?;
+        let signature = hex(&hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
+        let mut url = format!("https://{host}{}", self.object_path());
+        if !raw_query.is_empty() {
+            url.push('?');
+            url.push_str(raw_query);
+        }
+        Ok(UploadHttpRequest {
+            method,
+            url,
+            headers: BTreeMap::from([
+                ("Host".into(), host),
+                ("Content-Type".into(), "application/octet-stream".into()),
+                ("x-amz-content-sha256".into(), payload_hash),
+                ("x-amz-date".into(), timestamp),
+                ("x-amz-security-token".into(), self.security_token.clone()),
+                (
+                    "Authorization".into(),
+                    format!(
+                        "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
+                        self.access_key_id
+                    ),
+                ),
+            ]),
+            body,
+        })
+    }
+
+    fn upload(
+        &self,
+        http: &impl CloudUploadTransport,
+        path: &Path,
+        size: u64,
+    ) -> Result<(), QuarkError> {
+        if size == 0 {
+            let response = http.send_upload(self.request("PUT", "", "", Vec::new())?)?;
+            return aws_checked(response).map(|_| ());
+        }
+        let started = aws_checked(http.send_upload(self.request(
+            "POST",
+            "uploads",
+            "uploads=",
+            Vec::new(),
+        )?)?)?;
+        let upload_id = xml_tag(&started.body, "UploadId")?;
+        let mut file = std::fs::File::open(path)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        let mut remaining = size;
+        let mut parts = Vec::new();
+        let mut number = 1_u64;
+        while remaining > 0 {
+            let length = remaining.min(AWS_PART_SIZE) as usize;
+            let mut body = vec![0; length];
+            file.read_exact(&mut body)
+                .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+            remaining = remaining.saturating_sub(length as u64);
+            let encoded_upload = aws_percent(&upload_id);
+            let query = format!("partNumber={number}&uploadId={encoded_upload}");
+            let response =
+                aws_checked(http.send_upload(self.request("PUT", &query, &query, body)?)?)?;
+            let etag = response
+                .headers
+                .iter()
+                .find(|(key, value)| key.eq_ignore_ascii_case("etag") && !value.is_empty())
+                .map(|(_, value)| value.clone())
+                .ok_or(QuarkError::InvalidResponse)?;
+            parts.push((number, etag));
+            number += 1;
+        }
+        let mut complete = String::from("<CompleteMultipartUpload>");
+        for (number, etag) in parts {
+            complete.push_str(&format!(
+                "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
+                xml_escape(&etag)
+            ));
+        }
+        complete.push_str("</CompleteMultipartUpload>");
+        let encoded_upload = aws_percent(&upload_id);
+        let query = format!("uploadId={encoded_upload}");
+        aws_checked(http.send_upload(self.request(
+            "POST",
+            &query,
+            &query,
+            complete.into_bytes(),
+        )?)?)?;
+        Ok(())
+    }
+}
+
+fn aws_checked(response: UploadHttpResponse) -> Result<UploadHttpResponse, QuarkError> {
+    if !(200..300).contains(&response.status) || response.body.contains("<Error>") {
+        Err(QuarkError::Provider(format!(
+            "迅雷云盘上传服务拒绝请求（HTTP {}），请重试",
+            response.status
+        )))
+    } else {
+        Ok(response)
+    }
+}
+
+fn hmac_sha256(key: &[u8], value: &[u8]) -> Result<Vec<u8>, QuarkError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| QuarkError::InvalidResponse)?;
+    mac.update(value);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn aws_percent(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn xml_tag(body: &str, tag: &str) -> Result<String, QuarkError> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body.find(&open).ok_or(QuarkError::InvalidResponse)? + open.len();
+    let end = body[start..]
+        .find(&close)
+        .ok_or(QuarkError::InvalidResponse)?
+        + start;
+    let value = &body[start..end];
+    if value.is_empty() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(value.into())
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn xunlei_gcid(path: &Path, size: u64) -> Result<String, QuarkError> {
+    let mut block = 0x40000_u64;
+    while size / block > 0x200 && block < 0x200000 {
+        block <<= 1;
+    }
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+    let mut total = Sha1::new();
+    let mut remaining = size;
+    while remaining > 0 {
+        let length = remaining.min(block) as usize;
+        let mut bytes = vec![0; length];
+        file.read_exact(&mut bytes)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        total.update(Sha1::digest(&bytes));
+        remaining = remaining.saturating_sub(length as u64);
+    }
+    Ok(hex(&total.finalize()).to_uppercase())
+}
+
+fn aws_timestamp() -> String {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = (elapsed / 86_400) as i64;
+    let seconds = elapsed % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        seconds / 3_600,
+        (seconds % 3_600) / 60,
+        seconds % 60
+    )
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    (year + i64::from(month <= 2), month as u32, day as u32)
 }

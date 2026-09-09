@@ -1,11 +1,12 @@
 use super::{
     types::{encoded, required},
     CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CloudProvider, QuarkError,
+    CloudHttpTransport, CloudProvider, CloudUploadTransport, QuarkError, UploadHttpRequest,
+    UploadHttpResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 use zeroize::Zeroizing;
 
 const CLOUD: &str = "https://cloud.189.cn";
@@ -86,7 +87,12 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         tianyi_json(&response)
     }
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
-        let value = self.request("GET", "/api/open/user/getUserInfo.action", "", None)?;
+        let value = self.request(
+            "GET",
+            "/api/open/user/getUserInfoForPortal.action",
+            "",
+            None,
+        )?;
         let user = value
             .get("userInfo")
             .or_else(|| value.get("data"))
@@ -96,11 +102,13 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             id: user
                 .get("userId")
                 .or_else(|| user.get("id"))
+                .or_else(|| user.get("loginName"))
                 .and_then(string_or_number)
                 .ok_or(QuarkError::InvalidResponse)?,
             display_name: user
                 .get("nickName")
                 .or_else(|| user.get("userName"))
+                .or_else(|| user.get("loginName"))
                 .and_then(Value::as_str)
                 .unwrap_or("天翼云盘")
                 .into(),
@@ -210,6 +218,59 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
     pub fn upload(&self) -> Result<Value, QuarkError> {
         self.request("POST", "/v2/getUserUploadUrl.action", "", None)
     }
+
+    /// Uploads a regular file with the authenticated web session. The page
+    /// session key and upload URL are consumed in this stack frame only.
+    pub fn upload_file<U: CloudUploadTransport>(
+        &self,
+        parent: &str,
+        local_path: &Path,
+        upload_http: &U,
+    ) -> Result<CloudFile, QuarkError> {
+        if parent.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择目标目录".into()));
+        }
+        let metadata = std::fs::symlink_metadata(local_path)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(QuarkError::InvalidInput("请选择普通文件上传".into()));
+        }
+        let name = local_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
+            .ok_or_else(|| QuarkError::InvalidInput("文件名无效".into()))?
+            .to_owned();
+        let bytes = std::fs::read(local_path)
+            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        if bytes.len() as u64 != metadata.len() {
+            return Err(QuarkError::InvalidInput("本地文件在上传前发生变化".into()));
+        }
+        let session_key = self.page_session_key()?;
+        let endpoint = required(&self.upload()?, "uploadUrl")?;
+        let endpoint = super::https_transfer_url(&endpoint)?;
+        let (content_type, body) = super::multipart_file(
+            &[
+                ("sessionKey", session_key),
+                ("parentId", parent.into()),
+                ("albumId", "undefined".into()),
+                ("opertype", "1".into()),
+                ("fname", name.clone()),
+            ],
+            "Filedata",
+            &name,
+            bytes,
+        )?;
+        let mut headers = self.headers();
+        headers.insert("Content-Type".into(), content_type);
+        let response = upload_http.send_upload(UploadHttpRequest {
+            method: "POST",
+            url: endpoint,
+            headers,
+            body,
+        })?;
+        tianyi_upload_response(&response, parent, &name, metadata.len())
+    }
     pub fn download(&self, id: &str) -> Result<TianyiDownload, QuarkError> {
         let value = self.request(
             "GET",
@@ -265,12 +326,75 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         if value.get("result").and_then(Value::as_i64).unwrap_or(-1) != 0 {
             return Err(QuarkError::Provider("登录被服务拒绝".into()));
         }
-        let session = parse_tianyi_web_session(&response.set_cookies)?;
+        let mut session = parse_tianyi_web_session(&response.set_cookies)?;
+        session.auth_method = CloudAuthMethod::Password;
         let client = Self::new(session.clone(), http);
         client.account()?;
         client.directory("-11")?;
         Ok(session)
     }
+
+    fn page_session_key(&self) -> Result<String, QuarkError> {
+        let response = self.http.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("{CLOUD}/main.action"),
+            headers: self.headers(),
+            body: None,
+        })?;
+        if !(200..300).contains(&response.status) {
+            return Err(QuarkError::Provider("天翼云盘无法建立上传会话".into()));
+        }
+        let capture = regex::Regex::new(r#"sessionKey\s*=\s*['\"]([^'\"]+)['\"]"#)
+            .map_err(|_| QuarkError::InvalidResponse)?
+            .captures(&response.body)
+            .and_then(|captures| captures.get(1))
+            .map(|capture| capture.as_str().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or(QuarkError::InvalidResponse)?;
+        Ok(capture)
+    }
+}
+
+fn tianyi_upload_response(
+    response: &UploadHttpResponse,
+    parent: &str,
+    name: &str,
+    size: u64,
+) -> Result<CloudFile, QuarkError> {
+    if !(200..300).contains(&response.status) {
+        return Err(QuarkError::Provider("天翼云盘拒绝上传文件".into()));
+    }
+    let value: Value =
+        serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+    let code = value
+        .get("res_code")
+        .or_else(|| value.get("result"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if code != 0 {
+        return Err(QuarkError::Provider("天翼云盘拒绝上传文件".into()));
+    }
+    Ok(CloudFile {
+        id: value
+            .get("id")
+            .or_else(|| value.get("fileId"))
+            .and_then(string_or_number)
+            .ok_or(QuarkError::InvalidResponse)?,
+        parent_id: parent.into(),
+        name: value
+            .get("fileName")
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(name)
+            .into(),
+        kind: "file".into(),
+        size: value
+            .get("size")
+            .or_else(|| value.get("fileSize"))
+            .and_then(Value::as_u64)
+            .or(Some(size)),
+        modified_at: value.get("createDate").and_then(string_or_number),
+    })
 }
 fn tianyi_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if response.status == 401 {

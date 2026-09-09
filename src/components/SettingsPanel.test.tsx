@@ -12,6 +12,24 @@ const initial = {
 
 it('keeps detailed report collection off by default', () => {
   render(<SettingsPanel initial={initial} onChange={() => {}} />);
+  expect(screen.getByRole('tab', { name: '显示' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.queryByRole('checkbox', { name: '启用调试报告' })).not.toBeInTheDocument();
+});
+
+it('separates settings into display, network, and advanced workspaces', async () => {
+  const user = userEvent.setup();
+  render(<SettingsPanel initial={initial} onChange={() => {}} />);
+
+  expect(screen.getByRole('tab', { name: '显示' })).toBeVisible();
+  expect(screen.getByRole('tab', { name: '网络' })).toBeVisible();
+  expect(screen.getByRole('tab', { name: '高级' })).toBeVisible();
+  expect(screen.getByRole('textbox', { name: '下载目录' })).toBeVisible();
+
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+  expect(screen.getByRole('checkbox', { name: '启用下载代理' })).toBeVisible();
+  expect(screen.queryByRole('textbox', { name: '下载目录' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('tab', { name: '高级' }));
   expect(screen.getByRole('checkbox', { name: '启用调试报告' })).not.toBeChecked();
 });
 
@@ -41,6 +59,7 @@ it('allows users to explicitly enable debug reports in beta', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} />);
+  await user.click(screen.getByRole('tab', { name: '高级' }));
   await user.click(screen.getByRole('checkbox', { name: '启用调试报告' }));
   expect(onChange).toHaveBeenCalledWith({ ...initial, debugReports: true });
 });
@@ -59,6 +78,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
 
   await user.click(screen.getByRole('checkbox', { name: '启用下载代理' }));
   await user.selectOptions(screen.getByRole('combobox', { name: '代理协议' }), 'https');

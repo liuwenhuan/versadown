@@ -149,6 +149,21 @@ it('recovers an existing account on mount before loading its root directory', as
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
 });
 
+it.each([
+  ['baidu', '百度', '/'],
+  ['tianyi', '天翼', '-11'],
+  ['aliyun', '阿里', 'root'],
+  ['xunlei', '迅雷', '0']
+] as const)('uses the native root identifier for %s', async (provider, label, root) => {
+  const client = createCloudFake({
+    getCloudAccount: vi.fn().mockResolvedValue({ id: `${provider}-account`, displayName: 'alice', provider, authMethod: 'web' })
+  });
+  render(<CloudManager provider={provider} client={client} />);
+
+  expect(await screen.findByRole('tree', { name: `${label}网盘文件` })).toBeVisible();
+  expect(client.listCloudDirectory).toHaveBeenCalledWith(provider, root);
+});
+
 it('switches an account tab and reloads that account view from the root directory', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();

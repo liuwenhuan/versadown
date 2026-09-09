@@ -9,8 +9,8 @@ export interface CloudWorkspaceProps {
 
 type WorkspaceTab = 'management' | CloudProvider;
 
-const providers: readonly CloudProvider[] = ['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei'];
-const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷' };
+const providers: readonly CloudProvider[] = ['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'];
+const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷', uc: 'UC' };
 
 function isUnauthorized(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && ['unauthorized', 'not_authorized'].includes(String((error as { code?: unknown }).code));

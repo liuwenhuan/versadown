@@ -84,6 +84,14 @@ export async function removeTaskRecord(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('remove_task_record', { taskId });
 }
 
+export async function moveTaskToRecycle(taskId: string): Promise<QueueTask | undefined> {
+  return isTauriRuntime() ? invoke<QueueTask>('recycle_task', { taskId }) : undefined;
+}
+
+export async function purgeRecycledTasks(taskIds: string[], deleteFiles: boolean): Promise<void> {
+  if (isTauriRuntime()) await invoke('purge_recycled_tasks', { taskIds, deleteFiles });
+}
+
 export async function selectDownloadFiles(taskId: string, indices: number[]): Promise<QueueTask | undefined> {
   return isTauriRuntime() ? invoke<QueueTask>('select_files', { taskId, indices }) : undefined;
 }

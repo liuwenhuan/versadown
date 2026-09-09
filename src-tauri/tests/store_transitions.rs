@@ -59,7 +59,10 @@ fn removing_a_task_record_keeps_any_output_file_outside_the_database() {
         .create(NewTask::direct("https://host/file.iso"))
         .expect("task");
     store
-        .upsert_files(task.id, &[(0, output.to_string_lossy().into_owned(), 7, 7, true)])
+        .upsert_files(
+            task.id,
+            &[(0, output.to_string_lossy().into_owned(), 7, 7, true)],
+        )
         .unwrap();
 
     store.remove_task_record(task.id).unwrap();

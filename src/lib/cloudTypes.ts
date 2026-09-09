@@ -1,5 +1,15 @@
-export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei';
+export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
 export type CloudAuthMethod = 'web' | 'password';
+
+export const cloudRootDirectoryId: Record<CloudProvider, string> = {
+  quark: '0',
+  pikpak: '0',
+  baidu: '/',
+  tianyi: '-11',
+  aliyun: 'root',
+  xunlei: '0',
+  uc: '0'
+};
 
 export interface CloudAccount { provider: CloudProvider; id: string; displayName: string; authMethod: CloudAuthMethod; expiresAt?: string; }
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; }

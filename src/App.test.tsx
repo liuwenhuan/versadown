@@ -29,6 +29,8 @@ it('renders the compact download-manager layout without browser navigation contr
   expect(screen.getByRole('button', { name: '新建下载' })).toBeVisible();
   expect(screen.getByRole('tab', { name: /下载中/ })).toBeVisible();
   expect(screen.getByRole('tab', { name: /已完成/ })).toBeVisible();
+  expect(screen.getByRole('tab', { name: /失败/ })).toBeVisible();
+  expect(screen.getByRole('tab', { name: /回收站/ })).toBeVisible();
   expect(screen.queryByRole('button', { name: '后退' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '前进' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '刷新' })).not.toBeInTheDocument();
@@ -88,9 +90,11 @@ it('opens the cloud management workspace and restores each provider once', async
 
   expect(await screen.findByRole('region', { name: '网盘管理' })).toBeVisible();
   expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
-  expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(2);
+  expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(7);
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('quark');
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('pikpak');
+  expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('aliyun');
+  expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('uc');
 });
 
 it('preloads cloud authorization before the user opens My Cloud', async () => {
@@ -102,7 +106,7 @@ it('preloads cloud authorization before the user opens My Cloud', async () => {
 
   render(<App />);
 
-  await waitFor(() => expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(7));
   expect(screen.queryByRole('region', { name: '网盘管理' })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole('button', { name: /我的网盘/ }));

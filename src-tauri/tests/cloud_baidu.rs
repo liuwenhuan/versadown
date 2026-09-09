@@ -1,6 +1,7 @@
 use alldownloader_lib::cloud::{
-    baidu::{BaiduClient, BaiduSession},
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError, ReqwestTransport,
+    baidu::{parse_baidu_web_session, BaiduClient, BaiduSession},
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
+    ReqwestTransport, UploadHttpRequest, UploadHttpResponse,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::{
@@ -50,6 +51,45 @@ impl CloudHttpTransport for RecordingHttp {
     }
 }
 
+struct UploadRecordingHttp {
+    replies: Mutex<Vec<UploadHttpResponse>>,
+    requests: Mutex<Vec<UploadHttpRequest>>,
+}
+
+impl UploadRecordingHttp {
+    fn sequence(bodies: &[&str]) -> Self {
+        Self {
+            replies: Mutex::new(
+                bodies
+                    .iter()
+                    .map(|body| UploadHttpResponse {
+                        status: 200,
+                        body: (*body).into(),
+                        headers: BTreeMap::new(),
+                    })
+                    .rev()
+                    .collect(),
+            ),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<UploadHttpRequest> {
+        self.requests.lock().unwrap().drain(..).collect()
+    }
+}
+
+impl CloudUploadTransport for UploadRecordingHttp {
+    fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        self.requests.lock().unwrap().push(request);
+        self.replies
+            .lock()
+            .unwrap()
+            .pop()
+            .ok_or_else(|| QuarkError::Transport("unexpected upload request".into()))
+    }
+}
+
 fn form_field(body: &str, wanted: &str) -> String {
     url::form_urlencoded::parse(body.as_bytes())
         .find_map(|(name, value)| (name == wanted).then(|| value.into_owned()))
@@ -61,6 +101,22 @@ fn opaque_reference(path: &str) -> String {
         "bdr_{}",
         URL_SAFE_NO_PAD.encode(serde_json::json!({"fsid":"7","path":path}).to_string())
     )
+}
+
+#[test]
+fn baidu_accepts_the_secure_webview_session_cookie_after_browser_authorization() {
+    let session = parse_baidu_web_session(&[
+        "BAIDUID=browser-identity".into(),
+        "BDUSS_BFESS=secure-webview-session".into(),
+        "STOKEN=netdisk-token".into(),
+        "unrelated=value".into(),
+    ])
+    .unwrap();
+
+    assert_eq!(
+        session.cookie,
+        "BAIDUID=browser-identity; BDUSS_BFESS=secure-webview-session; STOKEN=netdisk-token"
+    );
 }
 
 #[test]
@@ -332,4 +388,86 @@ fn baidu_password_challenge_requires_web_authorization_without_a_session() {
         http.requests()[0].headers["Content-Type"],
         "application/x-www-form-urlencoded"
     );
+}
+
+#[test]
+fn baidu_uploads_a_local_file_then_commits_without_retaining_the_transfer_url() {
+    let mut input = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    input.write_all(b"hello baidu").unwrap();
+    let name = input
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let hash = format!("{:x}", md5::compute(b"hello baidu"));
+    let precreate = format!(
+        r#"{{"errno":0,"return_type":1,"uploadid":"upload-1","block_list":[0],"expected":"{hash}"}}"#
+    );
+    let slice = format!(r#"{{"md5":"{hash}"}}"#);
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"result":{"bdstoken":"fresh-token"}}"#,
+        &precreate,
+        r#"{"errno":0,"fs_id":7,"path":"/hello.txt"}"#,
+    ]);
+    let upload = UploadRecordingHttp::sequence(&[&slice]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    let file = client.upload_file("/", input.path(), &upload).unwrap();
+
+    assert_eq!(file.name, name);
+    assert_eq!(file.size, Some(11));
+    let requests = upload.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.starts_with("https://"));
+    assert!(requests[0].url.contains("method=upload"));
+    assert!(requests[0]
+        .body
+        .windows(b"hello baidu".len())
+        .any(|part| part == b"hello baidu"));
+    assert!(requests[0]
+        .headers
+        .get("Content-Type")
+        .is_some_and(|value| value.starts_with("multipart/form-data; boundary=")));
+    assert!(
+        http.requests()
+            .iter()
+            .all(|request| !request.url.contains("upload-1")),
+        "upload id must never be persisted in a follow-up URL outside the in-flight transfer"
+    );
+}
+
+#[test]
+fn baidu_upload_rejects_a_non_regular_file_before_starting_a_transfer() {
+    let directory = tempfile::tempdir().unwrap();
+    let http = RecordingHttp::sequence(&[]);
+    let upload = UploadRecordingHttp::sequence(&[]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    assert!(matches!(
+        client.upload_file("/", directory.path(), &upload),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(http.requests().is_empty());
+    assert!(upload.requests().is_empty());
+}
+
+#[test]
+fn baidu_commits_a_zero_slice_upload_instead_of_treating_precreate_as_a_file() {
+    let mut input = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    input.write_all(b"rapid upload").unwrap();
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"result":{"bdstoken":"fresh-token"}}"#,
+        r#"{"errno":0,"return_type":2,"uploadid":"rapid-1","block_list":[]}"#,
+        r#"{"errno":0,"fs_id":8,"path":"/rapid.txt","server_filename":"rapid.txt"}"#,
+    ]);
+    let upload = UploadRecordingHttp::sequence(&[]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    let file = client.upload_file("/", input.path(), &upload).unwrap();
+
+    assert_eq!(file.name, "rapid.txt");
+    assert!(upload.requests().is_empty());
+    assert_eq!(http.requests().len(), 3);
+    assert!(http.requests()[2].url.contains("/api/create"));
 }

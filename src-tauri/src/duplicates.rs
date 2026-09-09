@@ -74,6 +74,9 @@ pub fn duplicate_state(
                 Ok(DuplicateDownloadState::OverwriteRequired)
             }
         }
+        // Recycled records are kept only for user recovery. Callers avoid treating
+        // them as active duplicates, and this defensive fallback never resumes one.
+        TaskStatus::Recycled => Ok(DuplicateDownloadState::OverwriteRequired),
     }
 }
 
@@ -98,17 +101,10 @@ mod tests {
     use super::{duplicate_state, retry_duplicate_state};
     use crate::{DownloadTask, DuplicateDownloadState, NewTask, TaskStatus, TaskStore};
 
-    fn task_with_status(
-        store: &TaskStore,
-        source: &str,
-        status: TaskStatus,
-    ) -> DownloadTask {
+    fn task_with_status(store: &TaskStore, source: &str, status: TaskStatus) -> DownloadTask {
         let task = store.create(NewTask::direct(source)).unwrap();
         store
-            .apply_transfer_snapshot(DownloadTask {
-                status,
-                ..task
-            })
+            .apply_transfer_snapshot(DownloadTask { status, ..task })
             .unwrap()
     }
 
@@ -118,27 +114,76 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let store = TaskStore::open_in_memory().unwrap();
 
-        let completed = task_with_status(&store, "https://example.test/complete", TaskStatus::Completed);
+        let completed = task_with_status(
+            &store,
+            "https://example.test/complete",
+            TaskStatus::Completed,
+        );
         let complete_file = root.join("complete.bin");
         std::fs::write(&complete_file, b"abc").unwrap();
-        store.upsert_files(completed.id, &[(0, complete_file.to_string_lossy().into_owned(), 3, 3, true)]).unwrap();
-        assert_eq!(duplicate_state(&store, &completed).unwrap(), DuplicateDownloadState::CompletedFilesPresent);
+        store
+            .upsert_files(
+                completed.id,
+                &[(0, complete_file.to_string_lossy().into_owned(), 3, 3, true)],
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate_state(&store, &completed).unwrap(),
+            DuplicateDownloadState::CompletedFilesPresent
+        );
         std::fs::remove_file(&complete_file).unwrap();
-        assert_eq!(duplicate_state(&store, &completed).unwrap(), DuplicateDownloadState::CompletedFilesMissing);
+        assert_eq!(
+            duplicate_state(&store, &completed).unwrap(),
+            DuplicateDownloadState::CompletedFilesMissing
+        );
 
-        let partial = task_with_status(&store, "https://example.test/partial", TaskStatus::Completed);
+        let partial = task_with_status(
+            &store,
+            "https://example.test/partial",
+            TaskStatus::Completed,
+        );
         let partial_file = root.join("partial.bin");
         std::fs::write(&partial_file, b"a").unwrap();
-        store.upsert_files(partial.id, &[(0, partial_file.to_string_lossy().into_owned(), 3, 1, true)]).unwrap();
-        assert_eq!(duplicate_state(&store, &partial).unwrap(), DuplicateDownloadState::OverwriteRequired);
+        store
+            .upsert_files(
+                partial.id,
+                &[(0, partial_file.to_string_lossy().into_owned(), 3, 1, true)],
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate_state(&store, &partial).unwrap(),
+            DuplicateDownloadState::OverwriteRequired
+        );
 
         let resumable = task_with_status(&store, "https://example.test/resume", TaskStatus::Failed);
         let resumable_file = root.join("resume.bin");
         std::fs::write(&resumable_file, b"a").unwrap();
         std::fs::write(format!("{}.aria2", resumable_file.to_string_lossy()), []).unwrap();
-        store.upsert_files(resumable.id, &[(0, resumable_file.to_string_lossy().into_owned(), 3, 1, true)]).unwrap();
-        assert_eq!(duplicate_state(&store, &resumable).unwrap(), DuplicateDownloadState::ResumeAvailable);
-        assert_eq!(retry_duplicate_state(&store, &resumable).unwrap(), Some(DuplicateDownloadState::ResumeAvailable));
+        store
+            .upsert_files(
+                resumable.id,
+                &[(0, resumable_file.to_string_lossy().into_owned(), 3, 1, true)],
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate_state(&store, &resumable).unwrap(),
+            DuplicateDownloadState::ResumeAvailable
+        );
+        assert_eq!(
+            retry_duplicate_state(&store, &resumable).unwrap(),
+            Some(DuplicateDownloadState::ResumeAvailable)
+        );
+
+        let recycled = task_with_status(
+            &store,
+            "https://example.test/recycled",
+            TaskStatus::Recycled,
+        );
+        assert_eq!(
+            duplicate_state(&store, &recycled).unwrap(),
+            DuplicateDownloadState::OverwriteRequired,
+            "a recycled task must never be resumed implicitly"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

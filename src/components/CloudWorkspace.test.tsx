@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { CloudWorkspace } from './CloudWorkspace';
@@ -30,7 +30,7 @@ it('defaults to the cloud management tab and lists every supported provider ther
   expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('tab', { name: 'PikPak网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
 it('renders authorization cards for every newly supported cloud service', async () => {
@@ -40,7 +40,31 @@ it('renders authorization cards for every newly supported cloud service', async 
   for (const label of ['百度', '天翼', '阿里', '迅雷']) {
     expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
   }
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
+});
+
+it('renders UC web authorization without password fallback', async () => {
+  const client = createClient();
+  client.getCloudAuthorizationCapabilities.mockImplementation((provider: string) => provider === 'uc'
+    ? Promise.reject(new Error('能力查询暂不可用'))
+    : Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' }));
+  render(<CloudWorkspace client={client as never} />);
+
+  const ucAuthorization = await screen.findByRole('region', { name: 'UC账号授权' });
+  expect(within(ucAuthorization).getByRole('button', { name: '使用网页授权' })).toBeEnabled();
+  expect(within(ucAuthorization).queryByLabelText('UC账号')).not.toBeInTheDocument();
+});
+
+it('opens a recovered UC account at root 0', async () => {
+  const user = userEvent.setup();
+  const client = createClient({
+    uc: { id: 'uc-1', displayName: 'uc-alice', provider: 'uc' as never, authMethod: 'web' }
+  });
+  render(<CloudWorkspace client={client as never} />);
+
+  await user.click(await screen.findByRole('tab', { name: 'UC网盘' }));
+  expect(await screen.findByRole('tree', { name: 'UC网盘文件' })).toBeVisible();
+  expect(client.listCloudDirectory).toHaveBeenLastCalledWith('uc', '0');
 });
 
 it('ignores a recovered account when the provider does not match the request', async () => {
@@ -48,7 +72,7 @@ it('ignores a recovered account when the provider does not match the request', a
   client.getCloudAccount.mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' });
   render(<CloudWorkspace client={client as never} />);
 
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
   expect(screen.getAllByRole('tab', { name: 'PikPak网盘' })).toHaveLength(1);
   expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument();
 });
@@ -122,7 +146,7 @@ it('recovers accounts into tabs while still opening on cloud management', async 
   expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
   expect(client.listCloudDirectory).not.toHaveBeenCalled();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
 it('shows only authorized provider tabs and switches their real directory views', async () => {

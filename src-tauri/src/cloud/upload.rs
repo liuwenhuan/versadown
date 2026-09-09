@@ -10,6 +10,63 @@ use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
+/// Validates a server-provided transfer endpoint before file bytes are sent.
+/// Scheme-relative endpoints are normalised to HTTPS; credentials and fragments
+/// are never valid for a temporary transfer endpoint.
+pub(crate) fn https_transfer_url(value: &str) -> Result<String, QuarkError> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("//")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or_else(|| value.to_owned());
+    let url = url::Url::parse(&value).map_err(|_| QuarkError::InvalidResponse)?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(url.into())
+}
+
+/// Builds a binary multipart body without ever stringifying file bytes.
+/// Field names and filenames must be header-safe; values remain body data.
+pub(crate) fn multipart_file(
+    fields: &[(&str, String)],
+    file_field: &str,
+    file_name: &str,
+    file: Vec<u8>,
+) -> Result<(String, Vec<u8>), QuarkError> {
+    let safe_header = |value: &str| !value.is_empty() && !value.contains(['\r', '\n']);
+    if !safe_header(file_field)
+        || !safe_header(file_name)
+        || fields.iter().any(|(name, _)| !safe_header(name))
+    {
+        return Err(QuarkError::InvalidInput("文件名无效".into()));
+    }
+    let boundary = format!("----AllDownloader{}", uuid::Uuid::new_v4().simple());
+    let mut body = Vec::new();
+    for (name, value) in fields {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(&file);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Ok((format!("multipart/form-data; boundary={boundary}"), body))
+}
+
 pub struct UploadHttpRequest {
     pub method: &'static str,
     pub url: String,

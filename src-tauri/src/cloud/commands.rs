@@ -1,8 +1,9 @@
 use super::{http::response_json, types::required, *};
 use crate::{
-    commands::{task_action_outcome, AppState, TaskActionOutcome}, duplicate_state,
-    DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
+    commands::{task_action_outcome, AppState, TaskActionOutcome},
+    duplicate_state, DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
+use serde::{de::DeserializeOwned, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -18,6 +19,7 @@ pub struct CloudState {
     tianyi_operation: Mutex<()>,
     aliyun_operation: Mutex<()>,
     xunlei_operation: Mutex<()>,
+    uc_operation: Mutex<()>,
 }
 impl CloudState {
     pub fn upload_pikpak_file(
@@ -79,6 +81,7 @@ impl CloudState {
             tianyi_operation: Mutex::new(()),
             aliyun_operation: Mutex::new(()),
             xunlei_operation: Mutex::new(()),
+            uc_operation: Mutex::new(()),
         })
     }
     /// All session consumers, including recovery and logout, share this provider boundary.
@@ -94,6 +97,7 @@ impl CloudState {
             CloudProvider::Tianyi => &self.tianyi_operation,
             CloudProvider::Aliyun => &self.aliyun_operation,
             CloudProvider::Xunlei => &self.xunlei_operation,
+            CloudProvider::Uc => &self.uc_operation,
         };
         let _guard = mutex.lock().map_err(|_| QuarkError::Storage)?;
         work(&self.store)
@@ -124,20 +128,106 @@ pub fn restore_account(
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
-    if !matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak) {
-        return Err(QuarkError::ProviderUnsupported);
-    }
     if store.load(provider.key())?.is_none() {
         return Err(QuarkError::NotAuthorized);
     }
     match provider {
         CloudProvider::Quark => QuarkClient::new(cookie(store)?, http).account(),
         CloudProvider::Pikpak => PikPakClient::new(http, store).account(),
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            let session = load_provider_session(CloudProvider::Baidu, store)?;
+            baidu::BaiduClient::new(session, http).account()
+        }
+        CloudProvider::Tianyi => {
+            let session = load_provider_session(CloudProvider::Tianyi, store)?;
+            tianyi::TianyiClient::new(session, http).account()
+        }
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(store, http).account(),
+        CloudProvider::Xunlei => {
+            let session = load_provider_session(CloudProvider::Xunlei, store)?;
+            let client = xunlei::XunleiClient::new(session, http);
+            if client.session().profile.client_secret.is_empty() {
+                return client.web_account();
+            }
+            let account = client.account()?;
+            save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
+            Ok(account)
+        }
+        CloudProvider::Uc => {
+            let session = load_provider_session(CloudProvider::Uc, store)?;
+            // A browser-granted UC session is sufficient to restore its tab.
+            // File operations still validate the session against UC when the
+            // user opens it, but an internal member probe must not hide a
+            // previously authorized account at startup.
+            uc::UcClient::new(session, http).web_account()
+        }
     }
+}
+
+fn load_provider_session<T: DeserializeOwned>(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+) -> Result<T, QuarkError> {
+    let bytes = store
+        .load(provider.key())?
+        .ok_or(QuarkError::NotAuthorized)?;
+    serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)
+}
+
+fn save_provider_session<T: Serialize>(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    session: &T,
+) -> Result<(), QuarkError> {
+    let bytes = serde_json::to_vec(session).map_err(|_| QuarkError::Storage)?;
+    store.save(provider.key(), &bytes)
+}
+
+fn browser_cookies(
+    window: &tauri::WebviewWindow,
+    urls: &[&str],
+) -> Result<Vec<String>, QuarkError> {
+    let mut values = std::collections::BTreeMap::new();
+    for url in urls {
+        for cookie in window
+            .cookies_for_url(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
+            .map_err(|_| QuarkError::WebAuthorizationRequired)?
+        {
+            values.insert(cookie.name().to_owned(), cookie.value().to_owned());
+        }
+    }
+    Ok(values
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect())
+}
+
+fn web_value(raw: &str) -> Result<serde_json::Value, QuarkError> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| QuarkError::AuthorizationPending)?;
+    if let Some(serialized) = value.as_str() {
+        value = serde_json::from_str(serialized).map_err(|_| QuarkError::AuthorizationPending)?;
+    }
+    value
+        .is_object()
+        .then_some(value)
+        .ok_or(QuarkError::AuthorizationPending)
+}
+
+fn web_storage_tokens(
+    window: &tauri::WebviewWindow,
+    script: &str,
+) -> Result<serde_json::Value, QuarkError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    window
+        .eval_with_callback(script, move |value| {
+            let _ = tx.send(value);
+        })
+        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+    let raw = rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+    web_value(&raw)
 }
 
 #[tauri::command]
@@ -147,11 +237,13 @@ pub fn cloud_provider_capabilities(provider: CloudProvider) -> CloudAuthorizatio
 
 fn require_connected_provider(provider: CloudProvider) -> Result<(), QuarkError> {
     match provider {
-        CloudProvider::Quark | CloudProvider::Pikpak => Ok(()),
-        CloudProvider::Baidu
+        CloudProvider::Quark
+        | CloudProvider::Pikpak
+        | CloudProvider::Baidu
         | CloudProvider::Tianyi
         | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        | CloudProvider::Xunlei
+        | CloudProvider::Uc => Ok(()),
     }
 }
 
@@ -176,9 +268,6 @@ pub async fn cloud_begin_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAuthorization, QuarkError> {
-    if !matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak) {
-        return Err(QuarkError::ProviderUnsupported);
-    }
     let label = format!("cloud-auth-{}", provider.key());
     if let Some(window) = app.get_webview_window(&label) {
         window
@@ -189,10 +278,11 @@ pub async fn cloud_begin_authorization(
         let url = match provider {
             CloudProvider::Quark => "https://pan.quark.cn",
             CloudProvider::Pikpak => "https://mypikpak.com/drive",
-            CloudProvider::Baidu
-            | CloudProvider::Tianyi
-            | CloudProvider::Aliyun
-            | CloudProvider::Xunlei => return Err(QuarkError::ProviderUnsupported),
+            CloudProvider::Baidu => "https://pan.baidu.com",
+            CloudProvider::Tianyi => "https://cloud.189.cn",
+            CloudProvider::Aliyun => "https://www.aliyundrive.com/drive",
+            CloudProvider::Xunlei => "https://pan.xunlei.com",
+            CloudProvider::Uc => "https://drive.uc.cn",
         };
         WebviewWindowBuilder::new(
             &app,
@@ -232,6 +322,97 @@ const WEB_TOKENS_JS: &str = r#"(() => {
  for (let i=0;i<localStorage.length;i++) {const k=localStorage.key(i); if(k.startsWith('credentials_')) {try {const v=JSON.parse(localStorage.getItem(k)); if(v.access_token && v.refresh_token) {inspect(v,0);out.client_id=k.slice(12);break;}} catch (_) {}}}
  return out.access_token && out.refresh_token ? out : null;
 })()"#;
+
+// The browser page is the only place where these renewable credentials are
+// acquired.  The scripts return a narrowly selected object; they never return
+// a storage dump, DOM content or passwords to Rust.
+const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
+ if (location.protocol !== 'https:' || !(['aliyundrive.com','alipan.com'].some(h => location.hostname === h || location.hostname.endsWith('.' + h)))) return null;
+ const out = {}; const seen = new Set();
+ function inspect(v, depth) {
+  if (!v || depth > 6) return;
+  if (typeof v === 'string') { try { inspect(JSON.parse(v), depth + 1); } catch (_) {} return; }
+  if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
+  for (const [k, x] of Object.entries(v)) {
+   if (['refresh_token','refreshToken'].includes(k) && typeof x === 'string') out.refresh_token = x;
+   else if (!/password/i.test(k)) inspect(x, depth + 1);
+  }
+ }
+ for (const storage of [localStorage, sessionStorage]) for (let i = 0; i < storage.length; i++) inspect({[storage.key(i)]: storage.getItem(storage.key(i))}, 0);
+ return out.refresh_token ? out : null;
+})()"#;
+
+const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
+ if (location.protocol !== 'https:' || !(location.hostname === 'xunlei.com' || location.hostname.endsWith('.xunlei.com'))) return null;
+ const out = {}; const seen = new Set();
+ const fields = {
+  access_token: ['access_token','accessToken'], refresh_token: ['refresh_token','refreshToken'],
+  user_id: ['user_id','userId'], security_token: ['security_token','securityToken','captcha_token','captchaToken'],
+  client_id: ['client_id','clientId'], client_secret: ['client_secret','clientSecret'],
+  device_id: ['device_id','deviceId'], client_version: ['client_version','clientVersion'],
+  package_name: ['package_name','packageName'], user_agent: ['user_agent','userAgent'],
+  expires_at: ['expires_at','expiresAt']
+ };
+ function inspect(v, depth) {
+  if (!v || depth > 6) return;
+  if (typeof v === 'string') { try { inspect(JSON.parse(v), depth + 1); } catch (_) {} return; }
+  if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
+  for (const [k, x] of Object.entries(v)) {
+   const target = Object.entries(fields).find(([, names]) => names.includes(k));
+   if (target && (typeof x === 'string' || (target[0] === 'expires_at' && Number.isFinite(x)))) out[target[0]] = x;
+   else if (!/password/i.test(k)) inspect(x, depth + 1);
+  }
+ }
+ for (const storage of [localStorage, sessionStorage]) for (let i = 0; i < storage.length; i++) inspect({[storage.key(i)]: storage.getItem(storage.key(i))}, 0);
+ // The official web app never exposes its native refresh client secret. A
+ // current bearer token plus the non-secret drive profile is enough here;
+ // refresh remains disabled without that native-only secret.
+ return out.access_token && out.refresh_token && out.client_id && out.device_id && out.client_version && out.package_name && out.user_agent ? out : null;
+})()"#;
+
+fn parse_aliyun_web_refresh_token(value: serde_json::Value) -> Result<String, QuarkError> {
+    required(&value, "refresh_token").map_err(|_| QuarkError::AuthorizationPending)
+}
+
+fn find_created_directory(directory: CloudDirectory, name: &str) -> Result<CloudFile, QuarkError> {
+    directory
+        .items
+        .into_iter()
+        .find(|file| file.kind == "folder" && file.name == name)
+        .ok_or(QuarkError::InvalidResponse)
+}
+
+fn with_xunlei_client<T, H: CloudHttpTransport>(
+    store: &impl CredentialStore,
+    http: &H,
+    work: impl FnOnce(&xunlei::XunleiClient<'_, H>) -> Result<T, QuarkError>,
+) -> Result<T, QuarkError> {
+    let session = load_provider_session(CloudProvider::Xunlei, store)?;
+    let client = xunlei::XunleiClient::new(session, http);
+    let result = work(&client)?;
+    save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
+    Ok(result)
+}
+
+fn parse_xunlei_web_session(value: serde_json::Value) -> Result<xunlei::XunleiSession, QuarkError> {
+    let field =
+        |key| super::types::required(&value, key).map_err(|_| QuarkError::AuthorizationPending);
+    xunlei::XunleiSession::from_web_authorization(
+        value["access_token"].as_str().unwrap_or_default(),
+        field("refresh_token")?,
+        value["user_id"].as_str().unwrap_or_default(),
+        value["security_token"].as_str().unwrap_or_default(),
+        xunlei::XunleiClientProfile {
+            client_id: field("client_id")?,
+            client_secret: value["client_secret"].as_str().unwrap_or_default().into(),
+            device_id: field("device_id")?,
+            client_version: field("client_version")?,
+            package_name: field("package_name")?,
+            user_agent: field("user_agent")?,
+        },
+        value["expires_at"].as_u64().unwrap_or(0),
+    )
+}
 pub fn parse_web_tokens(raw: &str) -> Result<PikPakSession, QuarkError> {
     let mut v: serde_json::Value =
         serde_json::from_str(raw).map_err(|_| QuarkError::AuthorizationPending)?;
@@ -269,9 +450,6 @@ pub async fn cloud_complete_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
-    if !matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak) {
-        return Err(QuarkError::ProviderUnsupported);
-    }
     let window = app
         .get_webview_window(&format!("cloud-auth-{}", provider.key()))
         .ok_or(QuarkError::WebAuthorizationRequired)?;
@@ -279,20 +457,11 @@ pub async fn cloud_complete_authorization(
         match provider {
             CloudProvider::Quark => {
                 // Must stay on the blocking worker, never the Windows UI thread (WebView2 deadlock).
-                let mut values = std::collections::BTreeMap::new();
-                for u in ["https://pan.quark.cn", "https://drive-pc.quark.cn"] {
-                    for c in window
-                        .cookies_for_url(u.parse().map_err(|_| QuarkError::InvalidResponse)?)
-                        .map_err(|_| QuarkError::WebAuthorizationRequired)?
-                    {
-                        values.insert(c.name().to_owned(), c.value().to_owned());
-                    }
-                }
-                let cookie = values
-                    .into_iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join("; ");
+                let cookie = browser_cookies(
+                    &window,
+                    &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
+                )?
+                .join("; ");
                 if cookie.is_empty() {
                     return Err(QuarkError::AuthorizationPending);
                 }
@@ -303,16 +472,8 @@ pub async fn cloud_complete_authorization(
                 Ok(account)
             }
             CloudProvider::Pikpak => {
-                let (tx, rx) = std::sync::mpsc::channel();
-                window
-                    .eval_with_callback(WEB_TOKENS_JS, move |s| {
-                        let _ = tx.send(s);
-                    })
-                    .map_err(|_| QuarkError::WebAuthorizationRequired)?;
-                let raw = rx
-                    .recv_timeout(std::time::Duration::from_secs(15))
-                    .map_err(|_| QuarkError::WebAuthorizationRequired)?;
-                let session = parse_web_tokens(&raw)?;
+                let session =
+                    parse_web_tokens(&web_storage_tokens(&window, WEB_TOKENS_JS)?.to_string())?;
                 // Validate in a temporary store before replacing a previously authorized account.
                 let temporary = MemoryCredentialStore::default();
                 let client = PikPakClient::new(http, &temporary);
@@ -325,10 +486,76 @@ pub async fn cloud_complete_authorization(
                 let _ = window.close();
                 Ok(account)
             }
-            CloudProvider::Baidu
-            | CloudProvider::Tianyi
-            | CloudProvider::Aliyun
-            | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+            CloudProvider::Baidu => {
+                let session = baidu::parse_baidu_web_session(&browser_cookies(
+                    &window,
+                    &["https://pan.baidu.com", "https://passport.baidu.com"],
+                )?)?;
+                let client = baidu::BaiduClient::new(session.clone(), http);
+                let account = authorization_result(client.account())?;
+                authorization_result(client.directory("/"))?;
+                save_provider_session(CloudProvider::Baidu, &state.store, &session)?;
+                let _ = window.close();
+                Ok(account)
+            }
+            CloudProvider::Tianyi => {
+                let session = tianyi::parse_tianyi_web_session(&browser_cookies(
+                    &window,
+                    &["https://cloud.189.cn", "https://open.e.189.cn"],
+                )?)?;
+                let client = tianyi::TianyiClient::new(session.clone(), http);
+                let account = authorization_result(client.account())?;
+                authorization_result(client.directory("-11"))?;
+                save_provider_session(CloudProvider::Tianyi, &state.store, &session)?;
+                let _ = window.close();
+                Ok(account)
+            }
+            CloudProvider::Aliyun => {
+                let temporary = MemoryCredentialStore::default();
+                let client = aliyun::AliyunClient::new(&temporary, http);
+                let refresh_token = parse_aliyun_web_refresh_token(web_storage_tokens(
+                    &window,
+                    ALIYUN_WEB_TOKENS_JS,
+                )?)?;
+                let account =
+                    authorization_result(client.authorize_browser_refresh_token(&refresh_token))?;
+                state.store.save(
+                    CloudProvider::Aliyun.key(),
+                    &temporary
+                        .load(CloudProvider::Aliyun.key())?
+                        .ok_or(QuarkError::Storage)?,
+                )?;
+                let _ = window.close();
+                Ok(account)
+            }
+            CloudProvider::Xunlei => {
+                let session =
+                    parse_xunlei_web_session(web_storage_tokens(&window, XUNLEI_WEB_TOKENS_JS)?)?;
+                let client = xunlei::XunleiClient::new(session, http);
+                // The browser does not expose Xunlei's native client secret.
+                // Persist the valid web session and create its workspace
+                // without issuing a native refresh or an extra API probe.
+                let account = client.web_account()?;
+                save_provider_session(CloudProvider::Xunlei, &state.store, &client.session())?;
+                let _ = window.close();
+                Ok(account)
+            }
+            CloudProvider::Uc => {
+                let session = uc::parse_uc_web_session(&browser_cookies(
+                    &window,
+                    &["https://drive.uc.cn", "https://pc-api.uc.cn"],
+                )?)?;
+                let client = uc::UcClient::new(session.clone(), http);
+                // Once the official browser window has yielded the complete
+                // session cookie pair, persist it and close immediately.
+                // Validating with UC's undocumented `member` endpoint here
+                // made a successful browser login appear to hang whenever
+                // that optional probe was rejected.
+                let account = client.web_account()?;
+                save_provider_session(CloudProvider::Uc, &state.store, &session)?;
+                let _ = window.close();
+                Ok(account)
+            }
         }
     })
     .await
@@ -344,24 +571,39 @@ pub async fn cloud_login_password(
         return Err(QuarkError::WebAuthorizationRequired);
     }
     let password = zeroize::Zeroizing::new(password);
-    run(app, provider, move |state, http| {
-        match provider {
-            CloudProvider::Pikpak => {
-                let temporary = MemoryCredentialStore::default();
-                let client = PikPakClient::new(http, &temporary);
-                client.login(&username, &password)?;
-                let account = client.account()?;
-                state.store.save(
-                    "pikpak",
-                    &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
-                )?;
-                Ok(account)
-            }
-            CloudProvider::Quark
-            | CloudProvider::Baidu
-            | CloudProvider::Tianyi
-            | CloudProvider::Aliyun
-            | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+    run(app, provider, move |state, http| match provider {
+        CloudProvider::Pikpak => {
+            let temporary = MemoryCredentialStore::default();
+            let client = PikPakClient::new(http, &temporary);
+            client.login(&username, &password)?;
+            let account = client.account()?;
+            state.store.save(
+                "pikpak",
+                &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
+            )?;
+            Ok(account)
+        }
+        CloudProvider::Baidu => {
+            let session = baidu::BaiduClient::login_password(&username, &password, http)?;
+            let client = baidu::BaiduClient::new(session.clone(), http);
+            let account = client.account()?;
+            client.directory("/")?;
+            save_provider_session(CloudProvider::Baidu, &state.store, &session)?;
+            Ok(account)
+        }
+        CloudProvider::Tianyi => {
+            let session = tianyi::TianyiClient::login_password(&username, &password, http)?;
+            let client = tianyi::TianyiClient::new(session.clone(), http);
+            let account = client.account()?;
+            client.directory("-11")?;
+            save_provider_session(CloudProvider::Tianyi, &state.store, &session)?;
+            Ok(account)
+        }
+        CloudProvider::Quark
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei
+        | CloudProvider::Uc => {
+            Err(QuarkError::WebAuthorizationRequired)
         }
     })
     .await
@@ -385,10 +627,23 @@ pub async fn cloud_list_directory(
     run(app, provider, move |s, h| match provider {
         CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h).directory(&parent_id),
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).list(&parent_id),
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                .directory(&parent_id)
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
+                .directory(&parent_id)
+        }
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).directory(&parent_id),
+        CloudProvider::Xunlei => {
+            with_xunlei_client(&s.store, h, |client| client.directory(&parent_id))
+        }
+        CloudProvider::Uc => uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &s.store)?,
+            h,
+        )
+        .directory(&parent_id),
     })
     .await
 }
@@ -414,10 +669,30 @@ pub async fn cloud_create_directory(
             })
         }
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).mkdir(&parent_id, &name),
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            let client =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h);
+            client.mkdir(&parent_id, &name)?;
+            find_created_directory(client.directory(&parent_id)?, &name)
+        }
+        CloudProvider::Tianyi => {
+            let client = tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, &s.store)?,
+                h,
+            );
+            client.mkdir(&parent_id, &name)?;
+            find_created_directory(client.directory(&parent_id)?, &name)
+        }
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).mkdir(&parent_id, &name),
+        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
+            client.mkdir(&parent_id, &name)?;
+            find_created_directory(client.directory(&parent_id)?, &name)
+        }),
+        CloudProvider::Uc => {
+            let client = uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h);
+            client.mkdir(&parent_id, &name)?;
+            find_created_directory(client.directory(&parent_id)?, &name)
+        }
     })
     .await
 }
@@ -434,10 +709,24 @@ pub async fn cloud_rename(
             .rename(&file_id, &name)
             .map(|_| ()),
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).rename(&file_id, &name),
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                .rename(&file_id, &name)
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
+                .rename(&file_id, &name)
+        }
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).rename(&file_id, &name),
+        CloudProvider::Xunlei => {
+            with_xunlei_client(&s.store, h, |client| client.rename(&file_id, &name))
+        }
+        CloudProvider::Uc => uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &s.store)?,
+            h,
+        )
+        .rename(&file_id, &name)
+        .map(|_| ()),
     })
     .await
 }
@@ -455,10 +744,26 @@ pub async fn cloud_move(
         CloudProvider::Pikpak => {
             PikPakClient::new(h, &s.store).move_files(&file_ids, &target_parent_id)
         }
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                .move_files(&file_ids, &target_parent_id)
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
+                .move_files(&file_ids, &target_parent_id)
+        }
+        CloudProvider::Aliyun => {
+            aliyun::AliyunClient::new(&s.store, h).move_files(&file_ids, &target_parent_id)
+        }
+        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
+            client.move_files(&file_ids, &target_parent_id)
+        }),
+        CloudProvider::Uc => uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &s.store)?,
+            h,
+        )
+        .move_files(&file_ids, &target_parent_id)
+        .map(|_| ()),
     })
     .await
 }
@@ -476,10 +781,26 @@ pub async fn cloud_copy(
         CloudProvider::Pikpak => {
             PikPakClient::new(h, &s.store).copy_files(&file_ids, &target_parent_id)
         }
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                .copy_files(&file_ids, &target_parent_id)
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
+                .copy_files(&file_ids, &target_parent_id)
+        }
+        CloudProvider::Aliyun => {
+            aliyun::AliyunClient::new(&s.store, h).copy_files(&file_ids, &target_parent_id)
+        }
+        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
+            client.copy_files(&file_ids, &target_parent_id)
+        }),
+        CloudProvider::Uc => uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &s.store)?,
+            h,
+        )
+        .copy_files(&file_ids, &target_parent_id)
+        .map(|_| ()),
     })
     .await
 }
@@ -494,10 +815,22 @@ pub async fn cloud_trash(
             .trash(&file_ids)
             .map(|_| ()),
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).trash(&file_ids),
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                .trash(&file_ids)
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
+                .trash(&file_ids)
+        }
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).trash(&file_ids),
+        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| client.trash(&file_ids)),
+        CloudProvider::Uc => uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &s.store)?,
+            h,
+        )
+        .trash(&file_ids)
+        .map(|_| ()),
     })
     .await
 }
@@ -544,7 +877,11 @@ pub fn create_cloud_task(
     }
     store
         .create(NewTask {
-            source: format!("cloud://{}/{}", provider.key(), super::types::encoded(file_id)),
+            source: format!(
+                "cloud://{}/{}",
+                provider.key(),
+                super::types::encoded(file_id)
+            ),
             name: safe_filename(name),
             kind: "cloud".into(),
         })
@@ -566,6 +903,7 @@ pub fn parse_stable_cloud_source(source: &str) -> Result<(CloudProvider, String)
         "tianyi" => CloudProvider::Tianyi,
         "aliyun" => CloudProvider::Aliyun,
         "xunlei" => CloudProvider::Xunlei,
+        "uc" => CloudProvider::Uc,
         _ => return Err(invalid()),
     };
     if encoded.is_empty() || encoded.contains(['/', '?', '#', '&', '=']) || !encoded.is_ascii() {
@@ -586,7 +924,11 @@ pub fn parse_stable_cloud_source(source: &str) -> Result<(CloudProvider, String)
         .ok_or_else(invalid)?
         .1
         .into_owned();
-    if id.trim().is_empty() || id.chars().any(|character| character.is_control() || character == '\u{fffd}') {
+    if id.trim().is_empty()
+        || id
+            .chars()
+            .any(|character| character.is_control() || character == '\u{fffd}')
+    {
         return Err(invalid());
     }
     Ok((provider, id))
@@ -611,14 +953,20 @@ pub async fn cloud_download_url(
     provider: CloudProvider,
     file_id: String,
 ) -> Result<TaskActionOutcome, QuarkError> {
-    let stable_source = format!("cloud://{}/{}", provider.key(), super::types::encoded(&file_id));
+    let stable_source = format!(
+        "cloud://{}/{}",
+        provider.key(),
+        super::types::encoded(&file_id)
+    );
     let state = app.state::<AppState>();
     if let Some(existing) = state
         .store
         .find_by_source(&stable_source)
         .map_err(|_| QuarkError::Storage)?
+        .filter(|task| task.status != TaskStatus::Recycled)
     {
-        let duplicate = duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
+        let duplicate =
+            duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
         return task_action_outcome(&state.store, existing, Some(duplicate))
             .map_err(QuarkError::Transport);
     }
@@ -626,8 +974,8 @@ pub async fn cloud_download_url(
     let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
     let signed_url = resolved.url.clone();
     let mut options = resolved.into_uri_submission_options();
-    let configured = crate::commands::download_submission_options(&state)
-        .map_err(QuarkError::Transport)?;
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     options.directory = configured.directory;
     options.proxy = configured.proxy;
     let service = state
@@ -706,7 +1054,22 @@ pub fn resolve_download(
             let cookie = cookie(store)?;
             let r = QuarkClient::new(cookie.clone(), http).download_url(file_id)?;
             let v = response_json(&r)?;
-            Ok(ResolvedCloudDownload{url:parse_quark_download_url(&r.body)?,name:v.pointer("/data/0/file_name").and_then(serde_json::Value::as_str).unwrap_or(file_id).into(),headers:vec![("Cookie".into(),cookie_for_download(&cookie, &r.set_cookies)),("Referer".into(),"https://pan.quark.cn/".into()),("User-Agent".into(),QUARK_DESKTOP_USER_AGENT.into())]})
+            Ok(ResolvedCloudDownload {
+                url: parse_quark_download_url(&r.body)?,
+                name: v
+                    .pointer("/data/0/file_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(file_id)
+                    .into(),
+                headers: vec![
+                    (
+                        "Cookie".into(),
+                        cookie_for_download(&cookie, &r.set_cookies),
+                    ),
+                    ("Referer".into(), "https://pan.quark.cn/".into()),
+                    ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
+                ],
+            })
         }
         CloudProvider::Pikpak => {
             let (url, name) = PikPakClient::new(http, store).download(file_id)?;
@@ -716,10 +1079,56 @@ pub fn resolve_download(
                 headers: Vec::new(),
             })
         }
-        CloudProvider::Baidu
-        | CloudProvider::Tianyi
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Baidu => {
+            let download =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http)
+                    .download(file_id)?;
+            Ok(ResolvedCloudDownload {
+                url: download.url,
+                name: download.name,
+                headers: download.headers.into_iter().collect(),
+            })
+        }
+        CloudProvider::Tianyi => {
+            let download = tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, store)?,
+                http,
+            )
+            .download(file_id)?;
+            Ok(ResolvedCloudDownload {
+                url: download.url,
+                name: download.name,
+                headers: download.headers.into_iter().collect(),
+            })
+        }
+        CloudProvider::Aliyun => {
+            let (url, name) = aliyun::AliyunClient::new(store, http).download(file_id)?;
+            Ok(ResolvedCloudDownload {
+                url,
+                name,
+                headers: Vec::new(),
+            })
+        }
+        CloudProvider::Xunlei => with_xunlei_client(store, http, |client| {
+            let (url, name) = client.download(file_id)?;
+            Ok(ResolvedCloudDownload {
+                url,
+                name,
+                headers: Vec::new(),
+            })
+        }),
+        CloudProvider::Uc => {
+            let download = uc::UcClient::new(
+                load_provider_session(CloudProvider::Uc, store)?,
+                http,
+            )
+            .download(file_id)?;
+            Ok(ResolvedCloudDownload {
+                url: download.url,
+                name: download.name,
+                headers: download.headers.into_iter().collect(),
+            })
+        }
     }
 }
 pub(crate) fn safe_filename(name: &str) -> String {
@@ -764,7 +1173,10 @@ mod tests {
             "cloud://unknown/file",
             "cloud://quark/file?token=temporary",
         ] {
-            assert!(super::parse_stable_cloud_source(source).is_err(), "{source}");
+            assert!(
+                super::parse_stable_cloud_source(source).is_err(),
+                "{source}"
+            );
         }
     }
 
@@ -787,8 +1199,8 @@ mod tests {
         credentials.save("quark", b"session=fixture").unwrap();
         let transport = CapturingTransport(Mutex::new(None));
 
-        let download = resolve_download(CloudProvider::Quark, "fixture", &credentials, &transport)
-            .unwrap();
+        let download =
+            resolve_download(CloudProvider::Quark, "fixture", &credentials, &transport).unwrap();
         let api_request = transport.0.lock().unwrap().clone().unwrap();
         let aria2_user_agent = download
             .headers
@@ -796,12 +1208,10 @@ mod tests {
             .find(|(name, _)| name == "User-Agent")
             .map(|(_, value)| value);
 
-        assert!(
-            api_request
-                .headers
-                .get("User-Agent")
-                .is_some_and(|value| value.contains("quark-cloud-drive/"))
-        );
+        assert!(api_request
+            .headers
+            .get("User-Agent")
+            .is_some_and(|value| value.contains("quark-cloud-drive/")));
         assert!(aria2_user_agent.is_some_and(|value| value.contains("quark-cloud-drive/")));
     }
 
@@ -865,7 +1275,10 @@ mod tests {
         assert_eq!(
             options.headers,
             vec![
-                ("Cookie".into(), "sid=web-session; __puus=fresh-download-session".into()),
+                (
+                    "Cookie".into(),
+                    "sid=web-session; __puus=fresh-download-session".into()
+                ),
                 ("Referer".into(), "https://pan.quark.cn/".into()),
                 ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
             ]
@@ -890,6 +1303,24 @@ mod tests {
         assert_eq!(task.name, "fixture.jpg");
         assert_eq!(task.kind, "cloud");
     }
+
+    #[test]
+    fn xunlei_browser_session_does_not_require_a_native_client_secret() {
+        let session = super::parse_xunlei_web_session(serde_json::json!({
+            "access_token": "browser-access",
+            "refresh_token": "browser-refresh",
+            "user_id": "browser-user",
+            "client_id": "official-web-client",
+            "device_id": "web-device",
+            "client_version": "1.0.0",
+            "package_name": "pan.xunlei.com",
+            "user_agent": "Mozilla/5.0",
+        }))
+        .unwrap();
+
+        assert!(session.profile.client_secret.is_empty());
+        assert_eq!(session.user_id, "browser-user");
+    }
 }
 
 #[tauri::command]
@@ -899,13 +1330,19 @@ pub async fn cloud_upload_files(
     parent_id: String,
     paths: Option<Vec<String>>,
 ) -> Result<Vec<CloudFile>, QuarkError> {
-    if provider == CloudProvider::Quark {
+    if matches!(provider, CloudProvider::Quark | CloudProvider::Uc) {
         return Err(QuarkError::UploadUnavailable);
     }
-    if provider != CloudProvider::Pikpak {
-        return Err(QuarkError::ProviderUnsupported);
-    }
     let picker = app.clone();
+    let provider_label = match provider {
+        CloudProvider::Quark => "夸克",
+        CloudProvider::Pikpak => "PikPak",
+        CloudProvider::Baidu => "百度网盘",
+        CloudProvider::Tianyi => "天翼云盘",
+        CloudProvider::Aliyun => "阿里云盘",
+        CloudProvider::Xunlei => "迅雷云盘",
+        CloudProvider::Uc => "UC网盘",
+    };
     // The native picker may stay open indefinitely; it must hold no session lock.
     let paths =
         tauri::async_runtime::spawn_blocking(move || -> Result<Vec<PathBuf>, QuarkError> {
@@ -914,7 +1351,7 @@ pub async fn cloud_upload_files(
                 None => picker
                     .dialog()
                     .file()
-                    .set_title("选择上传到 PikPak 的文件")
+                    .set_title(format!("选择上传到 {provider_label} 的文件"))
                     .blocking_pick_files()
                     .unwrap_or_default()
                     .into_iter()
@@ -933,7 +1370,39 @@ pub async fn cloud_upload_files(
         let h = ReqwestTransport::new()?;
         let mut files = Vec::new();
         for path in paths {
-            files.push(s.upload_pikpak_file(&h, &parent_id, &path)?)
+            let file = match provider {
+                CloudProvider::Quark | CloudProvider::Uc => {
+                    return Err(QuarkError::UploadUnavailable)
+                }
+                // PikPak uploads hold provider state only around session refresh
+                // and initialization; its OSS byte transfer remains outside that lock.
+                CloudProvider::Pikpak => s.upload_pikpak_file(&h, &parent_id, &path)?,
+                CloudProvider::Baidu => s.with_provider(CloudProvider::Baidu, |store| {
+                    let client = baidu::BaiduClient::new(
+                        load_provider_session(CloudProvider::Baidu, store)?,
+                        &h,
+                    );
+                    client.upload_file(&parent_id, &path, &h)
+                })?,
+                CloudProvider::Tianyi => s.with_provider(CloudProvider::Tianyi, |store| {
+                    let client = tianyi::TianyiClient::new(
+                        load_provider_session(CloudProvider::Tianyi, store)?,
+                        &h,
+                    );
+                    client.upload_file(&parent_id, &path, &h)
+                })?,
+                CloudProvider::Aliyun => s.with_provider(CloudProvider::Aliyun, |store| {
+                    aliyun::AliyunClient::new(store, &h).upload_file(&parent_id, &path)
+                })?,
+                CloudProvider::Xunlei => s.with_provider(CloudProvider::Xunlei, |store| {
+                    let session = load_provider_session(CloudProvider::Xunlei, store)?;
+                    let client = xunlei::XunleiClient::new(session, &h);
+                    let file = client.upload_file(&parent_id, &path)?;
+                    save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
+                    Ok(file)
+                })?,
+            };
+            files.push(file);
         }
         Ok(files)
     })

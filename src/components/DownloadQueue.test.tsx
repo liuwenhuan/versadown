@@ -114,7 +114,7 @@ it('offers terminal-task cleanup without showing invalid transfer commands', () 
   fireEvent.contextMenu(screen.getByText('finished.iso'));
   expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '复制下载链接' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '移除任务记录…' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '移入回收站' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '暂停下载' })).not.toBeInTheDocument();
   expect(screen.queryByRole('menuitem', { name: '取消任务' })).not.toBeInTheDocument();
 });
@@ -131,6 +131,20 @@ it('dismisses the task menu with Escape', () => {
   expect(screen.getByRole('menu')).toBeVisible();
   fireEvent.keyDown(document, { key: 'Escape' });
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
+
+it('offers permanent deletion only for a task already in the recycle bin', () => {
+  render(<DownloadQueue
+    tasks={[{ id: 'recycled-1', name: 'old.iso', kind: 'file', status: 'recycled', progress: 100 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('old.iso'));
+  expect(screen.getByRole('menuitem', { name: '彻底删除…' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '移入回收站' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '重新下载' })).not.toBeInTheDocument();
 });
 
 it('selects a task on ordinary click without emitting a task-details command', async () => {

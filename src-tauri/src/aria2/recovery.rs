@@ -154,7 +154,10 @@ impl DownloadService {
                         .is_some_and(|gid| !session_gids.contains(gid))
                     && !matches!(
                         task.status,
-                        TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
+                        TaskStatus::Completed
+                            | TaskStatus::Cancelled
+                            | TaskStatus::Failed
+                            | TaskStatus::Recycled
                     )
             })
             .collect();
@@ -273,7 +276,10 @@ impl DownloadService {
             if session_gids.contains(&gid)
                 || matches!(
                     task.status,
-                    TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
+                    TaskStatus::Completed
+                        | TaskStatus::Cancelled
+                        | TaskStatus::Failed
+                        | TaskStatus::Recycled
                 )
             {
                 continue;

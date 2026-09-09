@@ -16,6 +16,7 @@ async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_star
             "aria2.addTorrent" => {
                 assert_eq!(request["params"][1], "dG9ycmVudC1ieXRlcw==");
                 assert_eq!(request["params"][3]["pause"], "true");
+                assert_eq!(request["params"][3]["check-integrity"], "true");
                 json!("torrent-gid")
             }
             "aria2.tellStatus" => {
@@ -406,7 +407,11 @@ async fn metadata_child_is_persisted_and_selection_precedes_unpause() {
         let method = request["method"].as_str().unwrap();
         wire.lock().unwrap().push(request.clone());
         match method {
-            "aria2.addUri" => { assert_eq!(request["params"][2]["pause-metadata"], "true"); json!("meta") },
+            "aria2.addUri" => {
+                assert_eq!(request["params"][2]["pause-metadata"], "true");
+                assert_eq!(request["params"][2]["check-integrity"], "true");
+                json!("meta")
+            }
             "aria2.tellStatus" if request["params"][1] == "meta" => {
                 let mut s = fixture::status("meta", "complete", 100); s["followedBy"] = json!(["child"]); s
             },

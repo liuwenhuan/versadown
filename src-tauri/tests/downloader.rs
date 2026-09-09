@@ -6,8 +6,7 @@ use std::{
 
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
-    prepare_download, DownloadAction, DownloadService, TaskStatus, TaskStore,
-    UriSubmissionOptions,
+    prepare_download, DownloadAction, DownloadService, TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -133,7 +132,9 @@ impl Aria2Api for RecordingAria2 {
 #[tokio::test]
 async fn cloud_submission_forwards_transient_options_without_persisting_them() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = prepare_download("cloud://quark/file-1", &store).unwrap().task;
+    let task = prepare_download("cloud://quark/file-1", &store)
+        .unwrap()
+        .task;
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store.clone());
 
@@ -175,7 +176,9 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
 #[tokio::test]
 async fn resumed_submission_keeps_one_task_and_sets_aria2_continue() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = prepare_download("https://example.test/fixture.bin", &store).unwrap().task;
+    let task = prepare_download("https://example.test/fixture.bin", &store)
+        .unwrap()
+        .task;
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store.clone());
     service
@@ -198,9 +201,19 @@ async fn resumed_submission_keeps_one_task_and_sets_aria2_continue() {
 
     assert_eq!(retried.id, task.id);
     assert_eq!(retried.status, TaskStatus::Downloading);
-    assert_eq!(api.calls(), ["aria2.addUri", "aria2.tellStatus", "aria2.addUri", "aria2.tellStatus"]);
     assert_eq!(
-        api.added_options().last().and_then(|options| options.get("continue")),
+        api.calls(),
+        [
+            "aria2.addUri",
+            "aria2.tellStatus",
+            "aria2.addUri",
+            "aria2.tellStatus"
+        ]
+    );
+    assert_eq!(
+        api.added_options()
+            .last()
+            .and_then(|options| options.get("continue")),
         Some(&"true".to_string())
     );
 }

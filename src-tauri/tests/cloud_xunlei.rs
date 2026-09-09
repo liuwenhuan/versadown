@@ -1,12 +1,15 @@
 use alldownloader_lib::cloud::{
     xunlei::{XunleiClient, XunleiClientProfile, XunleiResumableUpload, XunleiSession},
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
+    UploadHttpRequest, UploadHttpResponse,
 };
-use std::sync::Mutex;
+use std::{io::Write, sync::Mutex};
 
 struct RecordingHttp {
     responses: Mutex<Vec<CloudHttpResponse>>,
     requests: Mutex<Vec<CloudHttpRequest>>,
+    upload_responses: Mutex<Vec<UploadHttpResponse>>,
+    upload_requests: Mutex<Vec<UploadHttpRequest>>,
 }
 
 impl RecordingHttp {
@@ -24,6 +27,8 @@ impl RecordingHttp {
                     .collect(),
             ),
             requests: Mutex::new(Vec::new()),
+            upload_responses: Mutex::new(Vec::new()),
+            upload_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -34,12 +39,33 @@ impl RecordingHttp {
     fn requests(&self) -> Vec<CloudHttpRequest> {
         self.requests.lock().unwrap().clone()
     }
+
+    fn with_upload_responses(
+        mut self,
+        responses: impl IntoIterator<Item = UploadHttpResponse>,
+    ) -> Self {
+        let mut responses = responses.into_iter().collect::<Vec<_>>();
+        responses.reverse();
+        self.upload_responses = Mutex::new(responses);
+        self
+    }
 }
 
 impl CloudHttpTransport for RecordingHttp {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         self.requests.lock().unwrap().push(request);
         self.responses
+            .lock()
+            .unwrap()
+            .pop()
+            .ok_or(QuarkError::InvalidResponse)
+    }
+}
+
+impl CloudUploadTransport for RecordingHttp {
+    fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        self.upload_requests.lock().unwrap().push(request);
+        self.upload_responses
             .lock()
             .unwrap()
             .pop()
@@ -148,6 +174,52 @@ fn xunlei_sensitive_debug_output_is_redacted() {
     ] {
         assert!(!debug.contains(sensitive));
     }
+}
+
+#[test]
+fn xunlei_web_session_retains_a_current_browser_access_token_without_a_client_secret() {
+    // Break caught: requiring a native-only client secret rejects a valid
+    // browser session before the command layer can save it and close the
+    // official authorization window.
+    let mut web_profile = profile();
+    web_profile.client_secret.clear();
+
+    let session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        web_profile,
+        0,
+    );
+
+    assert!(session.is_ok());
+    assert_eq!(session.unwrap().access_token, "current-browser-access");
+}
+
+#[test]
+fn xunlei_web_session_builds_a_display_account_without_network_or_refresh() {
+    // Break caught: using account() to finish browser authorization tries a
+    // native refresh requiring a secret that the web client never exposes.
+    let mut web_profile = profile();
+    web_profile.client_secret.clear();
+    let session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        web_profile,
+        0,
+    )
+    .unwrap();
+    let http = RecordingHttp::sequence(&[]);
+    let client = XunleiClient::new(session, &http);
+
+    let account = client.web_account().unwrap();
+
+    assert_eq!(account.id, "web-user-42");
+    assert_eq!(account.display_name, "web-user-42");
+    assert!(http.requests().is_empty());
 }
 
 // Break caught: treating an interactive security challenge as an ordinary
@@ -276,4 +348,56 @@ fn xunlei_directory_requests_and_maps_only_complete_downloadable_files() {
     assert!(request
         .url
         .contains("%22phase%22%3A%7B%22eq%22%3A%22PHASE_TYPE_COMPLETE%22%7D"));
+}
+
+#[test]
+fn xunlei_upload_file_signs_https_s3_multipart_transfer_and_completes_it() {
+    let mut local = tempfile::NamedTempFile::new().unwrap();
+    local.write_all(b"xunlei-bytes").unwrap();
+    let http = RecordingHttp::sequence(&[
+        r#"{"upload_type":"UPLOAD_TYPE_RESUMABLE","file":{"id":"file-1","parent_id":"parent","name":"upload.bin","kind":"drive#file","size":12},"resumable":{"kind":"drive#resumable","provider":"aws","params":{"access_key_id":"access-key","access_key_secret":"secret-key","bucket":"bucket","endpoint":"https://s3.xunlei.example","expiration":"2030-01-01T00:00:00Z","key":"objects/upload.bin","security_token":"session-token"}}}"#,
+    ])
+    .with_upload_responses([
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "<InitiateMultipartUploadResult><UploadId>upload-id</UploadId></InitiateMultipartUploadResult>".into(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "part-etag".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "<CompleteMultipartUploadResult/>".into(),
+        },
+    ]);
+    let client = XunleiClient::new(
+        XunleiSession::with_access("access", "refresh", profile()),
+        &http,
+    );
+
+    let file = client.upload_file("parent", local.path()).unwrap();
+
+    assert_eq!(file.id, "file-1");
+    let uploads = http.upload_requests.lock().unwrap();
+    assert_eq!(uploads.len(), 3);
+    assert_eq!(uploads[0].method, "POST");
+    assert_eq!(
+        uploads[0].url,
+        "https://bucket.s3.xunlei.example/objects/upload.bin?uploads"
+    );
+    assert!(
+        uploads[0].headers["Authorization"].starts_with("AWS4-HMAC-SHA256 Credential=access-key/")
+    );
+    assert_eq!(uploads[1].method, "PUT");
+    assert!(uploads[1].url.contains("partNumber=1&uploadId=upload-id"));
+    assert_eq!(uploads[1].body, b"xunlei-bytes");
+    assert_eq!(uploads[2].method, "POST");
+    assert!(uploads[2]
+        .body
+        .windows("part-etag".len())
+        .any(|part| part == b"part-etag"));
 }

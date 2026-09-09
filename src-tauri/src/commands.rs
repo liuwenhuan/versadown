@@ -1,4 +1,7 @@
 use std::{
+    fs,
+    io::ErrorKind,
+    path::Path,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -9,8 +12,8 @@ use uuid::Uuid;
 
 use crate::downloader::load_torrent_base64;
 use crate::{
-    confirm_download, duplicate_state, prepare_download, retry_duplicate_state, DownloadAction,
-    AppSettings, DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome,
+    confirm_download, duplicate_state, prepare_download, retry_duplicate_state, AppSettings,
+    DownloadAction, DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome,
     ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
 
@@ -157,11 +160,7 @@ pub async fn parse_download(
     } else if !outcome.requires_confirmation {
         let options = download_submission_options(&state)?;
         outcome.task = service
-            .submit_uri_with_options(
-                outcome.task.id,
-                vec![outcome.task.source.clone()],
-                options,
-            )
+            .submit_uri_with_options(outcome.task.id, vec![outcome.task.source.clone()], options)
             .await
             .map_err(|error| error.to_string())?;
     } else if outcome.task.kind == "magnet" {
@@ -268,8 +267,8 @@ pub async fn task_action(
         if !matches!(current.status, TaskStatus::Failed | TaskStatus::Cancelled) {
             return Err("当前任务不能重新下载".to_string());
         }
-        if let Some(duplicate) = retry_duplicate_state(&state.store, &current)
-            .map_err(|error| error.to_string())?
+        if let Some(duplicate) =
+            retry_duplicate_state(&state.store, &current).map_err(|error| error.to_string())?
         {
             return task_action_outcome(&state.store, current, Some(duplicate));
         }
@@ -396,7 +395,11 @@ fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::
         .files(task_id)
         .map_err(|error| error.to_string())?
         .into_iter()
-        .filter_map(|file| std::path::PathBuf::from(file.path).parent().map(|path| path.to_path_buf()))
+        .filter_map(|file| {
+            std::path::PathBuf::from(file.path)
+                .parent()
+                .map(|path| path.to_path_buf())
+        })
         .find(|directory| directory.is_dir())
         .ok_or_else(|| "下载文件已不存在，无法打开所在目录".to_string())
 }
@@ -429,6 +432,87 @@ pub fn remove_task_record(task_id: String, state: State<'_, AppState>) -> Result
         .store
         .remove_task_record(id)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn recycle_task(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<DownloadTaskPayload, String> {
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let task = state.store.find(id).map_err(|error| error.to_string())?;
+    if !matches!(
+        task.status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+    ) {
+        return Err("请先取消活动下载任务，再移入回收站".to_string());
+    }
+    let recycled = state
+        .store
+        .transition(id, TaskStatus::Recycled)
+        .map_err(|error| error.to_string())?;
+    task_payload(&state.store, recycled)
+}
+
+fn remove_recorded_download_file(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("拒绝删除非绝对路径的下载文件：{}", path.display()));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            fs::remove_file(path).map_err(|error| format!("无法删除下载文件 {}：{error}", path.display()))
+        }
+        Ok(_) => Err(format!("拒绝删除非文件下载项：{}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("无法读取下载文件 {}：{error}", path.display())),
+    }
+}
+
+fn remove_task_payload_files(store: &TaskStore, task_id: Uuid) -> Result<(), String> {
+    for file in store.files(task_id).map_err(|error| error.to_string())? {
+        let path = PathBuf::from(file.path);
+        remove_recorded_download_file(&path)?;
+        let mut sidecar = path.into_os_string();
+        sidecar.push(".aria2");
+        remove_recorded_download_file(Path::new(&sidecar))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn purge_recycled_tasks(
+    task_ids: Vec<String>,
+    delete_files: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut ids = Vec::with_capacity(task_ids.len());
+    for task_id in task_ids {
+        let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return Ok(());
+    }
+    for id in &ids {
+        let task = state.store.find(*id).map_err(|error| error.to_string())?;
+        if !matches!(task.status, TaskStatus::Recycled | TaskStatus::Cancelled) {
+            return Err("只有回收站中的任务可以彻底删除".to_string());
+        }
+    }
+    if delete_files {
+        for id in &ids {
+            remove_task_payload_files(&state.store, *id)?;
+        }
+    }
+    for id in ids {
+        state
+            .store
+            .remove_task_record(id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -562,7 +646,10 @@ mod tests {
             password: "p@ss word".into(),
         };
         let value = proxy_url(&proxy).unwrap().unwrap();
-        assert_eq!(value, "https://user%40example.com:p%40ss%20word@127.0.0.1:1080/");
+        assert_eq!(
+            value,
+            "https://user%40example.com:p%40ss%20word@127.0.0.1:1080/"
+        );
     }
 
     #[test]
@@ -584,7 +671,9 @@ mod tests {
         let payload = root.join("fixture.bin");
         std::fs::write(&payload, [1_u8, 2, 3]).unwrap();
         let store = TaskStore::open_in_memory().unwrap();
-        let task = store.create(NewTask::direct("https://example.test/fixture.bin")).unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/fixture.bin"))
+            .unwrap();
         store
             .upsert_files(
                 task.id,
@@ -608,7 +697,9 @@ mod tests {
         let payload = root.join("fixture.bin");
         std::fs::write(&payload, b"payload").unwrap();
         let store = TaskStore::open_in_memory().unwrap();
-        let task = store.create(NewTask::direct("https://example.test/fixture.bin")).unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/fixture.bin"))
+            .unwrap();
         store
             .upsert_files(
                 task.id,
@@ -617,6 +708,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(task_output_directory(&store, task.id).unwrap(), root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn permanent_recycle_cleanup_removes_only_recorded_payload_and_sidecar() {
+        let root = std::env::temp_dir().join(format!("recycle-cleanup-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let payload = root.join("fixture.bin");
+        let sidecar = std::path::PathBuf::from(format!("{}.aria2", payload.display()));
+        let neighbor = root.join("keep.bin");
+        std::fs::write(&payload, b"payload").unwrap();
+        std::fs::write(&sidecar, b"control").unwrap();
+        std::fs::write(&neighbor, b"keep").unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/fixture.bin"))
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 7, 7, true)],
+            )
+            .unwrap();
+
+        remove_task_payload_files(&store, task.id).unwrap();
+
+        assert!(!payload.exists());
+        assert!(!sidecar.exists());
+        assert!(neighbor.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
