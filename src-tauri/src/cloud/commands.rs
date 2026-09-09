@@ -716,6 +716,10 @@ pub async fn cloud_complete_authorization(
                 let mut session =
                     parse_xunlei_web_session(web_storage_tokens(&window, XUNLEI_WEB_TOKENS_JS)?)?;
                 session.web_context = xunlei_web_context(&window)?;
+                let access_token = session.access_token.clone();
+                session
+                    .web_context
+                    .use_access_token_for_missing_session_id(&access_token);
                 let client = xunlei::XunleiClient::new(session, http);
                 // The browser does not expose Xunlei's native client secret.
                 // Persist the valid web session and create its workspace

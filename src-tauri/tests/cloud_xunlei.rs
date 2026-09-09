@@ -289,7 +289,7 @@ fn xunlei_old_web_session_without_browser_cookie_context_cannot_restore_an_accou
 }
 
 #[test]
-fn xunlei_web_session_replays_only_its_captured_browser_context() {
+fn xunlei_web_session_prefers_the_captured_sessionid_over_the_bearer() {
     let mut session = XunleiSession::from_web_authorization(
         "current-browser-access",
         "browser-refresh",
@@ -346,6 +346,34 @@ fn xunlei_web_session_replays_only_its_captured_browser_context() {
     assert!(query
         .iter()
         .any(|(key, value)| key == "_h[]" && value == "Credit-Key: official-credit"));
+}
+
+#[test]
+fn xunlei_web_context_without_sessionid_falls_back_to_the_current_bearer() {
+    let mut session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        XunleiClientProfile::default(),
+        0,
+    )
+    .unwrap();
+    session.web_context = XunleiWebContext {
+        session_id: String::new(),
+        peer_id: "official-peer".into(),
+        device_id: "official-device".into(),
+        credit_key: "official-credit".into(),
+    };
+    let http = RecordingHttp::sequence(&[r#"{"files":[],"next_page_token":""}"#]);
+
+    XunleiClient::new(session, &http).directory("0").unwrap();
+
+    let request = http.requests().pop().unwrap();
+    assert_eq!(
+        request.headers.get("Session-Id"),
+        Some(&"current-browser-access".into())
+    );
 }
 
 #[test]

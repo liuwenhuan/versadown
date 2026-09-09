@@ -57,6 +57,19 @@ pub struct XunleiWebContext {
 }
 
 impl XunleiWebContext {
+    /// The official web bundle uses the `sessionid` cookie when it exists and
+    /// otherwise uses the current browser bearer. This fallback is valid only
+    /// for an otherwise complete, allowlisted browser context.
+    pub(crate) fn use_access_token_for_missing_session_id(&mut self, access_token: &str) {
+        if self.session_id.is_empty()
+            && (!self.peer_id.is_empty() || !self.device_id.is_empty())
+            && !self.credit_key.is_empty()
+            && !access_token.is_empty()
+        {
+            self.session_id = access_token.into();
+        }
+    }
+
     fn is_complete(&self) -> bool {
         !self.session_id.is_empty()
             && (!self.peer_id.is_empty() || !self.device_id.is_empty())
@@ -261,7 +274,11 @@ pub struct XunleiClient<'a, T: CloudHttpTransport> {
 }
 
 impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
-    pub fn new(session: XunleiSession, http: &'a T) -> Self {
+    pub fn new(mut session: XunleiSession, http: &'a T) -> Self {
+        let access_token = session.access_token.clone();
+        session
+            .web_context
+            .use_access_token_for_missing_session_id(&access_token);
         Self {
             session: RefCell::new(session),
             http,
