@@ -23,6 +23,7 @@ const client = {
   moveCloudFiles: async () => undefined,
   copyCloudFiles: async () => undefined,
   trashCloudFiles: async () => undefined,
+  deleteCloudFiles: async () => undefined,
   downloadCloudFile: async () => undefined,
   logoutCloud: async () => undefined,
   pickAndUploadFiles: async () => undefined,

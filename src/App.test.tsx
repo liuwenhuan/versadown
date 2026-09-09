@@ -15,6 +15,7 @@ const cloudApiMocks = vi.hoisted(() => ({
   moveCloudFiles: vi.fn(),
   copyCloudFiles: vi.fn(),
   trashCloudFiles: vi.fn(),
+  deleteCloudFiles: vi.fn(),
   downloadCloudFile: vi.fn(),
   logoutCloud: vi.fn(),
   pickAndUploadFiles: vi.fn()
