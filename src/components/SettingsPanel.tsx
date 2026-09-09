@@ -1,5 +1,6 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useState, useSyncExternalStore } from 'react';
 import { AiSettings, AiSettingsInput, AppSettings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
+import { getThemeMode, setThemeMode, subscribeTheme, ThemeMode } from '../lib/theme';
 
 type SettingsTab = 'display' | 'network' | 'advanced';
 
@@ -19,6 +20,7 @@ interface SettingsPanelProps {
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
 const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
+const themeLabels: Record<ThemeMode, string> = { auto: '跟随系统', light: '浅色', dark: '深色' };
 
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels }: SettingsPanelProps) {
   const [debugReports, setDebugReports] = useState(initial.debugReports);
@@ -34,6 +36,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [aiBusy, setAiBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
+  const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
   useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); }, [initial]);
 
@@ -70,6 +73,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   function updateLauncherVisibility(visibility: LauncherVisibility) {
     setLauncherVisibility(visibility);
     onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy, ai, magnetMetadata });
+  }
+
+  function updateThemeMode(mode: ThemeMode) {
+    setThemeMode(mode);
   }
 
   async function fetchAiModels() {
@@ -121,6 +128,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     </div>
     <div className="settings-content">
       {activeTab === 'display' && <>
+        <label className="setting-row"><span><b>界面主题</b><small>立即切换界面外观；“跟随系统”会自动匹配 Windows 主题。</small></span><select aria-label="界面主题" value={themeMode} onChange={(event) => updateThemeMode(event.target.value as ThemeMode)}>{(['auto', 'light', 'dark'] as const).map((mode) => <option key={mode} value={mode}>{themeLabels[mode]}</option>)}</select></label>
         <form className="directory-settings" onSubmit={saveDownloadDirectory}>
           <label><span><b>下载目录</b><small>后续新建任务默认保存到此目录。</small></span><input aria-label="下载目录" required value={downloadDirectory} placeholder="C:\\Users\\用户名\\Downloads" onChange={(event) => setDownloadDirectory(event.target.value)} /></label>
           <button className="secondary" type="button" aria-label="浏览下载目录" onClick={() => void browseForDownloadDirectory()}>浏览</button>

@@ -18,6 +18,15 @@ it('keeps detailed report collection off by default', () => {
   expect(screen.queryByRole('checkbox', { name: '启用调试报告' })).not.toBeInTheDocument();
 });
 
+it('changes the interface theme from display settings', async () => {
+  const user = userEvent.setup();
+  render(<SettingsPanel initial={initial} onChange={() => {}} />);
+
+  await user.selectOptions(screen.getByRole('combobox', { name: '界面主题' }), 'dark');
+
+  expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
+});
+
 it('separates settings into display, network, and advanced workspaces', async () => {
   const user = userEvent.setup();
   render(<SettingsPanel initial={initial} onChange={() => {}} />);

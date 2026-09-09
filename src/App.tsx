@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { displayTaskName, DownloadQueue } from './components/DownloadQueue';
@@ -16,7 +16,6 @@ import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
-import { getThemeMode, setThemeMode as setAppThemeMode, subscribeTheme, ThemeMode } from './lib/theme';
 
 type DownloadTab = 'active' | 'completed' | 'failed' | 'recycle';
 
@@ -65,13 +64,11 @@ function WindowIcon({ kind }: { kind: 'minimize' | 'maximize' | 'close' }) {
   </svg>;
 }
 
-const themeLabels: Record<ThemeMode, string> = { auto: '自动', light: '浅色', dark: '深色' };
-
-function ThemeModeIcon({ mode }: { mode: ThemeMode }) {
+function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
-    {mode === 'auto' && <><rect x="4" y="5" width="16" height="12" rx="2" /><path d="M8 20h8M12 17v3" /><path d="M12 8v3M9.8 9.2l2.2 2.2 2.2-2.2" /></>}
-    {mode === 'light' && <><circle cx="12" cy="12" r="3.5" /><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4" /></>}
-    {mode === 'dark' && <path d="M19.4 15.2A7.8 7.8 0 0 1 8.8 4.6 7.8 7.8 0 1 0 19.4 15.2Z" />}
+    <rect x="4" y="4.5" width="16" height="15" rx="2" />
+    <path d="M9 4.5v15" />
+    {collapsed ? <path d="m12.5 9.5 3 2.5-3 2.5" /> : <path d="m15.5 9.5-3 2.5 3 2.5" />}
   </svg>;
 }
 
@@ -88,8 +85,7 @@ export function App() {
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
-  const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
-  const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const activeTasks = useMemo(() => tasks.filter((task) => !inactiveStatuses.has(task.status)), [tasks]);
   const completedTasks = useMemo(() => tasks.filter((task) => task.status === 'completed'), [tasks]);
   const failedTasks = useMemo(() => tasks.filter((task) => task.status === 'failed'), [tasks]);
@@ -110,24 +106,7 @@ export function App() {
   const taskEventVersions = useRef(new Map<string, number>());
   const engineEventEpoch = useRef(0);
   const tasksRef = useRef<QueueTask[]>(tasks);
-  const themePickerRef = useRef<HTMLDivElement>(null);
   tasksRef.current = tasks;
-
-  useEffect(() => {
-    if (!themePickerOpen) return;
-    const dismiss = (event: MouseEvent) => {
-      if (!themePickerRef.current?.contains(event.target as Node)) setThemePickerOpen(false);
-    };
-    const dismissWithEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setThemePickerOpen(false);
-    };
-    document.addEventListener('mousedown', dismiss);
-    window.addEventListener('keydown', dismissWithEscape);
-    return () => {
-      document.removeEventListener('mousedown', dismiss);
-      window.removeEventListener('keydown', dismissWithEscape);
-    };
-  }, [themePickerOpen]);
 
   function recordTaskEvent(task: QueueTask) {
     taskEventEpoch.current += 1;
@@ -496,6 +475,15 @@ export function App() {
           <div className="brand-mark" aria-hidden="true">↓</div>
           <h1>万能下载</h1>
         </div>
+        <button
+          type="button"
+          className="sidebar-toggle"
+          aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+          aria-controls="primary-navigation"
+          aria-expanded={!sidebarCollapsed}
+          title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+          onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+        ><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
         <label className="global-search">
           <span aria-hidden="true">⌕</span>
           <input
@@ -507,36 +495,6 @@ export function App() {
           />
         </label>
         <button className="new-download" onClick={() => setNewDownloadOpen(true)}><span aria-hidden="true">＋</span>新建下载</button>
-        <div className="theme-switcher" ref={themePickerRef}>
-          <button
-            type="button"
-            className="theme-picker-trigger"
-            aria-label={`主题：${themeLabels[themeMode]}`}
-            aria-haspopup="menu"
-            aria-expanded={themePickerOpen}
-            onClick={() => setThemePickerOpen((open) => !open)}
-          >
-            <ThemeModeIcon mode={themeMode} />
-          </button>
-          {themePickerOpen && <div className="theme-picker-menu" role="menu" aria-label="选择主题">
-            {(['auto', 'light', 'dark'] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                role="menuitemradio"
-                aria-label={`${themeLabels[mode]}主题`}
-                aria-checked={themeMode === mode}
-                title={`${themeLabels[mode]}主题`}
-                onClick={() => {
-                  setAppThemeMode(mode);
-                  setThemePickerOpen(false);
-                }}
-              >
-                <ThemeModeIcon mode={mode} />
-              </button>
-            ))}
-          </div>}
-        </div>
         <div className="window-controls" aria-label="窗口控制" style={{ marginLeft: 'auto', flex: '0 0 auto' }}>
           <button aria-label="最小化" onClick={() => void runWindowAction('minimize')}><WindowIcon kind="minimize" /></button>
           <button aria-label="最大化或还原" onClick={() => void runWindowAction('maximize')}><WindowIcon kind="maximize" /></button>
@@ -548,7 +506,7 @@ export function App() {
         setEngineState((current) => ({ ...current, retrying: true, error: undefined }));
         void retryDownloadEngine().then(setEngineState).catch((error: unknown) => setEngineState({ available: false, retrying: false, error: String(error) }));
       }} />
-      <div className="workspace"><nav aria-label="主导航">
+      <div className={`workspace${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}><nav id="primary-navigation" aria-label="主导航" aria-hidden={sidebarCollapsed}>
         <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon">↓</span><span>任务</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
         <button className={view === 'cloud' ? 'nav-active' : ''} onClick={() => setView('cloud')}><span className="nav-icon">☁</span><span>我的网盘</span></button>
         <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon">⚙</span><span>设置</span></button>
