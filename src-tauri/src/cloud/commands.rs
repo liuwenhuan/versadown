@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -14,6 +14,31 @@ use tauri::{
     AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::DialogExt;
+
+/// A stable cloud source has one submission owner from duplicate detection
+/// through aria2 submission. The registry lock is released before awaiting
+/// the source-specific lock, so unrelated files keep flowing concurrently.
+#[derive(Default)]
+pub struct CloudDownloadSourceGate {
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl CloudDownloadSourceGate {
+    pub async fn acquire(
+        &self,
+        source: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, QuarkError> {
+        let lock = {
+            let mut locks = self.locks.lock().map_err(|_| QuarkError::Storage)?;
+            Arc::clone(
+                locks
+                    .entry(source.to_owned())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        Ok(lock.lock_owned().await)
+    }
+}
 
 pub struct CloudState {
     pub store: DpapiCredentialStore,
@@ -1329,6 +1354,7 @@ async fn submit_cloud_file(
         provider.key(),
         super::types::encoded(&file_id)
     );
+    let _source_submission = state.cloud_download_sources.acquire(&stable_source).await?;
     if let Some(existing) = state
         .store
         .find_by_source(&stable_source)

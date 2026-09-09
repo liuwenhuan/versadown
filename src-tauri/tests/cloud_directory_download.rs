@@ -1,6 +1,8 @@
 use alldownloader_lib::cloud::{
-    commands::plan_cloud_directory_download, CloudDirectory, CloudFile, CloudProvider, QuarkError,
+    commands::{plan_cloud_directory_download, CloudDownloadSourceGate}, CloudDirectory, CloudFile,
+    CloudProvider, QuarkError,
 };
+use std::{sync::Arc, time::Duration};
 
 fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
     CloudDirectory { id: id.into(), items }
@@ -148,4 +150,41 @@ fn rejects_a_file_that_is_a_windows_normalized_ancestor_of_another_target() {
     );
 
     assert!(matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
+}
+
+#[tokio::test]
+async fn source_gate_serializes_matching_sources_without_blocking_other_sources() {
+    let gate = Arc::new(CloudDownloadSourceGate::default());
+    let first = gate
+        .acquire("cloud://quark/file-1")
+        .await
+        .expect("source gate must be available");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let waiting_gate = Arc::clone(&gate);
+    let waiting_entered = Arc::clone(&entered);
+    let waiting = tokio::spawn(async move {
+        waiting_entered.notify_one();
+        waiting_gate
+            .acquire("cloud://quark/file-1")
+            .await
+            .expect("source gate must be available")
+    });
+
+    entered.notified().await;
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished(), "matching source must remain gated");
+
+    let other = tokio::time::timeout(
+        Duration::from_millis(100),
+        gate.acquire("cloud://quark/file-2"),
+    )
+    .await
+    .expect("a different stable source must not wait")
+    .expect("source gate must be available");
+    drop(other);
+    drop(first);
+    tokio::time::timeout(Duration::from_millis(100), waiting)
+        .await
+        .expect("matching source must proceed after the first submission completes")
+        .expect("source gate task must not panic");
 }

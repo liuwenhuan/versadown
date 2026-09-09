@@ -187,6 +187,7 @@ pub fn run() {
                 settings: std::sync::Mutex::new(settings),
                 settings_path,
                 ai_secrets,
+                cloud_download_sources: Default::default(),
             });
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),

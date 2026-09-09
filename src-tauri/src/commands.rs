@@ -26,6 +26,7 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     pub settings_path: PathBuf,
     pub ai_secrets: DpapiCredentialStore,
+    pub cloud_download_sources: crate::cloud::commands::CloudDownloadSourceGate,
 }
 
 #[derive(Clone, Serialize)]
