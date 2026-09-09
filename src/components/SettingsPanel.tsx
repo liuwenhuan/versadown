@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { AiSettings, AiSettingsInput, AppSettings, LauncherVisibility, ProxyProtocol } from '../lib/types';
+import { AiSettings, AiSettingsInput, AppSettings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
 
 type SettingsTab = 'display' | 'network' | 'advanced';
 
@@ -18,6 +18,7 @@ interface SettingsPanelProps {
 }
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
+const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
 
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels }: SettingsPanelProps) {
   const [debugReports, setDebugReports] = useState(initial.debugReports);
@@ -25,6 +26,8 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
   const [ai, setAi] = useState<AiSettings>(initial.ai ?? disabledAiSettings);
+  const [magnetMetadata, setMagnetMetadata] = useState<MagnetMetadataSettings>(initial.magnetMetadata ?? defaultMagnetMetadataSettings);
+  const [magnetMetadataSaved, setMagnetMetadataSaved] = useState(false);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
@@ -32,7 +35,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [saved, setSaved] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); }, [initial]);
+  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); }, [initial]);
 
   const currentAiInput = (): AiSettingsInput => ({
     enabled: ai.enabled,
@@ -43,7 +46,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   function updateDebugReports(enabled: boolean) {
     setDebugReports(enabled);
-    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy, ai });
+    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata });
   }
 
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
@@ -53,7 +56,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   function saveProxy(event: FormEvent) {
     event.preventDefault();
-    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() }, ai });
+    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() }, ai, magnetMetadata });
     setSaved(true);
   }
 
@@ -61,12 +64,12 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     event.preventDefault();
     const normalized = downloadDirectory.trim();
     setDownloadDirectory(normalized);
-    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy, ai });
+    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy, ai, magnetMetadata });
   }
 
   function updateLauncherVisibility(visibility: LauncherVisibility) {
     setLauncherVisibility(visibility);
-    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy, ai });
+    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy, ai, magnetMetadata });
   }
 
   async function fetchAiModels() {
@@ -99,6 +102,14 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     }
   }
 
+  function saveMagnetMetadata(event: FormEvent) {
+    event.preventDefault();
+    const savedMetadata = { ...magnetMetadata, baseUrl: magnetMetadata.baseUrl.trim() };
+    setMagnetMetadata(savedMetadata);
+    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata: savedMetadata });
+    setMagnetMetadataSaved(true);
+  }
+
   async function browseForDownloadDirectory() {
     const selected = await browseDirectory?.(downloadDirectory);
     if (selected) setDownloadDirectory(selected);
@@ -129,6 +140,13 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         <div className="settings-actions"><button className="primary" type="submit">保存代理设置</button>{saved && <span role="status">已保存，后续新任务生效</span>}</div>
       </form>}
       {activeTab === 'advanced' && <>
+        <form className="ai-settings" onSubmit={saveMagnetMetadata}>
+          <label className="setting-row"><span><b>磁链元数据服务</b><small>磁链优先经此服务获取种子和文件清单；服务不可用时自动回退到本地 aria2 DHT。</small></span><input aria-label="启用磁链元数据服务" type="checkbox" checked={magnetMetadata.enabled} onChange={(event) => setMagnetMetadata((current) => ({ ...current, enabled: event.target.checked }))} /></label>
+          <fieldset disabled={!magnetMetadata.enabled}>
+            <label><span>服务地址</span><input aria-label="磁链元数据服务地址" required placeholder="http://peer.aigutta.com:8080" value={magnetMetadata.baseUrl} onChange={(event) => { setMagnetMetadataSaved(false); setMagnetMetadata((current) => ({ ...current, baseUrl: event.target.value })); }} /></label>
+          </fieldset>
+          <div className="settings-actions"><button className="primary" type="submit">保存磁链服务</button>{magnetMetadataSaved && <span role="status">已保存，后续磁链任务生效</span>}</div>
+        </form>
         <form className="ai-settings" onSubmit={(event) => void saveAiConfiguration(event)}>
           <label className="setting-row"><span><b>启用 AI 智能分析</b><small>仅用于规则无法可靠解析的文本、网页和后处理说明。</small></span><input aria-label="启用 AI 智能分析" type="checkbox" checked={ai.enabled} onChange={(event) => setAi((current) => ({ ...current, enabled: event.target.checked }))} /></label>
           <fieldset disabled={aiBusy}>

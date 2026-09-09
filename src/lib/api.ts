@@ -119,7 +119,8 @@ export const defaultSettings: AppSettings = {
   downloadDirectory: '',
   launcherVisibility: 'always',
   proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
-  ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false }
+  ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
+  magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
 };
 
 export async function getSettings(): Promise<AppSettings> {

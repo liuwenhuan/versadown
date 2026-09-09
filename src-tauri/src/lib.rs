@@ -10,6 +10,7 @@ mod downloader;
 mod duplicates;
 mod engine_runtime;
 mod launcher;
+mod magnet_metadata;
 mod models;
 mod parser;
 mod policy;
@@ -35,8 +36,9 @@ pub use launcher::{
 };
 pub use models::{
     may_transition, AiSettings, AiSettingsInput, AppSettings, DownloadTask, DuplicateDownloadState,
-    LauncherVisibility, NewTask, ProxySettings, TaskStatus,
+    LauncherVisibility, MagnetMetadataSettings, NewTask, ProxySettings, TaskStatus,
 };
+pub use magnet_metadata::{resolve_magnet_torrent, MagnetMetadataError};
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};

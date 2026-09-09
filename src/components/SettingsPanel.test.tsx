@@ -8,7 +8,8 @@ const initial = {
   downloadDirectory: 'C:\\Users\\tester\\Downloads',
   launcherVisibility: 'always' as const,
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
-  ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false }
+  ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
+  magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
 };
 
 it('keeps detailed report collection off by default', () => {
@@ -78,6 +79,23 @@ it('offers an OpenAI-compatible AI analysis configuration in advanced settings',
   expect(screen.getByRole('combobox', { name: 'AI 模型' })).toBeVisible();
 });
 
+it('saves the preferred magnet metadata service from advanced settings', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={initial} onChange={onChange} />);
+
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  const endpoint = screen.getByRole('textbox', { name: '磁链元数据服务地址' });
+  await user.clear(endpoint);
+  await user.type(endpoint, 'https://metadata.example.test');
+  await user.click(screen.getByRole('button', { name: '保存磁链服务' }));
+
+  expect(onChange).toHaveBeenLastCalledWith({
+    ...initial,
+    magnetMetadata: { enabled: true, baseUrl: 'https://metadata.example.test' }
+  });
+});
+
 it('lets users restore a hidden floating ball from the main settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
@@ -109,6 +127,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     downloadDirectory: 'C:\\Users\\tester\\Downloads',
     launcherVisibility: 'always',
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
-    ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false }
+    ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
+    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
   });
 });

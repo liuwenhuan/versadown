@@ -44,7 +44,8 @@ beforeEach(() => {
   state.getManagerVisible.mockReset();
   state.getSettings.mockResolvedValue({
     debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
-    proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }
+    proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
+    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
   });
   state.getManagerVisible.mockResolvedValue(true);
 });
@@ -86,7 +87,8 @@ it('shows the zero-speed status when aria2 still has an active task', async () =
 it('shows the zero-speed status for an active task in download-only mode', async () => {
   state.getSettings.mockResolvedValueOnce({
     debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'downloading',
-    proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }
+    proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
+    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
   });
   state.getGlobalStat.mockResolvedValueOnce({ download_speed: 0, num_active: 1 });
   state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });

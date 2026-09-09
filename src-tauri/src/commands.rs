@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::downloader::load_torrent_base64;
 use crate::{
     cloud::{CredentialStore, DpapiCredentialStore},
-    confirm_download, duplicate_state, prepare_download, retry_duplicate_state, AiSettings,
-    AiSettingsInput, AppSettings,
+    confirm_download, duplicate_state, prepare_download, resolve_magnet_torrent,
+    retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings,
     DownloadAction, DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome,
     ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
@@ -169,17 +169,39 @@ pub async fn parse_download(
             .map_err(|error| error.to_string())?;
     } else if outcome.task.kind == "magnet" {
         let options = download_submission_options(&state)?;
-        outcome.task = service
-            .prepare_magnet_with_options(outcome.task.id, outcome.task.source.clone(), options)
-            .await
-            .map_err(|error| error.to_string())?;
-        match service
-            .wait_for_metadata(outcome.task.id, std::time::Duration::from_secs(12))
-            .await
+        let metadata_settings = state
+            .settings
+            .lock()
+            .map_err(|_| "设置锁不可用".to_string())?
+            .magnet_metadata
+            .clone();
+        if let Ok(Some(torrent)) =
+            resolve_magnet_torrent(&metadata_settings, &outcome.task.source).await
         {
-            Ok(task) => outcome.task = task,
-            Err(DownloadServiceError::MetadataTimeout) => {}
-            Err(error) => return Err(error.to_string()),
+            outcome.task = service
+                .submit_torrent(
+                    outcome.task.id,
+                    torrent,
+                    vec![],
+                    options
+                        .into_aria2_options()
+                        .map_err(|error| error.to_string())?,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        } else {
+            outcome.task = service
+                .prepare_magnet_with_options(outcome.task.id, outcome.task.source.clone(), options)
+                .await
+                .map_err(|error| error.to_string())?;
+            match service
+                .wait_for_metadata(outcome.task.id, std::time::Duration::from_secs(12))
+                .await
+            {
+                Ok(task) => outcome.task = task,
+                Err(DownloadServiceError::MetadataTimeout) => {}
+                Err(error) => return Err(error.to_string()),
+            }
         }
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     }

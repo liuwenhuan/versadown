@@ -118,10 +118,16 @@ export interface AiSettingsInput {
   apiKey: string;
 }
 
+export interface MagnetMetadataSettings {
+  enabled: boolean;
+  baseUrl: string;
+}
+
 export interface AppSettings {
   debugReports: boolean;
   downloadDirectory: string;
   launcherVisibility: LauncherVisibility;
   proxy: ProxySettings;
   ai: AiSettings;
+  magnetMetadata: MagnetMetadataSettings;
 }

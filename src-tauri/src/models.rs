@@ -34,6 +34,22 @@ pub struct AiSettings {
     pub api_key_configured: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MagnetMetadataSettings {
+    pub enabled: bool,
+    pub base_url: String,
+}
+
+impl Default for MagnetMetadataSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: "http://peer.aigutta.com:8080".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AiSettingsInput {
@@ -60,6 +76,7 @@ pub struct AppSettings {
     pub launcher_visibility: LauncherVisibility,
     pub proxy: ProxySettings,
     pub ai: AiSettings,
+    pub magnet_metadata: MagnetMetadataSettings,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

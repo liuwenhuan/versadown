@@ -15,8 +15,8 @@ vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   confirmDownload: state.confirm, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
-  defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } },
-  getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } }),
+  defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' } },
+  getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' } }),
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: vi.fn(), removeTaskRecord: vi.fn(), resolveDuplicateDownload: vi.fn()
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
