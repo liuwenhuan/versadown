@@ -24,7 +24,26 @@ it('keeps discovered password masked until the user reveals it', async () => {
 
 it('labels BitTorrent confirmation choices as select-file semantics', () => {
   render(<ParseConfirmDialog result={{ ...result, isBitTorrent: true }} onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
-  expect(screen.getByRole('heading', { name: '选择要下载的文件' })).toBeVisible();
-  expect(screen.getByRole('button', { name: '下载已选 2 项' })).toBeVisible();
-  expect(screen.getByText(/将在开始前选择这些 BT 文件/)).toBeVisible();
+  expect(screen.getByRole('heading', { name: '新建任务' })).toBeVisible();
+  expect(screen.getAllByText('已选 2 / 2 个文件')).toHaveLength(2);
+  expect(screen.getByRole('button', { name: /立即下载 2/ })).toBeVisible();
+});
+
+it('offers a compact file-selection toolbar with select-all controls', async () => {
+  const user = userEvent.setup();
+  const onSelectionChange = vi.fn();
+  render(<ParseConfirmDialog result={{ ...result, isBitTorrent: true }} onConfirm={() => {}} onSelectionChange={onSelectionChange} onClose={() => {}} />);
+
+  expect(screen.getByRole('checkbox', { name: '全选文件' })).toBeChecked();
+  expect(screen.getAllByText('已选 2 / 2 个文件')).toHaveLength(2);
+
+  await user.click(screen.getByRole('checkbox', { name: '全选文件' }));
+  expect(onSelectionChange).toHaveBeenCalledWith([]);
+});
+
+it('keeps selection controls hidden while BitTorrent metadata is loading', () => {
+  render(<ParseConfirmDialog result={{ ...result, resources: [], isBitTorrent: true }} onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
+
+  expect(screen.getByText('正在获取文件信息…')).toBeVisible();
+  expect(screen.queryByRole('checkbox', { name: '全选文件' })).not.toBeInTheDocument();
 });

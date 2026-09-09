@@ -16,12 +16,12 @@ export function parseLocally(input: string): { task?: QueueTask; confirmation?: 
       { id: `${id()}-1`, name: '下载内容 01', size: '待连接后获取', selected: true },
       { id: `${id()}-2`, name: '下载内容 02', size: '待连接后获取', selected: true }
     ];
-    return { confirmation: { taskId: id(), requiresConfirmation: true, resources, processing: ['完成后按白名单检查后处理步骤'] } };
+    return { confirmation: { taskId: id(), title: 'BT 下载任务', requiresConfirmation: true, resources, processing: ['完成后按白名单检查后处理步骤'] } };
   }
   if (/^https?:\/\//i.test(trimmed)) {
     return { task: { id: id(), name: fileNameFrom(trimmed), kind: 'file', status: 'downloading', progress: 0, speed: '准备连接', source: trimmed } };
   }
-  return { confirmation: { taskId: id(), requiresConfirmation: true, resources: [{ id: `${id()}-candidate`, name: '从文本中发现的候选下载项', size: '需要进一步解析', selected: true }], processing: ['将用本地规则提取链接；必要时请求脱敏 AI 分析'] } };
+  return { confirmation: { taskId: id(), title: '待确认的下载内容', requiresConfirmation: true, resources: [{ id: `${id()}-candidate`, name: '从文本中发现的候选下载项', size: '需要进一步解析', selected: true }], processing: ['将用本地规则提取链接；必要时请求脱敏 AI 分析'] } };
 }
 
 export function isTauriRuntime() {
@@ -50,6 +50,7 @@ export async function parseDownload(input: string): Promise<{ task?: QueueTask; 
   return {
     confirmation: {
       taskId: result.task.id,
+      title: result.task.name,
       requiresConfirmation: true,
       resources: result.resources ?? [],
       processing: ['文件选择确认后调用本地 aria2 下载'],

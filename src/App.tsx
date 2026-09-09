@@ -530,7 +530,7 @@ export function App() {
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} /></section>
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} /></section>}
       </div>
-      {confirmation && <ParseConfirmDialog result={confirmation} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
+      {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
       } : current)} onClose={() => setConfirmation(null)} />}

@@ -74,6 +74,7 @@ export interface ConfirmResource {
 
 export interface ParseResult {
   taskId: string;
+  title?: string;
   requiresConfirmation: boolean;
   resources: ConfirmResource[];
   processing: string[];
