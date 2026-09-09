@@ -561,14 +561,22 @@ fn tianyi_file_list(value: &Value) -> Result<Vec<(&Value, bool)>, QuarkError> {
         .or_else(|| value.get("data"));
     let mut items = Vec::new();
     if let Some(container) = container {
-        let has_file_listing = container.get("fileList").is_some();
-        let has_folder_listing = container.get("folderList").is_some();
-        append_tianyi_entries(&mut items, container.get("fileList"), "file", false);
-        append_tianyi_entries(&mut items, container.get("folderList"), "folder", true);
+        let listings = [
+            (container.get("fileList"), "file", false),
+            (container.get("folderList"), "folder", true),
+        ];
+        for (listing, nested_name, folder) in listings {
+            append_tianyi_entries(&mut items, listing, nested_name, folder);
+        }
         // An authenticated but brand-new drive can validly contain neither
-        // files nor folders. The explicit list fields distinguish that from
-        // an unknown response shape.
-        if !items.is_empty() || has_file_listing || has_folder_listing {
+        // files nor folders.  Only an explicit empty array is trusted as an
+        // empty list; null or scalar values can be malformed API responses.
+        let known_empty_listing = listings
+            .iter()
+            .filter_map(|(listing, _, _)| *listing)
+            .all(|listing| listing.as_array().is_some_and(Vec::is_empty));
+        let has_listing = listings.iter().any(|(listing, _, _)| listing.is_some());
+        if !items.is_empty() || (has_listing && known_empty_listing) {
             return Ok(items);
         }
     }
@@ -625,6 +633,13 @@ impl XmlNode {
     fn into_value(mut self) -> Value {
         let text = self.text.trim();
         if self.children.is_empty() {
+            // XML represents an empty collection as `<fileList/>` rather
+            // than `[]`. Normalize only these known collection nodes before
+            // directory validation so an arbitrary empty JSON scalar cannot
+            // be mistaken for an empty drive.
+            if text.is_empty() && matches!(self.name.as_str(), "fileList" | "folderList") {
+                return Value::Array(Vec::new());
+            }
             return Value::String(text.into());
         }
         if !text.is_empty() {

@@ -1666,6 +1666,18 @@ mod tests {
         }
     }
 
+    struct TianyiMalformedRootTransport;
+
+    impl CloudHttpTransport for TianyiMalformedRootTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: r#"{"res_code":0,"fileListAO":{"fileList":null,"folderList":[]}}"#.into(),
+                ..Default::default()
+            })
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum TianyiRootAuthorizationError {
         Expired,
@@ -1924,6 +1936,23 @@ mod tests {
         );
 
         assert!(matches!(result, Err(QuarkError::Provider(_))));
+        assert_eq!(credentials.load("tianyi").unwrap(), Some(existing));
+    }
+
+    #[test]
+    fn tianyi_web_authorization_keeps_the_old_session_when_candidate_root_shape_is_malformed() {
+        let credentials = MemoryCredentialStore::default();
+        let existing = serde_json::to_vec(&TianyiSession::cookie("SSON=existing-session"))
+            .expect("the test session serializes");
+        credentials.save("tianyi", &existing).unwrap();
+
+        let result = super::finalize_tianyi_web_authorization(
+            TianyiSession::cookie("SSON=candidate-session"),
+            &credentials,
+            &TianyiMalformedRootTransport,
+        );
+
+        assert!(matches!(result, Err(QuarkError::InvalidResponse)));
         assert_eq!(credentials.load("tianyi").unwrap(), Some(existing));
     }
 
