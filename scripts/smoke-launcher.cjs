@@ -217,6 +217,38 @@ async function run() {
       `Main window did not use the compact 900x575 layout: ${JSON.stringify(managerViewport)}`
     );
 
+    const titlebarLayout = JSON.parse(await evaluate(manager, `JSON.stringify((() => {
+      const controls = document.querySelector('.window-controls').getBoundingClientRect();
+      return { viewportWidth: innerWidth, controlsLeft: controls.left, controlsRight: controls.right };
+    })())`));
+    assert(
+      Math.abs(titlebarLayout.controlsRight - (titlebarLayout.viewportWidth - 8)) <= 1,
+      `Compact titlebar controls are not pinned to the trailing edge: ${JSON.stringify(titlebarLayout)}`
+    );
+
+    await evaluate(manager, `window.__TAURI_INTERNALS__.invoke('plugin:window|toggle_maximize', { label: 'main' })`);
+    const maximizedTitlebarLayout = JSON.parse(await waitForEvaluation(
+      manager,
+      `JSON.stringify((() => {
+        const controls = document.querySelector('.window-controls').getBoundingClientRect();
+        return { viewportWidth: innerWidth, controlsRight: controls.right };
+      })())`,
+      (value) => {
+        const layout = JSON.parse(value);
+        return layout.viewportWidth > managerViewport.width && Math.abs(layout.controlsRight - (layout.viewportWidth - 8)) <= 1;
+      }
+    ));
+    assert(
+      Math.abs(maximizedTitlebarLayout.controlsRight - (maximizedTitlebarLayout.viewportWidth - 8)) <= 1,
+      `Maximized titlebar controls are not pinned to the trailing edge: ${JSON.stringify(maximizedTitlebarLayout)}`
+    );
+    await evaluate(manager, `window.__TAURI_INTERNALS__.invoke('plugin:window|toggle_maximize', { label: 'main' })`);
+    await waitForEvaluation(
+      manager,
+      `innerWidth < ${maximizedTitlebarLayout.viewportWidth}`,
+      Boolean
+    );
+
     const compact = JSON.parse(await evaluate(launcher, `JSON.stringify((() => {
       const button = document.querySelector('.launcher-trigger');
       const rect = button.getBoundingClientRect();

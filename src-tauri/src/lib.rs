@@ -1,6 +1,8 @@
 use tauri::{Emitter, Manager};
+use crate::cloud::CredentialStore;
 
 pub mod aria2;
+mod ai;
 pub mod cloud;
 mod commands;
 mod connectors;
@@ -32,8 +34,8 @@ pub use launcher::{
     LauncherInteractionState, LauncherRegion,
 };
 pub use models::{
-    may_transition, AppSettings, DownloadTask, DuplicateDownloadState, LauncherVisibility, NewTask,
-    ProxySettings, TaskStatus,
+    may_transition, AiSettings, AiSettingsInput, AppSettings, DownloadTask, DuplicateDownloadState,
+    LauncherVisibility, NewTask, ProxySettings, TaskStatus,
 };
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
@@ -117,6 +119,7 @@ pub fn run() {
             let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
                 data_dir.join("cloud-sessions"),
             )?);
+            let ai_secrets = cloud::DpapiCredentialStore::new(data_dir.join("ai-secrets"))?;
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
             // calls cannot race a later `manage` call.
@@ -149,6 +152,10 @@ pub fn run() {
                 .ok()
                 .and_then(|json| serde_json::from_slice(&json).ok())
                 .unwrap_or_default();
+            settings.ai.api_key_configured = ai_secrets
+                .load(ai::API_KEY_SECRET_NAME)
+                .map_err(|_| "无法读取本机保存的 AI API Key")?
+                .is_some();
             if settings.download_directory.trim().is_empty() {
                 settings.download_directory = default_destination.to_string_lossy().into_owned();
             }
@@ -179,6 +186,7 @@ pub fn run() {
                 debug_reports: std::sync::Mutex::new(debug_reports),
                 settings: std::sync::Mutex::new(settings),
                 settings_path,
+                ai_secrets,
             });
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
@@ -219,6 +227,8 @@ pub fn run() {
             commands::get_settings,
             commands::update_debug_reports,
             commands::update_settings,
+            commands::update_ai_settings,
+            commands::list_ai_models,
             cloud::commands::cloud_provider_capabilities,
             cloud::commands::cloud_begin_authorization,
             cloud::commands::cloud_complete_authorization,

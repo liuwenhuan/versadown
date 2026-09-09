@@ -11,10 +11,10 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace } from './components/CloudWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateSettings } from './lib/api';
+import { confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
-import { AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
+import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import { getThemeMode, setThemeMode as setAppThemeMode, subscribeTheme, ThemeMode } from './lib/theme';
 
@@ -73,10 +73,6 @@ function ThemeModeIcon({ mode }: { mode: ThemeMode }) {
     {mode === 'light' && <><circle cx="12" cy="12" r="3.5" /><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4" /></>}
     {mode === 'dark' && <path d="M19.4 15.2A7.8 7.8 0 0 1 8.8 4.6 7.8 7.8 0 1 0 19.4 15.2Z" />}
   </svg>;
-}
-
-function ChevronDownIcon() {
-  return <svg className="theme-picker-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m7 10 5 5 5-5" /></svg>;
 }
 
 export function App() {
@@ -264,6 +260,12 @@ export function App() {
   function saveSettings(next: AppSettings) {
     setSettings(next);
     void updateSettings(next).then(setSettings).catch(() => undefined);
+  }
+
+  async function saveAiConfiguration(configuration: AiSettingsInput) {
+    const saved = await updateAiSettings(configuration);
+    setSettings((current) => ({ ...current, ai: saved }));
+    return saved;
   }
 
   async function runLauncherBatchAction(command: 'pause' | 'resume') {
@@ -515,7 +517,6 @@ export function App() {
             onClick={() => setThemePickerOpen((open) => !open)}
           >
             <ThemeModeIcon mode={themeMode} />
-            <ChevronDownIcon />
           </button>
           {themePickerOpen && <div className="theme-picker-menu" role="menu" aria-label="选择主题">
             {(['auto', 'light', 'dark'] as const).map((mode) => (
@@ -536,7 +537,7 @@ export function App() {
             ))}
           </div>}
         </div>
-        <div className="window-controls" aria-label="窗口控制">
+        <div className="window-controls" aria-label="窗口控制" style={{ marginLeft: 'auto', flex: '0 0 auto' }}>
           <button aria-label="最小化" onClick={() => void runWindowAction('minimize')}><WindowIcon kind="minimize" /></button>
           <button aria-label="最大化或还原" onClick={() => void runWindowAction('maximize')}><WindowIcon kind="maximize" /></button>
           <button className="window-close" aria-label="关闭" onClick={() => void runWindowAction('hide')}><WindowIcon kind="close" /></button>
@@ -548,7 +549,7 @@ export function App() {
         void retryDownloadEngine().then(setEngineState).catch((error: unknown) => setEngineState({ available: false, retrying: false, error: String(error) }));
       }} />
       <div className="workspace"><nav aria-label="主导航">
-        <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon">↓</span><span>下载</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
+        <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon">↓</span><span>任务</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
         <button className={view === 'cloud' ? 'nav-active' : ''} onClick={() => setView('cloud')}><span className="nav-icon">☁</span><span>我的网盘</span></button>
         <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon">⚙</span><span>设置</span></button>
         <small>Windows Beta</small>
@@ -569,7 +570,7 @@ export function App() {
           </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} /></section>
-        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} /></section>}
+        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} /></section>}
       </div>
       {confirmation && <ParseConfirmDialog result={confirmation} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,

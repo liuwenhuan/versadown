@@ -103,9 +103,25 @@ export interface ProxySettings {
   password: string;
 }
 
+export interface AiSettings {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  apiKeyConfigured: boolean;
+}
+
+export interface AiSettingsInput {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  /** Empty keeps an already saved local secret unchanged. */
+  apiKey: string;
+}
+
 export interface AppSettings {
   debugReports: boolean;
   downloadDirectory: string;
   launcherVisibility: LauncherVisibility;
   proxy: ProxySettings;
+  ai: AiSettings;
 }

@@ -25,6 +25,24 @@ impl Default for ProxySettings {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiSettings {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_configured: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiSettingsInput {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LauncherVisibility {
@@ -41,6 +59,7 @@ pub struct AppSettings {
     pub download_directory: String,
     pub launcher_visibility: LauncherVisibility,
     pub proxy: ProxySettings,
+    pub ai: AiSettings,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

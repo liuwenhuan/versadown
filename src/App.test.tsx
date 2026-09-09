@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { App } from './App';
+import './styles.css';
 
 const cloudApiMocks = vi.hoisted(() => ({
   getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: false })),
@@ -45,6 +46,13 @@ it('leaves quick input to the independent native launcher window', async () => {
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
+it('labels the primary download workspace as tasks', async () => {
+  render(<App />);
+
+  expect(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: /任务/ })).toBeVisible();
+  await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
+});
+
 it('keeps the total transfer speed at the right edge of the download tab row', async () => {
   render(<App />);
 
@@ -54,7 +62,24 @@ it('keeps the total transfer speed at the right edge of the download tab row', a
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
-it('switches themes from one compact icon dropdown', async () => {
+it('keeps the custom window controls pinned to the header trailing edge', async () => {
+  render(<App />);
+
+  expect(screen.getByLabelText('窗口控制')).toHaveStyle({
+    marginLeft: 'auto',
+    flex: '0 0 auto'
+  });
+  await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
+});
+
+it('uses only the current theme icon for the compact theme trigger', async () => {
+  render(<App />);
+
+  expect(screen.getByRole('button', { name: '主题：自动' }).querySelectorAll('svg')).toHaveLength(1);
+  await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
+});
+
+it('switches themes from a three-icon dropdown', async () => {
   const user = userEvent.setup();
   render(<App />);
 
@@ -63,7 +88,12 @@ it('switches themes from one compact icon dropdown', async () => {
   expect(screen.queryByRole('menu', { name: '选择主题' })).not.toBeInTheDocument();
 
   await user.click(trigger);
-  expect(screen.getByRole('menu', { name: '选择主题' })).toBeVisible();
+  const menu = screen.getByRole('menu', { name: '选择主题' });
+  expect(menu).toBeVisible();
+  expect(within(menu).getAllByRole('menuitemradio')).toHaveLength(3);
+  for (const option of within(menu).getAllByRole('menuitemradio')) {
+    expect(option.querySelectorAll('svg')).toHaveLength(1);
+  }
   await user.click(screen.getByRole('menuitemradio', { name: '浅色主题' }));
   expect(document.documentElement).toHaveAttribute('data-theme', 'light');
   expect(screen.getByRole('button', { name: '主题：浅色' })).toHaveAttribute('aria-expanded', 'false');
@@ -132,7 +162,7 @@ it('adds a native cloud download result to the visible download queue', async ()
   await user.click(screen.getByRole('button', { name: '下载', exact: true }));
 
   expect(await screen.findByText('已将「网盘电影.mkv」加入下载队列')).toBeVisible();
-  await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: /下载/ }));
+  await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: /任务/ }));
   expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('网盘电影.mkv')).toBeVisible();
 });
 

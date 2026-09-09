@@ -7,7 +7,8 @@ const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
-  confirm: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn()
+  confirm: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
+  updateAiSettings: vi.fn(), listAiModels: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
@@ -16,7 +17,7 @@ vi.mock('./lib/api', () => ({
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } },
   getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } }),
-  updateSettings: vi.fn(), openTaskDirectory: vi.fn(), removeTaskRecord: vi.fn(), resolveDuplicateDownload: vi.fn()
+  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: vi.fn(), removeTaskRecord: vi.fn(), resolveDuplicateDownload: vi.fn()
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -53,6 +54,8 @@ beforeEach(() => {
   state.getEngineState.mockResolvedValue({ available: true, retrying: false });
   state.retryEngine.mockReset();
   state.taskAction.mockReset();
+  state.updateAiSettings.mockReset();
+  state.listAiModels.mockReset();
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -100,6 +103,31 @@ it('upserts a parsed task that already arrived through a live event', async () =
   await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://example.test/archive.iso' }); });
 
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
+});
+
+it('retrieves a compatible service model and persists the selected AI configuration', async () => {
+  const user = userEvent.setup();
+  state.listAiModels.mockResolvedValue(['gpt-4.1-mini', 'gpt-5-mini']);
+  state.updateAiSettings.mockResolvedValue({ enabled: true, baseUrl: 'https://gateway.example.test/v1', model: 'gpt-5-mini', apiKeyConfigured: true });
+  render(<App />);
+
+  await user.click(screen.getByRole('button', { name: /设置/ }));
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await user.click(screen.getByRole('checkbox', { name: '启用 AI 智能分析' }));
+  await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
+  await user.type(screen.getByLabelText('AI API Key'), 'sk-local-secret');
+  await user.click(screen.getByRole('button', { name: '获取可用模型' }));
+  await screen.findByRole('option', { name: 'gpt-5-mini' });
+  await user.selectOptions(screen.getByRole('combobox', { name: 'AI 模型' }), 'gpt-5-mini');
+  await user.click(screen.getByRole('button', { name: '保存 AI 配置' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('AI 服务配置已保存。');
+  expect(state.updateAiSettings).toHaveBeenCalledWith({
+    enabled: true,
+    baseUrl: 'https://gateway.example.test/v1',
+    model: 'gpt-5-mini',
+    apiKey: 'sk-local-secret'
+  });
 });
 
 it('opens the normal new-download dialog from the floating-ball menu command', async () => {

@@ -1,4 +1,4 @@
-import { AppSettings, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownload, DuplicateDownloadState, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
+import { AiSettings, AiSettingsInput, AppSettings, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownload, DuplicateDownloadState, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -118,7 +118,8 @@ export const defaultSettings: AppSettings = {
   debugReports: false,
   downloadDirectory: '',
   launcherVisibility: 'always',
-  proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }
+  proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
+  ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false }
 };
 
 export async function getSettings(): Promise<AppSettings> {
@@ -127,4 +128,16 @@ export async function getSettings(): Promise<AppSettings> {
 
 export async function updateSettings(settings: AppSettings): Promise<AppSettings> {
   return isTauriRuntime() ? invoke<AppSettings>('update_settings', { settings }) : settings;
+}
+
+export async function updateAiSettings(settings: AiSettingsInput): Promise<AiSettings> {
+  if (!isTauriRuntime()) {
+    return { enabled: settings.enabled, baseUrl: settings.baseUrl, model: settings.model, apiKeyConfigured: Boolean(settings.apiKey) };
+  }
+  return invoke<AiSettings>('update_ai_settings', { settings });
+}
+
+export async function listAiModels(settings: AiSettingsInput): Promise<string[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<string[]>('list_ai_models', { settings });
 }

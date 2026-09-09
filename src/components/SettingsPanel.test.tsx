@@ -7,7 +7,8 @@ const initial = {
   debugReports: false,
   downloadDirectory: 'C:\\Users\\tester\\Downloads',
   launcherVisibility: 'always' as const,
-  proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' }
+  proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
+  ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false }
 };
 
 it('keeps detailed report collection off by default', () => {
@@ -64,6 +65,19 @@ it('allows users to explicitly enable debug reports in beta', async () => {
   expect(onChange).toHaveBeenCalledWith({ ...initial, debugReports: true });
 });
 
+it('offers an OpenAI-compatible AI analysis configuration in advanced settings', async () => {
+  const user = userEvent.setup();
+  render(<SettingsPanel initial={initial} onChange={() => {}} />);
+
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+
+  expect(screen.getByRole('checkbox', { name: '启用 AI 智能分析' })).toBeVisible();
+  expect(screen.getByRole('textbox', { name: 'AI 服务地址' })).toBeVisible();
+  expect(screen.getByLabelText('AI API Key')).toHaveAttribute('type', 'password');
+  expect(screen.getByRole('button', { name: '获取可用模型' })).toBeVisible();
+  expect(screen.getByRole('combobox', { name: 'AI 模型' })).toBeVisible();
+});
+
 it('lets users restore a hidden floating ball from the main settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
@@ -94,6 +108,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     debugReports: false,
     downloadDirectory: 'C:\\Users\\tester\\Downloads',
     launcherVisibility: 'always',
-    proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' }
+    proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
+    ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false }
   });
 });

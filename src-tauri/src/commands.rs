@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::downloader::load_torrent_base64;
 use crate::{
-    confirm_download, duplicate_state, prepare_download, retry_duplicate_state, AppSettings,
+    cloud::{CredentialStore, DpapiCredentialStore},
+    confirm_download, duplicate_state, prepare_download, retry_duplicate_state, AiSettings,
+    AiSettingsInput, AppSettings,
     DownloadAction, DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome,
     ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
@@ -23,6 +25,7 @@ pub struct AppState {
     pub debug_reports: Mutex<bool>,
     pub settings: Mutex<AppSettings>,
     pub settings_path: PathBuf,
+    pub ai_secrets: DpapiCredentialStore,
 }
 
 #[derive(Clone, Serialize)]
@@ -574,6 +577,74 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
         .map(|settings| settings.clone())
 }
 
+fn persist_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(settings).map_err(|error| format!("无法保存设置：{error}"))?;
+    fs::write(path, json).map_err(|error| format!("无法保存设置：{error}"))
+}
+
+#[tauri::command]
+pub fn update_ai_settings(
+    mut settings: AiSettingsInput,
+    state: State<'_, AppState>,
+) -> Result<AiSettings, String> {
+    settings.base_url = settings.base_url.trim().to_string();
+    settings.model = settings.model.trim().to_string();
+    let mut api_key = settings.api_key.trim().to_string();
+    let has_new_key = !api_key.is_empty();
+    let has_saved_key = state
+        .ai_secrets
+        .load(crate::ai::API_KEY_SECRET_NAME)
+        .map_err(|_| "无法读取本机保存的 AI API Key".to_string())?
+        .is_some();
+    if settings.enabled {
+        crate::ai::normalize_base_url(&settings.base_url)?;
+        if settings.model.is_empty() {
+            return Err("请选择 AI 模型".into());
+        }
+    }
+    if has_new_key {
+        state
+            .ai_secrets
+            .save(crate::ai::API_KEY_SECRET_NAME, api_key.as_bytes())
+            .map_err(|_| "无法安全保存 AI API Key".to_string())?;
+    }
+    zeroize::Zeroize::zeroize(&mut api_key);
+    zeroize::Zeroize::zeroize(&mut settings.api_key);
+    let configured = has_saved_key || has_new_key;
+    if settings.enabled && !configured {
+        return Err("启用 AI 智能分析前请先配置 API Key".into());
+    }
+    let saved = AiSettings {
+        enabled: settings.enabled,
+        base_url: settings.base_url,
+        model: settings.model,
+        api_key_configured: configured,
+    };
+    let mut app_settings = state.settings.lock().map_err(|_| "设置锁不可用".to_string())?;
+    app_settings.ai = saved.clone();
+    persist_settings(&state.settings_path, &app_settings)?;
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn list_ai_models(
+    settings: AiSettingsInput,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let mut api_key = settings.api_key.trim().to_string();
+    if api_key.is_empty() {
+        api_key = state
+            .ai_secrets
+            .load(crate::ai::API_KEY_SECRET_NAME)
+            .map_err(|_| "无法读取本机保存的 AI API Key".to_string())?
+            .and_then(|value| String::from_utf8(value).ok())
+            .ok_or_else(|| "请先输入或保存 AI API Key".to_string())?;
+    }
+    let result = crate::ai::fetch_models(&settings.base_url, &api_key).await;
+    zeroize::Zeroize::zeroize(&mut api_key);
+    result
+}
+
 #[tauri::command]
 pub fn update_debug_reports(enabled: bool, state: State<'_, AppState>) -> Result<Settings, String> {
     let mut setting = state
@@ -606,18 +677,11 @@ pub fn update_settings(
     settings.proxy.username = settings.proxy.username.trim().to_string();
     proxy_url(&settings.proxy)?;
 
-    let json =
-        serde_json::to_vec_pretty(&settings).map_err(|error| format!("无法保存设置：{error}"))?;
-    std::fs::write(&state.settings_path, json).map_err(|error| format!("无法保存设置：{error}"))?;
-
-    *state
-        .debug_reports
-        .lock()
-        .map_err(|_| "设置锁不可用".to_string())? = settings.debug_reports;
-    *state
-        .settings
-        .lock()
-        .map_err(|_| "设置锁不可用".to_string())? = settings.clone();
+    let mut current = state.settings.lock().map_err(|_| "设置锁不可用".to_string())?;
+    settings.ai = current.ai.clone();
+    persist_settings(&state.settings_path, &settings)?;
+    *state.debug_reports.lock().map_err(|_| "设置锁不可用".to_string())? = settings.debug_reports;
+    *current = settings.clone();
     let _ = app.emit_to(
         "launcher",
         "launcher-visibility-updated",

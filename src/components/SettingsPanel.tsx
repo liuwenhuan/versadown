@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { AppSettings, LauncherVisibility, ProxyProtocol } from '../lib/types';
+import { AiSettings, AiSettingsInput, AppSettings, LauncherVisibility, ProxyProtocol } from '../lib/types';
 
 type SettingsTab = 'display' | 'network' | 'advanced';
 
@@ -13,21 +13,37 @@ interface SettingsPanelProps {
   initial: AppSettings;
   onChange(settings: AppSettings): void;
   browseDirectory?(currentDirectory: string): Promise<string | null>;
+  saveAiSettings?(settings: AiSettingsInput): Promise<AiSettings>;
+  loadAiModels?(settings: AiSettingsInput): Promise<string[]>;
 }
 
-export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPanelProps) {
+const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
+
+export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels }: SettingsPanelProps) {
   const [debugReports, setDebugReports] = useState(initial.debugReports);
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
+  const [ai, setAi] = useState<AiSettings>(initial.ai ?? disabledAiSettings);
+  const [aiApiKey, setAiApiKey] = useState('');
+  const [aiModels, setAiModels] = useState<string[]>([]);
+  const [aiStatus, setAiStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); }, [initial]);
+  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); }, [initial]);
+
+  const currentAiInput = (): AiSettingsInput => ({
+    enabled: ai.enabled,
+    baseUrl: ai.baseUrl.trim(),
+    model: ai.model.trim(),
+    apiKey: aiApiKey.trim()
+  });
 
   function updateDebugReports(enabled: boolean) {
     setDebugReports(enabled);
-    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy });
+    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy, ai });
   }
 
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
@@ -37,7 +53,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPa
 
   function saveProxy(event: FormEvent) {
     event.preventDefault();
-    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() } });
+    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() }, ai });
     setSaved(true);
   }
 
@@ -45,12 +61,42 @@ export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPa
     event.preventDefault();
     const normalized = downloadDirectory.trim();
     setDownloadDirectory(normalized);
-    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy });
+    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy, ai });
   }
 
   function updateLauncherVisibility(visibility: LauncherVisibility) {
     setLauncherVisibility(visibility);
-    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy });
+    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy, ai });
+  }
+
+  async function fetchAiModels() {
+    setAiStatus(null);
+    setAiBusy(true);
+    try {
+      const models = await loadAiModels?.(currentAiInput()) ?? [];
+      setAiModels(models);
+      setAiStatus({ kind: 'success', message: models.length ? `已获取 ${models.length} 个模型` : '服务未返回可选模型。' });
+    } catch (error) {
+      setAiStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  async function saveAiConfiguration(event: FormEvent) {
+    event.preventDefault();
+    setAiStatus(null);
+    setAiBusy(true);
+    try {
+      const savedAi = await saveAiSettings?.(currentAiInput()) ?? { ...ai, apiKeyConfigured: ai.apiKeyConfigured || Boolean(aiApiKey.trim()) };
+      setAi(savedAi);
+      setAiApiKey('');
+      setAiStatus({ kind: 'success', message: 'AI 服务配置已保存。' });
+    } catch (error) {
+      setAiStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setAiBusy(false);
+    }
   }
 
   async function browseForDownloadDirectory() {
@@ -83,6 +129,15 @@ export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPa
         <div className="settings-actions"><button className="primary" type="submit">保存代理设置</button>{saved && <span role="status">已保存，后续新任务生效</span>}</div>
       </form>}
       {activeTab === 'advanced' && <>
+        <form className="ai-settings" onSubmit={(event) => void saveAiConfiguration(event)}>
+          <label className="setting-row"><span><b>启用 AI 智能分析</b><small>仅用于规则无法可靠解析的文本、网页和后处理说明。</small></span><input aria-label="启用 AI 智能分析" type="checkbox" checked={ai.enabled} onChange={(event) => setAi((current) => ({ ...current, enabled: event.target.checked }))} /></label>
+          <fieldset disabled={aiBusy}>
+            <label><span>服务地址</span><input aria-label="AI 服务地址" required placeholder="https://api.openai.com/v1" value={ai.baseUrl} onChange={(event) => setAi((current) => ({ ...current, baseUrl: event.target.value }))} /></label>
+            <label><span>API Key</span><input aria-label="AI API Key" type="password" autoComplete="new-password" placeholder={ai.apiKeyConfigured ? '已配置；留空则保持不变' : '输入服务 API Key'} value={aiApiKey} onChange={(event) => setAiApiKey(event.target.value)} /></label>
+            <label><span>模型</span><select aria-label="AI 模型" required value={ai.model} onChange={(event) => setAi((current) => ({ ...current, model: event.target.value }))}><option value="">选择模型</option>{ai.model && !aiModels.includes(ai.model) && <option value={ai.model}>{ai.model}</option>}{aiModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+          </fieldset>
+          <div className="settings-actions"><button className="secondary" type="button" onClick={() => void fetchAiModels()} disabled={aiBusy}>获取可用模型</button><button className="primary" type="submit" disabled={aiBusy}>{aiBusy ? '正在保存…' : '保存 AI 配置'}</button>{aiStatus && <span role="status" className={aiStatus.kind}>{aiStatus.message}</span>}</div>
+        </form>
         <label className="setting-row"><span><b>启用调试报告</b><small>记录脱敏的解析与后处理步骤，供高级用户排查。</small></span><input aria-label="启用调试报告" type="checkbox" checked={debugReports} onChange={(event) => updateDebugReports(event.target.checked)} /></label>
         <section className="setting-safety"><b>隐私规则</b><ul><li>标准链接优先使用本地规则解析。</li><li>AI 仅接收复杂任务的脱敏文本，绝不接收凭据或本地文件。</li><li>代理账号配置仅由本机 aria2 使用。</li></ul></section>
       </>}
