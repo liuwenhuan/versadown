@@ -99,3 +99,34 @@ fn rejects_directory_trees_beyond_the_bounded_traversal_limit() {
 
     assert!(matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("过多子目录")));
 }
+
+#[test]
+fn rejects_windows_normalized_output_path_collisions_before_queueing() {
+    let normalized_file_name = plan_cloud_directory_download(
+        CloudProvider::Quark,
+        "root",
+        "资料",
+        |id| Ok(directory(id, vec![file("one", id, "a:b.txt"), file("two", id, "a?b.txt")])),
+    );
+    assert!(matches!(normalized_file_name, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
+
+    let case_insensitive_name = plan_cloud_directory_download(
+        CloudProvider::Quark,
+        "root",
+        "资料",
+        |id| Ok(directory(id, vec![file("one", id, "Readme.txt"), file("two", id, "README.TXT")])),
+    );
+    assert!(matches!(case_insensitive_name, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
+
+    let normalized_directory = plan_cloud_directory_download(
+        CloudProvider::Quark,
+        "root",
+        "资料",
+        |id| match id {
+            "root" => Ok(directory(id, vec![folder("first", id, "2026:笔记"), folder("second", id, "2026?笔记")])),
+            "first" | "second" => Ok(directory(id, vec![file(&format!("{id}-file"), id, "说明.txt")])),
+            _ => Err(QuarkError::InvalidResponse),
+        },
+    );
+    assert!(matches!(normalized_directory, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
+}

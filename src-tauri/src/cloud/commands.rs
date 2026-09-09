@@ -624,7 +624,24 @@ pub fn plan_cloud_directory_download(
     if files.is_empty() {
         return Err(QuarkError::InvalidInput("空目录不能下载".into()));
     }
+    if has_windows_output_path_collision(&files) {
+        return Err(QuarkError::InvalidInput("目录下载的输出路径冲突".into()));
+    }
     Ok(CloudDirectoryDownloadPlan { files })
+}
+
+fn has_windows_output_path_collision(files: &[PlannedCloudFile]) -> bool {
+    let mut targets = HashSet::new();
+    files.iter().any(|file| {
+        let target = file
+            .relative_directory
+            .iter()
+            .chain(std::iter::once(&file.output_name))
+            .map(|component| component.to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\\");
+        !targets.insert(target)
+    })
 }
 
 fn safe_directory_component(name: &str) -> String {
