@@ -36,6 +36,23 @@ fn quark_list_uses_cookie_auth_and_maps_401_to_reauthorization() {
 }
 
 #[test]
+fn quark_copy_uses_the_native_copy_endpoint_and_destination() {
+    let http = RecordingHttp::new();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+    let ids = vec!["file-1".to_owned(), "folder-2".to_owned()];
+
+    assert!(matches!(
+        client.copy_files(&ids, "target-folder"),
+        Err(QuarkError::AuthorizationExpired)
+    ));
+    let request = http.0.lock().unwrap().pop().unwrap();
+    assert!(request.url.contains("/1/clouddrive/file/copy"));
+    let body: serde_json::Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["filelist"], serde_json::json!(["file-1", "folder-2"]));
+    assert_eq!(body["to_pdir_fid"], "target-folder");
+}
+
+#[test]
 fn memory_credential_store_never_persists_plaintext_to_a_file() {
     let store = MemoryCredentialStore::default();
     store.save("quark", b"sid=secret").unwrap();

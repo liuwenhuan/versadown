@@ -182,6 +182,17 @@ impl<'a, T: CloudHttpTransport> QuarkClient<'a, T> {
             Some(json!({"filelist":ids,"to_pdir_fid":parent,"action_type":1})),
         )
     }
+    pub fn copy_files(
+        &self,
+        ids: &[String],
+        parent: &str,
+    ) -> Result<CloudHttpResponse, QuarkError> {
+        self.request(
+            "POST",
+            "file/copy",
+            Some(json!({"filelist":ids,"to_pdir_fid":parent,"action_type":1})),
+        )
+    }
     pub fn trash(&self, ids: &[String]) -> Result<CloudHttpResponse, QuarkError> {
         self.request(
             "POST",

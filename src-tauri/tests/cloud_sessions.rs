@@ -257,6 +257,24 @@ fn anonymous_web_cookie_keeps_authorization_pending() {
 }
 
 #[test]
+fn pikpak_copy_uses_the_native_batch_copy_endpoint_and_destination() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[r#"{}"#]);
+    let ids = vec!["file-1".to_owned(), "folder-2".to_owned()];
+
+    PikPakClient::new(&http, &store)
+        .copy_files(&ids, "target-folder")
+        .unwrap();
+
+    let requests = &http.0.lock().unwrap().1;
+    assert!(requests[0].url.ends_with("/drive/v1/files:batchCopy"));
+    let body: serde_json::Value = serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["ids"], serde_json::json!(["file-1", "folder-2"]));
+    assert_eq!(body["to"]["parent_id"], "target-folder");
+}
+
+#[test]
 fn cloud_module_is_available_without_a_second_aria2_engine() {
     let provider = alldownloader_lib::cloud::CloudProvider::Quark;
     assert_eq!(provider.key(), "quark");

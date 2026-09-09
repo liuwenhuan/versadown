@@ -11,12 +11,15 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     getCloudAccount: vi.fn().mockRejectedValue(Object.assign(new Error('未授权'), { code: 'unauthorized' })),
     listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === 'folder-1'
       ? { id: 'folder-1', items: [{ id: 'child-1', parentId: 'folder-1', name: '说明.txt', kind: 'file', size: 1024, modifiedAt: '刚刚' }] }
+      : parentId === 'folder-2'
+        ? { id: 'folder-2', items: [{ id: 'nested-folder', parentId: 'folder-2', name: '深层目录', kind: 'folder', modifiedAt: '刚刚' }] }
       : { id: '0', items: [{ id: 'folder-1', parentId: '0', name: '归档', kind: 'folder', modifiedAt: '今天' }, { id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file', size: 2_000_000, modifiedAt: '昨天' }] })),
     createCloudDirectory: vi.fn().mockResolvedValue(undefined),
     pickAndUploadFiles: vi.fn().mockResolvedValue(undefined),
     downloadCloudFile: vi.fn().mockResolvedValue('https://download.example/file'),
     renameCloudFile: vi.fn().mockResolvedValue(undefined),
     moveCloudFiles: vi.fn().mockResolvedValue(undefined),
+    copyCloudFiles: vi.fn().mockResolvedValue(undefined),
     trashCloudFiles: vi.fn().mockResolvedValue(undefined),
     logoutCloud: vi.fn().mockResolvedValue(undefined),
     ...overrides
@@ -235,11 +238,85 @@ it('shows normal file commands in the row context menu and opens a folder from i
   expect(screen.getByRole('menuitem', { name: '下载' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '重命名' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '移动' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '复制到' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '文件详情' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '删除' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '分享' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入超级保险箱' })).not.toBeInTheDocument();
   expect(menu).toBeVisible();
 
   fireEvent.click(screen.getByRole('menuitem', { name: '打开' }));
   expect(await screen.findByText('说明.txt')).toBeVisible();
+});
+
+it('copies selected files through a browsable destination picker', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('报告.pdf');
+  fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 240 });
+  await user.click(screen.getByRole('menuitem', { name: '复制到' }));
+  const picker = screen.getByRole('dialog', { name: '选择复制位置' });
+  expect(picker).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '打开 归档' }));
+  expect(screen.getByRole('navigation', { name: '目标目录' })).toHaveTextContent('根目录›归档');
+  await user.click(screen.getByRole('button', { name: '返回根目录' }));
+  await user.click(screen.getByRole('button', { name: '复制到此处' }));
+
+  expect(client.copyCloudFiles).toHaveBeenCalledWith('quark', ['file-1'], '0');
+  expect(await screen.findByRole('status')).toHaveTextContent('复制成功');
+});
+
+it('retries the destination directory that actually failed to load', async () => {
+  const user = userEvent.setup();
+  let folderAttempts = 0;
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => {
+      if (parentId === 'folder-1') {
+        folderAttempts += 1;
+        if (folderAttempts === 1) return Promise.reject(new Error('目录暂时不可用'));
+        return Promise.resolve({ id: 'folder-1', items: [] });
+      }
+      return Promise.resolve({ id: '0', items: [{ id: 'folder-1', parentId: '0', name: '归档', kind: 'folder' }, { id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file' }] });
+    })
+  });
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('报告.pdf');
+  fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 240 });
+  await user.click(screen.getByRole('menuitem', { name: '复制到' }));
+  await user.click(screen.getByRole('button', { name: '打开 归档' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('目录暂时不可用');
+  expect(screen.getByRole('navigation', { name: '目标目录' })).toHaveTextContent('根目录›归档');
+
+  await user.click(screen.getByRole('button', { name: '重试' }));
+  expect(await screen.findByText('此目录没有子文件夹')).toBeVisible();
+  expect(client.listCloudDirectory).toHaveBeenLastCalledWith('quark', 'folder-1');
+  await user.click(screen.getByRole('button', { name: '复制到此处' }));
+  expect(client.copyCloudFiles).toHaveBeenCalledWith('quark', ['file-1'], 'folder-1');
+});
+
+it('shows concise file details in a separate dialog', async () => {
+  const user = userEvent.setup();
+  render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('报告.pdf');
+  await user.click(screen.getByText('报告.pdf'));
+  const trigger = screen.getByRole('button', { name: '文件详情' });
+  await user.click(trigger);
+
+  const dialog = screen.getByRole('dialog', { name: '文件详情' });
+  expect(dialog).toHaveTextContent('报告.pdf');
+  expect(dialog).toHaveTextContent('1.9 MB');
+  expect(dialog).toHaveTextContent('昨天');
+  expect(dialog).not.toHaveTextContent('file-1');
+  expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
+  await user.tab();
+  expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
+  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  expect(screen.queryByRole('dialog', { name: '文件详情' })).not.toBeInTheDocument();
+  expect(trigger).toHaveFocus();
 });
 
 it('keeps multi-selection context actions valid for every selected item', async () => {

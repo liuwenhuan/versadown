@@ -10,6 +10,7 @@ export const listCloudDirectory = (provider: CloudProvider, parentId = '0') => i
 export const createCloudDirectory = (provider: CloudProvider, parentId: string, name: string) => invoke<CloudFile>('cloud_create_directory', { provider, parentId, name });
 export const renameCloudFile = (provider: CloudProvider, fileId: string, name: string) => invoke<void>('cloud_rename', { provider, fileId, name });
 export const moveCloudFiles = (provider: CloudProvider, fileIds: string[], targetParentId: string) => invoke<void>('cloud_move', { provider, fileIds, targetParentId });
+export const copyCloudFiles = (provider: CloudProvider, fileIds: string[], targetParentId: string) => invoke<void>('cloud_copy', { provider, fileIds, targetParentId });
 export const trashCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_trash', { provider, fileIds });
 type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState };
 export const downloadCloudFile = (provider: CloudProvider, fileId: string): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', { provider, fileId })

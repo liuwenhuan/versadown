@@ -218,6 +218,7 @@ pub fn run() {
             cloud::commands::cloud_create_directory,
             cloud::commands::cloud_rename,
             cloud::commands::cloud_move,
+            cloud::commands::cloud_copy,
             cloud::commands::cloud_trash,
             cloud::commands::cloud_download_url,
             cloud::commands::cloud_upload_files,

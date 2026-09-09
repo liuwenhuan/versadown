@@ -401,6 +401,14 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         )?;
         Ok(())
     }
+    pub fn copy_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
+        self.request(
+            "POST",
+            format!("{DRIVE}/drive/v1/files:batchCopy"),
+            Some(json!({"ids":ids,"to":{"parent_id":root(parent)}})),
+        )?;
+        Ok(())
+    }
     pub fn trash(&self, ids: &[String]) -> Result<(), QuarkError> {
         self.request(
             "POST",

@@ -381,6 +381,23 @@ pub async fn cloud_move(
     .await
 }
 #[tauri::command]
+pub async fn cloud_copy(
+    app: AppHandle,
+    provider: CloudProvider,
+    file_ids: Vec<String>,
+    target_parent_id: String,
+) -> Result<(), QuarkError> {
+    run(app, provider, move |s, h| match provider {
+        CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
+            .copy_files(&file_ids, &target_parent_id)
+            .map(|_| ()),
+        CloudProvider::Pikpak => {
+            PikPakClient::new(h, &s.store).copy_files(&file_ids, &target_parent_id)
+        }
+    })
+    .await
+}
+#[tauri::command]
 pub async fn cloud_trash(
     app: AppHandle,
     provider: CloudProvider,
