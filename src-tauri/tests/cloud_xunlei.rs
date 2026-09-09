@@ -1,5 +1,5 @@
 use alldownloader_lib::cloud::{
-    xunlei::{XunleiClient, XunleiSession},
+    xunlei::{XunleiClient, XunleiClientProfile, XunleiSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError,
 };
 use std::sync::Mutex;
@@ -47,15 +47,25 @@ impl CloudHttpTransport for RecordingHttp {
     }
 }
 
+fn profile() -> XunleiClientProfile {
+    XunleiClientProfile {
+        client_id: "official-browser-client".into(),
+        device_id: "device-1".into(),
+        client_version: "1.0.0".into(),
+        package_name: "com.xunlei.pan.web".into(),
+        user_agent: "Mozilla/5.0 XunleiBrowser/1.0".into(),
+    }
+}
+
 // Break caught: omitting the native refresh exchange, token rotation, or either
 // required authenticated-drive header makes the directory request invalid.
 #[test]
-fn xunlei_refreshes_rotates_token_and_sends_bearer_and_device_headers() {
+fn xunlei_refreshes_with_official_client_profile_and_sends_native_headers() {
     let http = RecordingHttp::sequence(&[
         r#"{"access_token":"access","refresh_token":"next","expires_in":7200,"sub":"user-1"}"#,
-        r#"{"files":[{"id":"f1","name":"archive.zip","kind":"drive#file","size":32,"parent_id":"0"}],"next_page_token":""}"#,
+        r#"{"files":[{"id":"f1","name":"archive.zip","kind":"drive#file","phase":"PHASE_TYPE_COMPLETE","size":32,"parent_id":"0"}],"next_page_token":""}"#,
     ]);
-    let client = XunleiClient::new(XunleiSession::refresh("refresh", "device-1"), &http);
+    let client = XunleiClient::new(XunleiSession::refresh("refresh", profile()), &http);
 
     let directory = client.directory("0").unwrap();
 
@@ -63,10 +73,18 @@ fn xunlei_refreshes_rotates_token_and_sends_bearer_and_device_headers() {
     assert_eq!(client.session().refresh_token, "next");
     let requests = http.requests();
     assert!(requests[0].url.ends_with("/v1/auth/token"));
+    let refresh: serde_json::Value =
+        serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(refresh["grant_type"], "refresh_token");
+    assert_eq!(refresh["client_id"], "official-browser-client");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(requests[0].body.as_deref().unwrap()).unwrap()
-            ["grant_type"],
-        "refresh_token"
+        requests[0].headers["X-Client-Id"],
+        "official-browser-client"
+    );
+    assert_eq!(requests[0].headers["X-Client-Version"], "1.0.0");
+    assert_eq!(
+        requests[0].headers["User-Agent"],
+        "Mozilla/5.0 XunleiBrowser/1.0"
     );
     assert_eq!(requests[1].headers["Authorization"], "Bearer access");
     assert_eq!(requests[1].headers["X-Device-Id"], "device-1");
@@ -78,7 +96,7 @@ fn xunlei_refreshes_rotates_token_and_sends_bearer_and_device_headers() {
 fn xunlei_security_challenge_is_web_auth_not_link_expiry() {
     assert!(matches!(
         XunleiClient::new(
-            XunleiSession::with_access("access", "refresh", "device-1"),
+            XunleiSession::with_access("access", "refresh", profile()),
             &RecordingHttp::challenge()
         )
         .directory("0"),
@@ -94,7 +112,7 @@ fn xunlei_download_returns_only_fresh_https_content_links() {
         r#"{"id":"f1","name":"archive.zip","web_content_link":"https://cdn.xunlei.example/archive.zip?signature=short"}"#,
     ]);
     let client = XunleiClient::new(
-        XunleiSession::with_access("access", "refresh", "device-1"),
+        XunleiSession::with_access("access", "refresh", profile()),
         &https,
     );
     assert_eq!(
@@ -111,7 +129,7 @@ fn xunlei_download_returns_only_fresh_https_content_links() {
     ]);
     assert!(matches!(
         XunleiClient::new(
-            XunleiSession::with_access("access", "refresh", "device-1"),
+            XunleiSession::with_access("access", "refresh", profile()),
             &insecure
         )
         .download("f1"),
@@ -123,9 +141,17 @@ fn xunlei_download_returns_only_fresh_https_content_links() {
 // perform the wrong file operation or the wrong destination.
 #[test]
 fn xunlei_file_mutations_and_upload_initialization_use_native_drive_contracts() {
-    let http = RecordingHttp::sequence(&["{}", "{}", "{}", "{}", "{}", "{}"]);
+    let http = RecordingHttp::sequence(&[
+        "{}",
+        "{}",
+        "{}",
+        "{}",
+        "{}",
+        "{}",
+        r#"{"upload_type":"UPLOAD_TYPE_RESUMABLE","resumable":{"kind":"drive#resumable","provider":"aws","params":{"access_key_id":"key-id","access_key_secret":"key-secret","bucket":"bucket","endpoint":"https://oss.xunlei.example","expiration":"2030-01-01T00:00:00Z","key":"object-key","security_token":"upload-token"}}}"#,
+    ]);
     let client = XunleiClient::new(
-        XunleiSession::with_access("access", "refresh", "device-1"),
+        XunleiSession::with_access("access", "refresh", profile()),
         &http,
     );
     let ids = vec!["file-1".to_owned(), "folder-2".to_owned()];
@@ -135,7 +161,12 @@ fn xunlei_file_mutations_and_upload_initialization_use_native_drive_contracts() 
     client.move_files(&ids, "destination").unwrap();
     client.copy_files(&ids, "destination").unwrap();
     client.trash(&ids).unwrap();
-    client.upload_init("parent", "upload.bin", 64).unwrap();
+    let upload = client
+        .upload_init("parent", "upload.bin", 64, "content-gcid")
+        .unwrap();
+    assert_eq!(upload.provider, "aws");
+    assert_eq!(upload.endpoint, "https://oss.xunlei.example");
+    assert_eq!(upload.key, "object-key");
 
     let requests = http.requests();
     assert!(requests[0].url.ends_with("/drive/v1/files"));
@@ -152,9 +183,37 @@ fn xunlei_file_mutations_and_upload_initialization_use_native_drive_contracts() 
         "destination"
     );
     assert!(requests[3].url.ends_with("/drive/v1/files:batchCopy"));
-    assert!(requests[4].url.ends_with("/drive/v1/files:batchTrash"));
+    assert_eq!(requests[4].method, "PATCH");
+    assert!(requests[4].url.ends_with("/drive/v1/files/file-1/trash"));
+    assert_eq!(requests[4].body.as_deref(), Some("{}"));
+    assert_eq!(requests[5].method, "PATCH");
+    assert!(requests[5].url.ends_with("/drive/v1/files/folder-2/trash"));
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(requests[5].body.as_deref().unwrap()).unwrap(),
-        serde_json::json!({"kind":"drive#file","parent_id":"parent","name":"upload.bin","size":64})
+        serde_json::from_str::<serde_json::Value>(requests[6].body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"kind":"drive#file","parent_id":"parent","name":"upload.bin","size":64,"hash":"content-gcid","upload_type":"UPLOAD_TYPE_RESUMABLE"})
     );
+}
+
+// Break caught: showing an unfinished offline/upload task as a ready cloud
+// file makes a non-downloadable object available to the user.
+#[test]
+fn xunlei_directory_requests_and_maps_only_complete_downloadable_files() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"files":[{"id":"ready","name":"ready.zip","kind":"drive#file","phase":"PHASE_TYPE_COMPLETE","size":"7"},{"id":"running","name":"running.zip","kind":"drive#file","phase":"PHASE_TYPE_RUNNING","size":"3"}],"next_page_token":""}"#,
+    ]);
+    let client = XunleiClient::new(
+        XunleiSession::with_access("access", "refresh", profile()),
+        &http,
+    );
+
+    let directory = client.directory("0").unwrap();
+
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, "ready");
+    let request = http.requests().pop().unwrap();
+    assert!(request.url.contains("__type=drive"));
+    assert!(request.url.contains("with_audit=true"));
+    assert!(request
+        .url
+        .contains("%22phase%22%3A%7B%22eq%22%3A%22PHASE_TYPE_COMPLETE%22%7D"));
 }

@@ -19,8 +19,27 @@ use std::{
 
 const AUTH: &str = "https://xluser-ssl.xunlei.com";
 const DRIVE: &str = "https://api-pan.xunlei.com";
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
+/// Non-secret identity values captured from the official browser/QR flow.
+/// They are retained because Xunlei binds refresh and drive calls to that
+/// profile; callers must never fabricate a replacement profile.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct XunleiClientProfile {
+    pub client_id: String,
+    pub device_id: String,
+    pub client_version: String,
+    pub package_name: String,
+    pub user_agent: String,
+}
+
+impl XunleiClientProfile {
+    fn is_complete(&self) -> bool {
+        !self.client_id.is_empty()
+            && !self.device_id.is_empty()
+            && !self.client_version.is_empty()
+            && !self.package_name.is_empty()
+            && !self.user_agent.is_empty()
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct XunleiSession {
@@ -28,7 +47,8 @@ pub struct XunleiSession {
     pub refresh_token: String,
     #[serde(default)]
     pub expires_at: u64,
-    pub device_id: String,
+    #[serde(default)]
+    pub profile: XunleiClientProfile,
     #[serde(default)]
     pub user_id: String,
     /// A security token issued during the official web/QR authorization flow.
@@ -40,12 +60,12 @@ pub struct XunleiSession {
 }
 
 impl XunleiSession {
-    pub fn refresh(refresh_token: impl Into<String>, device_id: impl Into<String>) -> Self {
+    pub fn refresh(refresh_token: impl Into<String>, profile: XunleiClientProfile) -> Self {
         Self {
             access_token: String::new(),
             refresh_token: refresh_token.into(),
             expires_at: 0,
-            device_id: device_id.into(),
+            profile,
             user_id: String::new(),
             security_token: String::new(),
             auth_method: CloudAuthMethod::Web,
@@ -55,13 +75,13 @@ impl XunleiSession {
     pub fn with_access(
         access_token: impl Into<String>,
         refresh_token: impl Into<String>,
-        device_id: impl Into<String>,
+        profile: XunleiClientProfile,
     ) -> Self {
         Self {
             access_token: access_token.into(),
             refresh_token: refresh_token.into(),
             expires_at: u64::MAX,
-            device_id: device_id.into(),
+            profile,
             user_id: String::new(),
             security_token: String::new(),
             auth_method: CloudAuthMethod::Web,
@@ -72,25 +92,42 @@ impl XunleiSession {
     pub fn from_web_authorization(
         access_token: impl Into<String>,
         refresh_token: impl Into<String>,
-        device_id: impl Into<String>,
         user_id: impl Into<String>,
         security_token: impl Into<String>,
+        profile: XunleiClientProfile,
         expires_at: u64,
     ) -> Result<Self, QuarkError> {
         let session = Self {
             access_token: access_token.into(),
             refresh_token: refresh_token.into(),
             expires_at,
-            device_id: device_id.into(),
+            profile,
             user_id: user_id.into(),
             security_token: security_token.into(),
             auth_method: CloudAuthMethod::Web,
         };
-        if session.refresh_token.is_empty() || session.device_id.is_empty() {
+        if session.refresh_token.is_empty() || !session.profile.is_complete() {
             return Err(QuarkError::AuthorizationPending);
         }
         Ok(session)
     }
+}
+
+/// Credentials required to start the provider's resumable object upload.
+/// This is deliberately not serializable: it contains short-lived upload
+/// credentials and must be consumed immediately by the upload executor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XunleiResumableUpload {
+    pub upload_type: String,
+    pub kind: String,
+    pub provider: String,
+    pub access_key_id: String,
+    pub access_key_secret: String,
+    pub bucket: String,
+    pub endpoint: String,
+    pub expiration: String,
+    pub key: String,
+    pub security_token: String,
 }
 
 fn now() -> u64 {
@@ -117,6 +154,16 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
 
     pub fn session(&self) -> XunleiSession {
         self.session.borrow().clone()
+    }
+
+    fn profile_headers(profile: &XunleiClientProfile) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("X-Device-Id".into(), profile.device_id.clone()),
+            ("X-Client-Id".into(), profile.client_id.clone()),
+            ("X-Client-Version".into(), profile.client_version.clone()),
+            ("User-Agent".into(), profile.user_agent.clone()),
+            ("Accept".into(), "application/json;charset=UTF-8".into()),
+        ])
     }
 
     fn challenge(value: &Value, status: u16) -> bool {
@@ -156,13 +203,10 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     }
 
     fn refresh(&self, previous: XunleiSession) -> Result<XunleiSession, QuarkError> {
-        if previous.refresh_token.is_empty() || previous.device_id.is_empty() {
+        if previous.refresh_token.is_empty() || !previous.profile.is_complete() {
             return Err(QuarkError::AuthorizationExpired);
         }
-        let mut headers = BTreeMap::from([
-            ("X-Device-Id".into(), previous.device_id.clone()),
-            ("User-Agent".into(), USER_AGENT.into()),
-        ]);
+        let mut headers = Self::profile_headers(&previous.profile);
         if !previous.security_token.is_empty() {
             headers.insert("X-Captcha-Token".into(), previous.security_token.clone());
         }
@@ -174,6 +218,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 json!({
                     "grant_type": "refresh_token",
                     "refresh_token": previous.refresh_token,
+                    "client_id": previous.profile.client_id,
                 })
                 .to_string(),
             ),
@@ -220,17 +265,14 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         body: Option<Value>,
         session: &XunleiSession,
     ) -> Result<Value, QuarkError> {
-        if session.access_token.is_empty() || session.device_id.is_empty() {
+        if session.access_token.is_empty() || !session.profile.is_complete() {
             return Err(QuarkError::AuthorizationExpired);
         }
-        let mut headers = BTreeMap::from([
-            (
-                "Authorization".into(),
-                format!("Bearer {}", session.access_token),
-            ),
-            ("X-Device-Id".into(), session.device_id.clone()),
-            ("User-Agent".into(), USER_AGENT.into()),
-        ]);
+        let mut headers = Self::profile_headers(&session.profile);
+        headers.insert(
+            "Authorization".into(),
+            format!("Bearer {}", session.access_token),
+        );
         if !session.security_token.is_empty() {
             headers.insert("X-Captcha-Token".into(), session.security_token.clone());
         }
@@ -294,10 +336,10 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             let value = self.request(
                 "GET",
                 format!(
-                    "{DRIVE}/drive/v1/files?parent_id={}&page_token={}&limit=100&filters={}",
+                    "{DRIVE}/drive/v1/files?space=&__type=drive&refresh=true&__sync=true&parent_id={}&page_token={}&with_audit=true&limit=100&filters={}",
                     encoded(parent),
                     encoded(&page_token),
-                    encoded(r#"{"trashed":{"eq":false}}"#),
+                    encoded(r#"{"phase":{"eq":"PHASE_TYPE_COMPLETE"},"trashed":{"eq":false}}"#),
                 ),
                 None,
             )?;
@@ -305,6 +347,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 .as_array()
                 .ok_or(QuarkError::InvalidResponse)?
             {
+                if file["phase"].as_str() != Some("PHASE_TYPE_COMPLETE") {
+                    continue;
+                }
                 items.push(Self::file(file, parent)?);
             }
             page_token = value["next_page_token"].as_str().unwrap_or("").into();
@@ -379,22 +424,59 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     }
 
     pub fn trash(&self, ids: &[String]) -> Result<(), QuarkError> {
-        self.request(
-            "POST",
-            format!("{DRIVE}/drive/v1/files:batchTrash"),
-            Some(json!({"ids":ids})),
-        )?;
+        for id in ids {
+            self.request(
+                "PATCH",
+                format!("{DRIVE}/drive/v1/files/{}/trash", encoded(id)),
+                Some(json!({})),
+            )?;
+        }
         Ok(())
     }
 
-    /// Initiates an upload; callers consume any provider-provided upload URLs
-    /// immediately and never store them with the stable cloud source.
-    pub fn upload_init(&self, parent: &str, name: &str, size: u64) -> Result<Value, QuarkError> {
-        self.request(
+    /// Initiates an upload and returns the provider-issued resumable contract.
+    /// Its short-lived credentials must be consumed immediately and never
+    /// stored with the stable cloud source.
+    pub fn upload_init(
+        &self,
+        parent: &str,
+        name: &str,
+        size: u64,
+        gcid: &str,
+    ) -> Result<XunleiResumableUpload, QuarkError> {
+        if gcid.is_empty() {
+            return Err(QuarkError::InvalidInput("缺少上传内容 GCID".into()));
+        }
+        let value = self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files"),
-            Some(json!({"kind":"drive#file","parent_id":parent,"name":name,"size":size})),
-        )
+            Some(json!({
+                "kind":"drive#file",
+                "parent_id":parent,
+                "name":name,
+                "size":size,
+                "hash":gcid,
+                "upload_type":"UPLOAD_TYPE_RESUMABLE",
+            })),
+        )?;
+        let resumable = &value["resumable"];
+        let params = &resumable["params"];
+        let upload = XunleiResumableUpload {
+            upload_type: required(&value, "upload_type")?,
+            kind: required(resumable, "kind")?,
+            provider: required(resumable, "provider")?,
+            access_key_id: required(params, "access_key_id")?,
+            access_key_secret: required(params, "access_key_secret")?,
+            bucket: required(params, "bucket")?,
+            endpoint: required(params, "endpoint")?,
+            expiration: required(params, "expiration")?,
+            key: required(params, "key")?,
+            security_token: required(params, "security_token")?,
+        };
+        if upload.upload_type != "UPLOAD_TYPE_RESUMABLE" || upload.kind != "drive#resumable" {
+            return Err(QuarkError::InvalidResponse);
+        }
+        Ok(upload)
     }
 
     /// Retrieves a short-lived direct link afresh for every download request.
