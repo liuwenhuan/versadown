@@ -287,9 +287,13 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [authorizationCapabilities, setAuthorizationCapabilities] = useState<CloudAuthorizationCapabilities>(() => fallbackCapabilities[provider]);
-  const effectiveAuthorizationCapabilities = authorizationCapabilities.provider === provider
-    ? authorizationCapabilities
+  const [authorizationCapabilityState, setAuthorizationCapabilityState] = useState(() => ({
+    provider,
+    client,
+    capabilities: fallbackCapabilities[provider]
+  }));
+  const effectiveAuthorizationCapabilities = authorizationCapabilityState.provider === provider && authorizationCapabilityState.client === client
+    ? authorizationCapabilityState.capabilities
     : fallbackCapabilities[provider];
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
@@ -356,17 +360,20 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   useEffect(() => {
     let active = true;
+    const setCapabilitiesForCurrentRequest = (capabilities: CloudAuthorizationCapabilities) => {
+      setAuthorizationCapabilityState((current) => current.provider === provider && current.client === client
+        && current.capabilities.provider === capabilities.provider && current.capabilities.web === capabilities.web && current.capabilities.password === capabilities.password
+        ? current
+        : { provider, client, capabilities });
+    };
     void client.getCloudAuthorizationCapabilities(provider).then((next) => {
       if (active && next.provider === provider) {
-        setAuthorizationCapabilities((current) => current.provider === next.provider && current.web === next.web && current.password === next.password ? current : next);
+        setCapabilitiesForCurrentRequest(next);
       } else if (active) {
-        setAuthorizationCapabilities(fallbackCapabilities[provider]);
+        setCapabilitiesForCurrentRequest(fallbackCapabilities[provider]);
       }
     }).catch(() => {
-      if (active) {
-        const fallback = fallbackCapabilities[provider];
-        setAuthorizationCapabilities((current) => current.provider === fallback.provider && current.web === fallback.web && current.password === fallback.password ? current : fallback);
-      }
+      if (active) setCapabilitiesForCurrentRequest(fallbackCapabilities[provider]);
     });
     return () => { active = false; };
   }, [client, provider]);

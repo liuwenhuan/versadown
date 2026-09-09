@@ -124,6 +124,19 @@ it('fails closed while a provider change waits for its capability response', asy
   expect(screen.getByText(/阿里未提供可用的账号密码登录接口/)).toBeVisible();
 });
 
+it('fails closed while a same-provider client change waits for its capability response', async () => {
+  const pending = new Promise<never>(() => undefined);
+  const resolvedClient = createCloudFake();
+  const pendingClient = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockReturnValue(pending) });
+  const { rerender } = render(<CloudManager provider={'baidu' as never} client={resolvedClient} authorizationOnly />);
+
+  expect(await screen.findByRole('button', { name: '登录百度账号' })).toBeVisible();
+  rerender(<CloudManager provider={'baidu' as never} client={pendingClient} authorizationOnly />);
+
+  expect(screen.queryByRole('button', { name: '登录百度账号' })).not.toBeInTheDocument();
+  expect(screen.getByText(/百度未提供可用的账号密码登录接口/)).toBeVisible();
+});
+
 it('recovers an existing account on mount before loading its root directory', async () => {
   const client = createCloudFake({ getCloudAccount: vi.fn().mockResolvedValue({ id: 'saved-1', displayName: 'saved-alice', provider: 'quark', authMethod: 'web' }) });
   render(<CloudManager provider="quark" client={client} />);
