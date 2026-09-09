@@ -144,8 +144,14 @@ pub fn restore_account(
             baidu::BaiduClient::new(session, http).account()
         }
         CloudProvider::Tianyi => {
-            let session = load_provider_session(CloudProvider::Tianyi, store)?;
-            tianyi::TianyiClient::new(session, http).account()
+            let session: tianyi::TianyiSession =
+                load_provider_session(CloudProvider::Tianyi, store)?;
+            let client = tianyi::TianyiClient::new(session.clone(), http);
+            if session.auth_method == CloudAuthMethod::Web {
+                client.web_account()
+            } else {
+                client.account()
+            }
         }
         CloudProvider::Aliyun => aliyun::AliyunClient::new(store, http).account(),
         CloudProvider::Xunlei => {
@@ -582,12 +588,10 @@ fn finalize_tianyi_web_authorization(
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
     let client = tianyi::TianyiClient::new(session.clone(), http);
-    let account = authorization_result(client.account())?;
-    // The portal account response is the authentication boundary.  Keep the
-    // root-directory request in normal file-management flow: treating it as
-    // part of authorization made an otherwise valid browser login retry
-    // forever whenever that independent endpoint was delayed or returned a
-    // non-list response.
+    let account = client.web_account()?;
+    // The official browser session is the authorization boundary. Keep both
+    // private account and root-directory requests in normal file-management
+    // flow: either can fail independently despite a completed browser login.
     save_provider_session(CloudProvider::Tianyi, store, &session)?;
     Ok(account)
 }
@@ -1523,6 +1527,16 @@ mod tests {
         }
     }
 
+    struct OfflineTransport;
+
+    impl CloudHttpTransport for OfflineTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Err(QuarkError::Transport(
+                "private account endpoint unavailable".into(),
+            ))
+        }
+    }
+
     #[test]
     fn baidu_web_authorization_persists_the_account_without_waiting_for_root_listing() {
         let credentials = MemoryCredentialStore::default();
@@ -1542,24 +1556,21 @@ mod tests {
     }
 
     #[test]
-    fn tianyi_web_authorization_persists_the_verified_account_without_waiting_for_root_listing() {
-        // The portal account probe is sufficient proof that the browser
-        // session is authenticated. A transient or differently-shaped root
-        // listing must not strand a finished login in its authorization
-        // window before the session can be saved.
+    fn tianyi_web_authorization_persists_the_browser_session_without_a_private_probe() {
+        // The official WebView already proved the user completed login. A
+        // separately failing private account endpoint must not keep that
+        // authorization window open or prevent its workspace tab.
         let credentials = MemoryCredentialStore::default();
-        let transport = SequenceTransport(Mutex::new(VecDeque::from([
-            r#"{"res_code":0,"loginName":"tianyi@example.cn"}"#,
-        ])));
 
         let account = super::finalize_tianyi_web_authorization(
-            TianyiSession::cookie("COOKIE_LOGIN_USER=browser-session"),
+            TianyiSession::cookie("SSON=official-browser-session"),
             &credentials,
-            &transport,
+            &OfflineTransport,
         )
-        .unwrap();
+        .expect("an official Tianyi browser session can complete authorization offline");
 
-        assert_eq!(account.id, "tianyi@example.cn");
+        assert_eq!(account.id, "tianyi-web");
+        assert_eq!(account.provider, CloudProvider::Tianyi);
         assert!(credentials.load("tianyi").unwrap().is_some());
     }
 

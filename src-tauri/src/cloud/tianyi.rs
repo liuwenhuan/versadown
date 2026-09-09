@@ -86,6 +86,23 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         })?;
         tianyi_json(&response)
     }
+
+    /// The official Tianyi browser window is the authentication boundary for
+    /// web authorization.  Its session cookie is sufficient to establish the
+    /// workspace; probing a separate private account endpoint here can fail
+    /// independently and must not strand a completed login in that window.
+    pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
+        if self.session.cookie.trim().is_empty() {
+            return Err(QuarkError::AuthorizationPending);
+        }
+        Ok(CloudAccount {
+            provider: CloudProvider::Tianyi,
+            id: "tianyi-web".into(),
+            display_name: "天翼云盘".into(),
+            auth_method: self.session.auth_method,
+        })
+    }
+
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
         let value = self.request(
             "GET",
