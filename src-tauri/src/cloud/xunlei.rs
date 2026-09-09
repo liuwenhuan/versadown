@@ -207,7 +207,7 @@ impl XunleiSession {
             web_context: XunleiWebContext::default(),
             auth_method: CloudAuthMethod::Web,
         };
-        if session.access_token.is_empty() || session.refresh_token.is_empty() {
+        if session.access_token.is_empty() || session.user_id.is_empty() {
             return Err(QuarkError::AuthorizationPending);
         }
         // The current official web client grants a bearer session via its
@@ -215,10 +215,7 @@ impl XunleiSession {
         // required by the token refresh endpoint.  Keep that bearer usable
         // for the current browser session instead of pretending to refresh it
         // with fabricated native fields.
-        if !session.profile.is_drive_complete() {
-            if session.user_id.is_empty() {
-                return Err(QuarkError::AuthorizationPending);
-            }
+        if session.refresh_token.is_empty() || !session.profile.is_drive_complete() {
             session.expires_at = u64::MAX;
         }
         Ok(session)
@@ -292,13 +289,12 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     fn is_browser_bearer_session(session: &XunleiSession) -> bool {
         session.auth_method == CloudAuthMethod::Web
             && !session.access_token.is_empty()
-            && !session.refresh_token.is_empty()
             && !session.user_id.is_empty()
             // A web session can expose its genuine browser device/profile
             // while deliberately withholding the native-only refresh secret.
             // It is usable until the provider rejects that current bearer;
             // never turn it into an impossible native refresh attempt.
-            && !session.profile.can_refresh()
+            && (session.refresh_token.is_empty() || !session.profile.can_refresh())
     }
 
     /// Builds the account used to finish an official browser authorization.

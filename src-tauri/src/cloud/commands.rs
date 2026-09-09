@@ -507,14 +507,14 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
  // Device and client identity can live in a sibling Vuex module. `inspect`
  // still returns only its narrow token/profile allowlist, never the state
  // object or arbitrary account data.
- if (!out.access_token || !out.refresh_token || !out.user_id) inspect(window.$nuxt?.$store?.state, 0);
- if ((!out.access_token || !out.refresh_token || !out.user_id) && window.__NUXT__?.state) inspect(window.__NUXT__.state, 0);
+ if (!out.access_token || !out.user_id) inspect(window.$nuxt?.$store?.state, 0);
+ if ((!out.access_token || !out.user_id) && window.__NUXT__?.state) inspect(window.__NUXT__.state, 0);
  if (!out.user_agent && typeof navigator?.userAgent === 'string') out.user_agent = navigator.userAgent;
  // The web client deliberately does not expose a native client profile or
  // client secret.  A current browser bearer and stable user id are sufficient
  // to complete the browser handshake; the Rust adapter must not fabricate
  // missing native-only fields.
- return out.access_token && out.refresh_token && out.user_id ? out : null;
+ return out.access_token && out.user_id ? out : null;
 })()"#;
 
 fn parse_aliyun_web_session(value: serde_json::Value) -> Result<aliyun::AliyunSession, QuarkError> {
@@ -560,7 +560,7 @@ fn parse_xunlei_web_session(value: serde_json::Value) -> Result<xunlei::XunleiSe
     let optional = |key| value[key].as_str().unwrap_or_default().to_owned();
     xunlei::XunleiSession::from_web_authorization(
         value["access_token"].as_str().unwrap_or_default(),
-        field("refresh_token")?,
+        optional("refresh_token"),
         field("user_id")?,
         optional("security_token"),
         xunlei::XunleiClientProfile {
@@ -1724,6 +1724,44 @@ mod tests {
     }
 
     #[test]
+    fn xunlei_web_authorization_accepts_a_current_bearer_without_a_refresh_token() {
+        // Break caught: treating an optional native refresh credential as a
+        // prerequisite for the already-current official browser bearer keeps
+        // a completed login stuck in its authorization window.
+        let credentials = MemoryCredentialStore::default();
+        let session = super::parse_xunlei_web_session(serde_json::json!({
+            "access_token": "browser-access",
+            "user_id": "browser-user",
+        }))
+        .expect("the current browser bearer needs no native refresh token");
+        let context = XunleiWebContext {
+            session_id: String::new(),
+            peer_id: "official-peer".into(),
+            device_id: String::new(),
+            credit_key: "official-credit".into(),
+        };
+
+        let account = super::finalize_xunlei_web_authorization(
+            session,
+            context,
+            &credentials,
+            &OfflineTransport,
+        )
+        .expect("the current bearer completes authorization until it expires");
+
+        assert_eq!(account.id, "browser-user");
+        let saved: XunleiSession = serde_json::from_slice(
+            &credentials
+                .load("xunlei")
+                .unwrap()
+                .expect("session is saved"),
+        )
+        .unwrap();
+        assert!(saved.refresh_token.is_empty());
+        assert_eq!(saved.web_context.session_id, "browser-access");
+    }
+
+    #[test]
     fn uc_web_authorization_keeps_unverified_browser_cookies_out_of_storage() {
         // Break caught: saving immediately after merely seeing __pus/__puus
         // creates an unusable tab when UC requires web verification for its
@@ -1742,6 +1780,60 @@ mod tests {
 
         assert!(matches!(error, QuarkError::AuthorizationPending));
         assert!(credentials.load("uc").unwrap().is_none());
+    }
+
+    #[test]
+    fn uc_web_authorization_does_not_replace_a_previous_session_when_root_verification_fails() {
+        // Break caught: persisting a candidate browser cookie before the first
+        // root read succeeds destroys a previously working UC authorization.
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("uc", b"previous-verified-session")
+            .unwrap();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"code":0,"status":200,"message":"risk verification required"}"#,
+        ])));
+
+        let error = super::finalize_uc_web_authorization(
+            UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
+            &credentials,
+            &transport,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, QuarkError::AuthorizationPending));
+        assert_eq!(
+            credentials.load("uc").unwrap().as_deref(),
+            Some(b"previous-verified-session".as_slice())
+        );
+    }
+
+    #[test]
+    fn uc_web_authorization_saves_a_candidate_only_after_root_verification_succeeds() {
+        // Break caught: never persisting a verified candidate leaves a
+        // successful official login unable to restore its UC workspace.
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("uc", b"previous-verified-session")
+            .unwrap();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+        ])));
+
+        let account = super::finalize_uc_web_authorization(
+            UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
+            &credentials,
+            &transport,
+        )
+        .expect("a verified root response completes authorization");
+
+        assert_eq!(account.id, "new-user");
+        let saved: UcSession =
+            serde_json::from_slice(&credentials.load("uc").unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved.cookie,
+            "__uid=new-user; __pus=new-identity; __puus=new-session"
+        );
     }
 
     #[test]
