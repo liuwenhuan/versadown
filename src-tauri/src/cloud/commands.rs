@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{webview::PageLoadEvent, AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 
 pub struct CloudState {
@@ -265,6 +265,20 @@ fn valid_name(name: &str) -> Result<(), QuarkError> {
     }
 }
 
+// Cloud vendors place their login controls at the upper right of their wide
+// desktop pages.  Run after every completed navigation because login flows
+// often redirect through one or more provider-owned pages before rendering.
+const AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS: &str = r#"(() => {
+  const scrollToTopRight = () => {
+    const root = document.scrollingElement || document.documentElement || document.body;
+    const maxLeft = Math.max(0, root.scrollWidth - window.innerWidth);
+    window.scrollTo({ left: maxLeft, top: 0, behavior: 'auto' });
+  };
+  scrollToTopRight();
+  requestAnimationFrame(scrollToTopRight);
+  for (const delay of [120, 480, 1000]) setTimeout(scrollToTopRight, delay);
+})()"#;
+
 #[tauri::command]
 pub async fn cloud_begin_authorization(
     app: AppHandle,
@@ -294,6 +308,11 @@ pub async fn cloud_begin_authorization(
         .title(format!("{} 网页授权", provider.key()))
         .inner_size(1024.0, 760.0)
         .incognito(true)
+        .on_page_load(|window, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                let _ = window.eval(AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS);
+            }
+        })
         .build()
         .map_err(|_| QuarkError::WebAuthorizationRequired)?;
     }
@@ -1182,6 +1201,22 @@ mod tests {
         QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
+
+    #[test]
+    fn cloud_authorization_window_repositions_each_loaded_page_to_the_top_right() {
+        // All providers go through the same external WebView builder.  The
+        // post-navigation hook must reset the document to its top-right login
+        // area even when a provider performs an intermediate redirect.
+        let source = include_str!("commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes its tests");
+        assert!(source.contains("AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS"));
+        assert!(source.contains(".on_page_load(|window, payload|"));
+        assert!(source.contains("PageLoadEvent::Finished"));
+        assert!(source.contains("window.eval(AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS)"));
+        assert!(source.contains("window.scrollTo({ left: maxLeft, top: 0"));
+    }
 
     #[test]
     fn stable_cloud_source_decodes_the_file_id_without_accepting_url_parts() {

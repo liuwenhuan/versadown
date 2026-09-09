@@ -6,13 +6,25 @@ const path = require('node:path');
 const WebSocket = require('ws');
 
 const projectRoot = path.resolve(__dirname, '..');
-const executable = path.join(
+const provider = process.env.ALLDOWNLOADER_TEST_PROVIDER || 'aliyun';
+const providerLabels = {
+  quark: '夸克网盘',
+  pikpak: 'PikPak网盘',
+  baidu: '百度网盘',
+  tianyi: '天翼云盘',
+  aliyun: '阿里云盘',
+  xunlei: '迅雷云盘',
+  uc: 'UC网盘',
+};
+const executable = process.env.ALLDOWNLOADER_TEST_BINARY || path.join(
   projectRoot,
   'artifacts',
   'AllDownloader-cloud-workspace-v16',
   'AllDownloader.exe',
 );
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+if (!providerLabels[provider]) throw new Error(`不支持的测试网盘：${provider}`);
 
 async function availablePort() {
   return await new Promise((resolve, reject) => {
@@ -90,15 +102,21 @@ async function authorizationPageState(port) {
     if (target.type !== 'page') return false;
     try {
       const hostname = new URL(target.url).hostname;
-      return hostname === 'aliyundrive.com'
-        || hostname.endsWith('.aliyundrive.com')
-        || hostname === 'alipan.com'
-        || hostname.endsWith('.alipan.com');
+      return hostname !== 'tauri.localhost';
     } catch (_) {
       return false;
     }
   });
   if (!page) return { open: false, sessionReady: false };
+
+  const viewport = await evaluate(page, `(() => {
+    const root = document.scrollingElement || document.documentElement || document.body;
+    return {
+      x: Math.round(window.scrollX),
+      y: Math.round(window.scrollY),
+      maxX: Math.max(0, Math.round(root.scrollWidth - window.innerWidth)),
+    };
+  })()`);
 
   // This runs in the official authorization page.  It deliberately returns
   // only booleans, HTTP status and response field names: credentials and
@@ -164,7 +182,7 @@ async function authorizationPageState(port) {
       result.userProbe = { networkError: String(error?.name || 'fetch_failed') };
     }
     return result;
-  })()`);
+  })()`).then((session) => ({ ...session, viewport }));
 }
 
 function safeError(error) {
@@ -218,6 +236,10 @@ async function removeTemporaryDirectory(directory) {
 
 async function run() {
   if (!fs.existsSync(executable)) throw new Error(`未找到发布二进制：${executable}`);
+  const viewportOnly = process.env.ALLDOWNLOADER_VERIFY_AUTH_VIEWPORT_ONLY === '1';
+  if (!viewportOnly && provider !== 'aliyun') {
+    throw new Error('完整网页登录验证当前仅支持 aliyun；其他网盘请设置 ALLDOWNLOADER_VERIFY_AUTH_VIEWPORT_ONLY=1');
+  }
 
   const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-aliyun-live-'));
   const port = await availablePort();
@@ -237,15 +259,22 @@ async function run() {
 
   try {
     const manager = await waitForManager(port, child);
-    const begin = await invoke(manager, 'cloud_begin_authorization', { provider: 'aliyun' });
-    if (!begin.ok) throw new Error(`阿里授权窗口无法打开：${safeError(begin.error)}`);
+    const begin = await invoke(manager, 'cloud_begin_authorization', { provider });
+    if (!begin.ok) throw new Error(`${providerLabels[provider]}授权窗口无法打开：${safeError(begin.error)}`);
 
-    process.stdout.write('阿里云盘官方授权窗口已打开。请在该窗口完成登录；后台将自动验证账号与根目录读取。\n');
+    process.stdout.write(`${providerLabels[provider]}官方授权窗口已打开。请在该窗口完成登录；后台将自动验证账号与根目录读取。\n`);
     const deadline = Date.now() + (10 * 60 * 1000);
     let sessionDetected = false;
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error(`应用在授权完成前退出（${child.exitCode}）`);
       const authorization = await authorizationPageState(port).catch(() => ({ open: false, sessionReady: false }));
+      if (viewportOnly && authorization.open && authorization.viewport) {
+        const { x, y, maxX } = authorization.viewport;
+        if (y === 0 && Math.abs(x - maxX) <= 1) {
+          process.stdout.write(`${providerLabels[provider]}授权页初始视口验证通过：x=${x} / maxX=${maxX}，y=${y}。\n`);
+          return;
+        }
+      }
       if (!authorization.sessionReady) {
         await delay(1500);
         continue;
