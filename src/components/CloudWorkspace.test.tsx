@@ -12,7 +12,8 @@ function createClient(accounts: Record<string, TestAccount | undefined> = {}) {
     loginCloudWithPassword: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => Promise.resolve({ id: `${provider}-1`, displayName: `${provider}-alice`, provider, authMethod: 'password' as const })),
     getCloudAccount: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => accounts[provider] ? Promise.resolve(accounts[provider]) : Promise.reject(Object.assign(new Error('未授权'), { code: 'unauthorized' }))),
     listCloudDirectory: vi.fn().mockImplementation((provider: string, parentId = '0') => Promise.resolve({ id: parentId, items: [{ id: `${provider}-file`, parentId, name: `${provider}-文件.txt`, kind: 'file', size: 10, modifiedAt: '刚刚' }] })),
-    createCloudDirectory: vi.fn().mockResolvedValue(undefined), renameCloudFile: vi.fn().mockResolvedValue(undefined), moveCloudFiles: vi.fn().mockResolvedValue(undefined), copyCloudFiles: vi.fn().mockResolvedValue(undefined), trashCloudFiles: vi.fn().mockResolvedValue(undefined), downloadCloudFile: vi.fn().mockResolvedValue({}), logoutCloud: vi.fn().mockResolvedValue(undefined), pickAndUploadFiles: vi.fn().mockResolvedValue(undefined)
+    createCloudDirectory: vi.fn().mockResolvedValue(undefined), renameCloudFile: vi.fn().mockResolvedValue(undefined), moveCloudFiles: vi.fn().mockResolvedValue(undefined), copyCloudFiles: vi.fn().mockResolvedValue(undefined), trashCloudFiles: vi.fn().mockResolvedValue(undefined), downloadCloudFile: vi.fn().mockResolvedValue({}), logoutCloud: vi.fn().mockResolvedValue(undefined), pickAndUploadFiles: vi.fn().mockResolvedValue(undefined),
+    getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' }))
   };
 }
 
@@ -29,7 +30,27 @@ it('defaults to the cloud management tab and lists every supported provider ther
   expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('tab', { name: 'PikPak网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
+});
+
+it('renders authorization cards for every newly supported cloud service', async () => {
+  const client = createClient();
+  render(<CloudWorkspace client={client as never} />);
+
+  for (const label of ['百度', '天翼', '阿里', '迅雷']) {
+    expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
+  }
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
+});
+
+it('ignores a recovered account when the provider does not match the request', async () => {
+  const client = createClient();
+  client.getCloudAccount.mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' });
+  render(<CloudWorkspace client={client as never} />);
+
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
+  expect(screen.getAllByRole('tab', { name: 'PikPak网盘' })).toHaveLength(1);
+  expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument();
 });
 
 it('never renders logged-out controls before persisted account recovery finishes', async () => {
@@ -101,7 +122,7 @@ it('recovers accounts into tabs while still opening on cloud management', async 
   expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
   expect(client.listCloudDirectory).not.toHaveBeenCalled();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(6));
 });
 
 it('shows only authorized provider tabs and switches their real directory views', async () => {

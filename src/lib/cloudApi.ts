@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
-import type { CloudAccount, CloudAuthorization, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from './cloudTypes';
+import type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from './cloudTypes';
 
+export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
 export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
 export const loginCloudWithPassword = (provider: CloudProvider, credentials: CloudCredentials) => invoke<CloudAccount>('cloud_login_password', { provider, ...credentials });

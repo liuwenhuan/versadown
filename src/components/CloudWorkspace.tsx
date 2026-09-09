@@ -9,8 +9,8 @@ export interface CloudWorkspaceProps {
 
 type WorkspaceTab = 'management' | CloudProvider;
 
-const providers: readonly CloudProvider[] = ['quark', 'pikpak'];
-const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak' };
+const providers: readonly CloudProvider[] = ['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei'];
+const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷' };
 
 function isUnauthorized(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && ['unauthorized', 'not_authorized'].includes(String((error as { code?: unknown }).code));
@@ -42,7 +42,10 @@ export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) 
     setRecoveringAccounts(true);
     setRecoveryError(null);
     void Promise.all(providers.map(async (provider) => {
-      try { return await client.getCloudAccount(provider); }
+      try {
+        const account = await client.getCloudAccount(provider);
+        return account.provider === provider ? account : null;
+      }
       catch (error) {
         if (active && !isUnauthorized(error)) setRecoveryError(errorMessage(error, '无法恢复网盘会话。'));
         return null;

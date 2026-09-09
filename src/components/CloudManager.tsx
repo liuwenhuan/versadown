@@ -1,10 +1,11 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { CloudAccount, CloudAuthorization, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
+import type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
-export type { CloudAccount, CloudAuthorization, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
+export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
 export interface CloudManagerClient {
+  getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
@@ -41,12 +42,21 @@ interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'download' | 'rename' | 'move' | 'copy' | 'details' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
 
-const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak' };
+const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷' };
+const fallbackCapabilities: Record<CloudProvider, CloudAuthorizationCapabilities> = {
+  quark: { provider: 'quark', web: true, password: false },
+  pikpak: { provider: 'pikpak', web: true, password: true },
+  baidu: { provider: 'baidu', web: true, password: true },
+  tianyi: { provider: 'tianyi', web: true, password: true },
+  aliyun: { provider: 'aliyun', web: true, password: false },
+  xunlei: { provider: 'xunlei', web: true, password: false }
+};
 const rootId = '0';
 const authorizationInitialPollMs = 800;
 const authorizationPollMs = 1_800;
 
 const unavailableClient: CloudManagerClient = {
+  getCloudAuthorizationCapabilities: () => Promise.reject(new Error('网盘连接器尚未接入')),
   beginCloudAuthorization: () => Promise.reject(new Error('网盘连接器尚未接入')),
   completeCloudAuthorization: () => Promise.reject(new Error('网盘连接器尚未接入')),
   loginCloudWithPassword: () => Promise.reject(new Error('网盘连接器尚未接入')),
@@ -277,6 +287,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [authorizationCapabilities, setAuthorizationCapabilities] = useState<CloudAuthorizationCapabilities>(() => fallbackCapabilities[provider]);
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
@@ -339,6 +350,21 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     return () => { active = false; };
   }, [authorizationOnly, client, provider, restoreOnMount]);
 
+  useEffect(() => {
+    let active = true;
+    void client.getCloudAuthorizationCapabilities(provider).then((next) => {
+      if (active && next.provider === provider) {
+        setAuthorizationCapabilities((current) => current.provider === next.provider && current.web === next.web && current.password === next.password ? current : next);
+      }
+    }).catch(() => {
+      if (active) {
+        const fallback = fallbackCapabilities[provider];
+        setAuthorizationCapabilities((current) => current.provider === fallback.provider && current.web === fallback.web && current.password === fallback.password ? current : fallback);
+      }
+    });
+    return () => { active = false; };
+  }, [client, provider]);
+
   async function acceptAccount(account: CloudAccount) {
     setAccounts((current) => current.some((item) => item.id === account.id) ? current.map((item) => item.id === account.id ? account : item) : [...current, account]);
     setActiveAccountId(account.id);
@@ -353,13 +379,16 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     try { await acceptAccount(await authorize()); } catch (error) { setAuthorizationStatus(errorMessage(error, '授权失败，请重试。')); }
   }
 
-  function submitPasswordLogin(event: FormEvent) {
+  async function submitPasswordLogin(event: FormEvent) {
     event.preventDefault();
     if (!username.trim() || !password) {
       setAuthorizationStatus('请输入账号和密码后再登录。');
       return;
     }
-    void addAccount(() => client.loginCloudWithPassword(provider, { username: username.trim(), password }));
+    const credentials = { username: username.trim(), password };
+    setUsername('');
+    setPassword('');
+    await addAccount(() => client.loginCloudWithPassword(provider, credentials));
   }
 
   async function beginWebAuthorization() {
@@ -530,15 +559,18 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function authorizationView(expired = false) {
+    const noPasswordLoginHint = provider === 'quark'
+      ? '夸克未提供可用的账号密码开放登录接口，请在官方网页窗口中登录。'
+      : `${label}未提供可用的账号密码登录接口，请在官方网页窗口中登录。`;
     return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
       <header className="cloud-heading"><div><p className="eyebrow">自有网盘 · 本地会话</p><h2>{label}网盘</h2><span>{expired ? '凭据失效后必须重新授权，文件列表不会继续显示。' : '授权完成前不会显示或加载任何文件。'}</span></div></header>
       {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
-        {provider === 'pikpak' && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+        {authorizationCapabilities.password && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label>{label}密码<input aria-label={`${label}密码`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <button className="primary" type="submit">登录{label}账号</button></>}
-        {provider === 'quark' && <p className="cloud-login-hint">夸克未提供可用的账号密码开放登录接口，请在官方网页窗口中登录。</p>}
-        <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>
+        {!authorizationCapabilities.password && <p className="cloud-login-hint">{noPasswordLoginHint}</p>}
+        {authorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
       </form>
       <p className="authorization-note" role="status"><b>{expired ? '凭据已过期' : '授权状态'}</b><span>{authorizationStatus}</span></p>

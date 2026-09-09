@@ -22,6 +22,7 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     copyCloudFiles: vi.fn().mockResolvedValue(undefined),
     trashCloudFiles: vi.fn().mockResolvedValue(undefined),
     logoutCloud: vi.fn().mockResolvedValue(undefined),
+    getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' })),
     ...overrides
   };
 }
@@ -37,6 +38,33 @@ it('shows only the authorization boundary before a provider has an account', () 
   expect(screen.getByRole('status')).toHaveTextContent('未授权');
   expect(screen.queryByRole('tree', { name: '夸克网盘文件' })).not.toBeInTheDocument();
   expect(screen.queryByText('下载示例.txt')).not.toBeInTheDocument();
+});
+
+it.each([
+  ['baidu', '百度', true],
+  ['tianyi', '天翼', true],
+  ['aliyun', '阿里', false],
+  ['xunlei', '迅雷', false]
+] as const)('shows only supported login controls for %s', async (provider, label, passwordSupported) => {
+  render(<CloudManager provider={provider as never} client={createCloudFake()} authorizationOnly />);
+
+  expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
+  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
+  expect(Boolean(screen.queryByRole('button', { name: `登录${label}账号` }))).toBe(passwordSupported);
+});
+
+it('clears a supported provider password after a failed native login', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockRejectedValue({ code: 'invalid_input', message: '账号或密码不正确' }) });
+  render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
+
+  await user.type(await screen.findByLabelText('百度账号'), 'alice');
+  await user.type(screen.getByLabelText('百度密码'), 'secret');
+  await user.click(screen.getByRole('button', { name: '登录百度账号' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('账号或密码不正确');
+  expect(screen.getByLabelText('百度账号')).toHaveValue('');
+  expect(screen.getByLabelText('百度密码')).toHaveValue('');
 });
 
 it('recovers an existing account on mount before loading its root directory', async () => {
