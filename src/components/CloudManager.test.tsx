@@ -192,7 +192,7 @@ it('adds the authorized account tab and drives the injected directory operations
 it('uses real checkboxes for row selection and supports select all', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  const { container } = render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   const folderCheckbox = screen.getByRole('checkbox', { name: '选择 归档' });
@@ -204,7 +204,10 @@ it('uses real checkboxes for row selection and supports select all', async () =>
   await user.click(screen.getByRole('checkbox', { name: '全选当前目录' }));
   expect(folderCheckbox).toBeChecked();
   expect(fileCheckbox).toBeChecked();
-  expect(screen.getByText('已选择 2 项')).toBeVisible();
+  const selectionHeader = screen.getByText('已选择 2 项');
+  expect(selectionHeader.closest('.cloud-columns')).not.toBeNull();
+  expect(screen.queryByText('名称')).not.toBeInTheDocument();
+  expect(container.querySelector('.cloud-selection-summary')).not.toBeInTheDocument();
 });
 
 it('formats large cloud files in practical size units', async () => {
