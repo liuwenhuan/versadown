@@ -14,6 +14,10 @@ pub struct CloudState {
     pub store: DpapiCredentialStore,
     quark_operation: Mutex<()>,
     pikpak_operation: Mutex<()>,
+    baidu_operation: Mutex<()>,
+    tianyi_operation: Mutex<()>,
+    aliyun_operation: Mutex<()>,
+    xunlei_operation: Mutex<()>,
 }
 impl CloudState {
     pub fn upload_pikpak_file(
@@ -71,6 +75,10 @@ impl CloudState {
             store: DpapiCredentialStore::new(root)?,
             quark_operation: Mutex::new(()),
             pikpak_operation: Mutex::new(()),
+            baidu_operation: Mutex::new(()),
+            tianyi_operation: Mutex::new(()),
+            aliyun_operation: Mutex::new(()),
+            xunlei_operation: Mutex::new(()),
         })
     }
     /// All session consumers, including recovery and logout, share this provider boundary.
@@ -82,6 +90,10 @@ impl CloudState {
         let mutex = match provider {
             CloudProvider::Quark => &self.quark_operation,
             CloudProvider::Pikpak => &self.pikpak_operation,
+            CloudProvider::Baidu => &self.baidu_operation,
+            CloudProvider::Tianyi => &self.tianyi_operation,
+            CloudProvider::Aliyun => &self.aliyun_operation,
+            CloudProvider::Xunlei => &self.xunlei_operation,
         };
         let _guard = mutex.lock().map_err(|_| QuarkError::Storage)?;
         work(&self.store)
@@ -112,13 +124,25 @@ pub fn restore_account(
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
+    if !matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak) {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     if store.load(provider.key())?.is_none() {
         return Err(QuarkError::NotAuthorized);
     }
     match provider {
         CloudProvider::Quark => QuarkClient::new(cookie(store)?, http).account(),
         CloudProvider::Pikpak => PikPakClient::new(http, store).account(),
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     }
+}
+
+#[tauri::command]
+pub fn cloud_provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapabilities {
+    provider_capabilities(provider)
 }
 fn valid_name(name: &str) -> Result<(), QuarkError> {
     if name.trim().is_empty() || name.contains(['\r', '\n', '/', '\\']) {
@@ -133,6 +157,9 @@ pub async fn cloud_begin_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAuthorization, QuarkError> {
+    if !matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak) {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     let label = format!("cloud-auth-{}", provider.key());
     if let Some(window) = app.get_webview_window(&label) {
         window
@@ -143,6 +170,10 @@ pub async fn cloud_begin_authorization(
         let url = match provider {
             CloudProvider::Quark => "https://pan.quark.cn",
             CloudProvider::Pikpak => "https://mypikpak.com/drive",
+            CloudProvider::Baidu
+            | CloudProvider::Tianyi
+            | CloudProvider::Aliyun
+            | CloudProvider::Xunlei => return Err(QuarkError::ProviderUnsupported),
         };
         WebviewWindowBuilder::new(
             &app,
@@ -219,6 +250,9 @@ pub async fn cloud_complete_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
+    if !matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak) {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     let window = app
         .get_webview_window(&format!("cloud-auth-{}", provider.key()))
         .ok_or(QuarkError::WebAuthorizationRequired)?;
@@ -272,6 +306,10 @@ pub async fn cloud_complete_authorization(
                 let _ = window.close();
                 Ok(account)
             }
+            CloudProvider::Baidu
+            | CloudProvider::Tianyi
+            | CloudProvider::Aliyun
+            | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
         }
     })
     .await
@@ -283,20 +321,29 @@ pub async fn cloud_login_password(
     username: String,
     password: String,
 ) -> Result<CloudAccount, QuarkError> {
+    if !provider_capabilities(provider).password {
+        return Err(QuarkError::WebAuthorizationRequired);
+    }
     let password = zeroize::Zeroizing::new(password);
     run(app, provider, move |state, http| {
-        if provider == CloudProvider::Quark {
-            return Err(QuarkError::WebAuthorizationRequired);
+        match provider {
+            CloudProvider::Pikpak => {
+                let temporary = MemoryCredentialStore::default();
+                let client = PikPakClient::new(http, &temporary);
+                client.login(&username, &password)?;
+                let account = client.account()?;
+                state.store.save(
+                    "pikpak",
+                    &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
+                )?;
+                Ok(account)
+            }
+            CloudProvider::Quark
+            | CloudProvider::Baidu
+            | CloudProvider::Tianyi
+            | CloudProvider::Aliyun
+            | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
         }
-        let temporary = MemoryCredentialStore::default();
-        let client = PikPakClient::new(http, &temporary);
-        client.login(&username, &password)?;
-        let account = client.account()?;
-        state.store.save(
-            "pikpak",
-            &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
-        )?;
-        Ok(account)
     })
     .await
 }
@@ -319,6 +366,10 @@ pub async fn cloud_list_directory(
     run(app, provider, move |s, h| match provider {
         CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h).directory(&parent_id),
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).list(&parent_id),
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     })
     .await
 }
@@ -344,6 +395,10 @@ pub async fn cloud_create_directory(
             })
         }
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).mkdir(&parent_id, &name),
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     })
     .await
 }
@@ -360,6 +415,10 @@ pub async fn cloud_rename(
             .rename(&file_id, &name)
             .map(|_| ()),
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).rename(&file_id, &name),
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     })
     .await
 }
@@ -377,6 +436,10 @@ pub async fn cloud_move(
         CloudProvider::Pikpak => {
             PikPakClient::new(h, &s.store).move_files(&file_ids, &target_parent_id)
         }
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     })
     .await
 }
@@ -394,6 +457,10 @@ pub async fn cloud_copy(
         CloudProvider::Pikpak => {
             PikPakClient::new(h, &s.store).copy_files(&file_ids, &target_parent_id)
         }
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     })
     .await
 }
@@ -408,6 +475,10 @@ pub async fn cloud_trash(
             .trash(&file_ids)
             .map(|_| ()),
         CloudProvider::Pikpak => PikPakClient::new(h, &s.store).trash(&file_ids),
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     })
     .await
 }
@@ -472,6 +543,10 @@ pub fn parse_stable_cloud_source(source: &str) -> Result<(CloudProvider, String)
     let provider = match provider {
         "quark" => CloudProvider::Quark,
         "pikpak" => CloudProvider::Pikpak,
+        "baidu" => CloudProvider::Baidu,
+        "tianyi" => CloudProvider::Tianyi,
+        "aliyun" => CloudProvider::Aliyun,
+        "xunlei" => CloudProvider::Xunlei,
         _ => return Err(invalid()),
     };
     if encoded.is_empty() || encoded.contains(['/', '?', '#', '&', '=']) || !encoded.is_ascii() {
@@ -622,6 +697,10 @@ pub fn resolve_download(
                 headers: Vec::new(),
             })
         }
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
     }
 }
 pub(crate) fn safe_filename(name: &str) -> String {
@@ -803,6 +882,9 @@ pub async fn cloud_upload_files(
 ) -> Result<Vec<CloudFile>, QuarkError> {
     if provider == CloudProvider::Quark {
         return Err(QuarkError::UploadUnavailable);
+    }
+    if provider != CloudProvider::Pikpak {
+        return Err(QuarkError::ProviderUnsupported);
     }
     let picker = app.clone();
     // The native picker may stay open indefinitely; it must hold no session lock.

@@ -5,12 +5,44 @@ use thiserror::Error;
 pub enum CloudProvider {
     Quark,
     Pikpak,
+    Baidu,
+    Tianyi,
+    Aliyun,
+    Xunlei,
 }
 impl CloudProvider {
     pub fn key(self) -> &'static str {
         match self {
             Self::Quark => "quark",
             Self::Pikpak => "pikpak",
+            Self::Baidu => "baidu",
+            Self::Tianyi => "tianyi",
+            Self::Aliyun => "aliyun",
+            Self::Xunlei => "xunlei",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudAuthorizationCapabilities {
+    pub web: bool,
+    pub password: bool,
+}
+
+pub fn provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapabilities {
+    match provider {
+        CloudProvider::Baidu | CloudProvider::Tianyi | CloudProvider::Pikpak => {
+            CloudAuthorizationCapabilities {
+                web: true,
+                password: true,
+            }
+        }
+        CloudProvider::Aliyun | CloudProvider::Xunlei | CloudProvider::Quark => {
+            CloudAuthorizationCapabilities {
+                web: true,
+                password: false,
+            }
         }
     }
 }
@@ -75,6 +107,8 @@ pub enum QuarkError {
     InvalidInput(String),
     #[error("当前上传协议尚未接通，请使用网盘官方页面上传")]
     UploadUnavailable,
+    #[error("当前网盘服务尚未接通，请稍后重试")]
+    ProviderUnsupported,
 }
 impl Serialize for QuarkError {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -90,6 +124,7 @@ impl Serialize for QuarkError {
             Self::Provider(_) => "provider_error",
             Self::InvalidInput(_) => "invalid_input",
             Self::UploadUnavailable => "provider_unsupported",
+            Self::ProviderUnsupported => "provider_unsupported",
         };
         serde_json::json!({"code":code,"message":self.to_string()}).serialize(s)
     }

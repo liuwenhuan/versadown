@@ -210,6 +210,7 @@ pub fn run() {
             commands::get_settings,
             commands::update_debug_reports,
             commands::update_settings,
+            cloud::commands::cloud_provider_capabilities,
             cloud::commands::cloud_begin_authorization,
             cloud::commands::cloud_complete_authorization,
             cloud::commands::cloud_login_password,

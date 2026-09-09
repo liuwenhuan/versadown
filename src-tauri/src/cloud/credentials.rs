@@ -37,7 +37,10 @@ impl DpapiCredentialStore {
         Ok(Self { root })
     }
     fn path(&self, key: &str) -> Result<PathBuf, QuarkError> {
-        if !matches!(key, "quark" | "pikpak") {
+        if !matches!(
+            key,
+            "quark" | "pikpak" | "baidu" | "tianyi" | "aliyun" | "xunlei"
+        ) {
             return Err(QuarkError::Storage);
         }
         Ok(self.root.join(format!("{key}.bin")))

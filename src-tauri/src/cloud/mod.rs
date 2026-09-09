@@ -1,3 +1,5 @@
+pub mod aliyun;
+pub mod baidu;
 pub mod commands;
 mod credentials;
 mod http;
@@ -5,6 +7,9 @@ mod pikpak;
 mod quark;
 mod types;
 mod upload;
+pub mod tianyi;
+pub mod xunlei;
+pub use commands::parse_stable_cloud_source;
 pub use credentials::*;
 pub use http::*;
 pub use pikpak::*;
