@@ -171,6 +171,13 @@ pub fn set_launcher_compact_shape(
     }
 }
 
+pub fn should_apply_launcher_window_visibility(
+    requested_visible: bool,
+    application_exiting: bool,
+) -> bool {
+    !requested_visible || !application_exiting
+}
+
 /// Shows or hides the floating launcher from its own renderer.  Keeping this
 /// native-side is important for the isolated background smoke process: that
 /// process must be able to exercise the launcher without ever surfacing a
@@ -183,6 +190,13 @@ pub fn set_launcher_window_visible(
 ) -> Result<(), String> {
     if window.label() != "launcher" {
         return Err("只能设置悬浮球窗口的可见性".to_string());
+    }
+    let application_exiting = window
+        .app_handle()
+        .try_state::<std::sync::Arc<crate::ApplicationLifecycle>>()
+        .is_some_and(|lifecycle| lifecycle.is_exiting());
+    if !should_apply_launcher_window_visibility(visible, application_exiting) {
+        return Ok(());
     }
     if interaction.is_background_test() {
         return Ok(());

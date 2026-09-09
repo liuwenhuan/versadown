@@ -27,7 +27,8 @@ pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
 pub use launcher::{
-    launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion,
+    launcher_circle_region, launcher_menu_entries, should_apply_launcher_window_visibility,
+    LauncherInteractionState, LauncherRegion,
 };
 pub use models::{
     may_transition, AppSettings, DownloadTask, DuplicateDownloadState, LauncherVisibility,

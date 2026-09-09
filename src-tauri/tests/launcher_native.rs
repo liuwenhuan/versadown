@@ -1,6 +1,6 @@
 use alldownloader_lib::{
-    launcher_circle_region, launcher_menu_entries, AppSettings, LauncherInteractionState,
-    LauncherRegion, LauncherVisibility,
+    launcher_circle_region, launcher_menu_entries, should_apply_launcher_window_visibility,
+    AppSettings, LauncherInteractionState, LauncherRegion, LauncherVisibility,
 };
 
 #[test]
@@ -64,4 +64,11 @@ fn legacy_settings_default_to_always_showing_the_launcher() {
     .expect("legacy settings should remain readable");
 
     assert_eq!(settings.launcher_visibility, LauncherVisibility::Always);
+}
+
+#[test]
+fn application_exit_rejects_late_launcher_show_requests() {
+    assert!(should_apply_launcher_window_visibility(false, true));
+    assert!(should_apply_launcher_window_visibility(true, false));
+    assert!(!should_apply_launcher_window_visibility(true, true));
 }

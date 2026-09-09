@@ -110,17 +110,16 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${liveSpeedVisible && !expanded && !contextMenuOpen ? 'launcher-speed-active' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${liveSpeedVisible && !expanded ? 'launcher-speed-active' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
         activeCount={activeCount}
+        liveSpeed={liveSpeedVisible && !expanded ? { label: `下载速度 ${Math.round(downloadSpeed / 1024)} KB/s`, value: formatCompactSpeed(downloadSpeed) } : undefined}
         onParse={(input) => { void sendLauncherInput(input); }}
         onExpandedChange={(nextExpanded) => { setContextMenuOpen(false); setExpanded(nextExpanded); void setLauncherExpanded(nextExpanded, liveSpeedVisible); }}
         onDragStart={() => { void startLauncherDragging(); }}
         onContextMenu={openContextMenu}
       />
-      {liveSpeedVisible && !contextMenuOpen && (expanded
-        ? <span className="launcher-live-speed">↓ {Math.round(downloadSpeed / 1024)} KB/s</span>
-        : <span className="launcher-live-indicator" aria-label={`下载速度 ${Math.round(downloadSpeed / 1024)} KB/s`}><span>↓</span>{formatCompactSpeed(downloadSpeed)}<small>/s</small></span>)}
+      {liveSpeedVisible && expanded && <span className="launcher-live-speed">↓ {Math.round(downloadSpeed / 1024)} KB/s</span>}
       {!engineAvailable && <span className="launcher-engine-offline" aria-label="下载引擎不可用">!</span>}
       {contextMenuOpen && <LauncherContextMenu managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}
     </main>

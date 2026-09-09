@@ -3,6 +3,7 @@ import { NewDownloadDialog } from './NewDownloadDialog';
 
 interface FloatingLauncherProps {
   activeCount: number;
+  liveSpeed?: { label: string; value: string };
   onParse(input: string): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
   onDragStart?(): void;
@@ -11,7 +12,7 @@ interface FloatingLauncherProps {
 
 const dragThreshold = 5;
 
-export function FloatingLauncher({ activeCount, onParse, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ activeCount, liveSpeed, onParse, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
   const [expanded, setExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
@@ -21,13 +22,13 @@ export function FloatingLauncher({ activeCount, onParse, onExpandedChange, onDra
     onExpandedChange?.(next);
   }
 
-  function beginPointer(event: MouseEvent<HTMLButtonElement>) {
+  function beginPointer(event: MouseEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
     dragOrigin.current = { x: event.clientX, y: event.clientY };
     suppressClick.current = false;
   }
 
-  function movePointer(event: MouseEvent<HTMLButtonElement>) {
+  function movePointer(event: MouseEvent<HTMLDivElement>) {
     const origin = dragOrigin.current;
     if (!origin || event.buttons !== 1 || suppressClick.current) return;
     if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < dragThreshold) return;
@@ -46,10 +47,8 @@ export function FloatingLauncher({ activeCount, onParse, onExpandedChange, onDra
 
   if (!expanded) {
     return (
-      <button
-        className="launcher-trigger"
-        data-size="48"
-        aria-label="打开下载输入"
+      <div
+        className="launcher-interaction-target"
         onMouseDown={beginPointer}
         onMouseMove={movePointer}
         onMouseUp={() => { dragOrigin.current = null; }}
@@ -60,8 +59,11 @@ export function FloatingLauncher({ activeCount, onParse, onExpandedChange, onDra
           onContextMenu?.();
         }}
       >
-        <span aria-hidden="true">↓</span>{activeCount > 0 && <i>{activeCount}</i>}
-      </button>
+        <button className="launcher-trigger" data-size="48" aria-label="打开下载输入">
+          <span aria-hidden="true">↓</span>{activeCount > 0 && <i>{activeCount}</i>}
+        </button>
+        {liveSpeed && <span className="launcher-live-indicator" aria-label={liveSpeed.label}><span>↓</span>{liveSpeed.value}<small>/s</small></span>}
+      </div>
     );
   }
 

@@ -33,7 +33,7 @@ vi.mock('../lib/downloadEvents', () => ({
 }));
 
 import { LauncherWindow } from './LauncherWindow';
-import { setLauncherLiveSpeedVisible, setLauncherWindowVisible } from '../lib/launcherWindow';
+import { setLauncherLiveSpeedVisible, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
 
 beforeEach(() => {
   state.onGlobalStat = undefined;
@@ -96,6 +96,41 @@ it('shows the zero-speed status for an active task in download-only mode', async
   expect(screen.getByLabelText('下载速度 0 KB/s')).toHaveTextContent('0K');
   expect(setLauncherWindowVisible).toHaveBeenLastCalledWith(true);
   expect(setLauncherLiveSpeedVisible).toHaveBeenLastCalledWith(true);
+});
+
+it('keeps live-speed status interactive for the launcher context menu', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
+  state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });
+  render(<LauncherWindow />);
+
+  const speed = await screen.findByLabelText('下载速度 512 KB/s');
+  fireEvent.contextMenu(speed);
+
+  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
+  expect(screen.getByLabelText('下载速度 512 KB/s')).toBeVisible();
+  expect(speed.closest('main')).toHaveClass('launcher-speed-active', 'launcher-menu-open');
+});
+
+it('opens the download input when clicking the live-speed status area', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
+  state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });
+  render(<LauncherWindow />);
+
+  fireEvent.click(await screen.findByLabelText('下载速度 512 KB/s'));
+
+  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
+});
+
+it('starts native dragging from the live-speed status area', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
+  state.getEngineState.mockResolvedValueOnce({ available: true, retrying: false });
+  render(<LauncherWindow />);
+
+  const speed = await screen.findByLabelText('下载速度 512 KB/s');
+  fireEvent.mouseDown(speed, { button: 0, clientX: 80, clientY: 24 });
+  fireEvent.mouseMove(speed, { buttons: 1, clientX: 88, clientY: 31 });
+
+  expect(startLauncherDragging).toHaveBeenCalledOnce();
 });
 
 it('uses the main task-menu visual system and reflects the current main-window visibility', async () => {
