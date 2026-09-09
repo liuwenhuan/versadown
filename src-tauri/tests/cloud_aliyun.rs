@@ -280,3 +280,63 @@ fn aliyun_upload_init_rejects_null_and_non_string_temporary_endpoints() {
             .is_err());
     }
 }
+
+#[test]
+fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
+    // A valid sibling must not short-circuit validation of the malformed field.
+    let valid = serde_json::json!("https://upload.example/part");
+    let invalid = [
+        serde_json::json!(""),
+        serde_json::json!(false),
+        serde_json::json!("http://upload.example/part"),
+    ];
+    let cases = invalid
+        .iter()
+        .cloned()
+        .map(|bad| (bad, valid.clone()))
+        .chain(invalid.iter().cloned().map(|bad| (valid.clone(), bad)));
+
+    for (upload_url, internal_upload_url) in cases {
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"r","access_token":"old","drive_id":"d1"}"#,
+            )
+            .unwrap();
+        let http = RecordingHttp::responses([
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"access_token":"fresh","refresh_token":"next","default_drive_id":"d1"}"#
+                    .into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"user_id":"u1","nick_name":"alice"}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"items":[]}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: serde_json::json!({
+                    "part_info_list": [{
+                        "part_number": 1,
+                        "upload_url": upload_url,
+                        "internal_upload_url": internal_upload_url,
+                    }]
+                })
+                .to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        assert!(AliyunClient::new(&store, &http)
+            .upload_init("root", "independent-check.pdf", 5)
+            .is_err());
+    }
+}
