@@ -459,10 +459,16 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
   }
  }
  for (const storage of [localStorage, sessionStorage]) for (let i = 0; i < storage.length; i++) inspect({[storage.key(i)]: storage.getItem(storage.key(i))}, 0);
- // The official web app never exposes its native refresh client secret. A
- // current bearer token plus the non-secret drive profile is enough here;
- // refresh remains disabled without that native-only secret.
- return out.access_token && out.refresh_token && out.client_id && out.device_id && out.client_version && out.package_name && out.user_agent ? out : null;
+ // Xunlei's current official web client keeps its completed login in Nuxt's
+ // in-memory user state, rather than in Web Storage.  Only copy the selected
+ // renewable fields; this never exposes the rest of the account object.
+ const currentUser = window.$nuxt?.$store?.state?.users?.curUser;
+ if (currentUser && typeof currentUser === 'object') inspect(currentUser, 0);
+ // The web client deliberately does not expose a native client profile or
+ // client secret.  A current browser bearer and stable user id are sufficient
+ // to complete the browser handshake; the Rust adapter must not fabricate
+ // missing native-only fields.
+ return out.access_token && out.refresh_token && out.user_id ? out : null;
 })()"#;
 
 fn parse_aliyun_web_session(value: serde_json::Value) -> Result<aliyun::AliyunSession, QuarkError> {
@@ -505,18 +511,19 @@ fn with_xunlei_client<T, H: CloudHttpTransport>(
 fn parse_xunlei_web_session(value: serde_json::Value) -> Result<xunlei::XunleiSession, QuarkError> {
     let field =
         |key| super::types::required(&value, key).map_err(|_| QuarkError::AuthorizationPending);
+    let optional = |key| value[key].as_str().unwrap_or_default().to_owned();
     xunlei::XunleiSession::from_web_authorization(
         value["access_token"].as_str().unwrap_or_default(),
         field("refresh_token")?,
-        value["user_id"].as_str().unwrap_or_default(),
-        value["security_token"].as_str().unwrap_or_default(),
+        field("user_id")?,
+        optional("security_token"),
         xunlei::XunleiClientProfile {
-            client_id: field("client_id")?,
-            client_secret: value["client_secret"].as_str().unwrap_or_default().into(),
-            device_id: field("device_id")?,
-            client_version: field("client_version")?,
-            package_name: field("package_name")?,
-            user_agent: field("user_agent")?,
+            client_id: optional("client_id"),
+            client_secret: optional("client_secret"),
+            device_id: optional("device_id"),
+            client_version: optional("client_version"),
+            package_name: optional("package_name"),
+            user_agent: optional("user_agent"),
         },
         value["expires_at"].as_u64().unwrap_or(0),
     )
@@ -566,6 +573,22 @@ fn finalize_baidu_web_authorization(
     // QR login trapped in its authorization window whenever that optional
     // request was delayed or rejected.
     save_provider_session(CloudProvider::Baidu, store, &session)?;
+    Ok(account)
+}
+
+fn finalize_tianyi_web_authorization(
+    session: tianyi::TianyiSession,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<CloudAccount, QuarkError> {
+    let client = tianyi::TianyiClient::new(session.clone(), http);
+    let account = authorization_result(client.account())?;
+    // The portal account response is the authentication boundary.  Keep the
+    // root-directory request in normal file-management flow: treating it as
+    // part of authorization made an otherwise valid browser login retry
+    // forever whenever that independent endpoint was delayed or returned a
+    // non-list response.
+    save_provider_session(CloudProvider::Tianyi, store, &session)?;
     Ok(account)
 }
 
@@ -624,10 +647,7 @@ pub async fn cloud_complete_authorization(
                     &window,
                     &["https://cloud.189.cn", "https://open.e.189.cn"],
                 )?)?;
-                let client = tianyi::TianyiClient::new(session.clone(), http);
-                let account = authorization_result(client.account())?;
-                authorization_result(client.directory("-11"))?;
-                save_provider_session(CloudProvider::Tianyi, &state.store, &session)?;
+                let account = finalize_tianyi_web_authorization(session, &state.store, http)?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -1265,8 +1285,8 @@ mod tests {
 
     use super::{create_cloud_task, resolve_download};
     use crate::cloud::{
-        baidu::BaiduSession, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
-        CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
+        baidu::BaiduSession, tianyi::TianyiSession, CloudHttpRequest, CloudHttpResponse,
+        CloudHttpTransport, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
         QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
@@ -1522,6 +1542,28 @@ mod tests {
     }
 
     #[test]
+    fn tianyi_web_authorization_persists_the_verified_account_without_waiting_for_root_listing() {
+        // The portal account probe is sufficient proof that the browser
+        // session is authenticated. A transient or differently-shaped root
+        // listing must not strand a finished login in its authorization
+        // window before the session can be saved.
+        let credentials = MemoryCredentialStore::default();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"res_code":0,"loginName":"tianyi@example.cn"}"#,
+        ])));
+
+        let account = super::finalize_tianyi_web_authorization(
+            TianyiSession::cookie("COOKIE_LOGIN_USER=browser-session"),
+            &credentials,
+            &transport,
+        )
+        .unwrap();
+
+        assert_eq!(account.id, "tianyi@example.cn");
+        assert!(credentials.load("tianyi").unwrap().is_some());
+    }
+
+    #[test]
     fn xunlei_browser_session_does_not_require_a_native_client_secret() {
         let session = super::parse_xunlei_web_session(serde_json::json!({
             "access_token": "browser-access",
@@ -1536,6 +1578,29 @@ mod tests {
         .unwrap();
 
         assert!(session.profile.client_secret.is_empty());
+        assert_eq!(session.user_id, "browser-user");
+    }
+
+    #[test]
+    fn xunlei_web_authorization_accepts_the_official_browser_user_state_without_native_identity() {
+        // The current official web client keeps the freshly issued tokens in
+        // Nuxt's users.curUser state.  It does not publish a native client
+        // profile, so requiring that profile traps a completed web login in
+        // its authorization window forever.
+        let source = include_str!("commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes its tests");
+        assert!(source.contains("window.$nuxt?.$store?.state?.users?.curUser"));
+
+        let session = super::parse_xunlei_web_session(serde_json::json!({
+            "access_token": "browser-access",
+            "refresh_token": "browser-refresh",
+            "user_id": "browser-user"
+        }))
+        .expect("official browser state needs no fabricated native profile");
+
+        assert!(session.profile.client_id.is_empty());
         assert_eq!(session.user_id, "browser-user");
     }
 

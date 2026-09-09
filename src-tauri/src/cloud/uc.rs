@@ -362,8 +362,7 @@ fn uc_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if ["captcha", "verify", "risk", "安全验证"]
         .iter()
         .any(|needle| {
-            value
-                .to_string()
+            message
                 .to_ascii_lowercase()
                 .contains(&needle.to_ascii_lowercase())
         })
@@ -478,4 +477,48 @@ fn https_download_url(value: &str) -> Result<String, QuarkError> {
         return Err(QuarkError::InvalidResponse);
     }
     Ok(url.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DirectoryTransport;
+
+    impl CloudHttpTransport for DirectoryTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: r#"{
+                    "code": 0,
+                    "status": 200,
+                    "data": {
+                        "list": [{
+                            "fid": "file-1",
+                            "file_name": "normal-file.txt",
+                            "file_type": 1,
+                            "risk_type": 0
+                        }]
+                    },
+                    "metadata": {"_total": 1}
+                }"#
+                .into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn directory_accepts_successful_file_metadata_that_includes_risk_type() {
+        let directory = UcClient::new(
+            UcSession::cookie("__pus=identity; __puus=session"),
+            &DirectoryTransport,
+        )
+        .directory("0")
+        .expect("a successful UC directory response is not a web-verification response");
+
+        assert_eq!(directory.id, "0");
+        assert_eq!(directory.items.len(), 1);
+        assert_eq!(directory.items[0].id, "file-1");
+    }
 }

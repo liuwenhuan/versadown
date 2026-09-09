@@ -198,6 +198,33 @@ fn xunlei_web_session_retains_a_current_browser_access_token_without_a_client_se
 }
 
 #[test]
+fn xunlei_web_session_without_native_profile_uses_the_current_browser_bearer() {
+    // The official browser client exposes the user session but deliberately
+    // does not expose its native client identity.  A completed browser login
+    // must still be storable and use its current bearer for the first drive
+    // request instead of remaining permanently pending.
+    let session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        XunleiClientProfile::default(),
+        0,
+    )
+    .expect("official browser session without native identity is usable");
+    let http = RecordingHttp::sequence(&[r#"{"files":[],"next_page_token":""}"#]);
+    let client = XunleiClient::new(session, &http);
+
+    assert!(client.directory("0").is_ok());
+    let request = http.requests().pop().expect("one directory request");
+    assert_eq!(
+        request.headers.get("Authorization"),
+        Some(&"Bearer current-browser-access".into())
+    );
+    assert!(!request.headers.contains_key("X-Client-Id"));
+}
+
+#[test]
 fn xunlei_web_session_builds_a_display_account_without_network_or_refresh() {
     // Break caught: using account() to finish browser authorization tries a
     // native refresh requiring a secret that the web client never exposes.

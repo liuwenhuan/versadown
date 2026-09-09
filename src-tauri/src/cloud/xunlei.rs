@@ -144,7 +144,7 @@ impl XunleiSession {
         profile: XunleiClientProfile,
         expires_at: u64,
     ) -> Result<Self, QuarkError> {
-        let session = Self {
+        let mut session = Self {
             access_token: access_token.into(),
             refresh_token: refresh_token.into(),
             expires_at,
@@ -153,11 +153,19 @@ impl XunleiSession {
             security_token: security_token.into(),
             auth_method: CloudAuthMethod::Web,
         };
-        if session.access_token.is_empty()
-            || session.refresh_token.is_empty()
-            || !session.profile.is_drive_complete()
-        {
+        if session.access_token.is_empty() || session.refresh_token.is_empty() {
             return Err(QuarkError::AuthorizationPending);
+        }
+        // The current official web client grants a bearer session via its
+        // in-memory user state, but never reveals the native client profile
+        // required by the token refresh endpoint.  Keep that bearer usable
+        // for the current browser session instead of pretending to refresh it
+        // with fabricated native fields.
+        if !session.profile.is_drive_complete() {
+            if session.user_id.is_empty() {
+                return Err(QuarkError::AuthorizationPending);
+            }
+            session.expires_at = u64::MAX;
         }
         Ok(session)
     }
@@ -223,6 +231,14 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         self.session.borrow().clone()
     }
 
+    fn is_browser_bearer_session(session: &XunleiSession) -> bool {
+        session.auth_method == CloudAuthMethod::Web
+            && !session.access_token.is_empty()
+            && !session.refresh_token.is_empty()
+            && !session.user_id.is_empty()
+            && !session.profile.is_drive_complete()
+    }
+
     /// Builds the account used to finish an official browser authorization.
     ///
     /// This deliberately does not probe Xunlei or refresh the token: browser
@@ -232,7 +248,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     /// has expired.
     pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
         let session = self.session();
-        if session.access_token.is_empty() || !session.profile.is_drive_complete() {
+        if session.access_token.is_empty() || session.user_id.is_empty() {
             return Err(QuarkError::AuthorizationPending);
         }
         let id = (!session.user_id.is_empty())
@@ -351,7 +367,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
 
     fn ready_session(&self) -> Result<XunleiSession, QuarkError> {
         let session = self.session();
-        if !session.access_token.is_empty() && session.expires_at > now().saturating_add(60) {
+        if (!session.access_token.is_empty() && session.expires_at > now().saturating_add(60))
+            || Self::is_browser_bearer_session(&session)
+        {
             return Ok(session);
         }
         if !session.profile.can_refresh() {
@@ -367,10 +385,16 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         body: Option<Value>,
         session: &XunleiSession,
     ) -> Result<Value, QuarkError> {
-        if session.access_token.is_empty() || !session.profile.is_drive_complete() {
+        if session.access_token.is_empty()
+            || (!session.profile.is_drive_complete() && !Self::is_browser_bearer_session(session))
+        {
             return Err(QuarkError::AuthorizationExpired);
         }
-        let mut headers = Self::profile_headers(&session.profile);
+        let mut headers = session
+            .profile
+            .is_drive_complete()
+            .then(|| Self::profile_headers(&session.profile))
+            .unwrap_or_default();
         headers.insert(
             "Authorization".into(),
             format!("Bearer {}", session.access_token),
