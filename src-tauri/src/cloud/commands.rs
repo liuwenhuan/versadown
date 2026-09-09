@@ -144,6 +144,25 @@ pub fn restore_account(
 pub fn cloud_provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapabilities {
     provider_capabilities(provider)
 }
+
+fn require_connected_provider(provider: CloudProvider) -> Result<(), QuarkError> {
+    match provider {
+        CloudProvider::Quark | CloudProvider::Pikpak => Ok(()),
+        CloudProvider::Baidu
+        | CloudProvider::Tianyi
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei => Err(QuarkError::ProviderUnsupported),
+    }
+}
+
+pub fn logout_provider(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+) -> Result<(), QuarkError> {
+    require_connected_provider(provider)?;
+    store.remove(provider.key())
+}
+
 fn valid_name(name: &str) -> Result<(), QuarkError> {
     if name.trim().is_empty() || name.contains(['\r', '\n', '/', '\\']) {
         Err(QuarkError::InvalidInput("请输入有效的文件名称".into()))
@@ -923,9 +942,10 @@ pub async fn cloud_upload_files(
 }
 #[tauri::command]
 pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(), QuarkError> {
+    require_connected_provider(provider)?;
     let copy = app.clone();
     run(app, provider, move |s, _| {
-        s.store.remove(provider.key())?;
+        logout_provider(provider, &s.store)?;
         if let Some(w) = copy.get_webview_window(&format!("cloud-auth-{}", provider.key())) {
             let _ = w.close();
         }
