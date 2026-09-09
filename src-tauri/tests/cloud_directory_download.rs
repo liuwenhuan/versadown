@@ -130,3 +130,22 @@ fn rejects_windows_normalized_output_path_collisions_before_queueing() {
     );
     assert!(matches!(normalized_directory, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
 }
+
+#[test]
+fn rejects_a_file_that_is_a_windows_normalized_ancestor_of_another_target() {
+    let result = plan_cloud_directory_download(
+        CloudProvider::Quark,
+        "root",
+        "资料",
+        |id| match id {
+            "root" => Ok(directory(
+                id,
+                vec![file("root-file", id, "a"), folder("subtree", id, "A")],
+            )),
+            "subtree" => Ok(directory(id, vec![file("nested-file", id, "x.txt")])),
+            _ => Err(QuarkError::InvalidResponse),
+        },
+    );
+
+    assert!(matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突")));
+}

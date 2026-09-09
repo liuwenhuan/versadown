@@ -631,7 +631,8 @@ pub fn plan_cloud_directory_download(
 }
 
 fn has_windows_output_path_collision(files: &[PlannedCloudFile]) -> bool {
-    let mut targets = HashSet::new();
+    let mut file_targets = HashSet::new();
+    let mut directories = HashSet::new();
     files.iter().any(|file| {
         let target = file
             .relative_directory
@@ -640,7 +641,17 @@ fn has_windows_output_path_collision(files: &[PlannedCloudFile]) -> bool {
             .map(|component| component.to_lowercase())
             .collect::<Vec<_>>()
             .join("\\");
-        !targets.insert(target)
+        if file_targets.contains(&target) || directories.contains(&target) {
+            return true;
+        }
+        for (index, _) in target.match_indices('\\') {
+            let ancestor = &target[..index];
+            if file_targets.contains(ancestor) {
+                return true;
+            }
+            directories.insert(ancestor.to_owned());
+        }
+        !file_targets.insert(target)
     })
 }
 
