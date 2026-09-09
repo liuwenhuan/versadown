@@ -189,6 +189,7 @@ async function run() {
       ALLDOWNLOADER_BACKGROUND_UI_TEST: '1',
       ALLDOWNLOADER_TEST_DATA_DIR: testDataDir,
       ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(testDataDir, 'downloads'),
+      WEBVIEW2_USER_DATA_FOLDER: path.join(testDataDir, 'webview2'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`
     }
   });
@@ -436,7 +437,10 @@ async function run() {
         }
       }
     }
-    fs.rmSync(testDataDir, { recursive: true, force: true });
+    // WebView2 tears down its profile handles shortly after the host exits.
+    // This keeps the background test isolated without leaking locked temp data.
+    await delay(2_000);
+    fs.rmSync(testDataDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 150 });
   }
 }
 

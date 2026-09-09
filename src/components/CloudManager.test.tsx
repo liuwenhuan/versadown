@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { CloudManager } from './CloudManager';
@@ -328,6 +328,42 @@ it('uses real checkboxes for row selection and supports select all', async () =>
   expect(container.querySelector('.cloud-selection-summary')).not.toBeInTheDocument();
 });
 
+it('keeps file controls on one line and preserves full breadcrumb names in tooltips', async () => {
+  const user = userEvent.setup();
+  render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('归档');
+  expect(screen.getByLabelText('文件操作')).toHaveClass('cloud-toolbar--single-line');
+
+  await user.dblClick(screen.getByText('归档'));
+  const navigation = screen.getByRole('navigation', { name: '当前目录' });
+  expect(within(navigation).getByRole('button', { name: '归档' })).toHaveAttribute('title', '归档');
+});
+
+it('keeps only download and delete visible in the selected-file header', async () => {
+  const user = userEvent.setup();
+  render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('报告.pdf');
+  await user.click(screen.getByRole('checkbox', { name: '选择 报告.pdf' }));
+
+  const toolbar = screen.getByRole('toolbar', { name: '已选择 1 项的文件操作' });
+  expect(within(toolbar).getByRole('button', { name: '下载' })).toBeVisible();
+  expect(within(toolbar).getByRole('button', { name: '删除' })).toBeVisible();
+  expect(within(toolbar).getByRole('button', { name: '更多文件操作' })).toBeVisible();
+  expect(within(toolbar).queryByRole('button', { name: '重命名' })).not.toBeInTheDocument();
+  expect(within(toolbar).queryByRole('button', { name: '移动' })).not.toBeInTheDocument();
+  expect(within(toolbar).queryByRole('button', { name: '复制到' })).not.toBeInTheDocument();
+  expect(within(toolbar).queryByRole('button', { name: '文件详情' })).not.toBeInTheDocument();
+
+  await user.click(within(toolbar).getByRole('button', { name: '更多文件操作' }));
+  const menu = screen.getByRole('menu', { name: '更多文件操作' });
+  expect(within(menu).getByRole('menuitem', { name: '重命名' })).toBeVisible();
+  expect(within(menu).getByRole('menuitem', { name: '移动' })).toBeVisible();
+  expect(within(menu).getByRole('menuitem', { name: '复制到' })).toBeVisible();
+  expect(within(menu).getByRole('menuitem', { name: '文件详情' })).toBeVisible();
+});
+
 it('formats large cloud files in practical size units', async () => {
   const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [{ id: 'large-file', parentId: '0', name: '镜像文件.iso', kind: 'file', size: 3 * 1024 * 1024 * 1024 }] }) });
   render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
@@ -424,7 +460,9 @@ it('shows concise file details in a separate dialog', async () => {
 
   await screen.findByText('报告.pdf');
   await user.click(screen.getByText('报告.pdf'));
-  const trigger = screen.getByRole('button', { name: '文件详情' });
+  const moreTrigger = screen.getByRole('button', { name: '更多文件操作' });
+  await user.click(moreTrigger);
+  const trigger = within(screen.getByRole('menu', { name: '更多文件操作' })).getByRole('menuitem', { name: '文件详情' });
   await user.click(trigger);
 
   const dialog = screen.getByRole('dialog', { name: '文件详情' });
@@ -437,7 +475,7 @@ it('shows concise file details in a separate dialog', async () => {
   expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
   await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
   expect(screen.queryByRole('dialog', { name: '文件详情' })).not.toBeInTheDocument();
-  expect(trigger).toHaveFocus();
+  expect(moreTrigger).toHaveFocus();
 });
 
 it('keeps multi-selection context actions valid for every selected item', async () => {
