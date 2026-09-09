@@ -5,6 +5,7 @@ use crate::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -13,6 +14,31 @@ use tauri::{
     AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::DialogExt;
+
+/// A stable cloud source has one submission owner from duplicate detection
+/// through aria2 submission. The registry lock is released before awaiting
+/// the source-specific lock, so unrelated files keep flowing concurrently.
+#[derive(Default)]
+pub struct CloudDownloadSourceGate {
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl CloudDownloadSourceGate {
+    pub async fn acquire(
+        &self,
+        source: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, QuarkError> {
+        let lock = {
+            let mut locks = self.locks.lock().map_err(|_| QuarkError::Storage)?;
+            Arc::clone(
+                locks
+                    .entry(source.to_owned())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        Ok(lock.lock_owned().await)
+    }
+}
 
 pub struct CloudState {
     pub store: DpapiCredentialStore,
@@ -240,9 +266,7 @@ fn xunlei_web_context(
             }
         }
     }
-    if context.session_id.is_empty()
-        || (context.peer_id.is_empty() && context.device_id.is_empty())
-        || context.credit_key.is_empty()
+    if (context.peer_id.is_empty() && context.device_id.is_empty()) || context.credit_key.is_empty()
     {
         return Err(QuarkError::AuthorizationPending);
     }
@@ -509,14 +533,14 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
  // Device and client identity can live in a sibling Vuex module. `inspect`
  // still returns only its narrow token/profile allowlist, never the state
  // object or arbitrary account data.
- if (!out.access_token || !out.refresh_token || !out.user_id) inspect(window.$nuxt?.$store?.state, 0);
- if ((!out.access_token || !out.refresh_token || !out.user_id) && window.__NUXT__?.state) inspect(window.__NUXT__.state, 0);
+ if (!out.access_token || !out.user_id) inspect(window.$nuxt?.$store?.state, 0);
+ if ((!out.access_token || !out.user_id) && window.__NUXT__?.state) inspect(window.__NUXT__.state, 0);
  if (!out.user_agent && typeof navigator?.userAgent === 'string') out.user_agent = navigator.userAgent;
  // The web client deliberately does not expose a native client profile or
  // client secret.  A current browser bearer and stable user id are sufficient
  // to complete the browser handshake; the Rust adapter must not fabricate
  // missing native-only fields.
- return out.access_token && out.refresh_token && out.user_id ? out : null;
+ return out.access_token && out.user_id ? out : null;
 })()"#;
 
 fn parse_aliyun_web_session(value: serde_json::Value) -> Result<aliyun::AliyunSession, QuarkError> {
@@ -544,6 +568,153 @@ fn find_created_directory(directory: CloudDirectory, name: &str) -> Result<Cloud
         .ok_or(QuarkError::InvalidResponse)
 }
 
+const MAX_DIRECTORY_DOWNLOAD_DIRECTORIES: usize = 1_000;
+const MAX_DIRECTORY_DOWNLOAD_FILES: usize = 10_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedCloudFile {
+    pub file_id: String,
+    pub relative_directory: Vec<String>,
+    pub output_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudDirectoryDownloadPlan {
+    pub files: Vec<PlannedCloudFile>,
+}
+
+/// Builds a bounded, path-safe file plan before any signed URL is resolved or
+/// task is submitted. A failed plan therefore cannot leave a partial queue.
+pub fn plan_cloud_directory_download(
+    provider: CloudProvider,
+    root_id: &str,
+    root_name: &str,
+    mut list_directory: impl FnMut(&str) -> Result<CloudDirectory, QuarkError>,
+) -> Result<CloudDirectoryDownloadPlan, QuarkError> {
+    if root_id.trim().is_empty() {
+        return Err(QuarkError::InvalidInput("目录 ID 无效".into()));
+    }
+    if provider == CloudProvider::Pikpak && root_id == PIKPAK_RECYCLE_BIN_ID {
+        return Err(QuarkError::InvalidInput("PikPak 回收站不能下载目录".into()));
+    }
+
+    let mut files = Vec::new();
+    let mut visited_directories = HashSet::new();
+    let mut visited_files = HashSet::new();
+    let mut pending = vec![(root_id.to_owned(), vec![safe_directory_component(root_name)])];
+
+    while let Some((directory_id, relative_directory)) = pending.pop() {
+        if visited_directories.len() >= MAX_DIRECTORY_DOWNLOAD_DIRECTORIES {
+            return Err(QuarkError::InvalidInput("目录下载包含过多子目录".into()));
+        }
+        if !visited_directories.insert(directory_id.clone()) {
+            return Err(QuarkError::InvalidInput("目录下载检测到循环或重复目录".into()));
+        }
+
+        let directory = list_directory(&directory_id)?;
+        if directory.id != directory_id {
+            return Err(QuarkError::InvalidResponse);
+        }
+        for item in directory.items.into_iter().rev() {
+            match item.kind.as_str() {
+                "file" => {
+                    if files.len() >= MAX_DIRECTORY_DOWNLOAD_FILES {
+                        return Err(QuarkError::InvalidInput("目录下载包含过多文件".into()));
+                    }
+                    if item.id.trim().is_empty() || !visited_files.insert(item.id.clone()) {
+                        return Err(QuarkError::InvalidInput("目录下载包含重复文件".into()));
+                    }
+                    files.push(PlannedCloudFile {
+                        file_id: item.id,
+                        relative_directory: relative_directory.clone(),
+                        output_name: safe_filename(&item.name),
+                    });
+                }
+                "folder" => {
+                    if item.id.trim().is_empty() {
+                        return Err(QuarkError::InvalidResponse);
+                    }
+                    if provider == CloudProvider::Pikpak && item.id == PIKPAK_RECYCLE_BIN_ID {
+                        return Err(QuarkError::InvalidInput("PikPak 回收站不能下载目录".into()));
+                    }
+                    let mut child_path = relative_directory.clone();
+                    child_path.push(safe_directory_component(&item.name));
+                    pending.push((item.id, child_path));
+                }
+                _ => return Err(QuarkError::InvalidResponse),
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Err(QuarkError::InvalidInput("空目录不能下载".into()));
+    }
+    if has_windows_output_path_collision(&files) {
+        return Err(QuarkError::InvalidInput("目录下载的输出路径冲突".into()));
+    }
+    Ok(CloudDirectoryDownloadPlan { files })
+}
+
+fn has_windows_output_path_collision(files: &[PlannedCloudFile]) -> bool {
+    let mut file_targets = HashSet::new();
+    let mut directories = HashSet::new();
+    files.iter().any(|file| {
+        let target = file
+            .relative_directory
+            .iter()
+            .chain(std::iter::once(&file.output_name))
+            .map(|component| component.to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\\");
+        if file_targets.contains(&target) || directories.contains(&target) {
+            return true;
+        }
+        for (index, _) in target.match_indices('\\') {
+            let ancestor = &target[..index];
+            if file_targets.contains(ancestor) {
+                return true;
+            }
+            directories.insert(ancestor.to_owned());
+        }
+        !file_targets.insert(target)
+    })
+}
+
+fn safe_directory_component(name: &str) -> String {
+    let value = safe_filename(name);
+    if matches!(value.as_str(), "." | "..") {
+        "folder".into()
+    } else {
+        value
+    }
+}
+
+fn list_cloud_directory(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+    parent_id: &str,
+) -> Result<CloudDirectory, QuarkError> {
+    match provider {
+        CloudProvider::Quark => QuarkClient::new(cookie(store)?, http).directory(parent_id),
+        CloudProvider::Pikpak => PikPakClient::new(http, store).list(parent_id),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http)
+                .directory(parent_id)
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, store)?, http)
+                .directory(parent_id)
+        }
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(store, http).directory(parent_id),
+        CloudProvider::Xunlei => with_xunlei_client(store, http, |client| client.directory(parent_id)),
+        CloudProvider::Uc => {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, http)
+                .directory(parent_id)
+        }
+    }
+}
+
 fn with_xunlei_client<T, H: CloudHttpTransport>(
     store: &impl CredentialStore,
     http: &H,
@@ -562,7 +733,7 @@ fn parse_xunlei_web_session(value: serde_json::Value) -> Result<xunlei::XunleiSe
     let optional = |key| value[key].as_str().unwrap_or_default().to_owned();
     xunlei::XunleiSession::from_web_authorization(
         value["access_token"].as_str().unwrap_or_default(),
-        field("refresh_token")?,
+        optional("refresh_token"),
         field("user_id")?,
         optional("security_token"),
         xunlei::XunleiClientProfile {
@@ -630,11 +801,48 @@ fn finalize_tianyi_web_authorization(
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
     let client = tianyi::TianyiClient::new(session.clone(), http);
+    // The web window owns login, but a candidate session must prove it can
+    // read the drive before replacing a previously usable stored session.
+    // The caller only closes the authorization window after this succeeds.
+    client.directory("-11").map_err(|error| match error {
+        QuarkError::AuthorizationExpired
+        | QuarkError::WebAuthorizationRequired
+        | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
+        other => other,
+    })?;
     let account = client.web_account()?;
-    // The official browser session is the authorization boundary. Keep both
-    // private account and root-directory requests in normal file-management
-    // flow: either can fail independently despite a completed browser login.
     save_provider_session(CloudProvider::Tianyi, store, &session)?;
+    Ok(account)
+}
+
+fn finalize_xunlei_web_authorization(
+    mut session: xunlei::XunleiSession,
+    context: xunlei::XunleiWebContext,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<CloudAccount, QuarkError> {
+    session.web_context = context;
+    // Xunlei's official web bundle treats `sessionid` as optional when the
+    // current browser bearer exists. XunleiClient applies that fallback only
+    // after the narrow peer/device and credit-key context is present.
+    let client = xunlei::XunleiClient::new(session, http);
+    let account = authorization_result(client.web_account())?;
+    save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
+    Ok(account)
+}
+
+fn finalize_uc_web_authorization(
+    session: uc::UcSession,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<CloudAccount, QuarkError> {
+    let client = uc::UcClient::new(session.clone(), http);
+    // A cookie pair only says that the WebView completed part of its flow.
+    // Verify the exact first read the workspace needs before replacing the
+    // stored account and closing the official authorization window.
+    authorization_result(client.directory("0"))?;
+    let account = client.web_account()?;
+    save_provider_session(CloudProvider::Uc, store, &session)?;
     Ok(account)
 }
 
@@ -713,19 +921,11 @@ pub async fn cloud_complete_authorization(
                 Ok(account)
             }
             CloudProvider::Xunlei => {
-                let mut session =
+                let session =
                     parse_xunlei_web_session(web_storage_tokens(&window, XUNLEI_WEB_TOKENS_JS)?)?;
-                session.web_context = xunlei_web_context(&window)?;
-                let access_token = session.access_token.clone();
-                session
-                    .web_context
-                    .use_access_token_for_missing_session_id(&access_token);
-                let client = xunlei::XunleiClient::new(session, http);
-                // The browser does not expose Xunlei's native client secret.
-                // Persist the valid web session and create its workspace
-                // without issuing a native refresh or an extra API probe.
-                let account = client.web_account()?;
-                save_provider_session(CloudProvider::Xunlei, &state.store, &client.session())?;
+                let context = xunlei_web_context(&window)?;
+                let account =
+                    finalize_xunlei_web_authorization(session, context, &state.store, http)?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -734,14 +934,7 @@ pub async fn cloud_complete_authorization(
                     &window,
                     &["https://drive.uc.cn", "https://pc-api.uc.cn"],
                 )?)?;
-                let client = uc::UcClient::new(session.clone(), http);
-                // Once the official browser window has yielded the complete
-                // session cookie pair, persist it and close immediately.
-                // Validating with UC's undocumented `member` endpoint here
-                // made a successful browser login appear to hang whenever
-                // that optional probe was rejected.
-                let account = client.web_account()?;
-                save_provider_session(CloudProvider::Uc, &state.store, &session)?;
+                let account = finalize_uc_web_authorization(session, &state.store, http)?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -811,25 +1004,8 @@ pub async fn cloud_list_directory(
     provider: CloudProvider,
     parent_id: String,
 ) -> Result<CloudDirectory, QuarkError> {
-    run(app, provider, move |s, h| match provider {
-        CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h).directory(&parent_id),
-        CloudProvider::Pikpak => PikPakClient::new(h, &s.store).list(&parent_id),
-        CloudProvider::Baidu => {
-            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
-                .directory(&parent_id)
-        }
-        CloudProvider::Tianyi => {
-            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
-                .directory(&parent_id)
-        }
-        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).directory(&parent_id),
-        CloudProvider::Xunlei => {
-            with_xunlei_client(&s.store, h, |client| client.directory(&parent_id))
-        }
-        CloudProvider::Uc => {
-            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
-                .directory(&parent_id)
-        }
+    run(app, provider, move |s, h| {
+        list_cloud_directory(provider, &s.store, h, &parent_id)
     })
     .await
 }
@@ -1145,18 +1321,40 @@ pub async fn resolve_stable_cloud_download(
     .await
 }
 
-#[tauri::command]
-pub async fn cloud_download_url(
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDirectoryDownloadFailure {
+    pub relative_path: String,
+    pub code: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDirectoryDownloadOutcome {
+    pub queued_count: usize,
+    pub tasks: Vec<TaskActionOutcome>,
+    pub failures: Vec<CloudDirectoryDownloadFailure>,
+}
+
+enum CloudFileSubmission {
+    Queued(TaskActionOutcome),
+    Duplicate(TaskActionOutcome),
+}
+
+async fn submit_cloud_file(
     app: AppHandle,
+    state: &AppState,
     provider: CloudProvider,
     file_id: String,
-) -> Result<TaskActionOutcome, QuarkError> {
+    configured: UriSubmissionOptions,
+) -> Result<CloudFileSubmission, QuarkError> {
     let stable_source = format!(
         "cloud://{}/{}",
         provider.key(),
         super::types::encoded(&file_id)
     );
-    let state = app.state::<AppState>();
+    let _source_submission = state.cloud_download_sources.acquire(&stable_source).await?;
     if let Some(existing) = state
         .store
         .find_by_source(&stable_source)
@@ -1165,26 +1363,27 @@ pub async fn cloud_download_url(
     {
         let duplicate =
             duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
-        return task_action_outcome(&state.store, existing, Some(duplicate))
-            .map_err(QuarkError::Transport);
+        return Ok(CloudFileSubmission::Duplicate(
+            task_action_outcome(&state.store, existing, Some(duplicate))
+                .map_err(QuarkError::Transport)?,
+        ));
     }
+
     let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
     let signed_url = resolved.url.clone();
     let mut options = resolved.into_uri_submission_options();
-    let configured =
-        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     options.directory = configured.directory;
+    options.output_name = configured.output_name.or(options.output_name);
     options.proxy = configured.proxy;
+    options.allow_overwrite = configured.allow_overwrite;
+    options.continue_download = configured.continue_download;
     let service = state
         .runtime
         .service()
         .await
         .map_err(|error| QuarkError::Transport(error.to_string()))?;
-    let submitted = service
-        .submit_uri_with_options(task.id, vec![signed_url], options)
-        .await;
-    let task = match submitted {
+    let task = match service.submit_uri_with_options(task.id, vec![signed_url], options).await {
         Ok(task) => task,
         Err(error) => {
             let message = format!("aria2 未能接受网盘下载任务：{error}");
@@ -1192,7 +1391,153 @@ pub async fn cloud_download_url(
             return Err(QuarkError::Transport(message));
         }
     };
-    task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)
+    Ok(CloudFileSubmission::Queued(
+        task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)?,
+    ))
+}
+
+fn planned_relative_path(file: &PlannedCloudFile) -> String {
+    file.relative_directory
+        .iter()
+        .chain(std::iter::once(&file.output_name))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn directory_download_output_directory(
+    base: &Path,
+    components: &[String],
+) -> Result<PathBuf, QuarkError> {
+    if !base.is_absolute() {
+        return Err(QuarkError::InvalidInput("下载目录必须是绝对路径".into()));
+    }
+    let mut target = base.to_path_buf();
+    for component in components {
+        if component.is_empty()
+            || matches!(component.as_str(), "." | "..")
+            || component.contains(['/', '\\'])
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        target.push(component);
+    }
+    std::fs::create_dir_all(&target)
+        .map_err(|_| QuarkError::Transport("无法创建目录下载目标文件夹".into()))?;
+    Ok(target)
+}
+
+fn directory_download_failure(
+    file: &PlannedCloudFile,
+    error: &QuarkError,
+) -> CloudDirectoryDownloadFailure {
+    let (code, message) = match error {
+        QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
+            ("credentials_expired", "网盘会话已过期")
+        }
+        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => {
+            ("web_auth_required", "网盘需要网页验证")
+        }
+        QuarkError::Transport(_) => ("network_error", "网络或下载引擎错误"),
+        QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
+        QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),
+        QuarkError::Storage => ("credential_storage_error", "本机凭据或任务存储不可用"),
+        QuarkError::InvalidInput(_) => ("invalid_input", "下载参数无效"),
+        QuarkError::AuthorizationPending => ("authorization_pending", "网页授权尚未完成"),
+        QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
+            ("provider_unsupported", "当前网盘不支持该下载")
+        }
+        QuarkError::PikpakRegionalMembershipRestricted => {
+            ("pikpak_regional_membership_restricted", "PikPak 当前地区下载受限")
+        }
+    };
+    CloudDirectoryDownloadFailure {
+        relative_path: planned_relative_path(file),
+        code,
+        message,
+    }
+}
+
+#[tauri::command]
+pub async fn cloud_download_url(
+    app: AppHandle,
+    provider: CloudProvider,
+    file_id: String,
+) -> Result<TaskActionOutcome, QuarkError> {
+    let app_handle = app.clone();
+    let state = app_handle.state::<AppState>();
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    match submit_cloud_file(app, &state, provider, file_id, configured).await? {
+        CloudFileSubmission::Queued(outcome) | CloudFileSubmission::Duplicate(outcome) => {
+            Ok(outcome)
+        }
+    }
+}
+
+/// Queues every real file below one selected cloud folder. The plan is built in
+/// full before any download URL is resolved so cycles, duplicate nodes, empty
+/// folders, and the traversal limits fail without enqueuing a partial tree.
+#[tauri::command]
+pub async fn cloud_download_directory(
+    app: AppHandle,
+    provider: CloudProvider,
+    directory_id: String,
+    directory_name: String,
+) -> Result<CloudDirectoryDownloadOutcome, QuarkError> {
+    let plan = run(app.clone(), provider, move |state, http| {
+        plan_cloud_directory_download(provider, &directory_id, &directory_name, |id| {
+            list_cloud_directory(provider, &state.store, http, id)
+        })
+    })
+    .await?;
+
+    let state = app.state::<AppState>();
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    let base_directory = configured
+        .directory
+        .clone()
+        .ok_or_else(|| QuarkError::InvalidInput("未配置下载目录".into()))?;
+    let mut outcome = CloudDirectoryDownloadOutcome {
+        queued_count: 0,
+        tasks: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    for file in plan.files {
+        let relative_path = planned_relative_path(&file);
+        let output_directory = match directory_download_output_directory(
+            &base_directory,
+            &file.relative_directory,
+        ) {
+            Ok(directory) => directory,
+            Err(error) => {
+                outcome.failures.push(directory_download_failure(&file, &error));
+                continue;
+            }
+        };
+        let mut options = configured.clone();
+        options.directory = Some(output_directory);
+        options.output_name = Some(file.output_name.clone());
+
+        match submit_cloud_file(app.clone(), &state, provider, file.file_id.clone(), options).await {
+            Ok(CloudFileSubmission::Queued(task)) => {
+                outcome.queued_count += 1;
+                outcome.tasks.push(task);
+            }
+            Ok(CloudFileSubmission::Duplicate(_)) => {
+                outcome.failures.push(CloudDirectoryDownloadFailure {
+                    relative_path,
+                    code: "duplicate",
+                    message: "已存在下载任务，未重复入队",
+                });
+            }
+            Err(error) => outcome.failures.push(directory_download_failure(&file, &error)),
+        }
+    }
+
+    Ok(outcome)
 }
 
 pub struct ResolvedCloudDownload {
@@ -1352,9 +1697,12 @@ mod tests {
 
     use super::{create_cloud_task, resolve_download};
     use crate::cloud::{
-        baidu::BaiduSession, tianyi::TianyiSession, CloudHttpRequest, CloudHttpResponse,
-        CloudHttpTransport, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
-        QUARK_DESKTOP_USER_AGENT,
+        baidu::BaiduSession,
+        tianyi::TianyiSession,
+        uc::UcSession,
+        xunlei::{XunleiClientProfile, XunleiSession, XunleiWebContext},
+        CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CredentialStore,
+        MemoryCredentialStore, QuarkError, QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
 
@@ -1628,6 +1976,64 @@ mod tests {
         }
     }
 
+    struct TianyiRootAcceptingTransport(Mutex<u8>);
+
+    impl CloudHttpTransport for TianyiRootAcceptingTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            *self.0.lock().unwrap() += 1;
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: r#"{"res_code":0,"fileListAO":{"fileList":[{"id":"root-fixture","name":"fixture","isFolder":false}]}}"#.into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct TianyiRootRejectingTransport;
+
+    impl CloudHttpTransport for TianyiRootRejectingTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Ok(CloudHttpResponse {
+                status: 400,
+                body: r#"{"success":false,"errorCode":"session_not_accepted"}"#.into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    struct TianyiMalformedRootTransport;
+
+    impl CloudHttpTransport for TianyiMalformedRootTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: r#"{"res_code":0,"fileListAO":{"fileList":null,"folderList":[]}}"#.into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum TianyiRootAuthorizationError {
+        Expired,
+        WebVerification,
+        Captcha,
+    }
+
+    struct TianyiRootAuthorizationErrorTransport(TianyiRootAuthorizationError);
+
+    impl CloudHttpTransport for TianyiRootAuthorizationErrorTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Err(match self.0 {
+                TianyiRootAuthorizationError::Expired => QuarkError::AuthorizationExpired,
+                TianyiRootAuthorizationError::WebVerification => {
+                    QuarkError::WebAuthorizationRequired
+                }
+                TianyiRootAuthorizationError::Captcha => QuarkError::CaptchaRequired,
+            })
+        }
+    }
+
     #[test]
     fn baidu_web_authorization_persists_the_account_without_waiting_for_root_listing() {
         let credentials = MemoryCredentialStore::default();
@@ -1647,22 +2053,242 @@ mod tests {
     }
 
     #[test]
-    fn tianyi_web_authorization_persists_the_browser_session_without_a_private_probe() {
-        // The official WebView already proved the user completed login. A
-        // separately failing private account endpoint must not keep that
-        // authorization window open or prevent its workspace tab.
+    fn tianyi_web_authorization_persists_a_session_after_root_directory_validates() {
         let credentials = MemoryCredentialStore::default();
+        let transport = TianyiRootAcceptingTransport(Mutex::new(0));
 
         let account = super::finalize_tianyi_web_authorization(
             TianyiSession::cookie("SSON=official-browser-session"),
             &credentials,
-            &OfflineTransport,
+            &transport,
         )
-        .expect("an official Tianyi browser session can complete authorization offline");
+        .expect("a browser session with a readable root directory should authorize");
 
         assert_eq!(account.id, "tianyi-web");
         assert_eq!(account.provider, CloudProvider::Tianyi);
+        assert_eq!(*transport.0.lock().unwrap(), 1);
         assert!(credentials.load("tianyi").unwrap().is_some());
+    }
+
+    #[test]
+    fn tianyi_web_authorization_does_not_persist_a_session_when_root_is_unreadable() {
+        let credentials = MemoryCredentialStore::default();
+
+        let result = super::finalize_tianyi_web_authorization(
+            TianyiSession::cookie("SSON=browser-session"),
+            &credentials,
+            &TianyiRootRejectingTransport,
+        );
+
+        assert!(matches!(result, Err(QuarkError::Provider(_))));
+        assert!(credentials.load("tianyi").unwrap().is_none());
+    }
+
+    #[test]
+    fn xunlei_web_authorization_uses_bearer_when_the_cookie_context_has_no_session_id() {
+        // Break caught: rejecting a completed official browser login before
+        // the documented `sessionid || access_token` fallback can run leaves
+        // the authorization window polling forever.
+        let credentials = MemoryCredentialStore::default();
+        let session = XunleiSession::from_web_authorization(
+            "browser-access",
+            "browser-refresh",
+            "browser-user",
+            "",
+            XunleiClientProfile::default(),
+            0,
+        )
+        .unwrap();
+        let context = XunleiWebContext {
+            session_id: String::new(),
+            peer_id: "official-peer".into(),
+            device_id: String::new(),
+            credit_key: "official-credit".into(),
+        };
+
+        let account = super::finalize_xunlei_web_authorization(
+            session,
+            context,
+            &credentials,
+            &OfflineTransport,
+        )
+        .expect("a complete browser context can use its current bearer as session id");
+
+        assert_eq!(account.id, "browser-user");
+        let saved: XunleiSession = serde_json::from_slice(
+            &credentials
+                .load("xunlei")
+                .unwrap()
+                .expect("session is saved"),
+        )
+        .unwrap();
+        assert_eq!(saved.web_context.session_id, "browser-access");
+    }
+
+    #[test]
+    fn xunlei_web_authorization_accepts_a_current_bearer_without_a_refresh_token() {
+        // Break caught: treating an optional native refresh credential as a
+        // prerequisite for the already-current official browser bearer keeps
+        // a completed login stuck in its authorization window.
+        let credentials = MemoryCredentialStore::default();
+        let session = super::parse_xunlei_web_session(serde_json::json!({
+            "access_token": "browser-access",
+            "user_id": "browser-user",
+        }))
+        .expect("the current browser bearer needs no native refresh token");
+        let context = XunleiWebContext {
+            session_id: String::new(),
+            peer_id: "official-peer".into(),
+            device_id: String::new(),
+            credit_key: "official-credit".into(),
+        };
+
+        let account = super::finalize_xunlei_web_authorization(
+            session,
+            context,
+            &credentials,
+            &OfflineTransport,
+        )
+        .expect("the current bearer completes authorization until it expires");
+
+        assert_eq!(account.id, "browser-user");
+        let saved: XunleiSession = serde_json::from_slice(
+            &credentials
+                .load("xunlei")
+                .unwrap()
+                .expect("session is saved"),
+        )
+        .unwrap();
+        assert!(saved.refresh_token.is_empty());
+        assert_eq!(saved.web_context.session_id, "browser-access");
+    }
+
+    #[test]
+    fn uc_web_authorization_keeps_unverified_browser_cookies_out_of_storage() {
+        // Break caught: saving immediately after merely seeing __pus/__puus
+        // creates an unusable tab when UC requires web verification for its
+        // first real directory request.
+        let credentials = MemoryCredentialStore::default();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"code":0,"status":200,"message":"verify in official browser"}"#,
+        ])));
+
+        let error = super::finalize_uc_web_authorization(
+            UcSession::cookie("__uid=browser-user; __pus=identity; __puus=session"),
+            &credentials,
+            &transport,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, QuarkError::AuthorizationPending));
+        assert!(credentials.load("uc").unwrap().is_none());
+    }
+
+    #[test]
+    fn uc_web_authorization_does_not_replace_a_previous_session_when_root_verification_fails() {
+        // Break caught: persisting a candidate browser cookie before the first
+        // root read succeeds destroys a previously working UC authorization.
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("uc", b"previous-verified-session")
+            .unwrap();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"code":0,"status":200,"message":"risk verification required"}"#,
+        ])));
+
+        let error = super::finalize_uc_web_authorization(
+            UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
+            &credentials,
+            &transport,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, QuarkError::AuthorizationPending));
+        assert_eq!(
+            credentials.load("uc").unwrap().as_deref(),
+            Some(b"previous-verified-session".as_slice())
+        );
+    }
+
+    #[test]
+    fn uc_web_authorization_saves_a_candidate_only_after_root_verification_succeeds() {
+        // Break caught: never persisting a verified candidate leaves a
+        // successful official login unable to restore its UC workspace.
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("uc", b"previous-verified-session")
+            .unwrap();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+        ])));
+
+        let account = super::finalize_uc_web_authorization(
+            UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
+            &credentials,
+            &transport,
+        )
+        .expect("a verified root response completes authorization");
+
+        assert_eq!(account.id, "new-user");
+        let saved: UcSession =
+            serde_json::from_slice(&credentials.load("uc").unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved.cookie,
+            "__uid=new-user; __pus=new-identity; __puus=new-session"
+        );
+    }
+
+    #[test]
+    fn tianyi_web_authorization_maps_root_authorization_errors_to_pending() {
+        for error in [
+            TianyiRootAuthorizationError::Expired,
+            TianyiRootAuthorizationError::WebVerification,
+            TianyiRootAuthorizationError::Captcha,
+        ] {
+            let credentials = MemoryCredentialStore::default();
+            let result = super::finalize_tianyi_web_authorization(
+                TianyiSession::cookie("SSON=candidate-session"),
+                &credentials,
+                &TianyiRootAuthorizationErrorTransport(error),
+            );
+
+            assert!(matches!(result, Err(QuarkError::AuthorizationPending)));
+            assert!(credentials.load("tianyi").unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn tianyi_web_authorization_keeps_the_old_session_when_candidate_root_is_unreadable() {
+        let credentials = MemoryCredentialStore::default();
+        let existing = serde_json::to_vec(&TianyiSession::cookie("SSON=existing-session"))
+            .expect("the test session serializes");
+        credentials.save("tianyi", &existing).unwrap();
+
+        let result = super::finalize_tianyi_web_authorization(
+            TianyiSession::cookie("SSON=candidate-session"),
+            &credentials,
+            &TianyiRootRejectingTransport,
+        );
+
+        assert!(matches!(result, Err(QuarkError::Provider(_))));
+        assert_eq!(credentials.load("tianyi").unwrap(), Some(existing));
+    }
+
+    #[test]
+    fn tianyi_web_authorization_keeps_the_old_session_when_candidate_root_shape_is_malformed() {
+        let credentials = MemoryCredentialStore::default();
+        let existing = serde_json::to_vec(&TianyiSession::cookie("SSON=existing-session"))
+            .expect("the test session serializes");
+        credentials.save("tianyi", &existing).unwrap();
+
+        let result = super::finalize_tianyi_web_authorization(
+            TianyiSession::cookie("SSON=candidate-session"),
+            &credentials,
+            &TianyiMalformedRootTransport,
+        );
+
+        assert!(matches!(result, Err(QuarkError::InvalidResponse)));
+        assert_eq!(credentials.load("tianyi").unwrap(), Some(existing));
     }
 
     #[test]

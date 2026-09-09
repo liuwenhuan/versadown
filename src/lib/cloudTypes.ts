@@ -1,3 +1,5 @@
+import type { TaskActionResult } from './types';
+
 export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
 export type CloudAuthMethod = 'web' | 'password';
 
@@ -20,3 +22,9 @@ export interface CloudAuthorization { provider: CloudProvider; windowLabel: stri
 export interface CloudAuthorizationCapabilities { provider: CloudProvider; web: boolean; password: boolean; }
 export interface CloudCredentials { username: string; password: string; }
 export interface CloudError { code: 'not_authorized' | 'credentials_expired' | 'web_auth_required' | 'authorization_pending' | 'credential_storage_error' | 'invalid_response' | 'network_error' | 'provider_error' | 'invalid_input' | 'provider_unsupported' | 'pikpak_regional_membership_restricted'; message: string; }
+export interface CloudDirectoryDownloadFailure { relativePath: string; code: string; message: string; }
+export interface CloudDirectoryDownloadOutcome {
+  queuedCount: number;
+  tasks: readonly TaskActionResult[];
+  failures: readonly CloudDirectoryDownloadFailure[];
+}

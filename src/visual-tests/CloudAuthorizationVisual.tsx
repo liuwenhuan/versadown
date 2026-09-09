@@ -25,6 +25,7 @@ const client = {
   trashCloudFiles: async () => undefined,
   deleteCloudFiles: async () => undefined,
   downloadCloudFile: async () => undefined,
+  downloadCloudDirectory: async () => ({ queuedCount: 0, tasks: [], failures: [] }),
   logoutCloud: async () => undefined,
   pickAndUploadFiles: async () => undefined,
 };

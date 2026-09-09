@@ -187,6 +187,7 @@ pub fn run() {
                 settings: std::sync::Mutex::new(settings),
                 settings_path,
                 ai_secrets,
+                cloud_download_sources: Default::default(),
             });
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
@@ -242,6 +243,7 @@ pub fn run() {
             cloud::commands::cloud_trash,
             cloud::commands::cloud_delete,
             cloud::commands::cloud_download_url,
+            cloud::commands::cloud_download_directory,
             cloud::commands::cloud_upload_files,
             cloud::commands::cloud_logout,
             launcher::set_launcher_compact_shape,
