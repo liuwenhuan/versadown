@@ -106,12 +106,43 @@ fn resolve_download_url(base_url: &url::Url, value: &str) -> Result<url::Url, Ma
     // its well-known cache path on the server the user actually configured;
     // never follow a cross-origin address supplied in the response.
     let localhost = matches!(resolved.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-    if localhost && resolved.path().starts_with("/download/") {
-        let mut rewritten = base_url
-            .join(resolved.path())
-            .map_err(|_| MagnetMetadataError::InvalidResponse("下载地址无效".into()))?;
-        rewritten.set_query(resolved.query());
-        return Ok(rewritten);
+    if localhost {
+        if resolved.path().starts_with("/download/") {
+            let mut rewritten = base_url
+                .join(resolved.path())
+                .map_err(|_| MagnetMetadataError::InvalidResponse("下载地址无效".into()))?;
+            rewritten.set_query(resolved.query());
+            return Ok(rewritten);
+        }
+        return Err(MagnetMetadataError::UnsafeTorrentUrl);
+    }
+    if resolved.scheme() == "https"
+        && resolved.host_str().is_some()
+        && resolved.username().is_empty()
+        && resolved.password().is_none()
+    {
+        return Ok(resolved);
     }
     Err(MagnetMetadataError::UnsafeTorrentUrl)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_an_external_https_torrent_mirror_returned_by_the_metadata_service() {
+        let base_url = normalized_base_url("http://peer.example.test:8080").unwrap();
+
+        let resolved = resolve_download_url(
+            &base_url,
+            "https://torrent-mirror.example.test/cache/example.torrent",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved.as_str(),
+            "https://torrent-mirror.example.test/cache/example.torrent"
+        );
+    }
 }
