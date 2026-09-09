@@ -109,6 +109,7 @@ export async function getDownloadGlobalStat(): Promise<DownloadGlobalStat> {
 export const defaultSettings: AppSettings = {
   debugReports: false,
   downloadDirectory: '',
+  launcherVisibility: 'always',
   proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }
 };
 

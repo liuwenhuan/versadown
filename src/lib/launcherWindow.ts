@@ -7,6 +7,7 @@ export const LAUNCHER_WINDOW_LABEL = 'launcher';
 export const launcherDimensions = {
   compact: { width: 48, height: 48 },
   live: { width: 192, height: 48 },
+  menu: { width: 240, height: 300 },
   expanded: { width: 470, height: 300 }
 } as const;
 
@@ -76,6 +77,18 @@ export async function setLauncherLiveSpeedVisible(visible: boolean) {
   await resizeLauncher(launcherCompactSize(visible), !visible);
 }
 
+export async function setLauncherContextMenuVisible(visible: boolean, hasLiveSpeed = false) {
+  await resizeLauncher(
+    visible ? launcherDimensions.menu : launcherCompactSize(hasLiveSpeed),
+    !visible && !hasLiveSpeed
+  );
+}
+
+export async function setLauncherWindowVisible(visible: boolean) {
+  if (!isTauriRuntime()) return;
+  await invoke('set_launcher_window_visible', { visible });
+}
+
 export async function anchorLauncherToWorkArea() {
   if (!isTauriRuntime()) return;
   const launcher = getCurrentWindow();
@@ -112,4 +125,14 @@ export async function startLauncherDragging() {
 export async function showLauncherMenu() {
   if (!isTauriRuntime()) return;
   await invoke('show_launcher_menu');
+}
+
+export async function runLauncherMenuAction(action: string) {
+  if (!isTauriRuntime()) return;
+  await invoke('run_launcher_menu_action', { action });
+}
+
+export async function getLauncherManagerVisible(): Promise<boolean> {
+  if (!isTauriRuntime()) return true;
+  return invoke<boolean>('launcher_manager_visible');
 }

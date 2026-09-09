@@ -6,6 +6,7 @@ import { SettingsPanel } from './SettingsPanel';
 const initial = {
   debugReports: false,
   downloadDirectory: 'C:\\Users\\tester\\Downloads',
+  launcherVisibility: 'always' as const,
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' }
 };
 
@@ -44,6 +45,16 @@ it('allows users to explicitly enable debug reports in beta', async () => {
   expect(onChange).toHaveBeenCalledWith({ ...initial, debugReports: true });
 });
 
+it('lets users restore a hidden floating ball from the main settings', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={{ ...initial, launcherVisibility: 'hidden' }} onChange={onChange} />);
+
+  await user.selectOptions(screen.getByRole('combobox', { name: '悬浮球显示' }), 'always');
+
+  expect(onChange).toHaveBeenLastCalledWith({ ...initial, launcherVisibility: 'always' });
+});
+
 it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
@@ -62,6 +73,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   expect(onChange).toHaveBeenLastCalledWith({
     debugReports: false,
     downloadDirectory: 'C:\\Users\\tester\\Downloads',
+    launcherVisibility: 'always',
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' }
   });
 });

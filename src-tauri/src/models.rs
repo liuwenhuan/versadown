@@ -25,11 +25,21 @@ impl Default for ProxySettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LauncherVisibility {
+    #[default]
+    Always,
+    Downloading,
+    Hidden,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub debug_reports: bool,
     pub download_directory: String,
+    pub launcher_visibility: LauncherVisibility,
     pub proxy: ProxySettings,
 }
 

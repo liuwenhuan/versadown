@@ -92,6 +92,7 @@ export interface CloudItem {
 }
 
 export type ProxyProtocol = 'http' | 'https';
+export type LauncherVisibility = 'always' | 'downloading' | 'hidden';
 
 export interface ProxySettings {
   enabled: boolean;
@@ -105,5 +106,6 @@ export interface ProxySettings {
 export interface AppSettings {
   debugReports: boolean;
   downloadDirectory: string;
+  launcherVisibility: LauncherVisibility;
   proxy: ProxySettings;
 }

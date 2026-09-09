@@ -4,7 +4,7 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::downloader::load_torrent_base64;
@@ -508,6 +508,7 @@ pub fn update_debug_reports(enabled: bool, state: State<'_, AppState>) -> Result
 pub fn update_settings(
     mut settings: AppSettings,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<AppSettings, String> {
     settings.download_directory = settings.download_directory.trim().to_string();
     let download_directory = PathBuf::from(&settings.download_directory);
@@ -520,10 +521,9 @@ pub fn update_settings(
     settings.proxy.username = settings.proxy.username.trim().to_string();
     proxy_url(&settings.proxy)?;
 
-    let json = serde_json::to_vec_pretty(&settings)
-        .map_err(|error| format!("无法保存设置：{error}"))?;
-    std::fs::write(&state.settings_path, json)
-        .map_err(|error| format!("无法保存设置：{error}"))?;
+    let json =
+        serde_json::to_vec_pretty(&settings).map_err(|error| format!("无法保存设置：{error}"))?;
+    std::fs::write(&state.settings_path, json).map_err(|error| format!("无法保存设置：{error}"))?;
 
     *state
         .debug_reports
@@ -533,6 +533,11 @@ pub fn update_settings(
         .settings
         .lock()
         .map_err(|_| "设置锁不可用".to_string())? = settings.clone();
+    let _ = app.emit_to(
+        "launcher",
+        "launcher-visibility-updated",
+        settings.launcher_visibility,
+    );
     Ok(settings)
 }
 

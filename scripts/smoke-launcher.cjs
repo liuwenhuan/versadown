@@ -213,6 +213,7 @@ async function run() {
     assert(compact.display !== 'none' && compact.visibility === 'visible' && compact.opacity === '1', 'Compact launcher button is not visible.');
     assert(compact.left >= 0 && compact.top >= 0 && compact.right <= compact.width + 0.5 && compact.bottom <= compact.height + 0.5, `Compact launcher is outside its viewport: ${JSON.stringify(compact)}`);
     assert(compact.background.includes('linear-gradient'), 'Compact launcher lost its colored background.');
+    assert(!await evaluate(launcher, 'Boolean(document.querySelector(".launcher-live-indicator"))'), 'Zero-speed launcher unexpectedly shows a traffic capsule.');
 
     const nativeCompact = JSON.parse(await evaluate(launcher, `(async () => JSON.stringify({
       position: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_position', { label: 'launcher' }),
@@ -242,15 +243,39 @@ async function run() {
     })()`);
     const launcherInteractions = JSON.parse(await waitForEvaluation(
       launcher,
-      `(async () => JSON.stringify({ state: await window.__TAURI_INTERNALS__.invoke('launcher_interaction_snapshot'), events: window.__launcherSmokeEvents, compact: Boolean(document.querySelector('.launcher-trigger')), expanded: Boolean(document.querySelector('.launcher-panel')) }))()`,
+      `(async () => JSON.stringify({ state: await window.__TAURI_INTERNALS__.invoke('launcher_interaction_snapshot'), events: window.__launcherSmokeEvents, compact: Boolean(document.querySelector('.launcher-trigger')), expanded: Boolean(document.querySelector('.launcher-panel')), menu: Boolean(document.querySelector('.launcher-context-menu')), menuText: document.querySelector('.launcher-context-menu')?.innerText ?? '', manager: await window.__TAURI_INTERNALS__.invoke('manager_window_snapshot') }))()`,
       (value) => {
         const state = JSON.parse(value).state;
-        return state.dragRequests === 1 && state.menuRequests === 1;
+        return state.dragRequests === 1 && state.menuRequests === 1 && JSON.parse(value).menu;
       }
     ));
     assert(launcherInteractions.state.dragRequests === 1, `Launcher drag did not invoke native window dragging: ${JSON.stringify(launcherInteractions)}`);
-    assert(launcherInteractions.state.menuRequests === 1, `Launcher right click did not request its native menu: ${JSON.stringify(launcherInteractions)}`);
-    assert(launcherInteractions.compact && !launcherInteractions.expanded, `Drag or right click unexpectedly expanded the launcher: ${JSON.stringify(launcherInteractions)}`);
+    assert(launcherInteractions.state.menuRequests === 1, `Launcher right click did not request its custom menu: ${JSON.stringify(launcherInteractions)}`);
+    assert(launcherInteractions.compact && !launcherInteractions.expanded && launcherInteractions.menu, `Drag or right click unexpectedly expanded the launcher: ${JSON.stringify(launcherInteractions)}`);
+    assert(!launcherInteractions.menuText.includes('本次隐藏悬浮球'), `Launcher menu still exposes temporary hiding: ${JSON.stringify(launcherInteractions)}`);
+    assert(
+      launcherInteractions.menuText.includes(launcherInteractions.manager.visible ? '隐藏主界面' : '显示主界面'),
+      `Launcher menu did not reflect the actual main-window state: ${JSON.stringify(launcherInteractions)}`
+    );
+
+    await evaluate(launcher, `document.querySelector('.launcher-context-menu [aria-haspopup="menu"]').click()`);
+    const visibilityMenu = JSON.parse(await waitForEvaluation(
+      launcher,
+      `JSON.stringify({ title: document.querySelector('.launcher-context-menu header b')?.textContent, options: Array.from(document.querySelectorAll('.launcher-context-menu [role="menuitemradio"]')).map((item) => item.textContent.trim()) })`,
+      (value) => JSON.parse(value).options.length === 3
+    ));
+    assert(visibilityMenu.title === '悬浮球显示', `Launcher visibility submenu did not open: ${JSON.stringify(visibilityMenu)}`);
+    assert(
+      ['总是显示', '仅下载时显示', '关闭显示'].every((label) => visibilityMenu.options.some((option) => option.startsWith(label))),
+      `Launcher visibility submenu options are incomplete: ${JSON.stringify(visibilityMenu)}`
+    );
+    await evaluate(launcher, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    const menuCollapsed = await waitForEvaluation(
+      launcher,
+      '!document.querySelector(".launcher-context-menu") && innerWidth < 200 && innerHeight < 100',
+      Boolean
+    );
+    assert(menuCollapsed, 'Launcher did not return to compact mode after closing its context menu.');
 
     const foregroundBeforeLifecycleChecks = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('foreground_window_handle_for_test')`);
 

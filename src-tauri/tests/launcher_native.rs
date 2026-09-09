@@ -1,5 +1,6 @@
 use alldownloader_lib::{
-    launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion,
+    launcher_circle_region, launcher_menu_entries, AppSettings, LauncherInteractionState,
+    LauncherRegion, LauncherVisibility,
 };
 
 #[test]
@@ -26,8 +27,7 @@ fn launcher_context_menu_contains_the_required_actions() {
             ("launcher.new_download", "新建下载"),
             ("launcher.start_all", "开始全部任务"),
             ("launcher.pause_all", "暂停全部任务"),
-            ("launcher.settings", "悬浮球设置"),
-            ("launcher.hide", "本次隐藏悬浮球"),
+            ("launcher.settings", "悬浮球显示"),
             ("launcher.quit", "退出万能下载"),
         ]
     );
@@ -43,4 +43,25 @@ fn background_interaction_state_records_drag_and_menu_without_native_ui() {
     assert!(state.is_background_test());
     assert_eq!(snapshot.drag_requests, 1);
     assert_eq!(snapshot.menu_requests, 1);
+}
+
+#[test]
+fn legacy_settings_default_to_always_showing_the_launcher() {
+    let settings: AppSettings = serde_json::from_str(
+        r#"{
+            "debugReports": false,
+            "downloadDirectory": "C:\\Downloads",
+            "proxy": {
+                "enabled": false,
+                "protocol": "http",
+                "host": "",
+                "port": 7890,
+                "username": "",
+                "password": ""
+            }
+        }"#,
+    )
+    .expect("legacy settings should remain readable");
+
+    assert_eq!(settings.launcher_visibility, LauncherVisibility::Always);
 }

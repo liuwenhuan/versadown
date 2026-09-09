@@ -14,8 +14,8 @@ vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   confirmDownload: state.confirm, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
-  defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } },
-  getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } }),
+  defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } },
+  getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' } }),
   updateSettings: vi.fn(), openTaskDirectory: vi.fn(), removeTaskRecord: vi.fn(), resolveDuplicateDownload: vi.fn()
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {

@@ -4,6 +4,7 @@ const native = vi.hoisted(() => {
   const calls: string[] = [];
   return {
     calls,
+    invoke: vi.fn(),
     emitTo: vi.fn(async () => { calls.push('emit'); }),
     getByLabel: vi.fn(),
     mainWindow: {
@@ -15,7 +16,7 @@ const native = vi.hoisted(() => {
 });
 
 vi.mock('./api', () => ({ isTauriRuntime: () => true }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ emitTo: native.emitTo }));
 vi.mock('@tauri-apps/api/window', () => ({
   currentMonitor: vi.fn(),
@@ -66,6 +67,12 @@ it('resizes around the launcher bottom-right corner and clamps it to the work ar
 it('uses a wider transparent compact window only while a live speed is visible', () => {
   expect(launcherWindow.launcherCompactSize(false)).toEqual({ width: 48, height: 48 });
   expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 192, height: 48 });
+});
+
+it('uses the native visibility command so background smoke runs cannot surface a launcher', async () => {
+  await launcherWindow.setLauncherWindowVisible(false);
+
+  expect(native.invoke).toHaveBeenCalledWith('set_launcher_window_visible', { visible: false });
 });
 
 it('restores and reveals the main window before forwarding launcher input', async () => {

@@ -1,29 +1,52 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { FloatingLauncher } from './FloatingLauncher';
-import { anchorLauncherToWorkArea, sendLauncherInput, setLauncherExpanded, setLauncherLiveSpeedVisible, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
-import { getDownloadEngineState, getDownloadGlobalStat, isTauriRuntime } from '../lib/api';
+import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
+import { anchorLauncherToWorkArea, getLauncherManagerVisible, runLauncherMenuAction, sendLauncherInput, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherLiveSpeedVisible, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
+import { getDownloadEngineState, getDownloadGlobalStat, getSettings, isTauriRuntime, updateSettings } from '../lib/api';
 import { formatCompactSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
-import type { DownloadEngineState, DownloadGlobalStat } from '../lib/types';
+import type { DownloadEngineState, DownloadGlobalStat, LauncherVisibility } from '../lib/types';
 
 export function LauncherWindow() {
   const [activeCount, setActiveCount] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [engineAvailable, setEngineAvailable] = useState(true);
   const [expanded, setExpanded] = useState(false);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [managerVisible, setManagerVisible] = useState(true);
+  const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>('always');
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [anchored, setAnchored] = useState(false);
   const statEventEpoch = useRef(0);
   const engineEventEpoch = useRef(0);
-  const hasLiveDownload = activeCount > 0;
-  const compactLiveSpeedVisible = useRef(false);
-  compactLiveSpeedVisible.current = !expanded && hasLiveDownload;
+  const hasActiveDownload = activeCount > 0;
+  const hasDownloadTraffic = downloadSpeed > 0;
+  const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
+  const liveSpeedVisible = shouldShowLauncher && hasDownloadTraffic;
 
   useEffect(() => {
-    void anchorLauncherToWorkArea().then(() => setLauncherLiveSpeedVisible(compactLiveSpeedVisible.current));
+    void anchorLauncherToWorkArea().catch(() => undefined).finally(() => setAnchored(true));
   }, []);
 
   useEffect(() => {
-    if (!expanded) void setLauncherLiveSpeedVisible(hasLiveDownload);
-  }, [expanded, hasLiveDownload]);
+    if (!isTauriRuntime()) { setSettingsReady(true); return; }
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getSettings().then((settings) => {
+      if (!disposed) setLauncherVisibility(settings.launcherVisibility);
+    }).catch(() => undefined).finally(() => { if (!disposed) setSettingsReady(true); });
+    listen<LauncherVisibility>('launcher-visibility-updated', (event) => {
+      if (!disposed) setLauncherVisibility(event.payload);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!settingsReady || !anchored || expanded || contextMenuOpen) return;
+    void setLauncherLiveSpeedVisible(liveSpeedVisible)
+      .then(() => setLauncherWindowVisible(shouldShowLauncher))
+      .catch(() => undefined);
+  }, [anchored, contextMenuOpen, expanded, liveSpeedVisible, settingsReady, shouldShowLauncher]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -60,19 +83,47 @@ export function LauncherWindow() {
     return () => { disposed = true; unlistenDownloads?.(); unlistenEngine?.(); };
   }, []);
 
+  function openContextMenu() {
+    if (expanded) return;
+    setContextMenuOpen(true);
+    void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
+    void setLauncherContextMenuVisible(true, liveSpeedVisible).catch(() => undefined);
+    void showLauncherMenu().catch(() => undefined);
+  }
+
+  function closeContextMenu() {
+    if (!contextMenuOpen) return;
+    setContextMenuOpen(false);
+    void setLauncherContextMenuVisible(false, liveSpeedVisible).catch(() => undefined);
+  }
+
+  function runContextAction(action: LauncherMenuAction) {
+    void runLauncherMenuAction(`launcher.${action}`).then(async () => {
+      if (action === 'hide_manager') setManagerVisible(await getLauncherManagerVisible().catch(() => managerVisible));
+    }).catch(() => undefined);
+  }
+
+  function updateLauncherVisibility(nextVisibility: LauncherVisibility) {
+    void getSettings()
+      .then((settings) => updateSettings({ ...settings, launcherVisibility: nextVisibility }))
+      .then((settings) => setLauncherVisibility(settings.launcherVisibility))
+      .catch(() => undefined);
+  }
+
   return (
-    <main className={`launcher-shell ${hasLiveDownload && !expanded ? 'launcher-speed-active' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${liveSpeedVisible && !expanded && !contextMenuOpen ? 'launcher-speed-active' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
         activeCount={activeCount}
         onParse={(input) => { void sendLauncherInput(input); }}
-        onExpandedChange={(nextExpanded) => { setExpanded(nextExpanded); void setLauncherExpanded(nextExpanded, hasLiveDownload); }}
+        onExpandedChange={(nextExpanded) => { setContextMenuOpen(false); setExpanded(nextExpanded); void setLauncherExpanded(nextExpanded, liveSpeedVisible); }}
         onDragStart={() => { void startLauncherDragging(); }}
-        onContextMenu={() => { void showLauncherMenu(); }}
+        onContextMenu={openContextMenu}
       />
-      {hasLiveDownload && (expanded
+      {liveSpeedVisible && !contextMenuOpen && (expanded
         ? <span className="launcher-live-speed">↓ {Math.round(downloadSpeed / 1024)} KB/s</span>
         : <span className="launcher-live-indicator" aria-label={`下载速度 ${Math.round(downloadSpeed / 1024)} KB/s`}><span>↓</span>{formatCompactSpeed(downloadSpeed)}<small>/s</small></span>)}
       {!engineAvailable && <span className="launcher-engine-offline" aria-label="下载引擎不可用">!</span>}
+      {contextMenuOpen && <LauncherContextMenu managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}
     </main>
   );
 }

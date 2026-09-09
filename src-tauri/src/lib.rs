@@ -30,8 +30,8 @@ pub use launcher::{
     launcher_circle_region, launcher_menu_entries, LauncherInteractionState, LauncherRegion,
 };
 pub use models::{
-    may_transition, AppSettings, DownloadTask, DuplicateDownloadState, NewTask, ProxySettings,
-    TaskStatus,
+    may_transition, AppSettings, DownloadTask, DuplicateDownloadState, LauncherVisibility,
+    NewTask, ProxySettings, TaskStatus,
 };
 pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
@@ -148,6 +148,7 @@ pub fn run() {
                 settings.download_directory = default_destination.to_string_lossy().into_owned();
             }
             let debug_reports = settings.debug_reports;
+            let launcher_visibility = settings.launcher_visibility;
             let destination = std::path::PathBuf::from(&settings.download_directory);
             std::fs::create_dir_all(&destination)?;
             let launch_config = Aria2LaunchConfig {
@@ -182,10 +183,12 @@ pub fn run() {
                 if let Some(main) = app.get_webview_window("main") {
                     main.show()?;
                 }
-                if let Some(launcher) = app.get_webview_window("launcher") {
-                    launcher::set_launcher_compact_shape(launcher.clone(), true)
-                        .map_err(std::io::Error::other)?;
-                    launcher.show()?;
+                if launcher_visibility == LauncherVisibility::Always {
+                    if let Some(launcher) = app.get_webview_window("launcher") {
+                        launcher::set_launcher_compact_shape(launcher.clone(), true)
+                            .map_err(std::io::Error::other)?;
+                        launcher.show()?;
+                    }
                 }
             }
             tauri::async_runtime::spawn(async move {
@@ -225,8 +228,11 @@ pub fn run() {
             cloud::commands::cloud_upload_files,
             cloud::commands::cloud_logout,
             launcher::set_launcher_compact_shape,
+            launcher::set_launcher_window_visible,
             launcher::start_launcher_dragging,
             launcher::show_launcher_menu,
+            launcher::run_launcher_menu_action,
+            launcher::launcher_manager_visible,
             launcher::launcher_interaction_snapshot,
             launcher::hide_manager_for_test,
             launcher::manager_window_snapshot,

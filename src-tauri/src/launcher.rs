@@ -1,14 +1,13 @@
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tauri::{menu::MenuBuilder, AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 pub const HIDE_MANAGER: &str = "launcher.hide_manager";
 pub const NEW_DOWNLOAD: &str = "launcher.new_download";
 pub const START_ALL: &str = "launcher.start_all";
 pub const PAUSE_ALL: &str = "launcher.pause_all";
 pub const OPEN_SETTINGS: &str = "launcher.settings";
-pub const HIDE_LAUNCHER: &str = "launcher.hide";
 pub const QUIT: &str = "launcher.quit";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -70,14 +69,13 @@ impl LauncherInteractionState {
     }
 }
 
-pub fn launcher_menu_entries() -> [(&'static str, &'static str); 7] {
+pub fn launcher_menu_entries() -> [(&'static str, &'static str); 6] {
     [
         (HIDE_MANAGER, "隐藏主界面"),
         (NEW_DOWNLOAD, "新建下载"),
         (START_ALL, "开始全部任务"),
         (PAUSE_ALL, "暂停全部任务"),
-        (OPEN_SETTINGS, "悬浮球设置"),
-        (HIDE_LAUNCHER, "本次隐藏悬浮球"),
+        (OPEN_SETTINGS, "悬浮球显示"),
         (QUIT, "退出万能下载"),
     ]
 }
@@ -166,6 +164,29 @@ pub fn set_launcher_compact_shape(
     }
 }
 
+/// Shows or hides the floating launcher from its own renderer.  Keeping this
+/// native-side is important for the isolated background smoke process: that
+/// process must be able to exercise the launcher without ever surfacing a
+/// window on the user's desktop.
+#[tauri::command]
+pub fn set_launcher_window_visible(
+    window: WebviewWindow,
+    visible: bool,
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<(), String> {
+    if window.label() != "launcher" {
+        return Err("只能设置悬浮球窗口的可见性".to_string());
+    }
+    if interaction.is_background_test() {
+        return Ok(());
+    }
+    if visible {
+        window.show().map_err(|error| error.to_string())
+    } else {
+        window.hide().map_err(|error| error.to_string())
+    }
+}
+
 #[tauri::command]
 pub fn start_launcher_dragging(
     window: WebviewWindow,
@@ -180,7 +201,6 @@ pub fn start_launcher_dragging(
 
 #[tauri::command]
 pub fn show_launcher_menu(
-    app: AppHandle,
     window: WebviewWindow,
     interaction: State<'_, LauncherInteractionState>,
 ) -> Result<(), String> {
@@ -188,21 +208,30 @@ pub fn show_launcher_menu(
         return Err("右键菜单只能从悬浮窗打开".to_string());
     }
     interaction.record_menu();
-    if interaction.is_background_test() {
-        return Ok(());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn run_launcher_menu_action(
+    app: AppHandle,
+    window: WebviewWindow,
+    action: String,
+) -> Result<(), String> {
+    if window.label() != "launcher" {
+        return Err("悬浮球菜单动作只能从悬浮窗执行".to_string());
     }
-    let menu = MenuBuilder::new(&app)
-        .text(HIDE_MANAGER, "隐藏主界面")
-        .text(NEW_DOWNLOAD, "新建下载")
-        .text(START_ALL, "开始全部任务")
-        .text(PAUSE_ALL, "暂停全部任务")
-        .text(OPEN_SETTINGS, "悬浮球设置")
-        .text(HIDE_LAUNCHER, "本次隐藏悬浮球")
-        .separator()
-        .text(QUIT, "退出万能下载")
-        .build()
-        .map_err(|error| error.to_string())?;
-    window.popup_menu(&menu).map_err(|error| error.to_string())
+    if !launcher_menu_entries().iter().any(|(id, _)| *id == action) {
+        return Err("未知的悬浮球菜单动作".to_string());
+    }
+    handle_launcher_menu_action(&app, &action);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn launcher_manager_visible(app: AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|manager| manager.is_visible().ok())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -261,11 +290,6 @@ pub fn handle_launcher_menu_action(app: &AppHandle, id: &str) {
             let _ = app.emit_to("main", "launcher-command", "pause-all");
         }
         OPEN_SETTINGS => reveal_manager(app, Some("settings")),
-        HIDE_LAUNCHER => {
-            if let Some(launcher) = app.get_webview_window("launcher") {
-                let _ = launcher.hide();
-            }
-        }
         QUIT => begin_application_exit(app),
         _ => {}
     }

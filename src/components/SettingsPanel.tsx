@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { AppSettings, ProxyProtocol } from '../lib/types';
+import { AppSettings, LauncherVisibility, ProxyProtocol } from '../lib/types';
 
 interface SettingsPanelProps {
   initial: AppSettings;
@@ -10,14 +10,15 @@ interface SettingsPanelProps {
 export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPanelProps) {
   const [debugReports, setDebugReports] = useState(initial.debugReports);
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
+  const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setProxy(initial.proxy); }, [initial]);
+  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); }, [initial]);
 
   function updateDebugReports(enabled: boolean) {
     setDebugReports(enabled);
-    onChange({ debugReports: enabled, downloadDirectory, proxy });
+    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy });
   }
 
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
@@ -27,7 +28,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPa
 
   function saveProxy(event: FormEvent) {
     event.preventDefault();
-    onChange({ debugReports, downloadDirectory, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() } });
+    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() } });
     setSaved(true);
   }
 
@@ -35,7 +36,12 @@ export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPa
     event.preventDefault();
     const normalized = downloadDirectory.trim();
     setDownloadDirectory(normalized);
-    onChange({ debugReports, downloadDirectory: normalized, proxy });
+    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy });
+  }
+
+  function updateLauncherVisibility(visibility: LauncherVisibility) {
+    setLauncherVisibility(visibility);
+    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy });
   }
 
   async function browseForDownloadDirectory() {
@@ -50,6 +56,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory }: SettingsPa
       <button className="secondary" type="button" aria-label="浏览下载目录" onClick={() => void browseForDownloadDirectory()}>浏览</button>
       <button className="primary" type="submit">保存下载目录</button>
     </form>
+    <label className="setting-row"><span><b>悬浮球显示</b><small>“关闭显示”后仍可在这里重新开启。</small></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
     <form className="proxy-settings" onSubmit={saveProxy}>
       <div className="setting-row"><span><b>下载代理服务器</b><small>启用后，后续新建任务将携带代理参数启动 aria2。</small></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
       <fieldset disabled={!proxy.enabled}>
