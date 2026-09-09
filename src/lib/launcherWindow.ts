@@ -7,7 +7,7 @@ export const LAUNCHER_WINDOW_LABEL = 'launcher';
 export const launcherDimensions = {
   compact: { width: 48, height: 48 },
   live: { width: 192, height: 48 },
-  menu: { width: 240, height: 300 },
+  menu: { width: 272, height: 360 },
   expanded: { width: 470, height: 300 }
 } as const;
 

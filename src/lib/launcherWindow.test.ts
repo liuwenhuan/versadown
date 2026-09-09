@@ -69,6 +69,10 @@ it('uses a wider transparent compact window only while a live speed is visible',
   expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 192, height: 48 });
 });
 
+it('reserves a shadow-safe viewport for the launcher context menu', () => {
+  expect(launcherWindow.launcherDimensions.menu).toEqual({ width: 272, height: 360 });
+});
+
 it('uses the native visibility command so background smoke runs cannot surface a launcher', async () => {
   await launcherWindow.setLauncherWindowVisible(false);
 

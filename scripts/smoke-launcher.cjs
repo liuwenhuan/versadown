@@ -267,6 +267,17 @@ async function run() {
       launcherInteractions.menuText.includes(launcherInteractions.manager.visible ? '隐藏主界面' : '显示主界面'),
       `Launcher menu did not reflect the actual main-window state: ${JSON.stringify(launcherInteractions)}`
     );
+    const menuGeometry = JSON.parse(await evaluate(launcher, `JSON.stringify((() => {
+      const menu = document.querySelector('.launcher-context-menu').getBoundingClientRect();
+      return { width: innerWidth, height: innerHeight, left: menu.left, top: menu.top, right: menu.right, bottom: menu.bottom };
+    })())`));
+    assert(
+      menuGeometry.width >= 272 && menuGeometry.height >= 360
+        && menuGeometry.left >= 23 && menuGeometry.top >= 23
+        && menuGeometry.right <= menuGeometry.width - 23
+        && menuGeometry.bottom <= menuGeometry.height - 71,
+      `Launcher context menu does not leave a shadow-safe viewport: ${JSON.stringify(menuGeometry)}`
+    );
 
     await evaluate(launcher, `document.querySelector('.launcher-context-menu [aria-haspopup="menu"]').click()`);
     const visibilityMenu = JSON.parse(await waitForEvaluation(
