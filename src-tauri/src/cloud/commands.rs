@@ -470,6 +470,11 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
  // renewable fields; this never exposes the rest of the account object.
  const currentUser = window.$nuxt?.$store?.state?.users?.curUser;
  if (currentUser && typeof currentUser === 'object') inspect(currentUser, 0);
+ // Device and client identity can live in a sibling Vuex module. `inspect`
+ // still returns only its narrow token/profile allowlist, never the state
+ // object or arbitrary account data.
+ inspect(window.$nuxt?.$store?.state, 0);
+ if (!out.user_agent && typeof navigator?.userAgent === 'string') out.user_agent = navigator.userAgent;
  // The web client deliberately does not expose a native client profile or
  // client secret.  A current browser bearer and stable user id are sufficient
  // to complete the browser handshake; the Rust adapter must not fabricate
@@ -1241,7 +1246,7 @@ pub fn resolve_download(
             Ok(ResolvedCloudDownload {
                 url,
                 name,
-                headers: Vec::new(),
+                headers: vec![("Referer".into(), "https://www.aliyundrive.com/".into())],
             })
         }
         CloudProvider::Xunlei => with_xunlei_client(store, http, |client| {
@@ -1491,6 +1496,34 @@ mod tests {
     }
 
     #[test]
+    fn aliyun_download_passes_its_official_web_referer_to_aria2() {
+        // The live signed-object endpoint rejects a request without this
+        // origin context, regardless of whether it uses a Chrome or aria2 UA.
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"r","access_token":"a","drive_id":"d","browser_access_ready":true}"#,
+            )
+            .unwrap();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"user_id":"u1","nick_name":"alice"}"#,
+            r#"{"items":[]}"#,
+            r#"{"name":"fixture.txt"}"#,
+            r#"{"url":"https://cdn.example.test/fixture?signature=temporary"}"#,
+        ])));
+
+        let options = resolve_download(CloudProvider::Aliyun, "fixture", &credentials, &transport)
+            .unwrap()
+            .into_uri_submission_options();
+
+        assert_eq!(
+            options.headers,
+            vec![("Referer".into(), "https://www.aliyundrive.com/".into())]
+        );
+    }
+
+    #[test]
     fn cloud_task_persists_encoded_stable_source_not_signed_url() {
         let store = TaskStore::open_in_memory().unwrap();
         let task = create_cloud_task(
@@ -1613,6 +1646,21 @@ mod tests {
 
         assert!(session.profile.client_id.is_empty());
         assert_eq!(session.user_id, "browser-user");
+    }
+
+    #[test]
+    fn xunlei_web_capture_reads_only_selected_client_context_from_nuxt_state() {
+        // The current web login keeps the bearer in users.curUser but can
+        // keep the matching browser device/profile in a sibling Vuex module.
+        // The capture script must inspect that state without returning the
+        // state object itself: `inspect` copies only its explicit allowlist.
+        let source = include_str!("commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes its tests");
+
+        assert!(source.contains("inspect(window.$nuxt?.$store?.state, 0)"));
+        assert!(source.contains("out.user_agent = navigator.userAgent"));
     }
 
     #[test]

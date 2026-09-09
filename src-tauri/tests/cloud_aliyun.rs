@@ -158,6 +158,33 @@ fn aliyun_browser_session_lists_the_root_with_the_same_current_bearer() {
 }
 
 #[test]
+fn aliyun_mkdir_accepts_current_file_name_response_field() {
+    // The live /v2/file/create folder response uses `file_name`, not `name`.
+    // Rejecting that response leaves a successfully created folder invisible to
+    // the caller and strands every following operation in a real workflow.
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"browser-refresh","access_token":"browser-access","drive_id":"browser-drive","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[]}"#,
+        r#"{"file_id":"folder-1","file_name":"AllDownloader-IT-folder","parent_file_id":"root","type":"folder"}"#,
+    ]);
+
+    let folder = AliyunClient::new(&store, &http)
+        .mkdir("root", "AllDownloader-IT-folder")
+        .expect("the official file_name response must create a usable folder");
+
+    assert_eq!(folder.id, "folder-1");
+    assert_eq!(folder.name, "AllDownloader-IT-folder");
+    assert_eq!(folder.kind, "folder");
+}
+
+#[test]
 fn aliyun_refreshes_bearer_token_lists_root_and_persists_only_session_fields() {
     // This catches a refresh that omits grant_type, a list without the fresh bearer
     // token/drive id, or persistence of a transient signed link.
@@ -343,6 +370,34 @@ fn aliyun_upload_init_requires_https_part_urls_and_rename_uses_current_contract(
 }
 
 #[test]
+fn aliyun_upload_init_uses_public_https_url_when_internal_url_is_http() {
+    // The official service returns a browser-reachable HTTPS upload_url and an
+    // HTTP-only intranet internal_upload_url in the same part.  The client must
+    // use only the public URL instead of rejecting a valid upload response.
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"r","access_token":"access","drive_id":"drive","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[]}"#,
+        r#"{"part_info_list":[{"part_number":1,"upload_url":"https://upload.example/public","internal_upload_url":"http://oss.internal/private"}]}"#,
+    ]);
+
+    let init = AliyunClient::new(&store, &http)
+        .upload_init("root", "fixture.txt", 7)
+        .expect("a valid public HTTPS upload_url must not be rejected by an internal HTTP URL");
+
+    assert_eq!(
+        init["part_info_list"][0]["upload_url"],
+        "https://upload.example/public"
+    );
+}
+
+#[test]
 fn aliyun_upload_init_rejects_null_and_non_string_temporary_endpoints() {
     // This catches treating a present-but-malformed endpoint as absent and handing
     // an unusable or unsafe transfer response to the caller.
@@ -392,8 +447,9 @@ fn aliyun_upload_init_rejects_null_and_non_string_temporary_endpoints() {
 }
 
 #[test]
-fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
-    // A valid sibling must not short-circuit validation of the malformed field.
+fn aliyun_upload_init_rejects_each_malformed_public_endpoint() {
+    // Only the browser-reachable public endpoint can transfer bytes. A valid
+    // internal sibling must not hide a malformed public upload_url.
     let valid = serde_json::json!("https://upload.example/part");
     let invalid = [
         serde_json::json!(""),
@@ -403,13 +459,7 @@ fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
         serde_json::json!("http://upload.example/part"),
         serde_json::json!("https://upload.example/part#fragment"),
     ];
-    let cases = invalid
-        .iter()
-        .cloned()
-        .map(|bad| (bad, valid.clone()))
-        .chain(invalid.iter().cloned().map(|bad| (valid.clone(), bad)));
-
-    for (upload_url, internal_upload_url) in cases {
+    for upload_url in invalid {
         let store = MemoryCredentialStore::default();
         store
             .save(
@@ -440,7 +490,7 @@ fn aliyun_upload_init_checks_each_temporary_endpoint_independently() {
                     "part_info_list": [{
                         "part_number": 1,
                         "upload_url": upload_url,
-                        "internal_upload_url": internal_upload_url,
+                        "internal_upload_url": valid,
                     }]
                 })
                 .to_string(),
@@ -510,4 +560,40 @@ fn aliyun_upload_file_transfers_https_part_then_completes_without_persisting_tem
     assert!(persisted.contains("rotated"));
     assert!(!persisted.contains("upload.example"));
     assert!(!persisted.contains("temporary=secret"));
+}
+
+#[test]
+fn aliyun_upload_file_omits_content_type_when_the_signed_part_leaves_it_empty() {
+    // A live browser session issued `content_type: ""`. Supplying an arbitrary
+    // Content-Type changes the signed canonical request and is rejected by OSS.
+    let mut local = tempfile::NamedTempFile::new().unwrap();
+    local.write_all(b"cloud-bytes").unwrap();
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[]}"#,
+        r#"{"file_id":"file-1","file_name":"upload.bin","parent_file_id":"root","type":"file","upload_id":"upload-1","part_info_list":[{"part_number":1,"content_type":"","upload_url":"https://upload.example/part?temporary=secret"}]}"#,
+        r#"{}"#,
+    ])
+    .with_upload_responses([UploadHttpResponse {
+        status: 200,
+        headers: Default::default(),
+        body: String::new(),
+    }]);
+
+    AliyunClient::new(&store, &http)
+        .upload_file("root", local.path())
+        .expect("an empty server content type must not add an unsigned header");
+
+    let uploads = http.upload_requests.lock().unwrap();
+    assert!(
+        !uploads[0].headers.contains_key("Content-Type"),
+        "empty signed content type must be omitted"
+    );
 }

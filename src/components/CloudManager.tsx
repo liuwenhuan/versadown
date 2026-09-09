@@ -335,6 +335,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     ? authorizationCapabilityState.capabilities
     : fallbackCapabilities[provider];
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
+  const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
   const [editorValue, setEditorValue] = useState('');
@@ -436,6 +437,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     setActiveAccountId(account.id);
     setPassword('');
     setWebAuthorization(null);
+    setReauthorizationRequired(false);
     onAccountAuthorized?.(account);
     if (!authorizationOnly) await loadDirectory(account, rootId, [{ id: rootId, name: '根目录' }]);
   }
@@ -486,7 +488,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   useEffect(() => {
-    if (!webAuthorization || (activeAccount && directoryState !== 'expired')) return;
+    if (!webAuthorization) return;
     let cancelled = false;
     let timer: number | undefined;
     const poll = () => {
@@ -522,6 +524,13 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         setDirectory(null);
         setDirectoryState('expired');
         setAuthorizationStatus(errorMessage(error, '登录凭据已过期。'));
+      } else if (provider === 'pikpak' && isAuthorizationWindowUnavailable(error)) {
+        // Keep the existing account and directory alive while the official
+        // browser proves the requested action. `cloud_begin_authorization`
+        // only opens the WebView; the saved session is replaced later, after
+        // a successful `cloud_complete_authorization` validation.
+        setReauthorizationRequired(true);
+        setOperation({ kind: 'error', message: `${name}需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重试。` });
       } else {
         setOperation({ kind: 'error', message: `${name}失败：${errorMessage(error, '请重试。')}` });
       }
@@ -657,7 +666,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function sessionActions() {
-    return <div className="cloud-session-actions"><button className="cloud-auth-state" disabled>{authorizedLabel}</button><button className="secondary" disabled={operationBusy} onClick={() => setPendingLogout(true)}>{logoutLabel}</button></div>;
+    return <div className="cloud-session-actions"><button className="cloud-auth-state" disabled>{authorizedLabel}</button>{provider === 'pikpak' && reauthorizationRequired && effectiveAuthorizationCapabilities.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}<button className="secondary" disabled={operationBusy} onClick={() => setPendingLogout(true)}>{logoutLabel}</button></div>;
   }
 
   function logoutConfirmation() {

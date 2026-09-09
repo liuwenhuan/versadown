@@ -576,6 +576,29 @@ it('keeps the current file list visible when a cloud operation fails', async () 
   expect(screen.getByText('报告.pdf')).toBeVisible();
 });
 
+it('offers PikPak reauthorization after a download requires official web verification', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    downloadCloudFile: vi.fn().mockRejectedValue({
+      code: 'web_auth_required',
+      message: '此登录方式需要网页验证，请点击网页授权完成登录'
+    })
+  });
+  render(<CloudManager provider="pikpak" client={client} initialAccounts={[
+    { id: 'account-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }
+  ]} restoreOnMount={false} />);
+
+  await screen.findByRole('tree', { name: 'PikPak网盘文件' });
+  await user.click(screen.getByText('报告.pdf'));
+  await user.click(screen.getByRole('button', { name: '下载' }));
+
+  expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '重新网页授权' }));
+  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('pikpak');
+  expect(await screen.findByRole('tab', { name: 'alice · PikPak' })).toHaveAttribute('aria-selected', 'true');
+  await waitFor(() => expect(client.completeCloudAuthorization).toHaveBeenCalledWith('pikpak'));
+});
+
 it('surfaces the message from a structured Tauri command error', async () => {
   const user = userEvent.setup();
   const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockRejectedValue({ code: 'invalid_credentials', message: '账号或密码不正确' }) });

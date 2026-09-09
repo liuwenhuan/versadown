@@ -225,6 +225,38 @@ fn xunlei_web_session_without_native_profile_uses_the_current_browser_bearer() {
 }
 
 #[test]
+fn xunlei_web_session_with_real_browser_identity_but_no_secret_uses_current_bearer() {
+    // The official web client may expose its browser device/profile without
+    // exposing a native refresh secret. That identity must be forwarded to
+    // the drive request, but it must never make a still-current web bearer
+    // look refreshable or expired.
+    let mut web_profile = profile();
+    web_profile.client_secret.clear();
+    let session = XunleiSession::from_web_authorization(
+        "current-browser-access",
+        "browser-refresh",
+        "web-user-42",
+        "",
+        web_profile,
+        0,
+    )
+    .expect("official web identity without a native secret is usable");
+    let http = RecordingHttp::sequence(&[r#"{"files":[],"next_page_token":""}"#]);
+    let client = XunleiClient::new(session, &http);
+
+    assert!(client.directory("0").is_ok());
+    let request = http.requests().pop().expect("one drive request");
+    assert_eq!(
+        request.headers.get("Authorization"),
+        Some(&"Bearer current-browser-access".into())
+    );
+    assert_eq!(
+        request.headers.get("X-Client-Id"),
+        Some(&"official-browser-client".into())
+    );
+}
+
+#[test]
 fn xunlei_web_session_builds_a_display_account_without_network_or_refresh() {
     // Break caught: using account() to finish browser authorization tries a
     // native refresh requiring a secret that the web client never exposes.

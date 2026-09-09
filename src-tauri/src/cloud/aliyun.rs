@@ -445,25 +445,26 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport + CloudUploadTransport> Aliyu
         validate_upload_urls(&init)?;
         let file_id = required(&init, "file_id")?;
         let upload_id = required(&init, "upload_id")?;
-        let urls = upload_urls(&init, parts)?;
+        let upload_parts = upload_parts(&init, parts)?;
 
         let mut input = std::fs::File::open(path)
             .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
         let mut remaining = size;
-        for url in urls {
+        for part in upload_parts {
             let length = remaining.min(ALIYUN_PART_SIZE) as usize;
             let mut body = vec![0; length];
             input
                 .read_exact(&mut body)
                 .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
             remaining = remaining.saturating_sub(length as u64);
+            let mut headers = BTreeMap::new();
+            if let Some(content_type) = part.content_type {
+                headers.insert("Content-Type".into(), content_type);
+            }
             let response = self.http.send_upload(UploadHttpRequest {
                 method: "PUT",
-                url,
-                headers: BTreeMap::from([(
-                    "Content-Type".into(),
-                    "application/octet-stream".into(),
-                )]),
+                url: part.url,
+                headers,
                 body,
             })?;
             if !(200..300).contains(&response.status) {
@@ -498,13 +499,18 @@ fn upload_part_count(size: u64) -> Result<u64, QuarkError> {
     Ok(count)
 }
 
-fn upload_urls(value: &Value, expected_parts: u64) -> Result<Vec<String>, QuarkError> {
+struct UploadPart {
+    url: String,
+    content_type: Option<String>,
+}
+
+fn upload_parts(value: &Value, expected_parts: u64) -> Result<Vec<UploadPart>, QuarkError> {
     let parts = value
         .get("part_info_list")
         .and_then(Value::as_array)
         .filter(|parts| parts.len() == expected_parts as usize)
         .ok_or(QuarkError::InvalidResponse)?;
-    let mut urls = Vec::with_capacity(parts.len());
+    let mut upload_parts = Vec::with_capacity(parts.len());
     for (index, part) in parts.iter().enumerate() {
         if part.get("part_number").and_then(Value::as_u64) != Some(index as u64 + 1) {
             return Err(QuarkError::InvalidResponse);
@@ -514,9 +520,18 @@ fn upload_urls(value: &Value, expected_parts: u64) -> Result<Vec<String>, QuarkE
             .and_then(Value::as_str)
             .filter(|url| secure_temporary_url(url))
             .ok_or(QuarkError::InvalidResponse)?;
-        urls.push(url.into());
+        let content_type = match part.get("content_type") {
+            None => None,
+            Some(Value::String(value)) if value.is_empty() => None,
+            Some(Value::String(value)) if !value.contains(['\r', '\n']) => Some(value.to_owned()),
+            _ => return Err(QuarkError::InvalidResponse),
+        };
+        upload_parts.push(UploadPart {
+            url: url.into(),
+            content_type,
+        });
     }
-    Ok(urls)
+    Ok(upload_parts)
 }
 
 fn secure_temporary_url(value: &str) -> bool {
@@ -535,7 +550,11 @@ fn validate_upload_urls(value: &Value) -> Result<(), QuarkError> {
         Value::Array(values) => values.iter().try_for_each(validate_upload_urls),
         Value::Object(values) => {
             for (key, value) in values {
-                if matches!(key.as_str(), "upload_url" | "internal_upload_url") {
+                // Only the public upload URL is ever transferred by this
+                // client.  Aliyun also returns an HTTP-only intranet endpoint
+                // (`internal_upload_url`) for its own infrastructure; treating
+                // that as a browser transfer target rejects a valid public URL.
+                if key == "upload_url" {
                     match value.as_str() {
                         Some(url) if secure_temporary_url(url) => {}
                         _ => return Err(QuarkError::InvalidResponse),
@@ -557,7 +576,13 @@ fn parse_file(value: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
             .and_then(Value::as_str)
             .unwrap_or(parent)
             .into(),
-        name: required(value, "name")?,
+        name: value
+            .get("name")
+            .or_else(|| value.get("file_name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .ok_or(QuarkError::InvalidResponse)?,
         kind: required(value, "type")?,
         size: value
             .get("size")

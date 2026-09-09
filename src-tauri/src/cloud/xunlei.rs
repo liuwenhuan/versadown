@@ -236,7 +236,11 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             && !session.access_token.is_empty()
             && !session.refresh_token.is_empty()
             && !session.user_id.is_empty()
-            && !session.profile.is_drive_complete()
+            // A web session can expose its genuine browser device/profile
+            // while deliberately withholding the native-only refresh secret.
+            // It is usable until the provider rejects that current bearer;
+            // never turn it into an impossible native refresh attempt.
+            && !session.profile.can_refresh()
     }
 
     /// Builds the account used to finish an official browser authorization.
