@@ -234,7 +234,9 @@ it('renders an authorized account-management card without loading its directory'
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} authorizationOnly initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
 
-  expect(screen.getByRole('region', { name: '夸克账号授权' })).toHaveTextContent('alice');
+  expect(screen.getByRole('heading', { name: '夸克网盘 · alice' })).toBeVisible();
+  expect(document.querySelector('.cloud-account-summary')).not.toBeInTheDocument();
+  expect(screen.queryByText(/官方网页授权.*凭据仅保存在本机/)).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '已经完成授权' })).toBeDisabled();
   expect(screen.getByRole('button', { name: '退出授权' })).toBeVisible();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();

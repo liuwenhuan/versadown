@@ -606,8 +606,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   function accountManagementView() {
     return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading"><h2>{label}网盘</h2></header>
-      <div className="cloud-account-summary"><span className="cloud-account-avatar" aria-hidden="true">{label.slice(0, 1)}</span><div><b>{activeAccount?.displayName}</b><small>{passwordSession ? '账号密码登录' : '官方网页授权'} · 凭据仅保存在本机</small></div></div>
+      <header className="cloud-heading"><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2></header>
       {sessionActions()}
       {logoutConfirmation()}
       {operation && <p className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}>{operation.message}</p>}
