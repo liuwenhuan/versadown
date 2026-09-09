@@ -1016,7 +1016,23 @@ pub async fn cloud_trash(
     })
     .await
 }
-
+#[tauri::command]
+pub async fn cloud_delete(
+    app: AppHandle,
+    provider: CloudProvider,
+    file_ids: Vec<String>,
+) -> Result<(), QuarkError> {
+    run(app, provider, move |s, h| match provider {
+        // The UI only exposes this operation while browsing PikPak's virtual
+        // recycle-bin directory. Other providers keep their non-destructive
+        // `cloud_trash` behaviour.
+        CloudProvider::Pikpak => PikPakClient::new(h, &s.store).delete(&file_ids),
+        _ => Err(QuarkError::InvalidInput(
+            "只有 PikPak 回收站中的项目可以永久删除".into(),
+        )),
+    })
+    .await
+}
 pub fn enqueue_cloud_download(
     store: &TaskStore,
     url: &str,

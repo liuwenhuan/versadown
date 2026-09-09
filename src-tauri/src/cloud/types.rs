@@ -96,6 +96,8 @@ pub enum QuarkError {
     WebAuthorizationRequired,
     #[error("网盘要求更新操作验证，请重新网页授权")]
     CaptchaRequired,
+    #[error("区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员")]
+    PikpakRegionalMembershipRestricted,
     #[error("正在等待网页登录，请在授权窗口完成登录")]
     AuthorizationPending,
     #[error("云盘响应无效，请刷新后重试")]
@@ -120,6 +122,7 @@ impl Serialize for QuarkError {
             Self::AuthorizationExpired => "credentials_expired",
             Self::WebAuthorizationRequired => "web_auth_required",
             Self::CaptchaRequired => "web_auth_required",
+            Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
             Self::Storage => "credential_storage_error",
             Self::InvalidResponse => "invalid_response",

@@ -221,6 +221,7 @@ fn xml_escape(v: &str) -> String {
 }
 impl<'a, T: CloudHttpTransport + CloudUploadTransport, S: CredentialStore> PikPakClient<'a, T, S> {
     pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
+        super::pikpak::reject_pikpak_recycle_bin_target(parent)?;
         upload_pikpak_file(self.http, parent, path, |payload| {
             self.request(
                 "POST",

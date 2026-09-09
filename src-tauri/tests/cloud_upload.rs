@@ -53,6 +53,29 @@ fn oss_http_200_error_is_not_upload_success() {
 }
 
 #[test]
+fn pikpak_upload_rejects_the_virtual_recycle_bin_target_before_network() {
+    let root = std::env::temp_dir().join(format!("cloud-upload-recycle-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("upload.txt");
+    std::fs::write(&path, b"hello").unwrap();
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let server = UploadServer {
+        requests: Mutex::new(Vec::new()),
+        fail_complete: false,
+    };
+
+    let error = PikPakClient::new(&server, &store)
+        .upload_file("__all_downloader_pikpak_recycle_bin__", &path)
+        .unwrap_err();
+
+    assert!(matches!(error, QuarkError::InvalidInput(_)));
+    assert!(server.requests.lock().unwrap().is_empty());
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
 fn upload_transfer_allows_same_account_list_and_logout_without_resurrecting_session() {
     upload_does_not_lock_account(false);
 }

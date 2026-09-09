@@ -13,6 +13,8 @@ export const renameCloudFile = (provider: CloudProvider, fileId: string, name: s
 export const moveCloudFiles = (provider: CloudProvider, fileIds: string[], targetParentId: string) => invoke<void>('cloud_move', { provider, fileIds, targetParentId });
 export const copyCloudFiles = (provider: CloudProvider, fileIds: string[], targetParentId: string) => invoke<void>('cloud_copy', { provider, fileIds, targetParentId });
 export const trashCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_trash', { provider, fileIds });
+/** Permanently deletes files already displayed inside a provider recycle bin. */
+export const deleteCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_delete', { provider, fileIds });
 type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState };
 export const downloadCloudFile = (provider: CloudProvider, fileId: string): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', { provider, fileId })
   .then((result) => result.duplicate ? { duplicate: { task: result, state: result.duplicate } } : { task: result });

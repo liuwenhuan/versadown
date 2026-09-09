@@ -54,11 +54,12 @@ fn risk_limited_refreshes_action_captcha_once_and_persists_it() {
         r#"{"captcha_token":"fresh-cap","expires_in":300}"#,
         r#"{"files":[],"next_page_token":""}"#,
     ]);
-    assert!(PikPakClient::new(&http, &store)
-        .list("0")
-        .unwrap()
-        .items
-        .is_empty());
+    let directory = PikPakClient::new(&http, &store).list("0").unwrap();
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(
+        directory.items[0].id,
+        "__all_downloader_pikpak_recycle_bin__"
+    );
     let requests = &http.0.lock().unwrap().1;
     assert_eq!(requests.len(), 3);
     let payload: serde_json::Value =
@@ -101,6 +102,180 @@ fn risk_limited_retry_is_bounded_and_interactive_challenge_stops_retry() {
         ));
         assert_eq!(http.0.lock().unwrap().1.len(), expected_requests);
     }
+}
+
+#[test]
+fn pikpak_delete_uses_the_permanent_batch_delete_endpoint() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"id":"trashed-file-1","trashed":true}"#,
+        r#"{"id":"trashed-file-2","trashed":true}"#,
+        r#"{}"#,
+    ]);
+
+    PikPakClient::new(&http, &store)
+        .delete(&["trashed-file-1".to_owned(), "trashed-file-2".to_owned()])
+        .unwrap();
+
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].method, "GET");
+    assert!(requests[0].url.ends_with("/drive/v1/files/trashed-file-1"));
+    assert_eq!(requests[1].method, "GET");
+    assert!(requests[1].url.ends_with("/drive/v1/files/trashed-file-2"));
+    let request = &requests[2];
+    assert!(request.url.ends_with("/drive/v1/files:batchDelete"));
+    assert_eq!(request.method, "POST");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(request.body.as_deref().unwrap()).unwrap()["ids"],
+        serde_json::json!(["trashed-file-1", "trashed-file-2"])
+    );
+}
+
+#[test]
+fn pikpak_delete_rejects_items_outside_the_recycle_bin_without_batch_delete() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"id":"trashed-file","trashed":true}"#,
+        r#"{"id":"live-file","trashed":false}"#,
+    ]);
+
+    let error = PikPakClient::new(&http, &store)
+        .delete(&["trashed-file".to_owned(), "live-file".to_owned()])
+        .unwrap_err();
+
+    assert!(matches!(error, QuarkError::InvalidInput(_)));
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].method, "GET");
+    assert!(requests
+        .iter()
+        .all(|request| !request.url.contains("batchDelete")));
+}
+
+#[test]
+fn pikpak_maps_explicit_regional_to_global_membership_restriction() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[r#"{
+        "error":"forbidden",
+        "error_description":"Regional Premium is restricted in the current location.",
+        "details":[{"reason":"Upgrade to Global Premium to download."}]
+    }"#]);
+
+    let error = PikPakClient::new(&http, &store).list("0").unwrap_err();
+
+    assert!(matches!(
+        error,
+        QuarkError::PikpakRegionalMembershipRestricted
+    ));
+    let value = serde_json::to_value(error).unwrap();
+    assert_eq!(value["code"], "pikpak_regional_membership_restricted");
+    assert_eq!(
+        value["message"],
+        "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
+    );
+}
+
+#[test]
+fn pikpak_does_not_map_captcha_or_incomplete_membership_reasons() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    for bodies in [
+        vec![
+            r#"{"error":"captcha_invalid","error_code":4031,"error_description":"Regional Premium requires Global Premium upgrade"}"#,
+        ],
+        vec![r#"{"error":"forbidden","message":"Regional Premium is restricted"}"#],
+        vec![r#"{"error":"forbidden","details":[{"reason":"Upgrade to Global Premium"}]}"#],
+        vec![
+            r#"{"error":"unauthenticated","message":"Regional Premium is restricted; upgrade to Global Premium"}"#,
+            r#"{"error":"forbidden"}"#,
+        ],
+    ] {
+        let error = PikPakClient::new(&Sequence::new(&bodies), &store)
+            .list("0")
+            .unwrap_err();
+        assert!(
+            !matches!(error, QuarkError::PikpakRegionalMembershipRestricted),
+            "captcha, authorization, and incomplete membership reasons must retain existing errors"
+        );
+    }
+}
+
+#[test]
+fn pikpak_root_includes_the_virtual_recycle_bin() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"files":[{"id":"normal","name":"normal.txt","kind":"drive#file"}],"next_page_token":""}"#,
+    ]);
+
+    let directory = PikPakClient::new(&http, &store).list("0").unwrap();
+
+    assert!(directory.items.iter().any(|file| {
+        file.id == "__all_downloader_pikpak_recycle_bin__"
+            && file.name == "回收站"
+            && file.kind == "folder"
+            && file.parent_id == "0"
+    }));
+}
+
+#[test]
+fn pikpak_virtual_recycle_bin_lists_all_trashed_pages() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"files":[{"id":"deleted-1","name":"old-a.txt","kind":"drive#file"}],"next_page_token":"next"}"#,
+        r#"{"files":[{"id":"deleted-2","name":"old-b.txt","kind":"drive#file"}],"next_page_token":""}"#,
+    ]);
+
+    let directory = PikPakClient::new(&http, &store)
+        .list("__all_downloader_pikpak_recycle_bin__")
+        .unwrap();
+
+    assert_eq!(directory.id, "__all_downloader_pikpak_recycle_bin__");
+    assert_eq!(directory.items.len(), 2);
+    assert!(directory
+        .items
+        .iter()
+        .all(|file| { file.parent_id == "__all_downloader_pikpak_recycle_bin__" }));
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]
+        .url
+        .contains("%22trashed%22%3A%7B%22eq%22%3Atrue%7D"));
+    assert!(requests[1].url.contains("page_token=next"));
+}
+
+struct NoNetwork;
+impl CloudHttpTransport for NoNetwork {
+    fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        Err(QuarkError::Transport("network must not be used".into()))
+    }
+}
+
+#[test]
+fn pikpak_rejects_the_virtual_recycle_bin_as_a_write_target() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    let client = PikPakClient::new(&NoNetwork, &store);
+    let recycle = "__all_downloader_pikpak_recycle_bin__";
+
+    assert!(matches!(
+        client.mkdir(recycle, "new"),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        client.move_files(&["file".into()], recycle),
+        Err(QuarkError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        client.copy_files(&["file".into()], recycle),
+        Err(QuarkError::InvalidInput(_))
+    ));
 }
 
 #[test]
@@ -299,7 +474,7 @@ fn pikpak_lists_all_pages_and_rotates_expired_refresh_token() {
         r#"{"files":[{"id":"two","name":"b","kind":"drive#file","size":"12","parent_id":""}],"next_page_token":""}"#,
     ]);
     let directory = PikPakClient::new(&http, &store).list("0").unwrap();
-    assert_eq!(directory.items.len(), 2);
+    assert_eq!(directory.items.len(), 3);
     assert_eq!(directory.items[1].size, Some(12));
     assert!(String::from_utf8(store.load("pikpak").unwrap().unwrap())
         .unwrap()

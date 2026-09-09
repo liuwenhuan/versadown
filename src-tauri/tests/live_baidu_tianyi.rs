@@ -153,6 +153,7 @@ fn provider_error_kind(error: &QuarkError) -> &'static str {
         QuarkError::AuthorizationExpired => "authorization-expired",
         QuarkError::WebAuthorizationRequired => "web-authorization-required",
         QuarkError::CaptchaRequired => "captcha-required",
+        QuarkError::PikpakRegionalMembershipRestricted => "pikpak-regional-membership-restricted",
         QuarkError::AuthorizationPending => "authorization-pending",
         QuarkError::InvalidResponse => "invalid-response",
         QuarkError::Storage => "storage",

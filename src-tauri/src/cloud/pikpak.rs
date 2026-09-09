@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 const AUTH: &str = "https://user.mypikpak.com";
 const DRIVE: &str = "https://api-drive.mypikpak.com";
+pub(crate) const PIKPAK_RECYCLE_BIN_ID: &str = "__all_downloader_pikpak_recycle_bin__";
+const PIKPAK_RECYCLE_BIN_NAME: &str = "回收站";
 const CAPTCHA_SALTS: &[&str] = &[
     "SOP04dGzk0TNO7t7t9ekDbAmx+eq0OI1ovEx",
     "nVBjhYiND4hZ2NCGyV5beamIr7k6ifAsAbl",
@@ -92,12 +94,16 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
                 headers.insert("X-Captcha-Token".into(), s.captcha_token.clone());
             }
         }
-        response_json(&self.http.send(CloudHttpRequest {
+        let response = self.http.send(CloudHttpRequest {
             method,
             url,
             headers,
             body: body.map(|b| b.to_string()),
-        })?)
+        })?;
+        if pikpak_regional_membership_restriction(&response) {
+            return Err(QuarkError::PikpakRegionalMembershipRestricted);
+        }
+        response_json(&response)
     }
     pub fn save_session(&self, s: &PikPakSession) -> Result<(), QuarkError> {
         if s.access_token.is_empty() || s.refresh_token.is_empty() {
@@ -359,7 +365,8 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         })
     }
     pub fn list(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
-        let p = root(parent);
+        let trashed = parent == PIKPAK_RECYCLE_BIN_ID;
+        let p = if trashed { "" } else { root(parent) };
         let mut items = Vec::new();
         let mut token = String::new();
         let mut seen = HashSet::new();
@@ -369,7 +376,11 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
                 format!(
                     "{DRIVE}/drive/v1/files?parent_id={}&limit=500&filters={}&page_token={}",
                     encoded(p),
-                    encoded(r#"{"trashed":{"eq":false}}"#),
+                    encoded(if trashed {
+                        r#"{"trashed":{"eq":true}}"#
+                    } else {
+                        r#"{"trashed":{"eq":false}}"#
+                    }),
                     encoded(&token)
                 ),
                 None,
@@ -385,12 +396,23 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
                 return Err(QuarkError::InvalidResponse);
             }
         }
+        if parent == "0" {
+            items.push(CloudFile {
+                id: PIKPAK_RECYCLE_BIN_ID.into(),
+                name: PIKPAK_RECYCLE_BIN_NAME.into(),
+                parent_id: "0".into(),
+                kind: "folder".into(),
+                size: None,
+                modified_at: None,
+            });
+        }
         Ok(CloudDirectory {
             id: parent.into(),
             items,
         })
     }
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<CloudFile, QuarkError> {
+        reject_pikpak_recycle_bin_target(parent)?;
         let v = self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files"),
@@ -407,6 +429,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok(())
     }
     pub fn move_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_target(parent)?;
         self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files:batchMove"),
@@ -415,6 +438,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok(())
     }
     pub fn copy_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_target(parent)?;
         self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files:batchCopy"),
@@ -426,6 +450,27 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files:batchTrash"),
+            Some(json!({"ids":ids})),
+        )?;
+        Ok(())
+    }
+    /// Permanently deletes items already present in PikPak's recycle bin.
+    pub fn delete(&self, ids: &[String]) -> Result<(), QuarkError> {
+        for id in ids {
+            let file = self.request(
+                "GET",
+                format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
+                None,
+            )?;
+            if file["trashed"].as_bool() != Some(true) {
+                return Err(QuarkError::InvalidInput(
+                    "只能永久删除 PikPak 回收站中的项目".into(),
+                ));
+            }
+        }
+        self.request(
+            "POST",
+            format!("{DRIVE}/drive/v1/files:batchDelete"),
             Some(json!({"ids":ids})),
         )?;
         Ok(())
@@ -454,6 +499,69 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Ok((url.into(), required(&fetched, "name")?))
     }
 }
+
+pub(crate) fn reject_pikpak_recycle_bin_target(parent: &str) -> Result<(), QuarkError> {
+    if parent == PIKPAK_RECYCLE_BIN_ID {
+        return Err(QuarkError::InvalidInput(
+            "回收站不能作为创建、移动、复制或上传的目标目录".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Maps only the provider's explicit Regional Premium → Global Premium
+/// restriction wording from fixed JSON error fields. It never infers this
+/// from HTTP status, numeric codes, generic region wording, CAPTCHA, or
+/// authorization errors.
+fn pikpak_regional_membership_restriction(response: &CloudHttpResponse) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(&response.body) else {
+        return false;
+    };
+    let mut texts = Vec::new();
+    for key in ["error", "error_description", "message"] {
+        if let Some(text) = value[key].as_str() {
+            texts.push(text);
+        }
+    }
+    for key in ["details", "error_details"] {
+        if let Some(details) = value[key].as_array() {
+            for detail in details {
+                for key in ["reason", "message"] {
+                    if let Some(text) = detail[key].as_str() {
+                        texts.push(text);
+                    }
+                }
+            }
+        }
+    }
+    let normalized = texts
+        .iter()
+        .map(|text| text.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let is_captcha_or_authorization = [
+        "captcha",
+        "unauthenticated",
+        "invalid_grant",
+        "invalid_token",
+        "验证码",
+        "授权失效",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    let is_regional_membership =
+        normalized.contains("regional premium") || normalized.contains("区域会员");
+    let is_global_membership =
+        normalized.contains("global premium") || normalized.contains("全球会员");
+    let is_restricted_or_upgrade = ["restrict", "upgrade", "受限", "升级"]
+        .iter()
+        .any(|marker| normalized.contains(marker));
+    !is_captcha_or_authorization
+        && is_regional_membership
+        && is_global_membership
+        && is_restricted_or_upgrade
+}
+
 fn root(p: &str) -> &str {
     if p == "0" {
         ""
