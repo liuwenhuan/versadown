@@ -631,7 +631,12 @@ fn finalize_tianyi_web_authorization(
     // The web window owns login, but a candidate session must prove it can
     // read the drive before replacing a previously usable stored session.
     // The caller only closes the authorization window after this succeeds.
-    client.directory("-11")?;
+    client.directory("-11").map_err(|error| match error {
+        QuarkError::AuthorizationExpired
+        | QuarkError::WebAuthorizationRequired
+        | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
+        other => other,
+    })?;
     let account = client.web_account()?;
     save_provider_session(CloudProvider::Tianyi, store, &session)?;
     Ok(account)
@@ -1661,6 +1666,27 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum TianyiRootAuthorizationError {
+        Expired,
+        WebVerification,
+        Captcha,
+    }
+
+    struct TianyiRootAuthorizationErrorTransport(TianyiRootAuthorizationError);
+
+    impl CloudHttpTransport for TianyiRootAuthorizationErrorTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Err(match self.0 {
+                TianyiRootAuthorizationError::Expired => QuarkError::AuthorizationExpired,
+                TianyiRootAuthorizationError::WebVerification => {
+                    QuarkError::WebAuthorizationRequired
+                }
+                TianyiRootAuthorizationError::Captcha => QuarkError::CaptchaRequired,
+            })
+        }
+    }
+
     #[test]
     fn baidu_web_authorization_persists_the_account_without_waiting_for_root_listing() {
         let credentials = MemoryCredentialStore::default();
@@ -1863,6 +1889,42 @@ mod tests {
             saved.cookie,
             "__uid=new-user; __pus=new-identity; __puus=new-session"
         );
+    }
+
+    #[test]
+    fn tianyi_web_authorization_maps_root_authorization_errors_to_pending() {
+        for error in [
+            TianyiRootAuthorizationError::Expired,
+            TianyiRootAuthorizationError::WebVerification,
+            TianyiRootAuthorizationError::Captcha,
+        ] {
+            let credentials = MemoryCredentialStore::default();
+            let result = super::finalize_tianyi_web_authorization(
+                TianyiSession::cookie("SSON=candidate-session"),
+                &credentials,
+                &TianyiRootAuthorizationErrorTransport(error),
+            );
+
+            assert!(matches!(result, Err(QuarkError::AuthorizationPending)));
+            assert!(credentials.load("tianyi").unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn tianyi_web_authorization_keeps_the_old_session_when_candidate_root_is_unreadable() {
+        let credentials = MemoryCredentialStore::default();
+        let existing = serde_json::to_vec(&TianyiSession::cookie("SSON=existing-session"))
+            .expect("the test session serializes");
+        credentials.save("tianyi", &existing).unwrap();
+
+        let result = super::finalize_tianyi_web_authorization(
+            TianyiSession::cookie("SSON=candidate-session"),
+            &credentials,
+            &TianyiRootRejectingTransport,
+        );
+
+        assert!(matches!(result, Err(QuarkError::Provider(_))));
+        assert_eq!(credentials.load("tianyi").unwrap(), Some(existing));
     }
 
     #[test]

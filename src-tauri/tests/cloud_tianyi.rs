@@ -145,6 +145,18 @@ fn tianyi_maps_the_current_list_files_xml_root() {
 }
 
 #[test]
+fn tianyi_accepts_a_successful_empty_root_directory() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"res_code":0,"fileListAO":{"fileList":[],"folderList":[]}}"#,
+    ]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    let directory = client.directory("-11").unwrap();
+
+    assert!(directory.items.is_empty());
+}
+
+#[test]
 fn tianyi_maps_xml_folder_entries_as_folders() {
     let http = RecordingHttp::sequence(&[
         r#"<listFiles><folderList><folder><id>d1</id><name>folder</name></folder></folderList></listFiles>"#,

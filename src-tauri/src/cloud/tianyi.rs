@@ -561,9 +561,14 @@ fn tianyi_file_list(value: &Value) -> Result<Vec<(&Value, bool)>, QuarkError> {
         .or_else(|| value.get("data"));
     let mut items = Vec::new();
     if let Some(container) = container {
+        let has_file_listing = container.get("fileList").is_some();
+        let has_folder_listing = container.get("folderList").is_some();
         append_tianyi_entries(&mut items, container.get("fileList"), "file", false);
         append_tianyi_entries(&mut items, container.get("folderList"), "folder", true);
-        if !items.is_empty() {
+        // An authenticated but brand-new drive can validly contain neither
+        // files nor folders. The explicit list fields distinguish that from
+        // an unknown response shape.
+        if !items.is_empty() || has_file_listing || has_folder_listing {
             return Ok(items);
         }
     }
