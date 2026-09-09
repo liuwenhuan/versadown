@@ -45,9 +45,9 @@ type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y:
 const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷' };
 const fallbackCapabilities: Record<CloudProvider, CloudAuthorizationCapabilities> = {
   quark: { provider: 'quark', web: true, password: false },
-  pikpak: { provider: 'pikpak', web: true, password: true },
-  baidu: { provider: 'baidu', web: true, password: true },
-  tianyi: { provider: 'tianyi', web: true, password: true },
+  pikpak: { provider: 'pikpak', web: true, password: false },
+  baidu: { provider: 'baidu', web: true, password: false },
+  tianyi: { provider: 'tianyi', web: true, password: false },
   aliyun: { provider: 'aliyun', web: true, password: false },
   xunlei: { provider: 'xunlei', web: true, password: false }
 };
@@ -342,6 +342,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     let active = true;
     client.getCloudAccount(provider).then((account) => {
       if (!active) return;
+      ensureProviderAccount(account);
       setAccounts((current) => current.some((item) => item.id === account.id) ? current : [...current, account]);
       setActiveAccountId(account.id);
     }).catch((error) => {
@@ -355,6 +356,8 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     void client.getCloudAuthorizationCapabilities(provider).then((next) => {
       if (active && next.provider === provider) {
         setAuthorizationCapabilities((current) => current.provider === next.provider && current.web === next.web && current.password === next.password ? current : next);
+      } else if (active) {
+        setAuthorizationCapabilities(fallbackCapabilities[provider]);
       }
     }).catch(() => {
       if (active) {
@@ -365,7 +368,15 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     return () => { active = false; };
   }, [client, provider]);
 
+  function ensureProviderAccount(account: CloudAccount): CloudAccount {
+    if (account.provider !== provider) {
+      throw { code: 'invalid_response', message: '授权返回的服务商不匹配，请重新授权。' };
+    }
+    return account;
+  }
+
   async function acceptAccount(account: CloudAccount) {
+    ensureProviderAccount(account);
     setAccounts((current) => current.some((item) => item.id === account.id) ? current.map((item) => item.id === account.id ? account : item) : [...current, account]);
     setActiveAccountId(account.id);
     setPassword('');

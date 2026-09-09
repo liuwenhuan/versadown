@@ -1,13 +1,14 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { CloudManager } from './CloudManager';
+import type { CloudProvider } from '../lib/cloudTypes';
 
 function createCloudFake(overrides: Record<string, unknown> = {}) {
   return {
-    beginCloudAuthorization: vi.fn().mockResolvedValue({ provider: 'quark', windowLabel: '夸克登录', instructions: '请在安全窗口中完成登录。' }),
-    completeCloudAuthorization: vi.fn().mockResolvedValue({ id: 'account-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }),
-    loginCloudWithPassword: vi.fn().mockResolvedValue({ id: 'account-1', displayName: 'alice', provider: 'quark', authMethod: 'password' }),
+    beginCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ provider, windowLabel: '网盘登录', instructions: '请在安全窗口中完成登录。' })),
+    completeCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' as const })),
+    loginCloudWithPassword: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'password' as const })),
     getCloudAccount: vi.fn().mockRejectedValue(Object.assign(new Error('未授权'), { code: 'unauthorized' })),
     listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === 'folder-1'
       ? { id: 'folder-1', items: [{ id: 'child-1', parentId: 'folder-1', name: '说明.txt', kind: 'file', size: 1024, modifiedAt: '刚刚' }] }
@@ -50,7 +51,8 @@ it.each([
 
   expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
   expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
-  expect(Boolean(screen.queryByRole('button', { name: `登录${label}账号` }))).toBe(passwordSupported);
+  if (passwordSupported) expect(await screen.findByRole('button', { name: `登录${label}账号` })).toBeVisible();
+  else expect(screen.queryByRole('button', { name: `登录${label}账号` })).not.toBeInTheDocument();
 });
 
 it('clears a supported provider password after a failed native login', async () => {
@@ -65,6 +67,46 @@ it('clears a supported provider password after a failed native login', async () 
   expect(await screen.findByRole('status')).toHaveTextContent('账号或密码不正确');
   expect(screen.getByLabelText('百度账号')).toHaveValue('');
   expect(screen.getByLabelText('百度密码')).toHaveValue('');
+});
+
+it('rejects a password login account returned for another provider', async () => {
+  const user = userEvent.setup();
+  const onAccountAuthorized = vi.fn();
+  const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' }) });
+  render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
+
+  await user.type(await screen.findByLabelText('百度账号'), 'alice');
+  await user.type(screen.getByLabelText('百度密码'), 'secret');
+  await user.click(screen.getByRole('button', { name: '登录百度账号' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('授权返回的服务商不匹配');
+  expect(onAccountAuthorized).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: '已经登录' })).not.toBeInTheDocument();
+});
+
+it('rejects a web authorization account returned for another provider', async () => {
+  const user = userEvent.setup();
+  const onAccountAuthorized = vi.fn();
+  const client = createCloudFake({ completeCloudAuthorization: vi.fn().mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'web' }) });
+  render(<CloudManager provider="quark" client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
+
+  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(screen.getByRole('button', { name: '我已完成授权' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('授权返回的服务商不匹配');
+  expect(onAccountAuthorized).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: '已经完成授权' })).not.toBeInTheDocument();
+});
+
+it.each([
+  ['capability request fails', vi.fn().mockRejectedValue(new Error('连接器不可用'))],
+  ['capability response is for another provider', vi.fn().mockResolvedValue({ provider: 'pikpak', web: true, password: true })]
+])('does not expose password login when %s', async (_reason, getCloudAuthorizationCapabilities) => {
+  const client = createCloudFake({ getCloudAuthorizationCapabilities });
+  render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
+
+  await waitFor(() => expect(screen.queryByRole('button', { name: '登录百度账号' })).not.toBeInTheDocument());
+  expect(screen.getByText(/百度未提供可用的账号密码登录接口/)).toBeVisible();
 });
 
 it('recovers an existing account on mount before loading its root directory', async () => {
@@ -453,17 +495,17 @@ it('surfaces the message from a structured Tauri command error', async () => {
   const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockRejectedValue({ code: 'invalid_credentials', message: '账号或密码不正确' }) });
   render(<CloudManager provider="pikpak" client={client} />);
 
-  await user.type(screen.getByLabelText('PikPak账号'), 'alice');
+  await user.type(await screen.findByLabelText('PikPak账号'), 'alice');
   await user.type(screen.getByLabelText('PikPak密码'), 'wrong');
   await user.click(screen.getByRole('button', { name: '登录PikPak账号' }));
 
   expect(await screen.findByRole('status')).toHaveTextContent('账号或密码不正确');
 });
 
-it('keeps password login available for PikPak', () => {
+it('keeps password login available for PikPak', async () => {
   render(<CloudManager provider="pikpak" client={createCloudFake()} />);
 
-  expect(screen.getByLabelText('PikPak账号')).toBeVisible();
+  expect(await screen.findByLabelText('PikPak账号')).toBeVisible();
   expect(screen.getByLabelText('PikPak密码')).toBeVisible();
   expect(screen.getByRole('button', { name: '登录PikPak账号' })).toBeVisible();
 });
