@@ -448,7 +448,7 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
  const out = {}; const seen = new Set();
  const fields = {
   access_token: ['access_token','accessToken'], refresh_token: ['refresh_token','refreshToken'],
-  user_id: ['user_id','userId'], security_token: ['security_token','securityToken','captcha_token','captchaToken'],
+  user_id: ['user_id','userId','userid','userID','id'], security_token: ['security_token','securityToken','captcha_token','captchaToken','user_security_token','userSecurityToken'],
   client_id: ['client_id','clientId'], client_secret: ['client_secret','clientSecret'],
   device_id: ['device_id','deviceId'], client_version: ['client_version','clientVersion'],
   package_name: ['package_name','packageName'], user_agent: ['user_agent','userAgent'],
@@ -460,7 +460,7 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
   if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
   for (const [k, x] of Object.entries(v)) {
    const target = Object.entries(fields).find(([, names]) => names.includes(k));
-   if (target && (typeof x === 'string' || (target[0] === 'expires_at' && Number.isFinite(x)))) out[target[0]] = x;
+   if (target && x && !out[target[0]] && (typeof x === 'string' || (target[0] === 'expires_at' && Number.isFinite(x)))) out[target[0]] = x;
    else if (!/password/i.test(k)) inspect(x, depth + 1);
   }
  }
@@ -468,12 +468,13 @@ const XUNLEI_WEB_TOKENS_JS: &str = r#"(() => {
  // Xunlei's current official web client keeps its completed login in Nuxt's
  // in-memory user state, rather than in Web Storage.  Only copy the selected
  // renewable fields; this never exposes the rest of the account object.
- const currentUser = window.$nuxt?.$store?.state?.users?.curUser;
+ const currentUser = window.$nuxt?.$store?.state?.users?.curUser || window.__NUXT__?.state?.users?.curUser;
  if (currentUser && typeof currentUser === 'object') inspect(currentUser, 0);
  // Device and client identity can live in a sibling Vuex module. `inspect`
  // still returns only its narrow token/profile allowlist, never the state
  // object or arbitrary account data.
- inspect(window.$nuxt?.$store?.state, 0);
+ if (!out.access_token || !out.refresh_token || !out.user_id) inspect(window.$nuxt?.$store?.state, 0);
+ if ((!out.access_token || !out.refresh_token || !out.user_id) && window.__NUXT__?.state) inspect(window.__NUXT__.state, 0);
  if (!out.user_agent && typeof navigator?.userAgent === 'string') out.user_agent = navigator.userAgent;
  // The web client deliberately does not expose a native client profile or
  // client secret.  A current browser bearer and stable user id are sufficient
@@ -1661,6 +1662,23 @@ mod tests {
 
         assert!(source.contains("inspect(window.$nuxt?.$store?.state, 0)"));
         assert!(source.contains("out.user_agent = navigator.userAgent"));
+    }
+
+    #[test]
+    fn xunlei_web_capture_preserves_the_completed_nuxt_login_fields() {
+        // Xunlei's Vuex tree also contains logged-out/default copies of the
+        // user model.  A recursive scan must not overwrite the first genuine
+        // token with one of those empty fields, and must support the casing
+        // used by the official browser state.
+        let source = include_str!("commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes its tests");
+
+        assert!(source.contains("if (target && x && !out[target[0]]"));
+        assert!(source.contains("'userId','userid','userID','id'"));
+        assert!(source.contains("'user_security_token'"));
+        assert!(source.contains("window.__NUXT__?.state?.users?.curUser"));
     }
 
     #[test]
