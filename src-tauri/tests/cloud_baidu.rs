@@ -168,6 +168,10 @@ fn baidu_rejects_malformed_references_before_transport() {
         client.move_files(&[opaque_reference("/")], "/"),
         Err(QuarkError::InvalidResponse)
     ));
+    assert!(matches!(
+        client.copy_files(&[opaque_reference("/")], "/"),
+        Err(QuarkError::InvalidResponse)
+    ));
     let forged_root = opaque_reference("/");
     assert!(matches!(
         client.rename(&forged_root, "renamed.mkv"),
