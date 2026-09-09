@@ -116,6 +116,10 @@ pub fn run() {
             let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
                 data_dir.join("cloud-sessions"),
             )?);
+            // Webviews can invoke cloud commands while setup is still creating the
+            // download runtime. Register this state immediately so those early
+            // calls cannot race a later `manage` call.
+            app.manage(cloud);
             let manifest_sidecar = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("binaries")
                 .join(aria2_binary_name());
@@ -175,7 +179,6 @@ pub fn run() {
                 settings: std::sync::Mutex::new(settings),
                 settings_path,
             });
-            app.manage(cloud);
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
             ));

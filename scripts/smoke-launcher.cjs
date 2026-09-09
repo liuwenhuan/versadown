@@ -204,6 +204,12 @@ async function run() {
     assert(manager, 'Download manager WebView2 target did not render.');
     ownedSidecarPids = await waitForOwnedSidecar(child.pid);
 
+    const managerViewport = JSON.parse(await evaluate(manager, 'JSON.stringify({ width: innerWidth, height: innerHeight })'));
+    assert(
+      Math.abs(managerViewport.width - 900) <= 1 && Math.abs(managerViewport.height - 575) <= 1,
+      `Main window did not use the compact 900x575 layout: ${JSON.stringify(managerViewport)}`
+    );
+
     const compact = JSON.parse(await evaluate(launcher, `JSON.stringify((() => {
       const button = document.querySelector('.launcher-trigger');
       const rect = button.getBoundingClientRect();
