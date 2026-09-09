@@ -104,7 +104,7 @@ fn risk_limited_retry_is_bounded_and_interactive_challenge_stops_retry() {
 }
 
 #[test]
-fn pikpak_download_refreshes_the_collection_captcha_action_before_retrying_fetch() {
+fn pikpak_download_refreshes_the_collection_captcha_action_before_retrying_cache() {
     // Catches sending a per-file action such as `GET:/drive/v1/files/file-1`.
     // PikPak's drive captcha contract scopes a file fetch to the collection
     // endpoint (`GET:/drive/v1/files/`), even though the request URL includes
@@ -124,8 +124,36 @@ fn pikpak_download_refreshes_the_collection_captcha_action_before_retrying_fetch
     let requests = &http.0.lock().unwrap().1;
     let captcha: serde_json::Value =
         serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert!(requests[0]
+        .url
+        .ends_with("/drive/v1/files/file-1?usage=CACHE"));
     assert_eq!(captcha["action"], "GET:/drive/v1/files/");
+    assert!(requests[2]
+        .url
+        .ends_with("/drive/v1/files/file-1?usage=CACHE"));
     assert_eq!(requests[2].headers["X-Captcha-Token"], "fresh-cap");
+}
+
+#[test]
+fn pikpak_cache_risk_for_browser_session_never_falls_back_to_fetch() {
+    // Catches swallowing a CACHE action-verification failure and issuing a
+    // second, more privileged FETCH request with the same browser OAuth
+    // session. The server must decide whether interactive verification is
+    // needed; the client must not bypass it by changing usage.
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap","client_id":"browser-client","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[r#"{"error":"riskLimited","error_code":9}"#]);
+
+    assert!(matches!(
+        PikPakClient::new(&http, &store).download("file-1"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]
+        .url
+        .ends_with("/drive/v1/files/file-1?usage=CACHE"));
 }
 
 #[test]

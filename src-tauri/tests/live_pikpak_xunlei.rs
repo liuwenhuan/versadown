@@ -57,16 +57,32 @@ fn error_kind(error: &QuarkError) -> &'static str {
     }
 }
 
+#[test]
+fn provider_failure_message_redacts_server_echoes() {
+    let error = QuarkError::Provider(
+        "HTTP 403 https://signed.example/file?token=credential&captcha=context".into(),
+    );
+
+    let message = safe_provider_failure("PikPak CACHE resolve download", &error);
+
+    assert_eq!(message, "PikPak CACHE resolve download: provider");
+    assert!(!message.contains("signed.example"));
+    assert!(!message.contains("credential"));
+    assert!(!message.contains("captcha"));
+}
+
 fn provider_step<T>(
     name: &str,
     operation: impl FnOnce() -> Result<T, QuarkError>,
 ) -> LiveResult<T> {
-    operation().map_err(|error| {
-        // Cloud errors redact request URLs and credentials; retaining this
-        // normalized provider response is safe and identifies the boundary
-        // that rejected a live regression operation.
-        failure(format!("{name}: {} ({error})", error_kind(&error)))
-    })
+    operation().map_err(|error| failure(safe_provider_failure(name, &error)))
+}
+
+fn safe_provider_failure(name: &str, error: &QuarkError) -> String {
+    // Server responses and transport errors can echo signed URLs, bearer
+    // material, or challenge context. The enum class is sufficient for a
+    // live-regression diagnosis and is the only safe failure detail to log.
+    format!("{name}: {}", error_kind(error))
 }
 
 impl CloudHttpTransport for LiveTransport {
