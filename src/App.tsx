@@ -65,6 +65,20 @@ function WindowIcon({ kind }: { kind: 'minimize' | 'maximize' | 'close' }) {
   </svg>;
 }
 
+const themeLabels: Record<ThemeMode, string> = { auto: '自动', light: '浅色', dark: '深色' };
+
+function ThemeModeIcon({ mode }: { mode: ThemeMode }) {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    {mode === 'auto' && <><rect x="4" y="5" width="16" height="12" rx="2" /><path d="M8 20h8M12 17v3" /><path d="M12 8v3M9.8 9.2l2.2 2.2 2.2-2.2" /></>}
+    {mode === 'light' && <><circle cx="12" cy="12" r="3.5" /><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M18.7 5.3l-1.4 1.4M6.7 17.3l-1.4 1.4" /></>}
+    {mode === 'dark' && <path d="M19.4 15.2A7.8 7.8 0 0 1 8.8 4.6 7.8 7.8 0 1 0 19.4 15.2Z" />}
+  </svg>;
+}
+
+function ChevronDownIcon() {
+  return <svg className="theme-picker-chevron" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m7 10 5 5 5-5" /></svg>;
+}
+
 export function App() {
   const [tasks, setTasks] = useState<QueueTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -79,6 +93,7 @@ export function App() {
   const [pendingRemovalId, setPendingRemovalId] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
   const activeTasks = useMemo(() => tasks.filter((task) => !terminalStatuses.has(task.status)), [tasks]);
   const completedTasks = useMemo(() => tasks.filter((task) => terminalStatuses.has(task.status)), [tasks]);
   const visibleTasks = downloadTab === 'active' ? activeTasks : completedTasks;
@@ -92,7 +107,24 @@ export function App() {
   const taskEventVersions = useRef(new Map<string, number>());
   const engineEventEpoch = useRef(0);
   const tasksRef = useRef<QueueTask[]>(tasks);
+  const themePickerRef = useRef<HTMLDivElement>(null);
   tasksRef.current = tasks;
+
+  useEffect(() => {
+    if (!themePickerOpen) return;
+    const dismiss = (event: MouseEvent) => {
+      if (!themePickerRef.current?.contains(event.target as Node)) setThemePickerOpen(false);
+    };
+    const dismissWithEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setThemePickerOpen(false);
+    };
+    document.addEventListener('mousedown', dismiss);
+    window.addEventListener('keydown', dismissWithEscape);
+    return () => {
+      document.removeEventListener('mousedown', dismiss);
+      window.removeEventListener('keydown', dismissWithEscape);
+    };
+  }, [themePickerOpen]);
 
   function recordTaskEvent(task: QueueTask) {
     taskEventEpoch.current += 1;
@@ -422,10 +454,36 @@ export function App() {
           />
         </label>
         <button className="new-download" onClick={() => setNewDownloadOpen(true)}><span aria-hidden="true">＋</span>新建下载</button>
-        <div className="theme-switcher" role="group" aria-label="主题">
-          {([['auto', '自动'], ['light', '浅色'], ['dark', '深色']] as const).map(([mode, label]) => (
-            <button key={mode} aria-pressed={themeMode === mode} onClick={() => setAppThemeMode(mode as ThemeMode)}>{label}</button>
-          ))}
+        <div className="theme-switcher" ref={themePickerRef}>
+          <button
+            type="button"
+            className="theme-picker-trigger"
+            aria-label={`主题：${themeLabels[themeMode]}`}
+            aria-haspopup="menu"
+            aria-expanded={themePickerOpen}
+            onClick={() => setThemePickerOpen((open) => !open)}
+          >
+            <ThemeModeIcon mode={themeMode} />
+            <ChevronDownIcon />
+          </button>
+          {themePickerOpen && <div className="theme-picker-menu" role="menu" aria-label="选择主题">
+            {(['auto', 'light', 'dark'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                role="menuitemradio"
+                aria-label={`${themeLabels[mode]}主题`}
+                aria-checked={themeMode === mode}
+                title={`${themeLabels[mode]}主题`}
+                onClick={() => {
+                  setAppThemeMode(mode);
+                  setThemePickerOpen(false);
+                }}
+              >
+                <ThemeModeIcon mode={mode} />
+              </button>
+            ))}
+          </div>}
         </div>
         <div className="window-controls" aria-label="窗口控制">
           <button aria-label="最小化" onClick={() => void runWindowAction('minimize')}><WindowIcon kind="minimize" /></button>

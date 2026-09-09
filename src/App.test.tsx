@@ -4,6 +4,7 @@ import { vi } from 'vitest';
 import { App } from './App';
 
 const cloudApiMocks = vi.hoisted(() => ({
+  getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: false })),
   beginCloudAuthorization: vi.fn(),
   completeCloudAuthorization: vi.fn(),
   loginCloudWithPassword: vi.fn(),
@@ -49,16 +50,22 @@ it('keeps the download overview focused on transfer status instead of engine int
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
-it('lets the user switch between automatic, light and dark themes', async () => {
+it('switches themes from one compact icon dropdown', async () => {
   const user = userEvent.setup();
   render(<App />);
 
-  expect(screen.getByRole('group', { name: '主题' })).toBeVisible();
-  await user.click(screen.getByRole('button', { name: '浅色' }));
-  expect(document.documentElement).toHaveAttribute('data-theme', 'light');
-  expect(screen.getByRole('button', { name: '浅色' })).toHaveAttribute('aria-pressed', 'true');
+  const trigger = screen.getByRole('button', { name: '主题：自动' });
+  expect(trigger).toBeVisible();
+  expect(screen.queryByRole('menu', { name: '选择主题' })).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole('button', { name: '深色' }));
+  await user.click(trigger);
+  expect(screen.getByRole('menu', { name: '选择主题' })).toBeVisible();
+  await user.click(screen.getByRole('menuitemradio', { name: '浅色主题' }));
+  expect(document.documentElement).toHaveAttribute('data-theme', 'light');
+  expect(screen.getByRole('button', { name: '主题：浅色' })).toHaveAttribute('aria-expanded', 'false');
+
+  await user.click(screen.getByRole('button', { name: '主题：浅色' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '深色主题' }));
   expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
 });
 
