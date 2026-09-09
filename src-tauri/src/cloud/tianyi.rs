@@ -35,13 +35,13 @@ pub fn parse_tianyi_web_session(cookies: &[String]) -> Result<TianyiSession, Qua
         .filter_map(|raw| {
             let pair = raw.split(';').next()?.trim();
             let (name, value) = pair.split_once('=')?;
-            (!value.is_empty() && matches!(name, "COOKIE_LOGIN_USER" | "SESSION" | "LT"))
+            (!value.is_empty() && matches!(name, "COOKIE_LOGIN_USER" | "SSON" | "SESSION" | "LT"))
                 .then(|| format!("{name}={value}"))
         })
         .collect::<Vec<_>>();
     if !pairs
         .iter()
-        .any(|pair| pair.starts_with("COOKIE_LOGIN_USER="))
+        .any(|pair| pair.starts_with("COOKIE_LOGIN_USER=") || pair.starts_with("SSON="))
     {
         return Err(QuarkError::AuthorizationExpired);
     }

@@ -165,6 +165,21 @@ fn tianyi_rejects_an_empty_login_cookie() {
 }
 
 #[test]
+fn tianyi_accepts_the_current_browser_sso_cookie_after_web_authorization() {
+    // The current official browser sign-in can issue SSON without the older
+    // COOKIE_LOGIN_USER name.  Treating that successful login as expired
+    // leaves the native authorization window open forever.
+    let session = parse_tianyi_web_session(&[
+        "SSON=browser-sso-session; Path=/; Domain=.cloud.189.cn".into(),
+        "SESSION=portal-session; Path=/".into(),
+    ])
+    .expect("SSON is a valid official Tianyi browser session");
+
+    assert!(session.cookie.contains("SSON=browser-sso-session"));
+    assert!(session.cookie.contains("SESSION=portal-session"));
+}
+
+#[test]
 fn tianyi_accepts_the_portal_login_name_returned_after_web_authorization() {
     // The browser portal confirms a valid web session with `loginName` rather
     // than a numeric `userId`. Rejecting this response prevents the command
