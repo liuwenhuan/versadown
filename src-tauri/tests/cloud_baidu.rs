@@ -168,6 +168,19 @@ fn baidu_rejects_malformed_references_before_transport() {
         client.move_files(&[opaque_reference("/")], "/"),
         Err(QuarkError::InvalidResponse)
     ));
+    let forged_root = opaque_reference("/");
+    assert!(matches!(
+        client.rename(&forged_root, "renamed.mkv"),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert!(matches!(
+        client.trash(&[forged_root.clone()]),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert!(matches!(
+        client.download(&forged_root),
+        Err(QuarkError::InvalidResponse)
+    ));
     assert!(
         http.requests().is_empty(),
         "malformed references must not reach the transport"

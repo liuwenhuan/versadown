@@ -455,7 +455,10 @@ fn string_or_number(value: &Value) -> Option<String> {
 }
 
 fn encode_reference(reference: BaiduFileReference) -> Result<String, QuarkError> {
-    if reference.fsid.is_empty() || !reference.fsid.bytes().all(|byte| byte.is_ascii_digit()) {
+    if reference.fsid.is_empty()
+        || !reference.fsid.bytes().all(|byte| byte.is_ascii_digit())
+        || reference.path == "/"
+    {
         return Err(QuarkError::InvalidResponse);
     }
     validate_path(&reference.path)?;
@@ -489,6 +492,9 @@ fn parse_file_reference(value: &str) -> Result<BaiduFileReference, QuarkError> {
         return Err(QuarkError::InvalidResponse);
     }
     validate_path(&reference.path)?;
+    if reference.path == "/" {
+        return Err(QuarkError::InvalidResponse);
+    }
     Ok(reference)
 }
 
