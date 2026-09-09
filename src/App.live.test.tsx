@@ -198,7 +198,7 @@ it('reopens awaiting magnet file confirmation and confirms only through the dial
   expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
   expect(screen.getByText('episode.mkv')).toBeVisible();
   expect(state.selectFiles).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('button', { name: '下载已选 1 项' }));
+  await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
 
   expect(state.confirm).toHaveBeenCalledWith('magnet-awaiting', ['1']);
   expect(state.selectFiles).not.toHaveBeenCalled();
@@ -252,7 +252,7 @@ it('preserves a user deselection when later magnet metadata refreshes the file',
   render(<App />);
   await waitFor(() => expect(state.onTask).toBeDefined());
   await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'magnet:?xt=urn:btih:def' }); });
-  await user.click(screen.getByRole('checkbox'));
+  await user.click(screen.getByRole('checkbox', { name: '选择 pending.mkv' }));
 
   act(() => { state.onTask?.({
     id: 'magnet-2', name: 'collection', kind: 'magnet', status: 'awaiting_user', progress: 0,
@@ -260,7 +260,7 @@ it('preserves a user deselection when later magnet metadata refreshes the file',
   }); });
 
   expect(screen.getByText('renamed.mkv')).toBeVisible();
-  expect(screen.getByRole('checkbox')).not.toBeChecked();
+  expect(screen.getByRole('checkbox', { name: '选择 renamed.mkv' })).not.toBeChecked();
 });
 
 it('cleans up launcher listeners that resolve after App unmounts', async () => {

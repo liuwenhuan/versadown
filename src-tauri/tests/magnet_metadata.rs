@@ -1,11 +1,12 @@
 use alldownloader_lib::{resolve_magnet_torrent, MagnetMetadataSettings};
 use axum::{
     extract::Json,
-    http::StatusCode,
+    http::{header::USER_AGENT, HeaderMap, StatusCode},
     routing::{get, post},
     Router,
 };
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
 
@@ -49,6 +50,48 @@ async fn resolves_metadata_service_result_to_a_torrent_for_local_aria2() {
     .unwrap();
 
     assert_eq!(result.as_deref(), Some("dG9ycmVudC1ieXRlcw=="));
+}
+
+#[tokio::test]
+async fn identifies_as_alldownloader_when_requesting_metadata_service() {
+    let observed_user_agent = Arc::new(Mutex::new(None));
+    let captured_user_agent = Arc::clone(&observed_user_agent);
+    let app = Router::new()
+        .route(
+            "/api/v1/metadata",
+            post(move |headers: HeaderMap| {
+                let captured_user_agent = Arc::clone(&captured_user_agent);
+                async move {
+                    *captured_user_agent.lock().unwrap() = headers
+                        .get(USER_AGENT)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    Json(json!({
+                        "download_url": "/download/0123456789abcdef0123456789abcdef01234567"
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/download/0123456789abcdef0123456789abcdef01234567",
+            get(|| async { (StatusCode::OK, b"torrent-bytes".to_vec()) }),
+        );
+    let base_url = serve(app).await;
+
+    let result = resolve_magnet_torrent(
+        &MagnetMetadataSettings {
+            enabled: true,
+            base_url,
+        },
+        MAGNET,
+    )
+    .await;
+
+    assert!(result.is_ok());
+    assert_eq!(
+        observed_user_agent.lock().unwrap().as_deref(),
+        Some("AllDownloader/0.1")
+    );
 }
 
 #[tokio::test]

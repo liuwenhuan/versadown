@@ -1,7 +1,8 @@
 #[path = "aria2_sync.rs"]
 mod fixture;
-use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore};
+use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
 use serde_json::json;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
@@ -77,6 +78,43 @@ async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_star
         .position(|call| call["method"] == "aria2.unpause")
         .unwrap();
     assert!(select < start);
+    server.abort();
+}
+
+#[tokio::test]
+async fn selected_torrent_uses_the_chosen_destination_before_unpausing() {
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_started = started.clone();
+    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.changeOption" => {
+            assert_eq!(request["params"][2]["select-file"], "1");
+            assert_eq!(request["params"][2]["dir"], "E:\\Media");
+            json!("OK")
+        }
+        "aria2.unpause" => {
+            wire_started.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!("torrent-gid")
+        }
+        "aria2.tellStatus" => {
+            let mut status = fixture::status("torrent-gid", if wire_started.load(std::sync::atomic::Ordering::SeqCst) { "active" } else { "paused" }, 0);
+            status["files"] = json!([{"index":"1","path":"D:/合集/episode.mp4","length":"168996012","completedLength":"0","selected":"true"}]);
+            status
+        }
+        other => panic!("unexpected method {other}"),
+    }).await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(NewTask::direct("magnet:?xt=urn:btih:fixture")).unwrap();
+    store.bind_gid(task.id, "torrent-gid").unwrap();
+    store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
+    store.upsert_files(task.id, &[(1, "D:/合集/episode.mp4".into(), 168996012, 0, true)]).unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let started_task = service.select_files_with_options(task.id, vec![1], UriSubmissionOptions {
+        directory: Some(PathBuf::from("E:\\Media")),
+        ..Default::default()
+    }).await.unwrap();
+
+    assert_eq!(started_task.status, TaskStatus::Downloading);
     server.abort();
 }
 

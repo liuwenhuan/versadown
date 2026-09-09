@@ -341,13 +341,15 @@ export function App() {
     }
   }
 
-  async function confirm(selectedIds: string[]) {
+  async function confirm(selectedIds: string[], destinationDirectory?: string) {
     if (!confirmation) return;
     const task: QueueTask = {
       id: confirmation.taskId, name: '多文件下载任务', kind: 'folder', status: 'queued', progress: 0, speed: '等待开始',
       children: confirmation.resources.filter((resource) => selectedIds.includes(resource.id)).map((resource) => ({ id: resource.id, name: resource.name, kind: 'file', status: 'queued', progress: 0, size: resource.size }))
     };
-    const nativeTask = await confirmDownload(confirmation.taskId, selectedIds).catch(() => undefined);
+    const nativeTask = await (destinationDirectory
+      ? confirmDownload(confirmation.taskId, selectedIds, destinationDirectory)
+      : confirmDownload(confirmation.taskId, selectedIds)).catch(() => undefined);
     const confirmed = nativeTask ?? task;
     recordTaskEvent(confirmed);
     setTasks((current) => upsertTask(current, confirmed)); setSelectedTaskId(confirmed.id); setConfirmation(null);
@@ -530,7 +532,7 @@ export function App() {
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} /></section>
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} /></section>}
       </div>
-      {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
+      {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
       } : current)} onClose={() => setConfirmation(null)} />}

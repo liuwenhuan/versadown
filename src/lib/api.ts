@@ -59,9 +59,9 @@ export async function parseDownload(input: string): Promise<{ task?: QueueTask; 
   };
 }
 
-export async function confirmDownload(taskId: string, selectedIds: string[] = []): Promise<QueueTask | undefined> {
+export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<QueueTask | undefined> {
   if (!isTauriRuntime()) return undefined;
-  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds });
+  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, destinationDirectory });
 }
 
 export async function listPersistedTasks(): Promise<QueueTask[]> {
