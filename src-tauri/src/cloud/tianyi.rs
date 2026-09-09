@@ -65,6 +65,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
     }
     fn headers(&self) -> BTreeMap<String, String> {
         BTreeMap::from([
+            ("Accept".into(), "application/json;charset=UTF-8".into()),
             ("Cookie".into(), self.session.cookie.clone()),
             ("Origin".into(), CLOUD.into()),
             ("Referer".into(), format!("{CLOUD}/")),
@@ -142,14 +143,10 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             ),
             None,
         )?;
-        let files = value
-            .pointer("/fileListAO/fileList")
-            .or_else(|| value.get("data"))
-            .and_then(Value::as_array)
-            .ok_or(QuarkError::InvalidResponse)?;
+        let files = tianyi_file_list(&value)?;
         let items = files
             .iter()
-            .map(|file| {
+            .map(|(file, listed_as_folder)| {
                 Ok(CloudFile {
                     id: file
                         .get("id")
@@ -158,20 +155,15 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                         .ok_or(QuarkError::InvalidResponse)?,
                     parent_id: parent.into(),
                     name: required(file, "name").or_else(|_| required(file, "fileName"))?,
-                    kind: if file
-                        .get("isFolder")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
+                    kind: if *listed_as_folder
+                        || bool_value(file.get("isFolder").or_else(|| file.get("folder")))
                     {
                         "folder"
                     } else {
                         "file"
                     }
                     .into(),
-                    size: file
-                        .get("size")
-                        .or_else(|| file.get("fileSize"))
-                        .and_then(Value::as_u64),
+                    size: u64_value(file.get("size").or_else(|| file.get("fileSize"))),
                     modified_at: file.get("lastOpTime").and_then(string_or_number),
                 })
             })
@@ -182,11 +174,10 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         })
     }
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
-        self.request(
+        self.form_request(
             "POST",
             "/api/open/file/createFolder.action",
-            "",
-            Some(json!({"folderId":parent,"folderName":name})),
+            &[("parentFolderId", parent), ("folderName", name)],
         )
         .map(|_| ())
     }
@@ -230,6 +221,30 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             Some(json!({"fileIds":ids,"destFolderId":parent})),
         )
         .map(|_| ())
+    }
+
+    fn form_request(
+        &self,
+        method: &'static str,
+        path: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<Value, QuarkError> {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (name, value) in fields {
+            serializer.append_pair(name, value);
+        }
+        let mut headers = self.headers();
+        headers.insert(
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded; charset=UTF-8".into(),
+        );
+        let response = self.http.send(CloudHttpRequest {
+            method,
+            url: format!("{CLOUD}{path}"),
+            headers,
+            body: Some(serializer.finish()),
+        })?;
+        tianyi_json(&response)
     }
     /// Obtains the upload host; bytes are submitted later by the command layer.
     pub fn upload(&self) -> Result<Value, QuarkError> {
@@ -381,12 +396,11 @@ fn tianyi_upload_response(
     if !(200..300).contains(&response.status) {
         return Err(QuarkError::Provider("天翼云盘拒绝上传文件".into()));
     }
-    let value: Value =
-        serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+    let value = tianyi_response_value(&response.body)?;
     let code = value
         .get("res_code")
         .or_else(|| value.get("result"))
-        .and_then(Value::as_i64)
+        .and_then(i64_value)
         .unwrap_or(0);
     if code != 0 {
         return Err(QuarkError::Provider("天翼云盘拒绝上传文件".into()));
@@ -417,15 +431,14 @@ fn tianyi_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if response.status == 401 {
         return Err(QuarkError::AuthorizationExpired);
     }
-    let value: Value =
-        serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+    let value = tianyi_response_value(&response.body)?;
     if challenge(&value) {
         return Err(QuarkError::WebAuthorizationRequired);
     }
     let code = value
         .get("res_code")
         .or_else(|| value.get("result"))
-        .and_then(Value::as_i64)
+        .and_then(i64_value)
         .unwrap_or(0);
     if code != 0 {
         return Err(if matches!(code, -1 | 401) {
@@ -454,4 +467,194 @@ fn string_or_number(value: &Value) -> Option<String> {
         .as_str()
         .map(str::to_owned)
         .or_else(|| value.as_u64().map(|number| number.to_string()))
+        .or_else(|| value.as_i64().map(|number| number.to_string()))
+}
+
+fn i64_value(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+}
+
+fn u64_value(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+    })
+}
+
+fn bool_value(value: Option<&Value>) -> bool {
+    value
+        .and_then(|value| {
+            value.as_bool().or_else(|| {
+                value.as_str().and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" => Some(true),
+                    "false" | "0" | "no" => Some(false),
+                    _ => None,
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn tianyi_file_list(value: &Value) -> Result<Vec<(&Value, bool)>, QuarkError> {
+    let list = value
+        .pointer("/fileListAO/fileList")
+        .or_else(|| value.pointer("/listFiles/fileList"))
+        .or_else(|| value.get("data"));
+    let container = value
+        .get("fileListAO")
+        .or_else(|| value.get("listFiles"))
+        .or_else(|| value.get("data"));
+    let mut items = Vec::new();
+    if let Some(container) = container {
+        append_tianyi_entries(&mut items, container.get("fileList"), "file", false);
+        append_tianyi_entries(&mut items, container.get("folderList"), "folder", true);
+        if !items.is_empty() {
+            return Ok(items);
+        }
+    }
+    let list = list.ok_or(QuarkError::InvalidResponse)?;
+    append_tianyi_entries(&mut items, Some(list), "file", false);
+    (!items.is_empty())
+        .then_some(items)
+        .ok_or(QuarkError::InvalidResponse)
+}
+
+fn append_tianyi_entries<'a>(
+    output: &mut Vec<(&'a Value, bool)>,
+    candidate: Option<&'a Value>,
+    nested_name: &str,
+    folder: bool,
+) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    let candidate = candidate.get(nested_name).unwrap_or(candidate);
+    if let Some(entries) = candidate.as_array() {
+        output.extend(entries.iter().map(|entry| (entry, folder)));
+    } else if candidate.is_object() {
+        output.push((candidate, folder));
+    }
+}
+
+/// Tianyi's authenticated file endpoints can return either JSON or XML.  XML
+/// is converted into the small JSON-like tree consumed by the rest of this
+/// provider, without exposing a general XML execution surface.  Attributes,
+/// DTDs and processing instructions are intentionally ignored.
+fn tianyi_response_value(body: &str) -> Result<Value, QuarkError> {
+    if let Ok(value) = serde_json::from_str(body) {
+        return Ok(value);
+    }
+    tianyi_xml_value(body)
+}
+
+struct XmlNode {
+    name: String,
+    children: serde_json::Map<String, Value>,
+    text: String,
+}
+
+impl XmlNode {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            children: serde_json::Map::new(),
+            text: String::new(),
+        }
+    }
+
+    fn into_value(mut self) -> Value {
+        let text = self.text.trim();
+        if self.children.is_empty() {
+            return Value::String(text.into());
+        }
+        if !text.is_empty() {
+            self.children.insert("#text".into(), Value::String(text.into()));
+        }
+        Value::Object(self.children)
+    }
+}
+
+fn insert_xml_child(children: &mut serde_json::Map<String, Value>, name: String, value: Value) {
+    match children.entry(name) {
+        serde_json::map::Entry::Vacant(entry) => {
+            entry.insert(value);
+        }
+        serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
+            Value::Array(values) => values.push(value),
+            previous => {
+                let previous = std::mem::replace(previous, Value::Null);
+                *entry.get_mut() = Value::Array(vec![previous, value]);
+            }
+        },
+    }
+}
+
+fn xml_name(name: &str) -> Result<String, QuarkError> {
+    (!name.is_empty())
+        .then(|| name.to_owned())
+        .ok_or(QuarkError::InvalidResponse)
+}
+
+fn xml_text(raw: &str) -> Result<String, QuarkError> {
+    quick_xml::escape::unescape(raw)
+        .map(|value| value.into_owned())
+        .map_err(|_| QuarkError::InvalidResponse)
+}
+
+fn tianyi_xml_value(body: &str) -> Result<Value, QuarkError> {
+    use quick_xml::{events::Event, Reader};
+
+    let mut reader = Reader::from_str(body);
+    reader.config_mut().trim_text(true);
+    let mut stack = Vec::<XmlNode>::new();
+    let mut root: Option<(String, Value)> = None;
+    loop {
+        match reader.read_event().map_err(|_| QuarkError::InvalidResponse)? {
+            Event::Start(event) => stack.push(XmlNode::new(xml_name(event.name().as_ref())?)),
+            Event::Empty(event) => {
+                let node = XmlNode::new(xml_name(event.name().as_ref())?);
+                let name = node.name.clone();
+                let value = node.into_value();
+                if let Some(parent) = stack.last_mut() {
+                    insert_xml_child(&mut parent.children, name, value);
+                } else if root.is_none() {
+                    root = Some((name, value));
+                } else {
+                    return Err(QuarkError::InvalidResponse);
+                }
+            }
+            Event::Text(event) => {
+                if let Some(node) = stack.last_mut() {
+                    node.text.push_str(&xml_text(event.as_ref())?);
+                }
+            }
+            Event::CData(event) => {
+                if let Some(node) = stack.last_mut() {
+                    node.text.push_str(event.as_ref());
+                }
+            }
+            Event::End(_) => {
+                let node = stack.pop().ok_or(QuarkError::InvalidResponse)?;
+                let name = node.name.clone();
+                let value = node.into_value();
+                if let Some(parent) = stack.last_mut() {
+                    insert_xml_child(&mut parent.children, name, value);
+                } else if root.is_none() {
+                    root = Some((name, value));
+                } else {
+                    return Err(QuarkError::InvalidResponse);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if !stack.is_empty() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let (name, value) = root.ok_or(QuarkError::InvalidResponse)?;
+    Ok(json!({ name: value }))
 }

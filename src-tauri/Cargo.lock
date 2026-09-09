@@ -40,6 +40,7 @@ dependencies = [
  "hmac",
  "httpdate",
  "md5",
+ "quick-xml 0.42.0",
  "rand 0.8.7",
  "regex",
  "reqwest 0.12.28",

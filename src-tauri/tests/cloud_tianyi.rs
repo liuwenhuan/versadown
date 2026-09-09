@@ -110,6 +110,55 @@ fn tianyi_maps_files_and_passes_cookie_to_the_resolved_download() {
 }
 
 #[test]
+fn tianyi_maps_the_official_xml_directory_response() {
+    // The authenticated browser endpoint currently returns XML for file
+    // listing even though mutation responses can still be JSON.  The client
+    // must preserve the existing directory model across both formats.
+    let http = RecordingHttp::sequence(&[
+        r#"<?xml version="1.0" encoding="UTF-8"?><fileListAO><fileList><file><id>f1</id><name>photo.jpg</name><folder>false</folder><size>9</size><lastOpTime>2026-09-09</lastOpTime></file></fileList></fileListAO>"#,
+    ]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    let directory = client.directory("-11").unwrap();
+
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, "f1");
+    assert_eq!(directory.items[0].name, "photo.jpg");
+    assert_eq!(directory.items[0].kind, "file");
+    assert_eq!(directory.items[0].size, Some(9));
+}
+
+#[test]
+fn tianyi_maps_the_current_list_files_xml_root() {
+    // The current browser endpoint wraps the same file list in `listFiles`
+    // rather than the older `fileListAO` JSON envelope.
+    let http = RecordingHttp::sequence(&[
+        r#"<?xml version="1.0" encoding="UTF-8"?><listFiles><fileList><file><id>f2</id><name>current.jpg</name><folder>false</folder><size>10</size></file></fileList></listFiles>"#,
+    ]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    let directory = client.directory("-11").unwrap();
+
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, "f2");
+    assert_eq!(directory.items[0].size, Some(10));
+}
+
+#[test]
+fn tianyi_maps_xml_folder_entries_as_folders() {
+    let http = RecordingHttp::sequence(&[
+        r#"<listFiles><folderList><folder><id>d1</id><name>folder</name></folder></folderList></listFiles>"#,
+    ]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    let directory = client.directory("-11").unwrap();
+
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, "d1");
+    assert_eq!(directory.items[0].kind, "folder");
+}
+
+#[test]
 fn tianyi_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
     let http = RecordingHttp::sequence(&[
         r#"{"res_code":0,"fileDownloadUrl":"http://download.example/photo.jpg"}"#,
@@ -141,6 +190,14 @@ fn tianyi_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
     assert!(requests[5]
         .url
         .contains("/api/open/file/deleteFiles.action"));
+    assert_eq!(
+        requests[1].headers["Content-Type"],
+        "application/x-www-form-urlencoded; charset=UTF-8"
+    );
+    assert!(requests[1]
+        .body
+        .as_deref()
+        .is_some_and(|body| body.contains("parentFolderId=-11")));
 }
 
 #[test]
