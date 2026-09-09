@@ -54,6 +54,13 @@ pub struct TianyiDownload {
     pub name: String,
     pub headers: BTreeMap<String, String>,
 }
+
+struct TianyiEntryInfo {
+    id: String,
+    name: String,
+    is_folder: bool,
+}
+
 pub struct TianyiClient<'a, T: CloudHttpTransport> {
     session: TianyiSession,
     http: &'a T,
@@ -182,43 +189,64 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         .map(|_| ())
     }
     pub fn rename(&self, id: &str, name: &str) -> Result<(), QuarkError> {
-        self.request(
-            "POST",
-            "/api/open/file/rename.action",
-            "",
-            Some(json!({"fileId":id,"fileName":name})),
-        )
-        .map(|_| ())
+        let entry = self.entry_info(id)?;
+        let (path, id_key, name_key) = if entry.is_folder {
+            (
+                "/api/open/file/renameFolder.action",
+                "folderId",
+                "destFolderName",
+            )
+        } else {
+            (
+                "/api/open/file/renameFile.action",
+                "fileId",
+                "destFileName",
+            )
+        };
+        self.form_request("POST", path, &[(id_key, id), (name_key, name)])
+            .map(|_| ())
     }
     pub fn move_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
-        self.file_operation("moveFiles", ids, parent)
+        self.batch_operation("MOVE", ids, parent)
     }
     pub fn copy_files(&self, ids: &[String], parent: &str) -> Result<(), QuarkError> {
-        self.file_operation("copyFiles", ids, parent)
+        self.batch_operation("COPY", ids, parent)
     }
     pub fn trash(&self, ids: &[String]) -> Result<(), QuarkError> {
-        self.request(
-            "POST",
-            "/api/open/file/deleteFiles.action",
-            "",
-            Some(json!({"fileIds":ids,"toRecycle":true})),
-        )
-        .map(|_| ())
+        self.batch_operation("DELETE", ids, "")
     }
-    fn file_operation(
+    fn batch_operation(
         &self,
         operation: &str,
         ids: &[String],
         parent: &str,
     ) -> Result<(), QuarkError> {
-        if ids.is_empty() || parent.is_empty() {
+        if ids.is_empty() || (operation != "DELETE" && parent.is_empty()) {
             return Err(QuarkError::InvalidInput("请选择文件和目标目录".into()));
         }
-        self.request(
+        let task_infos = ids
+            .iter()
+            .map(|id| self.entry_info(id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|entry| {
+                json!({
+                    "fileId": entry.id,
+                    "fileName": entry.name,
+                    "isFolder": i64::from(entry.is_folder),
+                })
+            })
+            .collect::<Vec<_>>();
+        let task_infos = serde_json::to_string(&task_infos)
+            .map_err(|_| QuarkError::InvalidResponse)?;
+        self.form_request(
             "POST",
-            &format!("/api/open/file/{operation}.action"),
-            "",
-            Some(json!({"fileIds":ids,"destFolderId":parent})),
+            "/api/open/batch/createBatchTask.action",
+            &[
+                ("type", operation),
+                ("targetFolderId", parent),
+                ("taskInfos", &task_infos),
+            ],
         )
         .map(|_| ())
     }
@@ -245,6 +273,30 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             body: Some(serializer.finish()),
         })?;
         tianyi_json(&response)
+    }
+
+    fn entry_info(&self, id: &str) -> Result<TianyiEntryInfo, QuarkError> {
+        let value = self.request(
+            "GET",
+            "/api/portal/getFileInfo.action",
+            &format!("fileId={}", encoded(id)),
+            None,
+        )?;
+        let file = value
+            .get("fileInfo")
+            .or_else(|| value.get("data"))
+            .unwrap_or(&value);
+        Ok(TianyiEntryInfo {
+            id: file
+                .get("fileId")
+                .or_else(|| file.get("folderId"))
+                .or_else(|| file.get("id"))
+                .and_then(string_or_number)
+                .unwrap_or_else(|| id.into()),
+            name: required(file, "fileName").or_else(|_| required(file, "name"))?,
+            is_folder: bool_value(file.get("isFolder").or_else(|| file.get("folder")))
+                || file.get("fileCata").and_then(i64_value) == Some(1),
+        })
     }
     /// Obtains the upload host; bytes are submitted later by the command layer.
     pub fn upload(&self) -> Result<Value, QuarkError> {

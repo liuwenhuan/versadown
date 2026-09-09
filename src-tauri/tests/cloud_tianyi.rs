@@ -163,9 +163,13 @@ fn tianyi_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
     let http = RecordingHttp::sequence(&[
         r#"{"res_code":0,"fileDownloadUrl":"http://download.example/photo.jpg"}"#,
         r#"{"res_code":0}"#,
+        r#"{"res_code":0,"fileInfo":{"fileId":"f1","fileName":"photo.jpg","isFolder":false}}"#,
         r#"{"res_code":0}"#,
+        r#"{"res_code":0,"fileInfo":{"fileId":"f1","fileName":"renamed.jpg","isFolder":false}}"#,
         r#"{"res_code":0}"#,
+        r#"{"res_code":0,"fileInfo":{"fileId":"f1","fileName":"renamed.jpg","isFolder":false}}"#,
         r#"{"res_code":0}"#,
+        r#"{"res_code":0,"fileInfo":{"fileId":"f1","fileName":"renamed.jpg","isFolder":false}}"#,
         r#"{"res_code":0}"#,
     ]);
     let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
@@ -184,12 +188,20 @@ fn tianyi_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
     assert!(requests[1]
         .url
         .contains("/api/open/file/createFolder.action"));
-    assert!(requests[2].url.contains("/api/open/file/rename.action"));
-    assert!(requests[3].url.contains("/api/open/file/moveFiles.action"));
-    assert!(requests[4].url.contains("/api/open/file/copyFiles.action"));
+    assert!(requests[2].url.contains("/api/portal/getFileInfo.action"));
+    assert!(requests[3].url.contains("/api/open/file/renameFile.action"));
+    assert!(requests[4].url.contains("/api/portal/getFileInfo.action"));
     assert!(requests[5]
         .url
-        .contains("/api/open/file/deleteFiles.action"));
+        .contains("/api/open/batch/createBatchTask.action"));
+    assert!(requests[6].url.contains("/api/portal/getFileInfo.action"));
+    assert!(requests[7]
+        .url
+        .contains("/api/open/batch/createBatchTask.action"));
+    assert!(requests[8].url.contains("/api/portal/getFileInfo.action"));
+    assert!(requests[9]
+        .url
+        .contains("/api/open/batch/createBatchTask.action"));
     assert_eq!(
         requests[1].headers["Content-Type"],
         "application/x-www-form-urlencoded; charset=UTF-8"
@@ -198,6 +210,32 @@ fn tianyi_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
         .body
         .as_deref()
         .is_some_and(|body| body.contains("parentFolderId=-11")));
+    assert!(requests[5]
+        .body
+        .as_deref()
+        .is_some_and(|body| body.contains("type=MOVE") && body.contains("taskInfos=")));
+    assert!(requests[9]
+        .body
+        .as_deref()
+        .is_some_and(|body| body.contains("type=DELETE") && body.contains("taskInfos=")));
+}
+
+#[test]
+fn tianyi_renames_a_folder_with_the_official_form_endpoint() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"res_code":0,"fileInfo":{"fileId":"d1","fileName":"old","isFolder":true}}"#,
+        r#"{"res_code":0}"#,
+    ]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    client.rename("d1", "new").unwrap();
+
+    let requests = http.requests();
+    assert!(requests[1].url.contains("/api/open/file/renameFolder.action"));
+    assert!(requests[1]
+        .body
+        .as_deref()
+        .is_some_and(|body| body.contains("folderId=d1") && body.contains("destFolderName=new")));
 }
 
 #[test]

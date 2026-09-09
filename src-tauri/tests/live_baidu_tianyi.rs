@@ -486,3 +486,77 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
         ))),
     }
 }
+
+fn wait_for_named(
+    mut directory: impl FnMut() -> Result<alldownloader_lib::cloud::CloudDirectory, QuarkError>,
+    name: &str,
+    kind: &str,
+) -> LiveResult<CloudFile> {
+    let mut last_error = None;
+    for _ in 0..10 {
+        match directory() {
+            Ok(listing) => match find_named(&listing.items, name, kind) {
+                Ok(item) => return Ok(item),
+                Err(error) => last_error = Some(error),
+            },
+            Err(error) => last_error = Some(Box::new(error)),
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    Err(last_error.unwrap_or_else(|| failure("provider did not expose the expected item")))
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Tianyi account and creates only AllDownloader-IT-* test data"]
+fn live_tianyi_folder_rename_move_and_trash() -> LiveResult<()> {
+    require_live_authorization()?;
+    let store = session_store()?;
+    let session: TianyiSession = serde_json::from_slice(
+        &store
+            .load("tianyi")?
+            .ok_or_else(|| failure("Tianyi is not currently authorized"))?,
+    )?;
+    let http = LiveTransport::new()?;
+    let client = TianyiClient::new(session, &http);
+    let base_name = test_name("tianyi", "mutations-root");
+    let source_name = test_name("tianyi", "rename-source");
+    let renamed_name = test_name("tianyi", "renamed-folder");
+    let destination_name = test_name("tianyi", "move-target");
+
+    if let Err(error) = client.mkdir("-11", &base_name) {
+        http.report();
+        return Err(Box::new(error));
+    }
+    let base = find_named(&client.directory("-11")?.items, &base_name, "folder")?;
+    let result = (|| -> LiveResult<()> {
+        client.mkdir(&base.id, &source_name)?;
+        client.mkdir(&base.id, &destination_name)?;
+        let children = client.directory(&base.id)?;
+        let source = find_named(&children.items, &source_name, "folder")?;
+        let destination = find_named(&children.items, &destination_name, "folder")?;
+        client.rename(&source.id, &renamed_name)?;
+        let renamed = wait_for_named(|| client.directory(&base.id), &renamed_name, "folder")?;
+        client.move_files(&[renamed.id.clone()], &destination.id)?;
+        wait_for_named(|| client.directory(&destination.id), &renamed_name, "folder")?;
+        Ok(())
+    })();
+    let cleanup = client.trash(&[base.id.clone()]);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => {
+            // The batch delete operation is asynchronous.  A successful task
+            // id may take a few seconds before the listing hides the folder.
+            for _ in 0..10 {
+                if !client.directory("-11")?.items.iter().any(|item| item.id == base.id) {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(failure("Tianyi mutation test root remained visible after trash"))
+        }
+        (Err(test), Ok(())) => Err(test),
+        (Ok(()), Err(cleanup)) => Err(Box::new(cleanup)),
+        (Err(test), Err(cleanup)) => Err(failure(format!(
+            "test failed ({test}); cleanup of only its test directory also failed ({cleanup})"
+        ))),
+    }
+}
