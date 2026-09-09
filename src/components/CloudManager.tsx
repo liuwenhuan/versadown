@@ -288,6 +288,9 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [authorizationCapabilities, setAuthorizationCapabilities] = useState<CloudAuthorizationCapabilities>(() => fallbackCapabilities[provider]);
+  const effectiveAuthorizationCapabilities = authorizationCapabilities.provider === provider
+    ? authorizationCapabilities
+    : fallbackCapabilities[provider];
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
@@ -577,11 +580,11 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       <header className="cloud-heading"><div><p className="eyebrow">自有网盘 · 本地会话</p><h2>{label}网盘</h2><span>{expired ? '凭据失效后必须重新授权，文件列表不会继续显示。' : '授权完成前不会显示或加载任何文件。'}</span></div></header>
       {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
-        {authorizationCapabilities.password && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+        {effectiveAuthorizationCapabilities.password && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label>{label}密码<input aria-label={`${label}密码`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <button className="primary" type="submit">登录{label}账号</button></>}
-        {!authorizationCapabilities.password && <p className="cloud-login-hint">{noPasswordLoginHint}</p>}
-        {authorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
+        {!effectiveAuthorizationCapabilities.password && <p className="cloud-login-hint">{noPasswordLoginHint}</p>}
+        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
       </form>
       <p className="authorization-note" role="status"><b>{expired ? '凭据已过期' : '授权状态'}</b><span>{authorizationStatus}</span></p>

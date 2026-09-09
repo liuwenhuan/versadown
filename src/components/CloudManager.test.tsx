@@ -109,6 +109,21 @@ it.each([
   expect(screen.getByText(/百度未提供可用的账号密码登录接口/)).toBeVisible();
 });
 
+it('fails closed while a provider change waits for its capability response', async () => {
+  const pending = new Promise<never>(() => undefined);
+  const getCloudAuthorizationCapabilities = vi.fn().mockImplementation((provider: CloudProvider) => provider === 'baidu'
+    ? Promise.resolve({ provider, web: true, password: true })
+    : pending);
+  const client = createCloudFake({ getCloudAuthorizationCapabilities });
+  const { rerender } = render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
+
+  expect(await screen.findByRole('button', { name: '登录百度账号' })).toBeVisible();
+  rerender(<CloudManager provider={'aliyun' as never} client={client} authorizationOnly />);
+
+  expect(screen.queryByRole('button', { name: '登录阿里账号' })).not.toBeInTheDocument();
+  expect(screen.getByText(/阿里未提供可用的账号密码登录接口/)).toBeVisible();
+});
+
 it('recovers an existing account on mount before loading its root directory', async () => {
   const client = createCloudFake({ getCloudAccount: vi.fn().mockResolvedValue({ id: 'saved-1', displayName: 'saved-alice', provider: 'quark', authMethod: 'web' }) });
   render(<CloudManager provider="quark" client={client} />);
