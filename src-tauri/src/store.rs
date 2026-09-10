@@ -166,6 +166,23 @@ impl TaskStore {
         Ok(task)
     }
 
+    /// Cleanup may finish after a user action. Update only its safe message,
+    /// never restore an old status or transfer snapshot over the current task.
+    pub(crate) fn set_completed_cleanup_message(
+        &self,
+        id: Uuid,
+        pending: bool,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let message =
+            pending.then_some("cleanup_pending：下载已完成，网盘转存文件清理未完成，可重试清理");
+        connection.execute(
+            "UPDATE tasks SET error = ?1 WHERE id = ?2 AND status = 'completed' AND (?1 IS NOT NULL OR error LIKE 'cleanup_pending：%')",
+            params![message, id.to_string()],
+        )?;
+        find_with_connection(&connection, id)
+    }
+
     pub fn bind_gid(&self, id: Uuid, gid: impl AsRef<str>) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         update_gid(&connection, id, gid.as_ref(), None)?;

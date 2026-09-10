@@ -251,7 +251,7 @@ pub fn selected_share_sources(
     }
     let plan = store.resolve_entry(plan_source)?.plan;
     let mut selected = BTreeSet::new();
-    selected_ids
+    let sources: Vec<String> = selected_ids
         .iter()
         .map(|id| {
             let entry = plan
@@ -262,7 +262,9 @@ pub fn selected_share_sources(
                 .ok_or_else(missing_plan)?;
             Ok(plan.source_for(&entry.entry_id))
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    store.link_local_sources(&sources)?;
+    Ok(sources)
 }
 
 pub(super) fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
@@ -592,6 +594,8 @@ impl CloudShareEntry {
 pub enum CloudShareCleanupState {
     Pending,
     Attempted,
+    Failed,
+    Succeeded,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -614,6 +618,10 @@ pub struct CloudSharePlan {
     pub created_at_ms: u64,
     pub last_used_at_ms: u64,
     pub transfers: Vec<CloudShareTransfer>,
+    /// Selected entries are registered before submission starts. Empty task sets
+    /// block cleanup until submission succeeds; removed/failed tasks also block.
+    #[serde(default)]
+    pub linked_local_tasks: BTreeMap<String, BTreeSet<uuid::Uuid>>,
 }
 
 impl CloudSharePlan {
@@ -635,6 +643,7 @@ impl CloudSharePlan {
             created_at_ms: 0,
             last_used_at_ms: 0,
             transfers: Vec::new(),
+            linked_local_tasks: BTreeMap::new(),
         }
     }
 
@@ -659,6 +668,10 @@ impl CloudSharePlan {
                 transfer.created_file_id.is_empty()
                     || !entries.contains(transfer.entry_fingerprint.as_str())
             })
+            || self
+                .linked_local_tasks
+                .keys()
+                .any(|fingerprint| !entries.contains(fingerprint.as_str()))
         {
             return Err(QuarkError::Storage);
         }
@@ -835,6 +848,7 @@ impl CloudSharePlanStore {
             if let Some(previous) = document.plans.get(&key) {
                 incoming.created_at_ms = previous.plan.created_at_ms;
                 incoming.transfers = previous.plan.transfers.clone();
+                incoming.linked_local_tasks = previous.plan.linked_local_tasks.clone();
                 for entry in &previous.plan.entries {
                     if !incoming
                         .entries
@@ -847,6 +861,7 @@ impl CloudSharePlanStore {
             } else {
                 incoming.created_at_ms = now;
                 incoming.transfers.clear();
+                incoming.linked_local_tasks.clear();
             }
             document.plans.insert(
                 key.clone(),
@@ -962,6 +977,108 @@ impl CloudSharePlanStore {
         })
     }
 
+    pub fn link_local_sources(&self, sources: &[String]) -> Result<(), QuarkError> {
+        self.update(|document, now| {
+            for source in sources {
+                let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+                let key = plan_key(provider, &share);
+                let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+                if !plan
+                    .entries
+                    .iter()
+                    .any(|entry| entry.entry_fingerprint == fingerprint)
+                {
+                    return Err(missing_plan());
+                }
+                plan.linked_local_tasks.entry(fingerprint).or_default();
+                document.touch(&key, now)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn link_local_task(&self, source: &str, task_id: uuid::Uuid) -> Result<(), QuarkError> {
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, now| {
+            let key = plan_key(provider, &share);
+            let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            plan.linked_local_tasks
+                .get_mut(&fingerprint)
+                .ok_or_else(missing_plan)?
+                .insert(task_id);
+            document.touch(&key, now)
+        })
+    }
+
+    /// Claim under the encrypted document lock, checking every exact linked task
+    /// against current SQLite state. The caller holds submission gates while the
+    /// claim and provider mutation run. Returning IDs requires a successful save.
+    pub fn mark_local_completion(
+        &self,
+        source: &str,
+        retry: bool,
+        is_completed: impl Fn(uuid::Uuid, &str) -> bool,
+    ) -> Result<Vec<String>, QuarkError> {
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, now| {
+            let key = plan_key(provider, &share);
+            let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            if !plan.linked_local_tasks.contains_key(&fingerprint) {
+                return Ok(vec![]);
+            }
+            for (entry, ids) in &plan.linked_local_tasks {
+                let source = format!("cloud-share://{}/{}/{}", provider.key(), share, entry);
+                if ids.is_empty() || !ids.iter().all(|id| is_completed(*id, &source)) {
+                    return Ok(vec![]);
+                }
+            }
+            // Unlinked historical transfers are never swept into this action.
+            let mut claimed = BTreeSet::new();
+            for transfer in &mut plan.transfers {
+                if plan
+                    .linked_local_tasks
+                    .contains_key(&transfer.entry_fingerprint)
+                    && (transfer.cleanup_state == CloudShareCleanupState::Pending
+                        || (retry
+                            && matches!(
+                                transfer.cleanup_state,
+                                CloudShareCleanupState::Failed | CloudShareCleanupState::Attempted
+                            )))
+                {
+                    transfer.cleanup_state = CloudShareCleanupState::Attempted;
+                    claimed.insert(transfer.created_file_id.clone());
+                }
+            }
+            document.touch(&key, now)?;
+            Ok(claimed.into_iter().collect())
+        })
+    }
+
+    pub fn finish_cleanup(
+        &self,
+        source: &str,
+        ids: &[String],
+        succeeded: bool,
+    ) -> Result<(), QuarkError> {
+        let (provider, share, _) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, now| {
+            let key = plan_key(provider, &share);
+            let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            for transfer in &mut plan.transfers {
+                if transfer.cleanup_state == CloudShareCleanupState::Attempted
+                    && ids.contains(&transfer.created_file_id)
+                {
+                    transfer.cleanup_state = if succeeded {
+                        CloudShareCleanupState::Succeeded
+                    } else {
+                        CloudShareCleanupState::Failed
+                    };
+                }
+            }
+            document.touch(&key, now)
+        })
+    }
+
     pub fn prune(&self) -> Result<usize, QuarkError> {
         let _guard = self.mutation.lock().map_err(|_| QuarkError::Storage)?;
         let mut document = self.load()?;
@@ -978,6 +1095,98 @@ mod tests {
     use super::*;
     use crate::cloud::MemoryCredentialStore;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn cleanup_claim_is_durable_and_one_shot_across_concurrent_completions() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("share");
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("f1");
+        store
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        store
+            .link_local_task(&source, uuid::Uuid::new_v4())
+            .unwrap();
+        store.record_transfer(&source, "exact-created-id").unwrap();
+        store.upsert(&plan).unwrap();
+        let store = Arc::new(store);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let store = store.clone();
+                let source = source.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store
+                        .mark_local_completion(&source, false, |_, _| true)
+                        .unwrap()
+                })
+            })
+            .collect();
+        let claims: Vec<_> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(claims, vec!["exact-created-id"]);
+        assert_eq!(
+            store.resolve_entry(&source).unwrap().plan.transfers[0].cleanup_state,
+            CloudShareCleanupState::Attempted
+        );
+    }
+
+    #[test]
+    fn cleanup_cannot_release_ids_when_encrypted_claim_save_fails() {
+        use std::sync::atomic::AtomicBool;
+        struct FailingCredentials {
+            inner: MemoryCredentialStore,
+            fail: AtomicBool,
+        }
+        impl CredentialStore for FailingCredentials {
+            fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+                self.inner.load(key)
+            }
+            fn remove(&self, key: &str) -> Result<(), QuarkError> {
+                self.inner.remove(key)
+            }
+            fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    Err(QuarkError::Storage)
+                } else {
+                    self.inner.save(key, bytes)
+                }
+            }
+        }
+        let credentials = Arc::new(FailingCredentials {
+            inner: MemoryCredentialStore::default(),
+            fail: AtomicBool::new(false),
+        });
+        let store = CloudSharePlanStore {
+            credentials: credentials.clone(),
+            mutation: Mutex::new(()),
+            now_ms: Arc::new(|| 1_000),
+        };
+        let plan = fixture("share");
+        let source = plan.source_for("f1");
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        store
+            .link_local_task(&source, uuid::Uuid::new_v4())
+            .unwrap();
+        store.record_transfer(&source, "created-id").unwrap();
+        credentials.fail.store(true, Ordering::SeqCst);
+        assert!(store
+            .mark_local_completion(&source, false, |_, _| true)
+            .is_err());
+        credentials.fail.store(false, Ordering::SeqCst);
+        assert_eq!(
+            store.resolve_entry(&source).unwrap().plan.transfers[0].cleanup_state,
+            CloudShareCleanupState::Pending
+        );
+    }
 
     #[test]
     fn rotated_share_context_must_be_persisted_before_transfer_or_download_handoff() {

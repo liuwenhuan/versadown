@@ -364,6 +364,13 @@ pub async fn task_action(
     app: AppHandle,
 ) -> Result<TaskActionOutcome, String> {
     let state = app.state::<AppState>();
+    if action == "retry_cleanup" {
+        let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+        let task = crate::cloud::commands::cleanup_cloud_share_task(app.clone(), id, true)
+            .await
+            .map_err(|_| "网盘转存文件清理未完成，可重试清理".to_string())?;
+        return task_action_outcome(&state.store, task, None);
+    }
     let service = state
         .runtime
         .service()
@@ -458,6 +465,15 @@ async fn resubmit_task(
     task: DownloadTask,
     mut options: UriSubmissionOptions,
 ) -> Result<DownloadTask, String> {
+    // Match the cleanup worker's source gate for both retry and overwrite.
+    let _share_submission = if task.source.starts_with("cloud-share://") {
+        Some(
+            state.cloud_download_sources.acquire(&task.source)
+                .await.map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
     let service = state
         .runtime
         .service()

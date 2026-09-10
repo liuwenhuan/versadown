@@ -71,6 +71,7 @@ impl EventSink for TauriDownloadEvents {
             let _ = self.app.emit("download-task-updated", payload);
         }
         commands::schedule_cloud_share_refresh(self.app.clone(), task);
+        cloud::commands::schedule_cloud_share_cleanup(self.app.clone(), task);
     }
 
     fn global_stat_updated(&self, stat: &Aria2GlobalStat) {

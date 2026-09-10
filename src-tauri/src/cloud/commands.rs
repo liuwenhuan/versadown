@@ -1370,36 +1370,37 @@ pub async fn cloud_trash(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run_session_work(
-        app,
-        provider,
-        SessionWorkKind::Mutation,
-        move |s, h| match provider {
-            CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
-                .trash(&file_ids)
-                .map(|_| ()),
-            CloudProvider::Pikpak => PikPakClient::new(h, &s.store).trash(&file_ids),
-            CloudProvider::Baidu => {
-                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
-                    .trash(&file_ids)
-            }
-            CloudProvider::Tianyi => tianyi::TianyiClient::new(
-                load_provider_session(CloudProvider::Tianyi, &s.store)?,
-                h,
-            )
-            .trash(&file_ids),
-            CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).trash(&file_ids),
-            CloudProvider::Xunlei => {
-                with_xunlei_client(&s.store, h, |client| client.trash(&file_ids))
-            }
-            CloudProvider::Uc => {
-                uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
-                    .trash(&file_ids)
-                    .map(|_| ())
-            }
-        },
-    )
+    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+        trash_provider_files(provider, &s.store, h, &file_ids)
+    })
     .await
+}
+
+fn trash_provider_files(
+    provider: CloudProvider,
+    store: &DpapiCredentialStore,
+    h: &impl CloudHttpTransport,
+    file_ids: &[String],
+) -> Result<(), QuarkError> {
+    match provider {
+        CloudProvider::Quark => QuarkClient::new(cookie(store)?, h)
+            .trash(&file_ids)
+            .map(|_| ()),
+        CloudProvider::Pikpak => PikPakClient::new(h, store).trash(&file_ids),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, h)
+                .trash(&file_ids)
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, store)?, h)
+                .trash(&file_ids)
+        }
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(store, h).trash(&file_ids),
+        CloudProvider::Xunlei => with_xunlei_client(store, h, |client| client.trash(&file_ids)),
+        CloudProvider::Uc => uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, h)
+            .trash(&file_ids)
+            .map(|_| ()),
+    }
 }
 #[tauri::command]
 pub async fn cloud_delete(
@@ -1583,6 +1584,9 @@ pub async fn submit_cloud_share_file(
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
     let entry = cloud.share_plans.resolve_entry(&source)?;
+    cloud
+        .share_plans
+        .link_local_sources(std::slice::from_ref(&source))?;
     if let Some(directory) = configured.directory.as_ref() {
         configured.directory = Some(directory_download_output_directory(
             directory,
@@ -1601,7 +1605,136 @@ pub async fn submit_cloud_share_file(
         .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?;
     let task =
         share::submit_current_share_download(&service, &source, resolved, configured).await?;
+    cloud.share_plans.link_local_task(&source, task.id)?;
+    if let Ok(latest) = state.store.find(task.id) {
+        schedule_cloud_share_cleanup(app.clone(), &latest);
+    }
     task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)
+}
+
+pub(crate) fn schedule_cloud_share_cleanup(app: AppHandle, task: &DownloadTask) {
+    if task.status != TaskStatus::Completed || !task.source.starts_with("cloud-share://") {
+        return;
+    }
+    let id = task.id;
+    tauri::async_runtime::spawn(async move {
+        let _ = cleanup_cloud_share_task(app, id, false).await;
+    });
+}
+
+/// Explicit retry uses the same exact-object journal, and never resolves a URL
+/// or resubmits a local download. It also works when aria2 is unavailable.
+pub(crate) async fn cleanup_cloud_share_task(
+    app: AppHandle,
+    id: uuid::Uuid,
+    retry: bool,
+) -> Result<DownloadTask, QuarkError> {
+    use tauri::Emitter;
+    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
+    let task = state.store.find(id).map_err(|_| QuarkError::Storage)?;
+    share::parse_stable_cloud_share_source(&task.source)?;
+    if task.status != TaskStatus::Completed {
+        return Err(QuarkError::InvalidInput(
+            "只有已完成的分享任务可以重试清理".into(),
+        ));
+    }
+    if !state
+        .settings
+        .lock()
+        .map_err(|_| QuarkError::Storage)?
+        .delete_transferred_share_files_after_download
+    {
+        return Ok(task);
+    }
+    match cleanup_cloud_share_task_inner(app.clone(), id, retry).await {
+        Ok(task) => Ok(task),
+        Err(_) => {
+            let task = state
+                .store
+                .set_completed_cleanup_message(id, true)
+                .map_err(|_| QuarkError::Storage)?;
+            if let Ok(payload) = crate::commands::task_payload(&state.store, task.clone()) {
+                let _ = app.emit("download-task-updated", payload);
+            }
+            Ok(task)
+        }
+    }
+}
+
+async fn cleanup_cloud_share_task_inner(
+    app: AppHandle,
+    id: uuid::Uuid,
+    retry: bool,
+) -> Result<DownloadTask, QuarkError> {
+    use tauri::Emitter;
+    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
+    let task = state.store.find(id).map_err(|_| QuarkError::Storage)?;
+    if task.status != TaskStatus::Completed {
+        return Err(QuarkError::InvalidInput(
+            "只有已完成的分享任务可以重试清理".into(),
+        ));
+    }
+    let (provider, _, _) = share::parse_stable_cloud_share_source(&task.source)?;
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let plan = cloud.share_plans.resolve_entry(&task.source)?.plan;
+    // Lock every linked source in deterministic order, shared with submission,
+    // retry and overwrite, until the provider action completes.
+    let sources: std::collections::BTreeSet<_> = plan
+        .linked_local_tasks
+        .keys()
+        .map(|entry| {
+            format!(
+                "cloud-share://{}/{}/{}",
+                provider.key(),
+                plan.share_fingerprint,
+                entry
+            )
+        })
+        .collect();
+    let mut guards = Vec::new();
+    for source in sources {
+        guards.push(state.cloud_download_sources.acquire(&source).await?);
+    }
+    cloud.share_plans.link_local_task(&task.source, id)?;
+    let tasks = Arc::clone(&state.store);
+    let worker_app = app.clone();
+    // No automatic session-recovery replay around a destructive action.
+    let updated = run(app.clone(), provider, move |cloud, http| {
+        let state = worker_app
+            .try_state::<AppState>()
+            .ok_or(QuarkError::Storage)?;
+        let enabled = state
+            .settings
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .delete_transferred_share_files_after_download;
+        crate::engine_runtime::cleanup_completed_share(
+            &cloud.share_plans,
+            &tasks,
+            &task,
+            enabled,
+            retry,
+            |provider, ids| {
+                if provider == CloudProvider::Baidu {
+                    baidu::BaiduClient::new(load_provider_session(provider, &cloud.store)?, http)
+                        .trash_transferred_files(ids)
+                } else {
+                    trash_provider_files(provider, &cloud.store, http, ids)
+                }
+            },
+        )
+    })
+    .await?;
+    if let Some(updated) = updated {
+        if let Ok(payload) = crate::commands::task_payload(&state.store, updated.clone()) {
+            let _ = app.emit("download-task-updated", payload);
+        }
+        Ok(updated)
+    } else {
+        state.store.find(id).map_err(|_| QuarkError::Storage)
+    }
 }
 
 #[derive(Clone, Serialize)]

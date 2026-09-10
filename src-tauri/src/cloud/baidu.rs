@@ -58,6 +58,46 @@ mod tests {
         json!({"errno":0,"data":{"shareid":22,"uk":33,"seckey":"secret-key","has_more":false,"list":[{"fs_id":11,"server_filename":"movie.mp4","path":"/movie.mp4","isdir":0,"size":123}]}})
     }
     #[test]
+    fn share_cleanup_resolves_only_exact_recorded_ids_before_deleting() {
+        let http = Http::new(vec![
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/created.txt","isdir":0}]}),
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0}),
+        ]);
+        BaiduClient::new(BaiduSession::cookie("BDUSS=current"), &http)
+            .trash_transferred_files(&["99".into()])
+            .unwrap();
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let url = url::Url::parse(&requests[0].url).unwrap();
+        assert!(url.query_pairs().any(|(k, v)| k == "fsids" && v == "[99]"));
+        assert!(requests[2].url.contains("opera=delete"));
+        assert!(
+            url::form_urlencoded::parse(requests[2].body.as_ref().unwrap().as_bytes())
+                .any(|(k, v)| k == "filelist" && v == "[\"/created.txt\"]")
+        );
+    }
+
+    #[test]
+    fn share_cleanup_rejects_missing_extra_directory_and_invalid_path_metadata() {
+        for files in [
+            json!([]),
+            json!([{"fs_id":100,"path":"/other","isdir":0}]),
+            json!([{"fs_id":99,"path":"/created","isdir":0},{"fs_id":100,"path":"/other","isdir":0}]),
+            json!([{"fs_id":99,"path":"/folder","isdir":1}]),
+            json!([{"fs_id":99,"path":"/","isdir":0}]),
+            json!([{"fs_id":99,"path":"/../other","isdir":0}]),
+        ] {
+            let http = Http::new(vec![json!({"errno":0,"list":files})]);
+            assert!(
+                BaiduClient::new(BaiduSession::cookie("BDUSS=current"), &http)
+                    .trash_transferred_files(&["99".into()])
+                    .is_err()
+            );
+            assert_eq!(http.requests.lock().unwrap().len(), 1);
+        }
+    }
+    #[test]
     fn baidu_transfer_fallback_requires_current_login() {
         let credentials = MemoryCredentialStore::default();
         let http = Http::new(vec![
@@ -589,6 +629,52 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .collect::<Result<Vec<_>, _>>()?;
         if paths.is_empty() {
             return Err(QuarkError::InvalidInput("请选择文件".into()));
+        }
+        let token = self.web_token()?;
+        self.web_file_manager("delete", &token, json!(paths))
+    }
+
+    pub(crate) fn trash_transferred_files(&self, ids: &[String]) -> Result<(), QuarkError> {
+        let expected: std::collections::BTreeSet<_> = ids.iter().cloned().collect();
+        if expected.is_empty()
+            || expected.len() != ids.len()
+            || ids
+                .iter()
+                .any(|id| id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let response = self.share_http(
+            "GET",
+            &format!(
+                "/rest/2.0/xpan/multimedia?method=filemetas&web=1&fsids={}",
+                encoded(&format!("[{}]", ids.join(",")))
+            ),
+            None,
+            "",
+        )?;
+        let value = share_json(&response)?;
+        let files = value["list"]
+            .as_array()
+            .filter(|files| files.len() == expected.len())
+            .ok_or(QuarkError::InvalidResponse)?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut paths = Vec::new();
+        for file in files {
+            let id = numeric_field(file, "fs_id")?;
+            let path = required(file, "path")?;
+            if !expected.contains(&id)
+                || !seen.insert(id)
+                || file["isdir"].as_u64() != Some(0)
+                || path == "/"
+            {
+                return Err(QuarkError::InvalidResponse);
+            }
+            validate_path(&path)?;
+            paths.push(path);
+        }
+        if seen != expected {
+            return Err(QuarkError::InvalidResponse);
         }
         let token = self.web_token()?;
         self.web_file_manager("delete", &token, json!(paths))

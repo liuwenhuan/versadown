@@ -18,6 +18,82 @@ use crate::{
     TaskStatus, TaskStore,
 };
 
+pub(crate) fn cleanup_completed_share(
+    plans: &crate::cloud::share::CloudSharePlanStore,
+    tasks: &TaskStore,
+    task: &crate::DownloadTask,
+    enabled: bool,
+    retry: bool,
+    trash: impl FnOnce(crate::cloud::CloudProvider, &[String]) -> Result<(), crate::cloud::QuarkError>,
+) -> Result<Option<crate::DownloadTask>, crate::cloud::QuarkError> {
+    use crate::cloud::{share::parse_stable_cloud_share_source, QuarkError};
+    if !enabled
+        || task.status != TaskStatus::Completed
+        || !task.source.starts_with("cloud-share://")
+    {
+        return Ok(None);
+    }
+    let (provider, _, _) = parse_stable_cloud_share_source(&task.source)?;
+    let current = tasks.find(task.id).map_err(|_| QuarkError::Storage)?;
+    if current.status != TaskStatus::Completed || current.source != task.source {
+        return Ok(None);
+    }
+    let attempt = (|| {
+        let ids = plans.mark_local_completion(&task.source, retry, |id, source| {
+            tasks
+                .find(id)
+                .is_ok_and(|local| local.status == TaskStatus::Completed && local.source == source)
+        })?;
+        if ids.is_empty() {
+            // aria2 may publish another completion without the cleanup message.
+            // Re-project the journal outcome without replaying a provider call.
+            use crate::cloud::share::CloudShareCleanupState;
+            let plan = plans.resolve_entry(&task.source)?.plan;
+            let pending = plan.transfers.iter().any(|transfer| {
+                plan.linked_local_tasks
+                    .contains_key(&transfer.entry_fingerprint)
+                    && matches!(
+                        transfer.cleanup_state,
+                        CloudShareCleanupState::Failed | CloudShareCleanupState::Attempted
+                    )
+            });
+            if pending
+                && !current
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.starts_with("cleanup_pending："))
+            {
+                return Ok(Some(false));
+            }
+            if !pending
+                && current
+                    .error
+                    .as_deref()
+                    .is_some_and(|message| message.starts_with("cleanup_pending："))
+                && plan
+                    .transfers
+                    .iter()
+                    .any(|transfer| transfer.cleanup_state == CloudShareCleanupState::Succeeded)
+            {
+                return Ok(Some(true));
+            }
+            return Ok(None);
+        }
+        let succeeded = trash(provider, &ids).is_ok();
+        plans.finish_cleanup(&task.source, &ids, succeeded)?;
+        Ok::<_, QuarkError>(Some(succeeded))
+    })();
+    let pending = match attempt {
+        Ok(None) => return Ok(None),
+        Ok(Some(succeeded)) => !succeeded,
+        Err(_) => true,
+    };
+    tasks
+        .set_completed_cleanup_message(task.id, pending)
+        .map(Some)
+        .map_err(|_| QuarkError::Storage)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineAvailability {
@@ -374,6 +450,240 @@ impl EngineRuntime {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    fn set_status(tasks: &TaskStore, id: uuid::Uuid, status: TaskStatus) -> crate::DownloadTask {
+        let mut task = tasks.find(id).unwrap();
+        task.status = status;
+        tasks.apply_transfer_snapshot(task).unwrap()
+    }
+
+    fn cleanup_fixture() -> (
+        tempfile::TempDir,
+        crate::cloud::share::CloudSharePlanStore,
+        TaskStore,
+        Vec<crate::DownloadTask>,
+    ) {
+        use crate::cloud::{share::*, CloudProvider, DpapiCredentialStore};
+        let root = tempfile::tempdir().unwrap();
+        let plans =
+            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "share".into(),
+            None,
+            ["first", "second"]
+                .into_iter()
+                .map(|id| CloudShareEntry::new("share", id.into(), "file".into(), vec![], Some(1)))
+                .collect(),
+            serde_json::json!({}),
+        );
+        plans.upsert(&plan).unwrap();
+        let sources = selected_share_sources(
+            &plans,
+            &plan.source_for("first"),
+            &plan
+                .entries
+                .iter()
+                .map(|e| e.entry_fingerprint.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        plans.record_transfer(&sources[0], "created-id").unwrap();
+        let tasks = TaskStore::open_in_memory().unwrap();
+        let locals = sources
+            .into_iter()
+            .map(|source| {
+                let task = tasks
+                    .create(crate::NewTask {
+                        source,
+                        name: "file".into(),
+                        kind: "cloud".into(),
+                    })
+                    .unwrap();
+                plans.link_local_task(&task.source, task.id).unwrap();
+                tasks.transition(task.id, TaskStatus::Queued).unwrap();
+                tasks.transition(task.id, TaskStatus::Downloading).unwrap()
+            })
+            .collect();
+        (root, plans, tasks, locals)
+    }
+
+    #[test]
+    fn last_completed_local_task_trashes_only_recorded_transfer_when_enabled() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        cleanup_completed_share(&plans, &tasks, &first, true, false, |_, _| {
+            panic!("sibling incomplete")
+        })
+        .unwrap();
+        let second = set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        let mut actions = vec![];
+        cleanup_completed_share(&plans, &tasks, &second, true, false, |provider, ids| {
+            actions.push((provider, ids.to_vec()));
+            // The claim must already survive a reload before the network call.
+            assert!(plans
+                .mark_cleanup_attempted(&first.source)
+                .unwrap()
+                .is_empty());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            actions,
+            vec![(
+                crate::cloud::CloudProvider::Baidu,
+                vec!["created-id".to_string()]
+            )]
+        );
+        cleanup_completed_share(&plans, &tasks, &second, true, false, |_, _| {
+            panic!("duplicate cleanup")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn disabled_cleanup_or_failed_sibling_keeps_transfer() {
+        for sibling_status in [
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+        ] {
+            let (_root, plans, tasks, locals) = cleanup_fixture();
+            set_status(&tasks, locals[0].id, sibling_status);
+            let last = set_status(&tasks, locals[1].id, TaskStatus::Completed);
+            cleanup_completed_share(
+                &plans,
+                &tasks,
+                &last,
+                sibling_status != TaskStatus::Completed,
+                false,
+                |_, _| panic!("cleanup blocked"),
+            )
+            .unwrap();
+            assert_eq!(
+                plans
+                    .resolve_entry(&locals[0].source)
+                    .unwrap()
+                    .plan
+                    .transfers[0]
+                    .cleanup_state,
+                crate::cloud::share::CloudShareCleanupState::Pending
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_failure_keeps_completed_and_manual_retry_only_retries_cleanup() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        let result = cleanup_completed_share(&plans, &tasks, &first, true, false, |_, _| {
+            Err(crate::cloud::QuarkError::Provider("secret-token".into()))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.status, TaskStatus::Completed);
+        assert!(result.error.as_ref().unwrap().contains("cleanup_pending"));
+        assert!(!result.error.as_ref().unwrap().contains("secret-token"));
+        cleanup_completed_share(&plans, &tasks, &result, true, false, |_, _| {
+            panic!("automatic retry")
+        })
+        .unwrap();
+        let retry =
+            cleanup_completed_share(&plans, &tasks, &result, true, true, |provider, ids| {
+                assert_eq!(provider, crate::cloud::CloudProvider::Baidu);
+                assert_eq!(ids, &["created-id"]);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.status, TaskStatus::Completed);
+        assert!(retry.error.is_none());
+    }
+
+    #[test]
+    fn cleanup_rechecks_current_status_and_ignores_non_share_sources() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let stale = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        let mut restarted = stale.clone();
+        restarted.status = TaskStatus::Downloading;
+        tasks.apply_transfer_snapshot(restarted).unwrap();
+        cleanup_completed_share(&plans, &tasks, &stale, true, true, |_, _| {
+            panic!("stale completion")
+        })
+        .unwrap();
+        for source in [
+            "cloud://baidu/existing-personal-id",
+            "https://example.com/file",
+            "cloud-share://baidu/invalid/invalid",
+        ] {
+            let mut task = stale.clone();
+            task.source = source.into();
+            let _ = cleanup_completed_share(&plans, &tasks, &task, true, true, |_, _| {
+                panic!("untracked source")
+            });
+        }
+    }
+
+    #[test]
+    fn cleanup_result_cannot_restore_a_task_changed_during_network_work() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        let result = cleanup_completed_share(&plans, &tasks, &first, true, false, |_, _| {
+            set_status(&tasks, first.id, TaskStatus::Cancelled);
+            Err(crate::cloud::QuarkError::Transport(
+                "private-provider-error".into(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.status, TaskStatus::Cancelled);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn repeated_completion_restores_cleanup_pending_without_repeating_network_action() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        cleanup_completed_share(&plans, &tasks, &first, true, false, |_, _| {
+            Err(crate::cloud::QuarkError::Storage)
+        })
+        .unwrap();
+        // A repeated aria2 completion snapshot carries no provider cleanup error.
+        tasks.apply_transfer_snapshot(first.clone()).unwrap();
+        cleanup_completed_share(&plans, &tasks, &first, true, false, |_, _| {
+            panic!("automatic replay")
+        })
+        .unwrap();
+        assert!(tasks
+            .find(first.id)
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("cleanup_pending"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_waiting_on_resubmission_gate_rechecks_restarted_sibling() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        let gates = crate::cloud::commands::CloudDownloadSourceGate::default();
+        let retry_guard = gates.acquire(&first.source).await.unwrap();
+        let cleanup_gate = gates.acquire(&first.source);
+        tokio::pin!(cleanup_gate);
+        assert!(futures_util::poll!(&mut cleanup_gate).is_pending());
+        set_status(&tasks, first.id, TaskStatus::Downloading);
+        drop(retry_guard);
+        let _cleanup_guard = cleanup_gate.await.unwrap();
+        cleanup_completed_share(&plans, &tasks, &first, true, false, |_, _| {
+            panic!("restarted sibling was deleted")
+        })
+        .unwrap();
+    }
 
     struct NoEngineEvents;
     impl EngineStateSink for NoEngineEvents {
