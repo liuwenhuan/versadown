@@ -127,16 +127,16 @@ it('clears direct credentials before switching to official WebView login', async
 });
 
 it.each([
-  ['is missing its provider', { web: true, password: false, passwordLoginMode: 'none' }],
-  ['uses an invalid password mode', { provider: 'quark', web: true, password: false, passwordLoginMode: 'unsupported' }],
-  ['belongs to another provider', { provider: 'pikpak', web: true, password: true, passwordLoginMode: 'rustDirect' }]
-])('fails closed with a retry control when the capability response %s', async (_reason, capabilities) => {
-  const client = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockResolvedValue(capabilities) });
-  render(<CloudManager provider="quark" client={client} authorizationOnly />);
+  ['baidu', '登录百度账号'],
+  ['aliyun', '在官方网页登录（可使用账号密码）'],
+  ['xunlei', '在官方网页登录（可使用账号密码）'],
+  ['uc', '在官方网页登录（可使用账号密码）']
+] as const)('renders the fixed %s login mode without waiting for a capability request', (provider, action) => {
+  const client = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockReturnValue(new Promise<never>(() => undefined)) });
+  render(<CloudManager provider={provider} client={client} authorizationOnly />);
 
-  expect(await screen.findByRole('button', { name: '重试' })).toBeVisible();
-  expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
-  expect(screen.queryByLabelText(/账号$/)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: action })).toBeVisible();
+  expect(client.getCloudAuthorizationCapabilities).not.toHaveBeenCalled();
 });
 
 it('clears a supported provider password after a failed native login', async () => {
@@ -199,46 +199,6 @@ it('rejects a web authorization account returned for another provider', async ()
   expect(await screen.findByRole('status')).toHaveTextContent('授权返回的服务商不匹配');
   expect(onAccountAuthorized).not.toHaveBeenCalled();
   expect(screen.queryByRole('button', { name: '已经完成授权' })).not.toBeInTheDocument();
-});
-
-it.each([
-  ['capability request fails', vi.fn().mockRejectedValue(new Error('连接器不可用'))],
-  ['capability response is for another provider', vi.fn().mockResolvedValue({ provider: 'pikpak', web: true, password: true })]
-])('fails closed when %s', async (_reason, getCloudAuthorizationCapabilities) => {
-  const client = createCloudFake({ getCloudAuthorizationCapabilities });
-  render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
-
-  await waitFor(() => expect(screen.queryByRole('button', { name: '登录百度账号' })).not.toBeInTheDocument());
-  expect(screen.queryByText(/百度未提供可用的账号密码登录接口/)).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: '重试' })).toBeVisible();
-});
-
-it('fails closed while a provider change waits for its capability response', async () => {
-  const pending = new Promise<never>(() => undefined);
-  const getCloudAuthorizationCapabilities = vi.fn().mockImplementation((provider: CloudProvider) => provider === 'baidu'
-    ? Promise.resolve({ provider, web: true, password: true, passwordLoginMode: 'rustDirect' })
-    : pending);
-  const client = createCloudFake({ getCloudAuthorizationCapabilities });
-  const { rerender } = render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
-
-  expect(await screen.findByRole('button', { name: '登录百度账号' })).toBeVisible();
-  rerender(<CloudManager provider={'aliyun' as never} client={client} authorizationOnly />);
-
-  expect(screen.queryByRole('button', { name: '登录阿里账号' })).not.toBeInTheDocument();
-  expect(screen.queryByText(/阿里未提供可用的账号密码登录接口/)).not.toBeInTheDocument();
-});
-
-it('fails closed while a same-provider client change waits for its capability response', async () => {
-  const pending = new Promise<never>(() => undefined);
-  const resolvedClient = createCloudFake();
-  const pendingClient = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockReturnValue(pending) });
-  const { rerender } = render(<CloudManager provider={'baidu' as never} client={resolvedClient} authorizationOnly />);
-
-  expect(await screen.findByRole('button', { name: '登录百度账号' })).toBeVisible();
-  rerender(<CloudManager provider={'baidu' as never} client={pendingClient} authorizationOnly />);
-
-  expect(screen.queryByRole('button', { name: '登录百度账号' })).not.toBeInTheDocument();
-  expect(screen.queryByText(/百度未提供可用的账号密码登录接口/)).not.toBeInTheDocument();
 });
 
 it('recovers an existing account on mount before loading its root directory', async () => {

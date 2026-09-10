@@ -46,6 +46,15 @@ type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y:
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'details';
 
 const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷', uc: 'UC' };
+const fixedAuthorizationCapabilities: Record<CloudProvider, CloudAuthorizationCapabilities> = {
+  quark: { provider: 'quark', web: true, password: false, passwordLoginMode: 'none' },
+  pikpak: { provider: 'pikpak', web: true, password: true, passwordLoginMode: 'rustDirect' },
+  baidu: { provider: 'baidu', web: true, password: true, passwordLoginMode: 'rustDirect' },
+  tianyi: { provider: 'tianyi', web: true, password: true, passwordLoginMode: 'rustDirect' },
+  aliyun: { provider: 'aliyun', web: true, password: false, passwordLoginMode: 'officialWebView' },
+  xunlei: { provider: 'xunlei', web: true, password: false, passwordLoginMode: 'officialWebView' },
+  uc: { provider: 'uc', web: true, password: false, passwordLoginMode: 'officialWebView' }
+};
 const authorizationInitialPollMs = 800;
 const authorizationPollMs = 1_800;
 
@@ -90,14 +99,6 @@ function requiresOfficialWebAuthorization(error: unknown) {
 
 function isSessionRenewedRetryOperation(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'session_renewed_retry_operation';
-}
-
-function isCapabilities(value: unknown, provider: CloudProvider): value is CloudAuthorizationCapabilities {
-  return typeof value === 'object' && value !== null
-    && (value as CloudAuthorizationCapabilities).provider === provider
-    && typeof (value as CloudAuthorizationCapabilities).web === 'boolean'
-    && typeof (value as CloudAuthorizationCapabilities).password === 'boolean'
-    && ['none', 'rustDirect', 'officialWebView'].includes((value as CloudAuthorizationCapabilities).passwordLoginMode);
 }
 
 function isTerminalWebAuthorizationError(error: unknown) {
@@ -353,12 +354,8 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [authorizationCapabilityState, setAuthorizationCapabilityState] = useState<{ provider: CloudProvider; client: CloudManagerClient; capabilities: CloudAuthorizationCapabilities | null }>({ provider, client, capabilities: null });
-  const [capabilityRetry, setCapabilityRetry] = useState(0);
-  const effectiveAuthorizationCapabilities = authorizationCapabilityState.provider === provider && authorizationCapabilityState.client === client
-    ? authorizationCapabilityState.capabilities
-    : null;
-  const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities?.password === true && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
+  const effectiveAuthorizationCapabilities = fixedAuthorizationCapabilities[provider];
+  const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
@@ -446,17 +443,6 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     });
     return () => { active = false; };
   }, [authorizationOnly, client, provider, restoreOnMount]);
-
-  useEffect(() => {
-    let active = true;
-    setAuthorizationCapabilityState({ provider, client, capabilities: null });
-    void client.getCloudAuthorizationCapabilities(provider).then((next) => {
-      if (active) setAuthorizationCapabilityState({ provider, client, capabilities: isCapabilities(next, provider) ? next : null });
-    }).catch(() => {
-      if (active) setAuthorizationCapabilityState({ provider, client, capabilities: null });
-    });
-    return () => { active = false; };
-  }, [capabilityRetry, client, provider]);
 
   function ensureProviderAccount(account: CloudAccount): CloudAccount {
     if (account.provider !== provider) {
@@ -731,7 +717,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
       <header className="cloud-heading"><h2>{label}网盘</h2></header>
       {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
-      {effectiveAuthorizationCapabilities ? <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
+      <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsDirectPasswordLogin && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label>{label}密码<input aria-label={`${label}密码`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <p className="cloud-login-security-note">账号和密码仅加密保存在本机，用于登录失效后的自动恢复。</p>
@@ -739,7 +725,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         {effectiveAuthorizationCapabilities.passwordLoginMode === 'officialWebView' && <p className="cloud-login-security-note">请在官方网页中使用账号密码登录；应用不会收集或保存密码。</p>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>{effectiveAuthorizationCapabilities.passwordLoginMode === 'officialWebView' ? '在官方网页登录（可使用账号密码）' : '使用网页授权'}</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
-      </form> : <div className="cloud-login-form"><p className="cloud-authorization-feedback" role="status">无法验证登录能力，请重试。</p><button type="button" className="secondary" onClick={() => setCapabilityRetry((current) => current + 1)}>重试</button></div>}
+      </form>
       {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${expired ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}
     </section>;
   }

@@ -52,7 +52,7 @@ it('renders authorization cards for every newly supported cloud service', async 
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
-it('fails closed when UC capability lookup is unavailable', async () => {
+it('keeps the UC official login available when the legacy capability endpoint is unavailable', async () => {
   const client = createClient();
   client.getCloudAuthorizationCapabilities.mockImplementation((provider: string) => provider === 'uc'
     ? Promise.reject(new Error('能力查询暂不可用'))
@@ -60,8 +60,9 @@ it('fails closed when UC capability lookup is unavailable', async () => {
   render(<CloudWorkspace client={client as never} />);
 
   const ucAuthorization = await screen.findByRole('region', { name: 'UC账号授权' });
-  expect(within(ucAuthorization).getByRole('button', { name: '重试' })).toBeEnabled();
+  expect(within(ucAuthorization).getByRole('button', { name: '在官方网页登录（可使用账号密码）' })).toBeEnabled();
   expect(within(ucAuthorization).queryByLabelText('UC账号')).not.toBeInTheDocument();
+  expect(client.getCloudAuthorizationCapabilities).not.toHaveBeenCalled();
 });
 
 it('opens a recovered UC account at root 0', async () => {
