@@ -265,6 +265,7 @@ mod tests {
         for url in [
             "http://download.quark.cn/file?sign=secret",
             "https://download.quark.cn/file",
+            "https://download.quark.cn/path@part?email=user@example.com",
         ] {
             let body = json!({"data":[{"download_url":url}]}).to_string();
             assert_eq!(parse_quark_download_url(&body).unwrap(), url);
@@ -273,6 +274,8 @@ mod tests {
             "ftp://download.quark.cn/file",
             "file:///tmp/file",
             "https://user:secret@download.quark.cn/file",
+            "https://@download.quark.cn/file",
+            "https:\n//@download.quark.cn/file",
             "http://user@download.quark.cn/file",
             "not a URL",
             "https://pan.quark.cn/s/share123",

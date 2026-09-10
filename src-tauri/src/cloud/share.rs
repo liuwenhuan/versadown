@@ -152,9 +152,21 @@ pub fn selected_share_sources(
 }
 
 pub(super) fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
+    // Do not let URL normalization strip controls that hide authority syntax.
+    if url.chars().any(char::is_control) {
+        return Err(QuarkError::InvalidResponse);
+    }
     let parsed = url::Url::parse(url).map_err(|_| QuarkError::InvalidResponse)?;
+    // URL parsing normalizes empty userinfo away. Check the original authority
+    // too, without rejecting ordinary @ characters in paths or query strings.
+    let authority = url
+        .split_once(':')
+        .map(|(_, rest)| rest.trim_start_matches(['/', '\\']))
+        .and_then(|rest| rest.split(['/', '\\', '?', '#']).next())
+        .ok_or(QuarkError::InvalidResponse)?;
     if !matches!(parsed.scheme(), "http" | "https")
         || parsed.host_str().is_none()
+        || authority.contains('@')
         || !parsed.username().is_empty()
         || parsed.password().is_some()
         || !matches!(
