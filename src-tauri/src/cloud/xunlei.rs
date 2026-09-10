@@ -23,6 +23,622 @@ use std::{
     path::Path,
 };
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud::share::{
+        test_support::{entry, Http},
+        *,
+    };
+    #[test]
+    fn xunlei_share_http_challenge_without_json_preserves_authorization_error() {
+        struct StatusHttp(u16);
+        impl CloudHttpTransport for StatusHttp {
+            fn send(&self,_:CloudHttpRequest)->Result<CloudHttpResponse,QuarkError>{Ok(CloudHttpResponse{status:self.0,body:"<html>secret</html>".into(),..Default::default()})}
+        }
+        let credentials=credentials();
+        for status in [401,412] {
+            let http=StatusHttp(status);let result=provider_share_adapter(CloudProvider::Xunlei,&credentials,&http).unwrap().resolve(&selected());
+            assert!(if status==401 {matches!(result,Err(QuarkError::AuthorizationExpired))} else {matches!(result,Err(QuarkError::WebAuthorizationRequired))});
+        }
+    }
+    fn credentials() -> MemoryCredentialStore {
+        let store = MemoryCredentialStore::default();
+        let mut session = XunleiSession::with_access(
+            "current-access",
+            "refresh",
+            XunleiClientProfile {
+                client_id: WEB_CLIENT_ID.into(),
+                client_version: WEB_VERSION_CODE.into(),
+                package_name: WEB_PACKAGE.into(),
+                device_id: "actual-device".into(),
+                user_agent: "official-browser-ua".into(),
+                ..Default::default()
+            },
+        );
+        session.user_id = "user".into();
+        session.web_security.captcha_token = "personal-captcha".into();
+        store
+            .save("xunlei", &serde_json::to_vec(&session).unwrap())
+            .unwrap();
+        store
+    }
+    fn selected() -> CloudShareResolvedEntry {
+        entry(CloudSharePlan::new(
+            CloudProvider::Xunlei,
+            "share123".into(),
+            Some("a123".into()),
+            vec![CloudShareEntry::new(
+                "share123",
+                "f1".into(),
+                "file.txt".into(),
+                vec![],
+                Some(7),
+            )],
+            json!({"pass_code_token":"old-pass"}),
+        ))
+    }
+    fn cap() -> Value {
+        json!({"captcha_token":"share-captcha","expires_in":300})
+    }
+    fn pass() -> Value {
+        json!({"share_status":"OK","pass_code_token":"fresh-pass"})
+    }
+    fn candidate() -> crate::parser::CloudShareCandidate {
+        crate::parser::CloudShareCandidate {
+            provider: CloudProvider::Xunlei,
+            url: "https://pan.xunlei.com/s/share123".into(),
+            access_code: Some("a123".into()),
+        }
+    }
+    #[test]
+    fn xunlei_share_direct_uses_isolated_captcha_and_selected_original_file() {
+        let credentials = credentials();
+        let before = credentials.load("xunlei").unwrap();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":"https://cdn.example/original","medias":[{"link":{"url":"https://cdn.example/transcode"}}]}}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+        let ShareResolution::Direct(direct) = adapter.resolve(&selected()).unwrap() else {
+            panic!()
+        };
+        assert_eq!(direct.url, "https://cdn.example/original");
+        assert!(direct
+            .headers
+            .contains(&("Authorization".into(), "Bearer current-access".into())));
+        assert!(direct
+            .headers
+            .contains(&("X-Captcha-Token".into(), "share-captcha".into())));
+        assert!(direct
+            .headers
+            .contains(&("X-Device-Id".into(), "actual-device".into())));
+        let requests = http.requests.lock().unwrap();
+        let body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["captcha_token"], "");
+        assert_eq!(body["action"], "GET:/drive/v1/share");
+        assert!(!requests.iter().any(|r| r.url.contains("restore")));
+        assert_eq!(credentials.load("xunlei").unwrap(), before);
+    }
+    #[test]
+    fn xunlei_share_pages_recursively_and_exchanges_code() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            json!({"share_status":"OK","files":[{"id":"d","kind":"drive#folder","name":"dir"}],"next_page_token":"p2"}),
+            json!({"share_status":"OK","files":[],"next_page_token":""}),
+            json!({"share_status":"OK","files":[{"id":"f1","kind":"drive#file","name":"file.txt","size":"7"}],"next_page_token":""}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+        assert_eq!(plan.entries[0].relative_directory, vec!["dir"]);
+        assert_eq!(plan.entries[0].size, Some(7));
+        let requests = http.requests.lock().unwrap();
+        assert!(requests[1].url.contains("pass_code=a123"));
+        assert!(requests[3].url.contains("page_token=p2"));
+        assert!(requests[4].url.contains("parent_id=d"));
+    }
+    #[test]
+    fn xunlei_share_no_login_expiry_risk_and_malformed_file_never_transfer() {
+        let empty = MemoryCredentialStore::default();
+        let http = Http::new(vec![]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Xunlei, &empty, &http)
+                .unwrap()
+                .resolve(&selected()),
+            Err(QuarkError::NotAuthorized)
+        ));
+        assert!(http.requests.lock().unwrap().is_empty());
+        let credentials = credentials();
+        for value in [
+            json!({"error_code":4031,"error":"captcha_required"}),
+            json!({"error_code":401}),
+            json!({"share_status":"EXPIRED"}),
+            json!({"error_code":"0"}),
+            json!({"share_status":"OK","file_info":{"id":"other","kind":"drive#file"}}),
+            json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":42}}),
+        ] {
+            let http = Http::new(vec![cap(), pass(), value.clone()]);
+            let result = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http)
+                .unwrap()
+                .resolve(&selected());
+            assert!(result.is_err());
+            if value["error_code"] == 4031 {
+                assert!(matches!(result, Err(QuarkError::WebAuthorizationRequired)));
+            }
+            assert_eq!(http.requests.lock().unwrap().len(), 3);
+        }
+    }
+    #[test]
+    fn xunlei_share_no_direct_transfers_selected_file_and_records_exact_personal_id_before_download(
+    ) {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":""}}),
+            cap(),
+            pass(),
+            json!({"task_id":"task1"}),
+            json!({"phase":"PHASE_TYPE_COMPLETE","params":{"trace_file_ids":"[\"personal-id\"]"}}),
+            json!({"error_code":401}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        let entry = selected();
+        store.upsert(&entry.plan).unwrap();
+        let source = entry.plan.source_for("f1");
+        assert!(matches!(
+            resolve_current_share_download(&store, adapter.as_ref(), &source),
+            Err(QuarkError::AuthorizationExpired)
+        ));
+        assert_eq!(
+            store.resolve_entry(&source).unwrap().plan.transfers[0].created_file_id,
+            "personal-id"
+        );
+        let requests = http.requests.lock().unwrap();
+        assert!(requests[5].url.ends_with("/share/restore"));
+        let body: Value = serde_json::from_str(requests[5].body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["file_ids"], json!(["f1"]));
+        assert!(requests[7].url.contains("/files/personal-id"));
+        assert!(!source.contains("share123"));
+    }
+    #[test]
+    fn xunlei_share_transfer_rechecks_login_after_successful_no_direct() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file"}}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+        let entry = selected();
+        assert!(matches!(
+            adapter.resolve(&entry),
+            Ok(ShareResolution::TransferRequired(_))
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        store.upsert(&entry.plan).unwrap();
+        credentials.remove("xunlei").unwrap();
+        assert!(matches!(
+            adapter.transfer(&entry, &store),
+            Err(QuarkError::NotAuthorized)
+        ));
+        assert!(store
+            .resolve_entry(&entry.plan.source_for("f1"))
+            .unwrap()
+            .plan
+            .transfers
+            .is_empty());
+        assert_eq!(http.requests.lock().unwrap().len(), 3);
+    }
+    #[test]
+    fn xunlei_share_access_code_challenge_and_expired_session_fail_closed() {
+        let credentials = credentials();
+        let mut candidate = candidate();
+        candidate.access_code = None;
+        let http = Http::new(vec![cap(), json!({"share_status":"PASS_CODE_EMPTY"})]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Xunlei, &credentials, &http)
+                .unwrap()
+                .inspect(&candidate),
+            Ok(ShareInspection::AccessCodeRequired)
+        ));
+        candidate.access_code = Some("wrong".into());
+        let http = Http::new(vec![cap(), json!({"share_status":"PASS_CODE_ERROR"})]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Xunlei, &credentials, &http)
+                .unwrap()
+                .inspect(&candidate),
+            Err(QuarkError::InvalidInput(_))
+        ));
+        let http = Http::new(vec![
+            json!({"url":"https://verify.example/secret","captcha_token":"token"}),
+        ]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Xunlei, &credentials, &http)
+                .unwrap()
+                .resolve(&selected()),
+            Err(QuarkError::WebAuthorizationRequired)
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+        let mut session: XunleiSession =
+            serde_json::from_slice(&credentials.load("xunlei").unwrap().unwrap()).unwrap();
+        session.expires_at = 0;
+        credentials
+            .save("xunlei", &serde_json::to_vec(&session).unwrap())
+            .unwrap();
+        let http = Http::new(vec![]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Xunlei, &credentials, &http)
+                .unwrap()
+                .resolve(&selected()),
+            Err(QuarkError::AuthorizationExpired)
+        ));
+        assert!(http.requests.lock().unwrap().is_empty());
+    }
+}
+
+use super::share::{
+    CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
+    CloudShareResolvedEntry, ShareInspection, ShareResolution, TransferRequest,
+};
+
+pub struct XunleiShareAdapter<'a> {
+    pub credentials: &'a dyn CredentialStore,
+    pub http: &'a dyn CloudHttpTransport,
+}
+struct XunleiShareSession<'a> {
+    http: &'a dyn CloudHttpTransport,
+    headers: BTreeMap<String, String>,
+}
+impl XunleiShareAdapter<'_> {
+    fn session(&self) -> Result<XunleiShareSession<'_>, QuarkError> {
+        let bytes = self
+            .credentials
+            .load("xunlei")?
+            .ok_or(QuarkError::NotAuthorized)?;
+        let session: XunleiSession =
+            serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
+        if session.access_token.is_empty() {
+            return Err(QuarkError::NotAuthorized);
+        }
+        if session.expires_at <= now() {
+            return Err(QuarkError::AuthorizationExpired);
+        }
+        if session.profile.device_id.is_empty()
+            || session.profile.user_agent.is_empty()
+            || session.user_id.is_empty()
+        {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .to_string();
+        let signature = session
+            .profile
+            .web_captcha_signature(&timestamp)
+            .ok_or(QuarkError::WebAuthorizationRequired)?;
+        let mut client = XunleiShareSession {
+            http: self.http,
+            headers: BTreeMap::from([
+                (
+                    "Authorization".into(),
+                    format!("Bearer {}", session.access_token),
+                ),
+                ("X-Client-Id".into(), session.profile.client_id.clone()),
+                ("X-Device-Id".into(), session.profile.device_id.clone()),
+                ("User-Agent".into(), session.profile.user_agent.clone()),
+                ("Origin".into(), "https://pan.xunlei.com".into()),
+                ("Referer".into(), "https://pan.xunlei.com/".into()),
+            ]),
+        };
+        // A fresh share action context never reuses or persists personal CAPTCHA state.
+        let value=client.request("POST",format!("{AUTH}/v1/shield/captcha/init"),Some(json!({"client_id":session.profile.client_id,"device_id":session.profile.device_id,"captcha_token":"","action":"GET:/drive/v1/share","meta":{"package_name":session.profile.package_name,"client_version":session.profile.client_version,"captcha_sign":signature,"timestamp":timestamp,"user_id":session.user_id}})))?;
+        client
+            .headers
+            .insert("X-Captcha-Token".into(), required(&value, "captcha_token")?);
+        Ok(client)
+    }
+}
+impl XunleiShareSession<'_> {
+    fn request(
+        &self,
+        method: &'static str,
+        url: String,
+        body: Option<Value>,
+    ) -> Result<Value, QuarkError> {
+        let response = self.http.send(CloudHttpRequest {
+            method,
+            url,
+            headers: self.headers.clone(),
+            body: body.map(|v| v.to_string()),
+        })?;
+        if response.status == 401 {
+            return Err(QuarkError::AuthorizationExpired);
+        }
+        if response.status == 412 {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let value: Value =
+            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        if !value.is_object() {
+            return Err(QuarkError::InvalidResponse);
+        }
+        for key in ["code", "error_code", "status"] {
+            if value.get(key).is_some_and(|v| v.as_i64().is_none()) {
+                return Err(QuarkError::InvalidResponse);
+            }
+        }
+        if let (Some(a), Some(b)) = (value.get("code"), value.get("error_code")) {
+            if a != b {
+                return Err(QuarkError::InvalidResponse);
+            }
+        }
+        if value.get("error").is_some_and(|v| v.as_str().is_none()) {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let challenge = ["url", "captcha_url", "verification_url"]
+            .iter()
+            .any(|key| value.get(key).is_some_and(|v| v.as_str() != Some("")));
+        let message = ["error", "error_description", "message"]
+            .iter()
+            .filter_map(|key| value[*key].as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if challenge
+            || ["captcha", "risk", "verify", "verification", "安全验证"]
+                .iter()
+                .any(|key| message.contains(key))
+        {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        response_json(&response).map_err(|e| match e {
+            QuarkError::CaptchaRequired => QuarkError::WebAuthorizationRequired,
+            QuarkError::Provider(_) => {
+                QuarkError::Provider("迅雷分享请求失败，请检查有效期及权限".into())
+            }
+            error => error,
+        })
+    }
+    fn pass(&self, id: &str, code: Option<&str>) -> Result<Value, QuarkError> {
+        self.request(
+            "GET",
+            format!(
+                "{DRIVE}/drive/v1/share?share_id={}&pass_code={}&limit=100",
+                encoded(id),
+                encoded(code.unwrap_or(""))
+            ),
+            None,
+        )
+    }
+}
+fn xunlei_share_status(value: &Value) -> Result<(), QuarkError> {
+    match value["share_status"].as_str() {
+        Some("OK") => Ok(()),
+        Some("PASS_CODE_EMPTY" | "PASS_CODE_ERROR") => {
+            Err(QuarkError::InvalidInput("迅雷分享访问码错误或缺失".into()))
+        }
+        Some("SENSITIVE_RESOURCE" | "RISK") => Err(QuarkError::WebAuthorizationRequired),
+        Some(_) => Err(QuarkError::Provider("迅雷分享已失效或无权访问".into())),
+        None => Err(QuarkError::InvalidResponse),
+    }
+}
+fn xunlei_share_pass_token(value: &Value, code: Option<&str>) -> Result<String, QuarkError> {
+    xunlei_share_status(value)?;
+    let token = value
+        .get("pass_code_token")
+        .map(|v| v.as_str().ok_or(QuarkError::InvalidResponse))
+        .transpose()?
+        .unwrap_or("");
+    if code.is_some() && token.is_empty() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(token.into())
+}
+impl CloudShareAdapter for XunleiShareAdapter<'_> {
+    fn inspect(
+        &self,
+        candidate: &crate::parser::CloudShareCandidate,
+    ) -> Result<ShareInspection, QuarkError> {
+        let id = super::share::share_id(candidate, CloudProvider::Xunlei)?;
+        let session = self.session()?;
+        let pass = session.pass(&id, candidate.access_code.as_deref())?;
+        if candidate.access_code.is_none()
+            && matches!(
+                pass["share_status"].as_str(),
+                Some("PASS_CODE_EMPTY" | "PASS_CODE_ERROR")
+            )
+        {
+            return Ok(ShareInspection::AccessCodeRequired);
+        }
+        let token = xunlei_share_pass_token(&pass, candidate.access_code.as_deref())?;
+        let mut queue = std::collections::VecDeque::from([(String::new(), Vec::<String>::new())]);
+        let mut seen = HashSet::new();
+        let mut entries = vec![];
+        let mut requests = 0;
+        while let Some((parent, directory)) = queue.pop_front() {
+            let mut page = String::new();
+            let mut pages = HashSet::new();
+            loop {
+                requests += 1;
+                if requests > 10_000 || directory.len() > 128 {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                let value=session.request("GET",format!("{DRIVE}/drive/v1/share/detail?share_id={}&parent_id={}&pass_code_token={}&page_token={}&limit=100",encoded(&id),encoded(&parent),encoded(&token),encoded(&page)),None)?;
+                xunlei_share_status(&value)?;
+                for raw in value["files"]
+                    .as_array()
+                    .ok_or(QuarkError::InvalidResponse)?
+                {
+                    let fid = required(raw, "id")?;
+                    let name = required(raw, "name")?;
+                    if !seen.insert(fid.clone()) {
+                        return Err(QuarkError::InvalidResponse);
+                    }
+                    match raw["kind"].as_str() {
+                        Some("drive#folder") => {
+                            let mut path = directory.clone();
+                            path.push(name);
+                            queue.push_back((fid, path));
+                        }
+                        Some("drive#file") => entries.push(CloudShareEntry::new(
+                            &id,
+                            fid,
+                            name,
+                            directory.clone(),
+                            raw["size"]
+                                .as_u64()
+                                .or_else(|| raw["size"].as_str().and_then(|s| s.parse().ok())),
+                        )),
+                        _ => return Err(QuarkError::InvalidResponse),
+                    }
+                }
+                page = value
+                    .get("next_page_token")
+                    .map(|v| v.as_str().ok_or(QuarkError::InvalidResponse))
+                    .transpose()?
+                    .unwrap_or("")
+                    .into();
+                if page.is_empty() {
+                    break;
+                }
+                if !pages.insert(page.clone()) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+            }
+        }
+        Ok(ShareInspection::Plan(CloudSharePlan::new(
+            CloudProvider::Xunlei,
+            id,
+            candidate.access_code.clone(),
+            entries,
+            json!({"pass_code_token":token}),
+        )))
+    }
+    fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+        resolve_xunlei_share(self.credentials, self.http, entry)
+    }
+    fn transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        store: &CloudSharePlanStore,
+    ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
+        if entry.provider != CloudProvider::Xunlei || entry.plan.provider != CloudProvider::Xunlei {
+            return Err(QuarkError::InvalidResponse);
+        }
+        // Re-check login immediately before the mutation; no refresh or CAPTCHA retry.
+        let session = self.session()?;
+        let token = xunlei_share_pass_token(
+            &session.pass(&entry.plan.canonical_share_id, entry.access_code())?,
+            entry.access_code(),
+        )?;
+        let value=session.request("POST",format!("{DRIVE}/drive/v1/share/restore"),Some(json!({"share_id":entry.plan.canonical_share_id,"pass_code_token":token,"file_ids":[entry.entry.entry_id],"parent_id":"","specify_parent_id":true,"ancestor_ids":[],"folder_type":"NORMAL"})))?;
+        let task = required(&value, "task_id")?;
+        for _ in 0..20 {
+            let value = session.request(
+                "GET",
+                format!("{DRIVE}/drive/v1/tasks/{}", encoded(&task)),
+                None,
+            )?;
+            match value["phase"].as_str() {
+                Some("PHASE_TYPE_COMPLETE") => {
+                    // Only the completed restore task's trace identifies created objects.
+                    // Never substitute the shared ID or discover objects by name.
+                    let trace: Value =
+                        serde_json::from_str(&required(&value["params"], "trace_file_ids")?)
+                            .map_err(|_| QuarkError::InvalidResponse)?;
+                    let id = if let Some(ids) = trace.as_array().filter(|v| v.len() == 1) {
+                        ids[0].as_str()
+                    } else {
+                        trace.get(&entry.entry.entry_id).and_then(Value::as_str)
+                    }
+                    .filter(|s| !s.is_empty() && *s != entry.entry.entry_id)
+                    .ok_or(QuarkError::InvalidResponse)?;
+                    store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                    let file = session.request(
+                        "GET",
+                        format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
+                        None,
+                    )?;
+                    if file["id"].as_str() != Some(id) {
+                        return Err(QuarkError::InvalidResponse);
+                    }
+                    let url = required(&file, "web_content_link")?;
+                    super::share::validate_direct_url(&url)?;
+                    return Ok(super::commands::ResolvedCloudDownload {
+                        url,
+                        name: entry.entry.name.clone(),
+                        headers: session.headers.into_iter().collect(),
+                    });
+                }
+                Some("PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING") => {
+                    std::thread::sleep(std::time::Duration::from_millis(250))
+                }
+                _ => return Err(QuarkError::Provider("迅雷分享转存失败".into())),
+            }
+        }
+        Err(QuarkError::Provider("迅雷分享转存尚未完成".into()))
+    }
+}
+pub fn resolve_xunlei_share(
+    credentials: &dyn CredentialStore,
+    http: &dyn CloudHttpTransport,
+    entry: &CloudShareResolvedEntry,
+) -> Result<ShareResolution, QuarkError> {
+    if entry.provider != CloudProvider::Xunlei || entry.plan.provider != CloudProvider::Xunlei {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let adapter = XunleiShareAdapter { credentials, http };
+    let session = adapter.session()?;
+    let token = xunlei_share_pass_token(
+        &session.pass(&entry.plan.canonical_share_id, entry.access_code())?,
+        entry.access_code(),
+    )?;
+    let value = session.request(
+        "GET",
+        format!(
+            "{DRIVE}/drive/v1/share/file_info?share_id={}&file_id={}&pass_code_token={}",
+            encoded(&entry.plan.canonical_share_id),
+            encoded(&entry.entry.entry_id),
+            encoded(&token)
+        ),
+        None,
+    )?;
+    xunlei_share_status(&value)?;
+    let file = &value["file_info"];
+    if file["id"].as_str() != Some(entry.entry.entry_id.as_str()) || file["kind"] != "drive#file" {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let url = file
+        .get("web_content_link")
+        .map(|v| v.as_str().ok_or(QuarkError::InvalidResponse))
+        .transpose()?
+        .unwrap_or("");
+    if url.is_empty() {
+        return Ok(ShareResolution::TransferRequired(TransferRequest {
+            source: entry.plan.source_for(&entry.entry.entry_id),
+        }));
+    }
+    super::share::validate_direct_url(url)?;
+    Ok(ShareResolution::Direct(
+        super::commands::ResolvedCloudDownload {
+            url: url.into(),
+            name: entry.entry.name.clone(),
+            headers: session.headers.into_iter().collect(),
+        },
+    ))
+}
+
 const AUTH: &str = "https://xluser-ssl.xunlei.com";
 const DRIVE: &str = "https://api-pan.xunlei.com";
 const WEB_VERSION_CODE: &str = "1.92.98";

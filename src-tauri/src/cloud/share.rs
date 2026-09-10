@@ -123,14 +123,19 @@ pub(super) mod test_support {
         }
     }
     #[test]
-    fn unregistered_share_providers_remain_unsupported() {
+    fn all_seven_share_providers_are_registered_without_network_side_effects() {
         let credentials = crate::cloud::MemoryCredentialStore::default();
         let http = Http::new(vec![]);
-        for provider in [CloudProvider::Xunlei, CloudProvider::Uc] {
-            assert!(matches!(
-                provider_share_adapter(provider, &credentials, &http),
-                Err(QuarkError::ProviderUnsupported)
-            ));
+        for provider in [
+            CloudProvider::Quark,
+            CloudProvider::Pikpak,
+            CloudProvider::Baidu,
+            CloudProvider::Tianyi,
+            CloudProvider::Aliyun,
+            CloudProvider::Xunlei,
+            CloudProvider::Uc,
+        ] {
+            assert!(provider_share_adapter(provider, &credentials, &http).is_ok());
         }
         assert!(http.requests.lock().unwrap().is_empty());
     }
@@ -161,7 +166,11 @@ pub fn provider_share_adapter<'a>(
             credentials,
             http,
         })),
-        _ => Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Uc => Ok(Box::new(super::uc::UcShareAdapter { credentials, http })),
+        CloudProvider::Xunlei => Ok(Box::new(super::xunlei::XunleiShareAdapter {
+            credentials,
+            http,
+        })),
     }
 }
 
@@ -285,6 +294,8 @@ pub(super) fn share_id(
     let url = url::Url::parse(&candidate.url).map_err(|_| QuarkError::InvalidResponse)?;
     let expected: &[&str] = match provider {
         CloudProvider::Quark => &["pan.quark.cn"],
+        CloudProvider::Uc => &["drive.uc.cn"],
+        CloudProvider::Xunlei => &["pan.xunlei.com"],
         CloudProvider::Baidu => &["pan.baidu.com"],
         CloudProvider::Pikpak => &["mypikpak.com", "www.mypikpak.com"],
         CloudProvider::Tianyi => &["cloud.189.cn"],
@@ -294,7 +305,6 @@ pub(super) fn share_id(
             "aliyundrive.com",
             "www.aliyundrive.com",
         ],
-        _ => return Err(QuarkError::ProviderUnsupported),
     };
     if !url.host_str().is_some_and(|host| expected.contains(&host))
         || !matches!(url.scheme(), "https" | "http")
