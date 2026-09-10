@@ -221,6 +221,39 @@ impl DownloadService {
         self.reconcile_task_unlocked(task_id).await
     }
 
+    /// Compare the caller's pre-resolution snapshot while holding the same
+    /// operation lock as cancellation, retries and reconciliation. A stale
+    /// request is a no-op: it must neither add a URI nor rebind the task.
+    pub async fn compare_and_resubmit_uri_with_options(
+        &self,
+        expected: &DownloadTask,
+        uris: Vec<String>,
+        options: UriSubmissionOptions,
+    ) -> Result<Option<DownloadTask>, DownloadServiceError> {
+        let options = options.into_aria2_options()?;
+        let _guard = self.operation.lock().await;
+        self.ensure_accepting()?;
+        let current = self.store.find(expected.id)?;
+        if current.status != expected.status
+            || current.aria_gid != expected.aria_gid
+            || !matches!(
+                current.status,
+                TaskStatus::Paused
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Completed
+            )
+        {
+            return Ok(None);
+        }
+        let gid = self.api().add_uri(uris, options).await?;
+        if let Err(error) = self.store.rebind_for_resubmission(expected.id, &gid) {
+            let _ = self.api().remove(&gid).await;
+            return Err(error.into());
+        }
+        self.reconcile_task_unlocked(expected.id).await.map(Some)
+    }
+
     pub async fn submit_torrent(
         &self,
         task_id: Uuid,

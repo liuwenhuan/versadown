@@ -19,6 +19,7 @@ struct RecordingAria2 {
     add_error: bool,
     pause_error: bool,
     status_error_message: Option<String>,
+    cancel_release: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl RecordingAria2 {
@@ -91,6 +92,9 @@ impl Aria2Api for RecordingAria2 {
     }
     async fn remove(&self, gid: &str) -> Result<String, Aria2Error> {
         self.record("aria2.remove");
+        if let Some(release) = &self.cancel_release {
+            release.notified().await;
+        }
         Ok(gid.to_string())
     }
     async fn force_remove(&self, gid: &str) -> Result<String, Aria2Error> {
@@ -246,6 +250,57 @@ async fn cloud_share_aria_failure_redacts_signed_urls_but_retains_http_error_cod
 }
 
 #[tokio::test]
+async fn cloud_share_cancel_after_outer_check_prevents_waiting_refresh_submission() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{
+            resubmit_current_share_download, stable_share_source, submit_current_share_download,
+        },
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let api = Arc::new(RecordingAria2 {
+        status_error_message: Some("HTTP error".into()),
+        cancel_release: Some(release.clone()),
+        ..Default::default()
+    });
+    let service = DownloadService::new(api.clone(), store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let resolved = || ResolvedCloudDownload {
+        url: "https://cdn.example/file?signature=fresh".into(),
+        name: "file".into(),
+        headers: vec![],
+    };
+    let checked = submit_current_share_download(&service, &source, resolved(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(checked.status, TaskStatus::Failed);
+
+    // The caller's outer check has completed. Cancellation now owns the
+    // service operation lock while its aria2 remove waits for our signal.
+    let cancel = service.control(checked.id, DownloadAction::Cancel);
+    tokio::pin!(cancel);
+    assert!(futures_util::poll!(&mut cancel).is_pending());
+    assert_eq!(api.calls().last().map(String::as_str), Some("aria2.remove"));
+    let refresh =
+        resubmit_current_share_download(&service, &checked, resolved(), Default::default());
+    tokio::pin!(refresh);
+    assert!(futures_util::poll!(&mut refresh).is_pending());
+    release.notify_one();
+    assert_eq!(cancel.await.unwrap().status, TaskStatus::Cancelled);
+    assert!(refresh.await.unwrap().is_none());
+    assert_eq!(
+        api.uris.lock().unwrap().len(),
+        1,
+        "stale refresh must not call addUri"
+    );
+    let saved = store.find(checked.id).unwrap();
+    assert_eq!(saved.status, TaskStatus::Cancelled);
+    assert_eq!(saved.aria_gid, checked.aria_gid);
+}
+
+#[tokio::test]
 async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
     use alldownloader_lib::cloud::{
         commands::ResolvedCloudDownload,
@@ -286,10 +341,10 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
     assert!(budget
         .claim(&task.source, task.aria_error_code.as_deref())
         .unwrap());
-    let updated =
-        resubmit_current_share_download(&service, task.id, resolved(1), Default::default())
-            .await
-            .unwrap();
+    let updated = resubmit_current_share_download(&service, &task, resolved(1), Default::default())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.id, task.id);
     assert_eq!(updated.source, source);
     assert_eq!(
@@ -305,6 +360,81 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
     assert!(!serde_json::to_string(&store.find(task.id).unwrap())
         .unwrap()
         .contains("signature"));
+}
+
+#[tokio::test]
+async fn cloud_share_stale_gid_is_skipped_even_when_task_is_failed_again() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{
+            resubmit_current_share_download, stable_share_source, submit_current_share_download,
+        },
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = Arc::new(RecordingAria2 {
+        status_error_message: Some("HTTP error".into()),
+        ..Default::default()
+    });
+    let service = DownloadService::new(api.clone(), store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let resolved = || ResolvedCloudDownload {
+        url: "https://cdn.example/file?signature=fresh".into(),
+        name: "file".into(),
+        headers: vec![],
+    };
+    let checked = submit_current_share_download(&service, &source, resolved(), Default::default())
+        .await
+        .unwrap();
+    store
+        .rebind_for_resubmission(checked.id, "replacement-gid")
+        .unwrap();
+    store.fail(checked.id, "new attempt failed").unwrap();
+    assert!(
+        resubmit_current_share_download(&service, &checked, resolved(), Default::default())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(api.uris.lock().unwrap().len(), 1);
+    let saved = store.find(checked.id).unwrap();
+    assert_eq!(saved.status, TaskStatus::Failed);
+    assert_eq!(saved.aria_gid.as_deref(), Some("replacement-gid"));
+}
+
+#[tokio::test]
+async fn cloud_share_manual_retry_can_restart_an_explicitly_cancelled_snapshot() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{
+            resubmit_current_share_download, stable_share_source, submit_current_share_download,
+        },
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let resolved = || ResolvedCloudDownload {
+        url: "https://cdn.example/file?signature=fresh".into(),
+        name: "file".into(),
+        headers: vec![],
+    };
+    let task = submit_current_share_download(&service, &source, resolved(), Default::default())
+        .await
+        .unwrap();
+    let cancelled = service
+        .control(task.id, DownloadAction::Cancel)
+        .await
+        .unwrap();
+    let retried =
+        resubmit_current_share_download(&service, &cancelled, resolved(), Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(retried.id, task.id);
+    assert_eq!(retried.status, TaskStatus::Downloading);
+    assert_eq!(api.uris.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

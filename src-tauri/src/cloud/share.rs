@@ -220,18 +220,14 @@ pub async fn submit_current_share_download(
 
 pub async fn resubmit_current_share_download(
     service: &crate::DownloadService,
-    task_id: uuid::Uuid,
+    expected: &crate::DownloadTask,
     resolved: super::commands::ResolvedCloudDownload,
     mut configured: crate::UriSubmissionOptions,
-) -> Result<crate::DownloadTask, QuarkError> {
-    let task = service
-        .store()
-        .find(task_id)
-        .map_err(|_| QuarkError::Storage)?;
-    parse_stable_cloud_share_source(&task.source)?;
+) -> Result<Option<crate::DownloadTask>, QuarkError> {
+    parse_stable_cloud_share_source(&expected.source)?;
     if let Some(file) = service
         .store()
-        .files(task_id)
+        .files(expected.id)
         .map_err(|_| QuarkError::Storage)?
         .first()
     {
@@ -246,7 +242,7 @@ pub async fn resubmit_current_share_download(
     }
     let (signed_url, options) = share_submission_options(resolved, configured)?;
     service
-        .resubmit_uri_with_options(task_id, vec![signed_url], options)
+        .compare_and_resubmit_uri_with_options(expected, vec![signed_url], options)
         .await
         .map_err(|_| QuarkError::Transport("aria2 未能接受网盘分享下载任务".into()))
 }

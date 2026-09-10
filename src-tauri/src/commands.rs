@@ -479,10 +479,11 @@ async fn resubmit_task(
         .map_err(|error| format!("无法重新获取网盘下载地址：{error}"))?;
         if share {
             return crate::cloud::share::resubmit_current_share_download(
-                &service, task.id, resolved, options,
+                &service, &task, resolved, options,
             )
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "任务状态已变化，本次重试已跳过".into());
         }
         let signed_url = resolved.url.clone();
         let mut cloud_options = resolved.into_uri_submission_options();
@@ -603,7 +604,7 @@ pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) 
             return;
         };
         let _ = crate::cloud::share::resubmit_current_share_download(
-            &service, latest.id, resolved, options,
+            &service, &failed, resolved, options,
         )
         .await;
     });
