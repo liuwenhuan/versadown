@@ -881,13 +881,12 @@ impl DownloadService {
         snapshot: TransferSnapshot,
     ) -> Result<DownloadTask, DownloadServiceError> {
         // aria2 may briefly restore a paused session before it has reloaded its
-        // length and file metadata. Treat that all-zero response as incomplete
-        // rather than erasing a durable partial-transfer snapshot.
-        let preserve_paused_progress = snapshot.status == TaskStatus::Paused
-            && snapshot.total_length.is_none()
-            && snapshot.completed_length == 0
-            && snapshot.files.is_empty()
-            && (task.progress > 0 || task.total_length.is_some() || task.completed_length > 0);
+        // length and file metadata. A paused task must not regress to an older
+        // transfer snapshot, including one that only carries placeholder files.
+        let preserve_paused_progress = task.status == TaskStatus::Paused
+            && snapshot.status == TaskStatus::Paused
+            && (snapshot.completed_length < task.completed_length
+                || (task.total_length.is_some() && snapshot.total_length.is_none()));
         if task.aria_gid.as_deref() != Some(&snapshot.gid) {
             task.followed_by_gid = Some(snapshot.gid.clone());
         }
@@ -909,19 +908,23 @@ impl DownloadService {
         task.eta_seconds = snapshot.eta_seconds;
         task.aria_error_code = snapshot.error_code;
         task.error = snapshot.error_message;
-        let files = snapshot
-            .files
-            .into_iter()
-            .map(|file| {
-                (
-                    file.index,
-                    file.path,
-                    file.length,
-                    file.completed_length,
-                    file.selected,
-                )
+        let files = (!preserve_paused_progress)
+            .then(|| {
+                snapshot
+                    .files
+                    .into_iter()
+                    .map(|file| {
+                        (
+                            file.index,
+                            file.path,
+                            file.length,
+                            file.completed_length,
+                            file.selected,
+                        )
+                    })
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .unwrap_or_default();
         let task = self
             .store
             .apply_transfer_snapshot_with_files(task, &files)?;
