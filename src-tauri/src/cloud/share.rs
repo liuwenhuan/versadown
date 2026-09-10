@@ -36,6 +36,16 @@ pub trait CloudShareAdapter: Send + Sync {
         candidate: &crate::parser::CloudShareCandidate,
     ) -> Result<ShareInspection, QuarkError>;
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError>;
+    /// Called only for the matching durable source after a typed transfer
+    /// requirement. Implementations recheck login and journal returned personal
+    /// IDs before requesting the personal download URL.
+    fn transfer(
+        &self,
+        _entry: &CloudShareResolvedEntry,
+        _store: &CloudSharePlanStore,
+    ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
+        Err(QuarkError::ProviderUnsupported)
+    }
 }
 
 pub enum ShareInspection {
@@ -48,8 +58,8 @@ pub enum ShareConfirmationOutcome {
     AccessCodeRequired,
 }
 
-/// A transfer request carries only a durable reference. Transfer execution and
-/// cleanup are deliberately separate from the direct-download dispatcher.
+/// A transfer request carries only a durable reference. Cleanup remains
+/// separate; the dispatcher may materialize this request through the adapter.
 pub struct TransferRequest {
     pub source: String,
 }
@@ -62,11 +72,21 @@ pub enum ShareResolution {
 /// Tasks 5–7 register audited provider adapters here. Failing closed is vital:
 /// a recognized share page must never fall back to ordinary URI downloading.
 pub fn provider_share_adapter<'a>(
-    _provider: CloudProvider,
-    _credentials: &'a dyn CredentialStore,
-    _http: &'a dyn super::CloudHttpTransport,
+    provider: CloudProvider,
+    credentials: &'a dyn CredentialStore,
+    http: &'a dyn super::CloudHttpTransport,
 ) -> Result<Box<dyn CloudShareAdapter + 'a>, QuarkError> {
-    Err(QuarkError::ProviderUnsupported)
+    match provider {
+        CloudProvider::Quark => Ok(Box::new(super::quark::QuarkShareAdapter {
+            credentials,
+            http,
+        })),
+        CloudProvider::Baidu => Ok(Box::new(super::baidu::BaiduShareAdapter {
+            credentials,
+            http,
+        })),
+        _ => Err(QuarkError::ProviderUnsupported),
+    }
 }
 
 pub fn inspect_share_with_adapter(
@@ -131,7 +151,7 @@ pub fn selected_share_sources(
         .collect()
 }
 
-fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
+pub(super) fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
     let parsed = url::Url::parse(url).map_err(|_| QuarkError::InvalidResponse)?;
     if !matches!(parsed.scheme(), "http" | "https")
         || parsed.host_str().is_none()
@@ -153,15 +173,82 @@ pub fn resolve_current_share_download(
     source: &str,
 ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
     let entry = store.resolve_entry(source)?;
-    match adapter.resolve(&entry)? {
-        ShareResolution::Direct(mut download) => {
-            validate_direct_url(&download.url)?;
-            // The inspected filename remains stable across expiring URL renewals.
-            download.name = entry.entry.name;
-            Ok(download)
+    let mut download = match adapter.resolve(&entry)? {
+        ShareResolution::Direct(download) => download,
+        ShareResolution::TransferRequired(request) => {
+            if request.source != source {
+                return Err(QuarkError::InvalidResponse);
+            }
+            adapter.transfer(&entry, store)?
         }
-        ShareResolution::TransferRequired(_) => Err(QuarkError::ProviderUnsupported),
+    };
+    validate_direct_url(&download.url)?;
+    download.name = entry.entry.name;
+    Ok(download)
+}
+
+pub(super) fn share_id(
+    candidate: &crate::parser::CloudShareCandidate,
+    provider: CloudProvider,
+) -> Result<String, QuarkError> {
+    if candidate.provider != provider {
+        return Err(QuarkError::InvalidResponse);
     }
+    let url = url::Url::parse(&candidate.url).map_err(|_| QuarkError::InvalidResponse)?;
+    let expected = match provider {
+        CloudProvider::Quark => "pan.quark.cn",
+        CloudProvider::Baidu => "pan.baidu.com",
+        _ => return Err(QuarkError::ProviderUnsupported),
+    };
+    if url.host_str() != Some(expected) || !matches!(url.scheme(), "https" | "http") {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let id = url
+        .path()
+        .strip_prefix("/s/")
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .ok_or(QuarkError::InvalidResponse)?;
+    Ok(id.into())
+}
+
+pub(super) fn download_headers(
+    cookie: &str,
+    response_cookies: &[String],
+    ua: &str,
+    referer: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut pairs = BTreeMap::new();
+    for part in cookie.split(';').chain(
+        response_cookies
+            .iter()
+            .filter_map(|raw| raw.split(';').next()),
+    ) {
+        if let Some((name, value)) = part.trim().split_once('=') {
+            if !name.is_empty() && !value.chars().any(char::is_control) {
+                pairs.insert(name, value);
+            }
+        }
+    }
+    let mut headers = vec![
+        (
+            "Cookie".into(),
+            pairs
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        ("User-Agent".into(), ua.into()),
+    ];
+    if let Some(referer) = referer {
+        headers.push(("Referer".into(), referer.into()));
+    }
+    headers
 }
 
 /// This consumed budget is separate from the source's RAII submission lock.
