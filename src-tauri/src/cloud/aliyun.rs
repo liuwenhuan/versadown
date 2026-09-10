@@ -17,6 +17,8 @@ use std::{collections::BTreeMap, io::Read, path::Path};
 const TOKEN_URL: &str = "https://api.aliyundrive.com/token/refresh";
 const API: &str = "https://api.aliyundrive.com";
 const WEB_REFERER: &str = "https://www.aliyundrive.com/";
+pub(crate) const ALIYUN_RECYCLE_BIN_ID: &str = "__all_downloader_aliyun_recycle_bin__";
+const ALIYUN_RECYCLE_BIN_NAME: &str = "回收站";
 
 #[cfg(test)]
 mod tests {
@@ -359,6 +361,16 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
                 .unwrap_or("")
                 .to_owned();
             if marker.is_empty() {
+                if parent == "root" {
+                    items.push(CloudFile {
+                        id: ALIYUN_RECYCLE_BIN_ID.into(),
+                        parent_id: "root".into(),
+                        name: ALIYUN_RECYCLE_BIN_NAME.into(),
+                        kind: "folder".into(),
+                        size: None,
+                        modified_at: None,
+                    });
+                }
                 return Ok(CloudDirectory {
                     id: parent.into(),
                     items,
@@ -463,6 +475,9 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
+        if parent == ALIYUN_RECYCLE_BIN_ID {
+            return self.list_recycle_bin();
+        }
         let (session, _, root) = self.refreshed_validated_session()?;
         if parent == "root" {
             Ok(root)
@@ -527,6 +542,52 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
 
     pub fn trash(&self, ids: &[String]) -> Result<(), QuarkError> {
         self.files_action("/v2/recyclebin/trash", ids, None)
+    }
+
+    pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
+        let (session, _, _) = self.refreshed_validated_session()?;
+        let mut marker = String::new();
+        let mut items = Vec::new();
+        for _ in 0..10_000 {
+            let value = self.api(
+                &session,
+                "/v2/recyclebin/list",
+                json!({
+                    "drive_id": session.drive_id,
+                    "limit": 200,
+                    "marker": marker,
+                }),
+            )?;
+            let page = value
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            for file in page {
+                let mut file = parse_file(file, ALIYUN_RECYCLE_BIN_ID)?;
+                file.parent_id = ALIYUN_RECYCLE_BIN_ID.into();
+                items.push(file);
+            }
+            marker = value
+                .get("next_marker")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if marker.is_empty() {
+                return Ok(CloudDirectory {
+                    id: ALIYUN_RECYCLE_BIN_ID.into(),
+                    items,
+                });
+            }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        self.files_action("/v2/recyclebin/restore", ids, None)
+    }
+
+    pub fn delete_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        self.files_action("/v2/recyclebin/delete", ids, None)
     }
 
     /// Initialize a one-part upload; the caller transfers returned upload URLs and

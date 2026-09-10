@@ -208,6 +208,57 @@ mod tests {
         ));
         assert!(http.requests.lock().unwrap().is_empty());
     }
+
+    #[test]
+    fn pikpak_restore_only_mutates_entries_confirmed_as_trashed() {
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "pikpak",
+                br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device"}"#,
+            )
+            .unwrap();
+        let http = Http::new(vec![json!({"id":"trashed-id","trashed":true}), json!({})]);
+
+        PikPakClient::new(&http, &store)
+            .restore_recycle_entries(&["trashed-id".into()])
+            .unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert!(requests[0].url.ends_with("/drive/v1/files/trashed-id"));
+        assert_eq!(requests[1].method, "POST");
+        assert!(requests[1].url.ends_with("/drive/v1/files:batchUntrash"));
+        assert_eq!(
+            serde_json::from_str::<Value>(requests[1].body.as_deref().unwrap()).unwrap()["ids"],
+            json!(["trashed-id"])
+        );
+    }
+
+    #[test]
+    fn pikpak_restore_rejects_live_entries_without_a_mutation() {
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "pikpak",
+                br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device"}"#,
+            )
+            .unwrap();
+        let http = Http::new(vec![json!({"id":"live-id","trashed":false})]);
+
+        let error = PikPakClient::new(&http, &store)
+            .restore_recycle_entries(&["live-id".into()])
+            .unwrap_err();
+
+        assert!(matches!(error, QuarkError::InvalidInput(_)));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.contains("batchUntrash")));
+    }
 }
 pub(crate) const PIKPAK_RECYCLE_BIN_ID: &str = "__all_downloader_pikpak_recycle_bin__";
 const PIKPAK_RECYCLE_BIN_NAME: &str = "回收站";
@@ -678,6 +729,28 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files:batchDelete"),
+            Some(json!({"ids":ids})),
+        )?;
+        Ok(())
+    }
+    /// Restores items only after the provider confirms that they remain trashed.
+    pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        reject_pikpak_recycle_bin_sources(ids)?;
+        for id in ids {
+            let file = self.request(
+                "GET",
+                format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
+                None,
+            )?;
+            if file["trashed"].as_bool() != Some(true) {
+                return Err(QuarkError::InvalidInput(
+                    "只能恢复 PikPak 回收站中的项目".into(),
+                ));
+            }
+        }
+        self.request(
+            "POST",
+            format!("{DRIVE}/drive/v1/files:batchUntrash"),
             Some(json!({"ids":ids})),
         )?;
         Ok(())
