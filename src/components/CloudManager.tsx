@@ -159,8 +159,10 @@ function formatCloudModifiedAt(value: unknown) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
 }
 
-function CloudFileIcon({ kind }: { kind: CloudFile['kind'] }) {
-  return <svg aria-hidden="true" viewBox="0 0 24 24">{kind === 'folder'
+function CloudFileIcon({ kind }: { kind: CloudFile['kind'] | 'recycle-bin' }) {
+  return <svg aria-hidden="true" viewBox="0 0 24 24">{kind === 'recycle-bin'
+    ? <><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6.5 7l.8 14h9.4l.8-14" /></>
+    : kind === 'folder'
     ? <><path d="M3.5 7.5h6l1.8 2h10.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.1l1.8 2h6.7a2.2 2.2 0 0 1 2.2 2.2v1.8" /></>
     : <><path d="M6 2.8h7l5 5v13.4H6z" /><path d="M13 2.8v5h5M9 13h6M9 16.5h6" /></>}</svg>;
 }
@@ -833,6 +835,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin ? <span className="cloud-selection-hint">回收站仅可打开</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />恢复</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />永久删除</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : '名称'}</span><span>大小</span><span>修改时间</span></div>
       {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? '回收站为空' : '此目录为空'}</b><span>{isRecycleBin ? '没有可恢复或永久删除的项目' : '可在这里上传文件或新建目录'}</span></div> : directory?.items.map((item, index) => {
         const isSelected = selectedIds.includes(item.id);
+        const iconKind = isVirtualRecycleBinItem(item) ? 'recycle-bin' : item.kind;
         return <div
           className={`cloud-row cloud-file-row ${isSelected ? 'selected' : ''}`}
           data-cloud-file-row
@@ -844,7 +847,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
           onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (!isSelected) setSelectedIds([item.id]); selectionAnchor.current = index; setContextMenu({ kind: 'selection', item, x: event.clientX, y: event.clientY }); }}
         >
           <span className="cloud-check-cell"><input type="checkbox" aria-label={`选择 ${item.name}`} checked={isSelected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelection(item.id)} /></span>
-          <span className="cloud-file-name"><i className={item.kind}><CloudFileIcon kind={item.kind} /></i><b title={item.name}>{item.name}</b></span>
+          <span className="cloud-file-name"><i className={iconKind}><CloudFileIcon kind={iconKind} /></i><b title={item.name}>{item.name}</b></span>
           <span>{item.kind === 'folder' ? '—' : readableSize(item.size)}</span>
           <span>{formatCloudModifiedAt(item.modifiedAt)}</span>
         </div>;

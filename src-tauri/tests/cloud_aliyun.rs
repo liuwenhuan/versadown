@@ -72,7 +72,7 @@ impl CloudUploadTransport for RecordingHttp {
 }
 
 #[test]
-fn aliyun_recycle_list_restore_and_delete_use_drive_scoped_ids() {
+fn aliyun_recycle_list_and_restore_use_drive_scoped_ids() {
     let store = MemoryCredentialStore::default();
     store
         .save(
@@ -87,9 +87,6 @@ fn aliyun_recycle_list_restore_and_delete_use_drive_scoped_ids() {
         r#"{"user_id":"u1","nick_name":"alice"}"#,
         r#"{"items":[],"next_marker":""}"#,
         r#"{}"#,
-        r#"{"user_id":"u1","nick_name":"alice"}"#,
-        r#"{"items":[],"next_marker":""}"#,
-        r#"{}"#,
     ]);
     let client = AliyunClient::new(&store, &http);
 
@@ -99,16 +96,13 @@ fn aliyun_recycle_list_restore_and_delete_use_drive_scoped_ids() {
     client
         .restore_recycle_entries(&[bin.items[0].id.clone()])
         .unwrap();
-    client
-        .delete_recycle_entries(&[bin.items[0].id.clone()])
-        .unwrap();
 
     let requests = http.requests.lock().unwrap();
     let recycle_requests = requests
         .iter()
         .filter(|request| request.url.contains("/v2/recyclebin/"))
         .collect::<Vec<_>>();
-    assert_eq!(recycle_requests.len(), 3);
+    assert_eq!(recycle_requests.len(), 2);
     assert_eq!(
         recycle_requests[0].url,
         "https://api.aliyundrive.com/v2/recyclebin/list"
@@ -117,10 +111,6 @@ fn aliyun_recycle_list_restore_and_delete_use_drive_scoped_ids() {
         recycle_requests[1].url,
         "https://api.aliyundrive.com/v2/recyclebin/restore"
     );
-    assert_eq!(
-        recycle_requests[2].url,
-        "https://api.aliyundrive.com/v2/recyclebin/delete"
-    );
     for request in &recycle_requests {
         let body: serde_json::Value =
             serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
@@ -128,10 +118,52 @@ fn aliyun_recycle_list_restore_and_delete_use_drive_scoped_ids() {
     }
     let restore: serde_json::Value =
         serde_json::from_str(recycle_requests[1].body.as_deref().unwrap()).unwrap();
-    let delete: serde_json::Value =
-        serde_json::from_str(recycle_requests[2].body.as_deref().unwrap()).unwrap();
     assert_eq!(restore["file_id"], "recycle-record-1");
-    assert_eq!(delete["file_id"], "recycle-record-1");
+}
+
+#[test]
+fn aliyun_recycle_permanent_delete_uses_file_delete_and_accepts_no_content() {
+    // Break caught: the recycle-bin endpoint only supports listing, trashing,
+    // and restoring. Permanent deletion must use FileDelete, whose successful
+    // single-file response is HTTP 204 with no JSON body.
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive-42","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::responses([
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"user_id":"u1","nick_name":"alice"}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"items":[],"next_marker":""}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 204,
+            body: String::new(),
+            ..Default::default()
+        },
+    ]);
+
+    AliyunClient::new(&store, &http)
+        .delete_recycle_entries(&["trashed-file-1".into()])
+        .expect("the FileDelete no-content success response must complete permanent deletion");
+
+    let requests = http.requests.lock().unwrap();
+    let delete = requests.last().unwrap();
+    assert_eq!(delete.method, "POST");
+    assert_eq!(delete.url, "https://api.aliyundrive.com/v2/file/delete");
+    assert_eq!(delete.headers["Authorization"], "Bearer access");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(delete.body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"drive_id":"drive-42","file_id":"trashed-file-1"})
+    );
 }
 
 #[test]
