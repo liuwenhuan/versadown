@@ -4,6 +4,7 @@ use std::io::Read;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::parser::{extract_cloud_share_candidate, ShareInputError};
 use crate::{
     classify_input, duplicate_state, CandidateKind, DownloadTask, DuplicateDownloadState, NewTask,
     StoreError, TaskStatus, TaskStore,
@@ -35,6 +36,10 @@ pub enum DownloadError {
     TorrentInput(String),
     #[error("{0}")]
     ThunderInput(String),
+    #[error(transparent)]
+    ShareInput(#[from] ShareInputError),
+    #[error("分享链接必须先通过网盘分享解析流程处理")]
+    CloudShareInput,
 }
 
 const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
@@ -179,6 +184,9 @@ fn decode_thunder_source(source: &str) -> Result<String, DownloadError> {
 }
 
 pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, DownloadError> {
+    if extract_cloud_share_candidate(input, None)?.is_some() {
+        return Err(DownloadError::CloudShareInput);
+    }
     let candidate = classify_input(input);
     let source = if candidate.kind == CandidateKind::Thunder {
         decode_thunder_source(&candidate.uri)?
@@ -189,7 +197,6 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
     new_task.kind = match candidate.kind {
         CandidateKind::Magnet => "magnet",
         CandidateKind::Torrent => "torrent",
-        CandidateKind::QuarkShare | CandidateKind::PikPakShare => "cloud",
         _ => "file",
     }
     .to_string();
@@ -253,6 +260,18 @@ mod tests {
             repeated.duplicate,
             Some(crate::DuplicateDownloadState::OverwriteRequired)
         );
+    }
+
+    #[test]
+    fn share_page_is_not_saved_as_a_cloud_task_source() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let source = "https://pan.baidu.com/s/share-id?pwd=1234";
+
+        assert!(matches!(
+            prepare_download(source, &store),
+            Err(DownloadError::CloudShareInput)
+        ));
+        assert!(store.find_by_source(source).unwrap().is_none());
     }
 
     #[test]
