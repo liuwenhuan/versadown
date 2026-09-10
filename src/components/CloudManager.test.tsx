@@ -363,6 +363,114 @@ it('formats large cloud files in practical size units', async () => {
   expect(screen.getByText('3.0 GB')).toBeVisible();
 });
 
+it('sorts cloud files by name, size, and modified time from their column headers', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
+    { id: 'largest', parentId: '0', name: 'zeta.txt', kind: 'file', size: 3_000, modifiedAt: '2025-06-03 08:00:00' },
+    { id: 'missing', parentId: '0', name: 'middle.txt', kind: 'file' },
+    { id: 'smallest', parentId: '0', name: 'alpha.txt', kind: 'file', size: 10, modifiedAt: '2025-06-01 08:00:00' },
+    { id: 'medium', parentId: '0', name: 'beta.txt', kind: 'file', size: 200, modifiedAt: '2025-06-02 08:00:00' }
+  ] }) });
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
+  const listedNames = () => Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"] b[title]'))
+    .map((name) => name.getAttribute('title'))
+    .filter((name): name is string => name !== null && name !== '回收站');
+
+  await user.click(screen.getByRole('button', { name: '按名称排序' }));
+  expect(listedNames()).toEqual(['alpha.txt', 'beta.txt', 'middle.txt', 'zeta.txt']);
+  await user.click(screen.getByRole('button', { name: '按名称排序' }));
+  expect(listedNames()).toEqual(['zeta.txt', 'middle.txt', 'beta.txt', 'alpha.txt']);
+
+  await user.click(screen.getByRole('button', { name: '按大小排序' }));
+  expect(listedNames()).toEqual(['alpha.txt', 'beta.txt', 'zeta.txt', 'middle.txt']);
+  await user.click(screen.getByRole('button', { name: '按大小排序' }));
+  expect(listedNames()).toEqual(['zeta.txt', 'beta.txt', 'alpha.txt', 'middle.txt']);
+
+  await user.click(screen.getByRole('button', { name: '按修改时间排序' }));
+  expect(listedNames()).toEqual(['alpha.txt', 'beta.txt', 'zeta.txt', 'middle.txt']);
+  await user.click(screen.getByRole('button', { name: '按修改时间排序' }));
+  expect(listedNames()).toEqual(['zeta.txt', 'beta.txt', 'alpha.txt', 'middle.txt']);
+});
+
+it('keeps unavailable cloud file sizes after known sizes in either sort direction', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
+    { id: 'null-size', parentId: '0', name: 'null-size.txt', kind: 'file', size: null },
+    { id: 'negative-size', parentId: '0', name: 'negative-size.txt', kind: 'file', size: -1 },
+    { id: 'large', parentId: '0', name: 'large.txt', kind: 'file', size: 100 },
+    { id: 'missing-size', parentId: '0', name: 'missing-size.txt', kind: 'file' },
+    { id: 'small', parentId: '0', name: 'small.txt', kind: 'file', size: 1 }
+  ] }) });
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
+  const listedNames = () => Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"] b[title]'))
+    .map((name) => name.getAttribute('title'))
+    .filter((name): name is string => name !== null && name !== '回收站');
+
+  await user.click(screen.getByRole('button', { name: '按大小排序' }));
+  expect(listedNames()).toEqual(['small.txt', 'large.txt', 'null-size.txt', 'negative-size.txt', 'missing-size.txt']);
+  await user.click(screen.getByRole('button', { name: '按大小排序' }));
+  expect(listedNames()).toEqual(['large.txt', 'small.txt', 'null-size.txt', 'negative-size.txt', 'missing-size.txt']);
+});
+
+it('keeps Shift range selection anchored to the same file after sorting', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
+    { id: 'zeta', parentId: '0', name: 'zeta.txt', kind: 'file', size: 300 },
+    { id: 'middle', parentId: '0', name: 'middle.txt', kind: 'file' },
+    { id: 'alpha', parentId: '0', name: 'alpha.txt', kind: 'file', size: 10 },
+    { id: 'beta', parentId: '0', name: 'beta.txt', kind: 'file', size: 200 }
+  ] }) });
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await user.click(await screen.findByText('zeta.txt'));
+  await user.click(screen.getByRole('button', { name: '按大小排序' }));
+  fireEvent.click(screen.getByText('middle.txt'), { shiftKey: true });
+
+  expect(screen.getByRole('checkbox', { name: '选择 zeta.txt' })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: '选择 middle.txt' })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: '选择 alpha.txt' })).not.toBeChecked();
+  expect(screen.getByRole('checkbox', { name: '选择 beta.txt' })).not.toBeChecked();
+});
+
+it('activates sort headers by keyboard without opening the selected folder', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await user.click(await screen.findByText('归档'));
+  const sizeHeader = screen.getByRole('button', { name: '按大小排序' });
+  sizeHeader.focus();
+  await user.keyboard('{Enter}');
+  expect(sizeHeader).toHaveAttribute('aria-pressed', 'true');
+  expect(sizeHeader).toHaveAttribute('aria-description', '当前为升序');
+  expect(client.listCloudDirectory).not.toHaveBeenCalledWith('quark', 'folder-1');
+
+  const timeHeader = screen.getByRole('button', { name: '按修改时间排序' });
+  timeHeader.focus();
+  await user.keyboard(' ');
+  expect(timeHeader).toHaveAttribute('aria-pressed', 'true');
+  expect(client.listCloudDirectory).not.toHaveBeenCalledWith('quark', 'folder-1');
+});
+
+it('keeps file-list keyboard shortcuts available from selection checkboxes', async () => {
+  const client = createCloudFake();
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('报告.pdf');
+  const fileCheckbox = screen.getByRole('checkbox', { name: '选择 报告.pdf' });
+  fileCheckbox.focus();
+  fireEvent.keyDown(fileCheckbox, { key: 'a', ctrlKey: true });
+  expect(screen.getByRole('checkbox', { name: '选择 归档' })).toBeChecked();
+  expect(fileCheckbox).toBeChecked();
+
+  fireEvent.keyDown(fileCheckbox, { key: 'Delete' });
+  expect(screen.getByRole('alertdialog', { name: '确认移入回收站' })).toBeVisible();
+});
+
 it('opens folders by double click without rendering an enter button', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
