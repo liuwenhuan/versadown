@@ -65,14 +65,13 @@ fn uc_restores_only_session_cookie_pairs_from_the_official_web_flow() {
 }
 
 #[test]
-fn uc_web_authorization_waits_until_both_session_cookies_arrive() {
-    // Incomplete browser cookies must keep authorization polling alive while
-    // the user signs in, rather than terminate it as an expired saved session.
+fn uc_web_authorization_waits_until_the_server_session_cookie_arrives() {
+    // Browser identity cookies are not guaranteed to be visible on every UC
+    // login route.  Only the server session cookie proves API authorization.
     for (case, cookies) in [
         ("empty", vec![]),
         ("only __uid", vec!["__uid=user-42; Path=/".into()]),
         ("only __pus", vec!["__pus=identity; Path=/".into()]),
-        ("only __puus", vec!["__puus=session; Path=/".into()]),
     ] {
         let result = parse_uc_web_session(&cookies);
         assert!(
@@ -80,6 +79,23 @@ fn uc_web_authorization_waits_until_both_session_cookies_arrive() {
             "{case}: expected AuthorizationPending, got {result:?}"
         );
     }
+
+    let session = parse_uc_web_session(&["__puus=session; Path=/; Secure; HttpOnly".into()])
+        .expect("the UC API session cookie should complete web authorization");
+    assert_eq!(session.cookie, "__puus=session");
+}
+
+#[test]
+fn uc_server_session_cookie_alone_can_read_the_root_directory() {
+    // Break caught: requiring the optional browser identity cookie after the
+    // parser accepts the session still traps a completed login in polling.
+    let http = RecordingHttp::sequence([
+        r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+    ]);
+    let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+    assert!(client.directory("0").unwrap().items.is_empty());
+    assert_eq!(http.requests()[0].headers["Cookie"], "__puus=session");
 }
 
 #[test]

@@ -66,9 +66,7 @@ pub fn parse_uc_web_session(cookies: &[String]) -> Result<UcSession, QuarkError>
             pairs.push((name.to_owned(), value.to_owned()));
         }
     }
-    if !pairs.iter().any(|(name, _)| name == "__pus")
-        || !pairs.iter().any(|(name, _)| name == "__puus")
-    {
+    if !pairs.iter().any(|(name, _)| name == "__puus") {
         return Err(QuarkError::AuthorizationPending);
     }
     Ok(UcSession::cookie(
@@ -102,19 +100,13 @@ impl<'a, T: CloudHttpTransport> UcClient<'a, T> {
     }
 
     fn cookie(&self) -> Result<&str, QuarkError> {
-        let has_identity = self
-            .session
-            .cookie
-            .split(';')
-            .filter_map(cookie_pair)
-            .any(|(name, _)| name == "__pus");
         let has_session = self
             .session
             .cookie
             .split(';')
             .filter_map(cookie_pair)
             .any(|(name, _)| name == "__puus");
-        if has_identity && has_session {
+        if has_session {
             Ok(&self.session.cookie)
         } else {
             Err(QuarkError::AuthorizationExpired)
