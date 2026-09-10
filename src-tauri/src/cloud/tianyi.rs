@@ -33,7 +33,7 @@ mod tests {
         store
     }
     fn info() -> Value {
-        json!({"res_code":0,"shareId":22,"fileId":"root","fileName":"root","isFolder":true,"needAccessCode":1})
+        json!({"res_code":0,"shareId":22,"fileId":"root","fileName":"root","isFolder":true,"needAccessCode":1,"shareMode":1})
     }
     fn checked() -> Value {
         json!({"res_code":0,"shareId":22})
@@ -108,7 +108,7 @@ mod tests {
             assert_eq!(http.requests.lock().unwrap().len(), 1);
         }
         let http = Http::new(vec![
-            json!({"res_code":0,"shareId":22,"fileId":"single","fileName":"verify.mp4","isFolder":false,"needAccessCode":0}),
+            json!({"res_code":0,"shareId":22,"fileId":"single","fileName":"verify.mp4","isFolder":false,"needAccessCode":0,"shareMode":1}),
             json!({"res_code":0,"fileDownloadUrl":""}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Tianyi, &store, &http).unwrap();
@@ -132,7 +132,7 @@ mod tests {
                 .unwrap()
                 .extend(error.as_object().unwrap().clone());
             let http = Http::new(vec![
-                json!({"res_code":0,"shareId":22,"fileId":"single","fileName":"verify.mp4","isFolder":false,"needAccessCode":0}),
+                json!({"res_code":0,"shareId":22,"fileId":"single","fileName":"verify.mp4","isFolder":false,"needAccessCode":0,"shareMode":1}),
                 response,
             ]);
             let adapter = provider_share_adapter(CloudProvider::Tianyi, &store, &http).unwrap();
@@ -150,7 +150,7 @@ mod tests {
     fn tianyi_share_public_file_download_does_not_require_an_access_code() {
         let store = credentials();
         let http = Http::new(vec![
-            json!({"res_code":0,"shareId":22,"fileId":"single","fileName":"verify.mp4","isFolder":false,"needAccessCode":0}),
+            json!({"res_code":0,"shareId":22,"fileId":"single","fileName":"verify.mp4","isFolder":false,"needAccessCode":0,"shareMode":1}),
             json!({"res_code":0,"fileDownloadUrl":"https://cdn.example/f"}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Tianyi, &store, &http).unwrap();
@@ -196,6 +196,55 @@ mod tests {
             Err(QuarkError::NotAuthorized)
         ));
         assert!(http.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tianyi_share_preserves_metadata_mode_and_directory_ids_at_every_depth() {
+        let store = credentials();
+        for mode in [json!(0), json!("2")] {
+            let mut metadata = info();
+            metadata["shareMode"] = mode.clone();
+            let http = Http::new(vec![
+                metadata,
+                checked(),
+                json!({"res_code":0,"fileListAO":{"count":1,"folderList":[{"id":"level-one","name":"one"}],"fileList":[]}}),
+                json!({"res_code":0,"fileListAO":{"count":1,"folderList":[{"id":"level-two","name":"two"}],"fileList":[]}}),
+                json!({"res_code":0,"fileListAO":{"count":1,"folderList":[],"fileList":[{"id":"leaf","name":"file.txt","size":7}]}}),
+            ]);
+            let adapter = provider_share_adapter(CloudProvider::Tianyi, &store, &http).unwrap();
+            let ShareInspection::Plan(plan) =
+                adapter.inspect(&candidate(CloudProvider::Tianyi)).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(plan.entries[0].relative_directory, vec!["one", "two"]);
+            let expected_mode = if mode.is_number() { "0" } else { "2" };
+            let requests = http.requests.lock().unwrap();
+            for (request, directory) in requests[2..].iter().zip(["root", "level-one", "level-two"])
+            {
+                let query: BTreeMap<String, String> = url::Url::parse(&request.url)
+                    .unwrap()
+                    .query_pairs()
+                    .into_owned()
+                    .collect();
+                assert_eq!(
+                    query.get("shareMode").map(String::as_str),
+                    Some(expected_mode)
+                );
+                assert_eq!(query.get("fileId").map(String::as_str), Some(directory));
+                assert_eq!(
+                    query.get("shareDirFileId").map(String::as_str),
+                    Some(directory)
+                );
+                assert_eq!(query.get("shareId").map(String::as_str), Some("22"));
+            }
+            assert_eq!(requests.len(), 5);
+            assert_eq!(
+                plan.provider_context["share_mode"],
+                if mode.is_number() { json!(0) } else { json!(2) }
+            );
+            assert_eq!(plan.provider_context["share_dir_file_id"], "root");
+        }
     }
 }
 const TIANYI_WEB_USER_AGENT: &str =
@@ -867,6 +916,12 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
             .and_then(string_or_number)
             .filter(|id| !id.is_empty())
             .ok_or(QuarkError::InvalidResponse)?;
+        let share_mode = info
+            .get("shareMode")
+            .and_then(i64_value)
+            .filter(|mode| *mode >= 0)
+            .ok_or(QuarkError::InvalidResponse)?;
+        let context = json!({"share_id":id,"needs_code":needs_code,"share_mode":share_mode,"share_dir_file_id":root});
         let mut entries = vec![];
         let folder = tianyi_share_flag(&info["isFolder"])?;
         if !folder {
@@ -888,7 +943,9 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
                     if requests > 10_000 || directory.len() > 128 {
                         return Err(QuarkError::InvalidResponse);
                     }
-                    let value = session.request("/api/open/share/listShareDir.action",&format!("shareId={}&fileId={}&isFolder=true&shareMode=1&accessCode={}&pageNum={page}&pageSize=100",encoded(&id),encoded(&parent),encoded(candidate.access_code.as_deref().unwrap_or(""))))?;
+                    // Tianyi requires both directory parameters to identify the current
+                    // traversal node; neither stays pinned to the original share root.
+                    let value = session.request("/api/open/share/listShareDir.action",&format!("shareId={}&fileId={}&shareDirFileId={}&isFolder=true&shareMode={share_mode}&accessCode={}&pageNum={page}&pageSize=100",encoded(&id),encoded(&parent),encoded(&parent),encoded(candidate.access_code.as_deref().unwrap_or(""))))?;
                     let files = tianyi_file_list(&value)?;
                     let length = files.len();
                     listed += length as u64;
@@ -941,7 +998,7 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
             code,
             candidate.access_code.clone(),
             entries,
-            json!({"share_id":id,"needs_code":needs_code}),
+            context,
         )))
     }
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
