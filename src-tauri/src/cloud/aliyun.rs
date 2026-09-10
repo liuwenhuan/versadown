@@ -587,7 +587,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     }
 
     pub fn delete_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
-        self.files_action("/v2/recyclebin/delete", ids, None)
+        self.files_action("/v2/file/delete", ids, None)
     }
 
     /// Initialize a one-part upload; the caller transfers returned upload URLs and
