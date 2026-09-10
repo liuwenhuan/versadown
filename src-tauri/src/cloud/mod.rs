@@ -6,6 +6,7 @@ mod http;
 mod pikpak;
 mod quark;
 mod session;
+pub mod share;
 pub mod tianyi;
 mod types;
 pub mod uc;

@@ -40,6 +40,7 @@ impl DpapiCredentialStore {
         if !matches!(
             key,
             "quark" | "pikpak" | "baidu" | "tianyi" | "aliyun" | "xunlei" | "uc" | "ai-api-key"
+                | "cloud-share-plans-v1"
         ) && !matches!(
             key,
             "cloud-password-pikpak" | "cloud-password-baidu" | "cloud-password-tianyi"
