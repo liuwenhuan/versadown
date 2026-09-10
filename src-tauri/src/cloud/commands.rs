@@ -15,6 +15,8 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt;
 
+const CLOUD_SHARE_PREPARE_FAILURE: &str = "网盘分享下载准备失败，请重试";
+
 /// Personal files lock their exact source. Share files lock the stable plan,
 /// so new siblings, overwrite, refresh and cleanup cannot bypass each other
 /// while the plan's entry set changes. The guard covers resolution through
@@ -1582,10 +1584,12 @@ pub async fn submit_cloud_share_file(
         .map_err(|_| QuarkError::Storage)?
         .filter(|task| task.status != TaskStatus::Recycled)
     {
-        let duplicate =
-            duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
-        return task_action_outcome(&state.store, existing, Some(duplicate))
-            .map_err(QuarkError::Transport);
+        if !is_retryable_cloud_share_prepare(&existing) {
+            let duplicate =
+                duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
+            return task_action_outcome(&state.store, existing, Some(duplicate))
+                .map_err(QuarkError::Transport);
+        }
     }
     let cloud = app
         .try_state::<Arc<CloudState>>()
@@ -1647,31 +1651,91 @@ where
         .map_err(|_| QuarkError::InvalidInput("下载路径或文件名无效".into()))?;
 
     let service = service().await?;
-    let prepared = tasks
-        .create(crate::NewTask {
-            source: source.clone(),
-            name: output_name,
-            kind: "cloud".into(),
-        })
-        .map_err(|_| QuarkError::Storage)?;
+    let prepared = match tasks
+        .find_by_source(&source)
+        .map_err(|_| QuarkError::Storage)?
+        .filter(is_retryable_cloud_share_prepare)
+    {
+        Some(mut prepared) => {
+            prepared.status = TaskStatus::Parsing;
+            prepared.error = None;
+            tasks
+                .apply_transfer_snapshot(prepared)
+                .map_err(|_| QuarkError::Storage)?
+        }
+        None => tasks
+            .create(crate::NewTask {
+                source: source.clone(),
+                name: output_name,
+                kind: "cloud".into(),
+            })
+            .map_err(|_| QuarkError::Storage)?,
+    };
     if let Err(error) = plans.reserve_local_task(&source, prepared.id) {
         return match tasks.remove_task_record(prepared.id) {
             Ok(()) | Err(crate::StoreError::NotFound(_)) => Err(error),
             // The task may still be durable, so report the conservative
             // recoverable state instead of claiming creation was rolled back.
-            Err(_) => Ok(TaskActionOutcome {
-                payload: crate::commands::DownloadTaskPayload {
-                    task: prepared,
-                    files: Vec::new(),
-                },
-                duplicate: None,
-            }),
+            Err(_) => Ok(cloud_share_failure_outcome(
+                &tasks,
+                prepared,
+                CLOUD_SHARE_PREPARE_FAILURE,
+            )),
         };
     }
 
-    let resolved = resolve().await?;
-    let task = share::submit_current_share_download(&service, &prepared, resolved, configured).await?;
-    task_action_outcome(&tasks, task, None).map_err(QuarkError::Transport)
+    let resolved = match resolve().await {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            return Ok(cloud_share_failure_outcome(
+                &tasks,
+                prepared,
+                "网盘分享下载地址获取失败，请检查登录状态后重试",
+            ))
+        }
+    };
+    let task = match share::submit_current_share_download(&service, &prepared, resolved, configured)
+        .await
+    {
+        Ok(task) => task,
+        Err(_) => {
+            return Ok(cloud_share_failure_outcome(
+                &tasks,
+                prepared,
+                "aria2 未能接受网盘分享下载任务",
+            ))
+        }
+    };
+    Ok(cloud_share_task_outcome(&tasks, task))
+}
+
+fn cloud_share_failure_outcome(
+    tasks: &TaskStore,
+    prepared: DownloadTask,
+    message: &'static str,
+) -> TaskActionOutcome {
+    let mut task = tasks
+        .fail(prepared.id, message)
+        .or_else(|_| tasks.find(prepared.id))
+        .unwrap_or(prepared);
+    task.status = TaskStatus::Failed;
+    task.error = Some(message.into());
+    cloud_share_task_outcome(tasks, task)
+}
+
+fn is_retryable_cloud_share_prepare(task: &DownloadTask) -> bool {
+    task.kind == "cloud"
+        && task.status == TaskStatus::Failed
+        && task.aria_gid.is_none()
+        && task.error.as_deref() == Some(CLOUD_SHARE_PREPARE_FAILURE)
+}
+
+fn cloud_share_task_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskActionOutcome {
+    let files = tasks.files(task.id).unwrap_or_default();
+    TaskActionOutcome {
+        payload: crate::commands::DownloadTaskPayload { task, files },
+        duplicate: None,
+    }
 }
 
 pub(crate) fn schedule_cloud_share_cleanup(app: AppHandle, task: &DownloadTask) {

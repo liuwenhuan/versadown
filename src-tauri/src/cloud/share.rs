@@ -1260,6 +1260,7 @@ mod tests {
     struct SagaAria2 {
         add_calls: AtomicU64,
         reject_add: AtomicBool,
+        drop_task_files: Mutex<Option<std::path::PathBuf>>,
     }
 
     #[async_trait]
@@ -1270,6 +1271,12 @@ mod tests {
             _: crate::aria2::Aria2Options,
         ) -> Result<String, crate::aria2::Aria2Error> {
             self.add_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(path) = self.drop_task_files.lock().unwrap().take() {
+                rusqlite::Connection::open(path)
+                    .unwrap()
+                    .execute_batch("DROP TABLE task_files")
+                    .unwrap();
+            }
             if self.reject_add.load(Ordering::SeqCst) {
                 Err(crate::aria2::Aria2Error::Transport)
             } else {
@@ -2299,6 +2306,290 @@ mod tests {
         assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 0);
         assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 0);
         assert_eq!(api.add_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_reservation_and_failed_rollback_returns_a_durable_failed_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let tasks = Arc::new(crate::TaskStore::open_path(&database).unwrap());
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_task_delete BEFORE DELETE ON tasks \
+                 BEGIN SELECT RAISE(FAIL, 'delete rejected'); END;",
+            )
+            .unwrap();
+        let credentials = Arc::new(FailNthSaveCredentials {
+            inner: MemoryCredentialStore::default(),
+            saves: AtomicU64::new(0),
+            fail_at: 3,
+        });
+        let plans = CloudSharePlanStore {
+            credentials,
+            mutation: Mutex::new(()),
+            now_ms: Arc::new(|| 1_000),
+        };
+        let plan = fixture("reservation-rollback-failure");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let api = Arc::new(SagaAria2::default());
+        let service = Arc::new(crate::DownloadService::new(api.clone(), tasks.clone()));
+
+        let outcome = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source.clone(),
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async { unreachable!("provider must not run before reservation succeeds") },
+        )
+        .await
+        .expect("a failed rollback must return the task which may still be durable");
+
+        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
+        assert_eq!(
+            outcome.payload.task.error.as_deref(),
+            Some("网盘分享下载准备失败，请重试")
+        );
+        assert_eq!(tasks.find(outcome.payload.task.id).unwrap().status, crate::TaskStatus::Failed);
+        assert_eq!(api.add_calls.load(Ordering::SeqCst), 0);
+        assert!(plans
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .linked_local_tasks
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_prepare_retry_reuses_and_reserves_the_exact_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let tasks = Arc::new(crate::TaskStore::open_path(&database).unwrap());
+        let administration = rusqlite::Connection::open(&database).unwrap();
+        administration
+            .execute_batch(
+                "CREATE TRIGGER reject_task_delete BEFORE DELETE ON tasks \
+                 BEGIN SELECT RAISE(FAIL, 'delete rejected'); END;",
+            )
+            .unwrap();
+        let credentials = Arc::new(FailNthSaveCredentials {
+            inner: MemoryCredentialStore::default(),
+            saves: AtomicU64::new(0),
+            fail_at: 3,
+        });
+        let plans = CloudSharePlanStore {
+            credentials,
+            mutation: Mutex::new(()),
+            now_ms: Arc::new(|| 1_000),
+        };
+        let plan = fixture("retry-failed-prepare");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let api = Arc::new(SagaAria2::default());
+        let service = Arc::new(crate::DownloadService::new(api.clone(), tasks.clone()));
+
+        let failed = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source.clone(),
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service.clone()) },
+            || async { unreachable!("provider must not run before reservation succeeds") },
+        )
+        .await
+        .unwrap();
+        administration
+            .execute_batch("DROP TRIGGER reject_task_delete")
+            .unwrap();
+        let adapter = SagaAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            fail_resolve: false,
+        };
+        let resolve_source = source.clone();
+
+        let retried = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source.clone(),
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async { resolve_current_share_download(&plans, &adapter, &resolve_source) },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(retried.payload.task.id, failed.payload.task.id);
+        assert_eq!(retried.payload.task.status, crate::TaskStatus::Downloading);
+        assert_eq!(api.add_calls.load(Ordering::SeqCst), 1);
+        assert!(plans
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .linked_local_tasks
+            .values()
+            .any(|ids| ids.contains(&failed.payload.task.id)));
+    }
+
+    #[tokio::test]
+    async fn provider_resolution_failure_returns_the_reserved_failed_task() {
+        let (plans, _, _) = memory_store();
+        let plan = fixture("provider-resolution-failure");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let tasks = Arc::new(crate::TaskStore::open_in_memory().unwrap());
+        let api = Arc::new(SagaAria2::default());
+        let service = Arc::new(crate::DownloadService::new(api.clone(), tasks.clone()));
+        let adapter = SagaAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            fail_resolve: true,
+        };
+        let resolve_source = source.clone();
+
+        let outcome = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source.clone(),
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async { resolve_current_share_download(&plans, &adapter, &resolve_source) },
+        )
+        .await
+        .expect("a prepared cloud-share task must be returned after resolution fails");
+
+        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
+        assert_eq!(outcome.payload.task.source, source);
+        assert_eq!(
+            outcome.payload.task.error.as_deref(),
+            Some("网盘分享下载地址获取失败，请检查登录状态后重试")
+        );
+        assert_eq!(tasks.find(outcome.payload.task.id).unwrap().status, crate::TaskStatus::Failed);
+        assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(api.add_calls.load(Ordering::SeqCst), 0);
+        assert!(plans
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .linked_local_tasks
+            .values()
+            .any(|ids| ids.contains(&outcome.payload.task.id)));
+    }
+
+    #[tokio::test]
+    async fn aria2_rejection_returns_the_reserved_failed_task() {
+        let (plans, _, _) = memory_store();
+        let plan = fixture("aria2-rejection");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let tasks = Arc::new(crate::TaskStore::open_in_memory().unwrap());
+        let api = Arc::new(SagaAria2::default());
+        api.reject_add.store(true, Ordering::SeqCst);
+        let service = Arc::new(crate::DownloadService::new(api.clone(), tasks.clone()));
+        let adapter = SagaAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            fail_resolve: false,
+        };
+        let resolve_source = source.clone();
+
+        let outcome = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source.clone(),
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async { resolve_current_share_download(&plans, &adapter, &resolve_source) },
+        )
+        .await
+        .expect("a prepared cloud-share task must be returned after aria2 rejects it");
+
+        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
+        assert_eq!(outcome.payload.task.source, source);
+        assert_eq!(
+            outcome.payload.task.error.as_deref(),
+            Some("aria2 未能接受网盘分享下载任务")
+        );
+        assert_eq!(tasks.find(outcome.payload.task.id).unwrap().status, crate::TaskStatus::Failed);
+        assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(api.add_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_store_recovery_still_returns_the_prepared_task_in_memory() {
+        let (plans, _, _) = memory_store();
+        let plan = fixture("failed-store-recovery");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let tasks = Arc::new(crate::TaskStore::open_path(&database).unwrap());
+        let api = Arc::new(SagaAria2::default());
+        let service = Arc::new(crate::DownloadService::new(api, tasks.clone()));
+        let drop_database = database.clone();
+
+        let outcome = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks,
+            &plans,
+            source.clone(),
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async move {
+                rusqlite::Connection::open(drop_database)
+                    .unwrap()
+                    .execute_batch("DROP TABLE tasks")
+                    .unwrap();
+                Err(QuarkError::AuthorizationExpired)
+            },
+        )
+        .await
+        .expect("a durable-create result must not be reported as no task when recovery fails");
+
+        assert_eq!(outcome.payload.task.source, source);
+        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
+        assert_eq!(
+            outcome.payload.task.error.as_deref(),
+            Some("网盘分享下载地址获取失败，请检查登录状态后重试")
+        );
+        assert!(outcome.payload.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn files_read_failure_falls_back_to_an_empty_outcome_file_list() {
+        let (plans, _, _) = memory_store();
+        let plan = fixture("files-read-failure");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let tasks = Arc::new(crate::TaskStore::open_path(&database).unwrap());
+        let api = Arc::new(SagaAria2::default());
+        *api.drop_task_files.lock().unwrap() = Some(database);
+        let service = Arc::new(crate::DownloadService::new(api.clone(), tasks.clone()));
+        let adapter = SagaAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            fail_resolve: false,
+        };
+        let resolve_source = source.clone();
+
+        let outcome = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks,
+            &plans,
+            source,
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async { resolve_current_share_download(&plans, &adapter, &resolve_source) },
+        )
+        .await
+        .expect("files projection failure must not discard the prepared task outcome");
+
+        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
+        assert!(outcome.payload.files.is_empty());
+        assert_eq!(api.add_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
