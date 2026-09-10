@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { CloudManager } from './CloudManager';
-import type { CloudProvider } from '../lib/cloudTypes';
+import { cloudRecycleBinDirectoryId, type CloudProvider } from '../lib/cloudTypes';
 
 function createCloudFake(overrides: Record<string, unknown> = {}) {
   return {
@@ -24,6 +24,7 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     copyCloudFiles: vi.fn().mockResolvedValue(undefined),
     trashCloudFiles: vi.fn().mockResolvedValue(undefined),
     deleteCloudFiles: vi.fn().mockResolvedValue(undefined),
+    restoreCloudFiles: vi.fn().mockResolvedValue(undefined),
     logoutCloud: vi.fn().mockResolvedValue(undefined),
     getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({
       provider,
@@ -646,7 +647,55 @@ it('requires a recycle-bin confirmation before deleting selected files', async (
   expect(await screen.findByRole('status')).toHaveTextContent('删除成功');
 });
 
-it('limits PikPak recycle-bin items to download and permanent deletion without folder navigation', async () => {
+it.each(['quark', 'uc', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'pikpak'] as const)('shows a virtual recycle bin and recycle-only controls for %s', async (provider) => {
+  const user = userEvent.setup();
+  const recycleBinId = cloudRecycleBinDirectoryId[provider];
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockImplementation((_requestedProvider: CloudProvider, parentId = '0') => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [{ id: 'deleted-file', parentId: recycleBinId, name: '已删除文件.txt', kind: 'file', size: 12 }] }
+      : { id: parentId, items: [{ id: 'live-file', parentId, name: '仍在网盘的文件.txt', kind: 'file', size: 10 }] }))
+  });
+  render(<CloudManager provider={provider} client={client} initialAccounts={[{ id: `${provider}-1`, displayName: 'alice', provider, authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await user.dblClick(await screen.findByText('回收站'));
+  await screen.findByText('已删除文件.txt');
+  expect(screen.queryByRole('button', { name: '上传' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '新建目录' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByText('已删除文件.txt'));
+  const toolbar = screen.getByRole('toolbar', { name: '已选择 1 项的文件操作' });
+  expect(within(toolbar).getByRole('button', { name: '恢复' })).toBeVisible();
+  expect(within(toolbar).getByRole('button', { name: '永久删除' })).toBeVisible();
+  expect(within(toolbar).queryByRole('button', { name: '下载' })).not.toBeInTheDocument();
+});
+
+it('restores and permanently deletes non-PikPak recycle records after confirmation', async () => {
+  const user = userEvent.setup();
+  const provider = 'quark' as const;
+  const recycleBinId = cloudRecycleBinDirectoryId[provider];
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockImplementation((_requestedProvider: CloudProvider, parentId = '0') => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [{ id: 'quark-recycle-record', parentId: recycleBinId, name: '已删除文件.txt', kind: 'file', size: 12 }] }
+      : { id: parentId, items: [] }))
+  });
+  render(<CloudManager provider={provider} client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider, authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await user.dblClick(await screen.findByText('回收站'));
+  await user.click(await screen.findByText('已删除文件.txt'));
+  await user.click(screen.getByRole('button', { name: '恢复' }));
+  expect(client.restoreCloudFiles).toHaveBeenCalledWith('quark', ['quark-recycle-record']);
+
+  await screen.findByText('已删除文件.txt');
+  await user.click(screen.getByText('已删除文件.txt'));
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  const dialog = screen.getByRole('alertdialog', { name: '确认永久删除' });
+  expect(dialog).toHaveTextContent('不可恢复');
+  await user.click(within(dialog).getByRole('button', { name: '永久删除', exact: true }));
+  expect(client.deleteCloudFiles).toHaveBeenCalledWith('quark', ['quark-recycle-record']);
+  expect(client.trashCloudFiles).not.toHaveBeenCalled();
+});
+
+it('limits PikPak recycle-bin items to restore and permanent deletion without folder navigation', async () => {
   const user = userEvent.setup();
   const recycleBinId = '__all_downloader_pikpak_recycle_bin__';
   const client = createCloudFake({
@@ -677,12 +726,18 @@ it('limits PikPak recycle-bin items to download and permanent deletion without f
   const deletedFolder = screen.getByTitle('已删除文件夹');
   fireEvent.contextMenu(deletedFolder, { clientX: 300, clientY: 240 });
   expect(screen.queryByRole('menuitem', { name: '打开' })).not.toBeInTheDocument();
+  expect(screen.getByRole('menuitem', { name: '恢复' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '永久删除' })).toBeVisible();
   client.listCloudDirectory.mockClear();
   fireEvent.doubleClick(deletedFolder);
   fireEvent.keyDown(tree, { key: 'Enter' });
   expect(client.listCloudDirectory).not.toHaveBeenCalled();
 
+  await user.click(screen.getByText('已删除文件.txt'));
+  await user.click(screen.getByRole('button', { name: '恢复' }));
+  expect(client.restoreCloudFiles).toHaveBeenCalledWith('pikpak', ['deleted-file']);
+
+  await screen.findByText('已删除文件.txt');
   await user.click(screen.getByText('已删除文件.txt'));
   await user.click(screen.getByRole('button', { name: '永久删除' }));
   const permanentDeleteDialog = screen.getByRole('alertdialog', { name: '确认永久删除' });

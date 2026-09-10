@@ -13,7 +13,15 @@ export const cloudRootDirectoryId: Record<CloudProvider, string> = {
   uc: '0'
 };
 
-export const pikpakRecycleBinDirectoryId = '__all_downloader_pikpak_recycle_bin__';
+export const cloudRecycleBinDirectoryId: Record<CloudProvider, string> = {
+  quark: '__all_downloader_quark_recycle_bin__',
+  pikpak: '__all_downloader_pikpak_recycle_bin__',
+  baidu: '__all_downloader_baidu_recycle_bin__',
+  tianyi: '__all_downloader_tianyi_recycle_bin__',
+  aliyun: '__all_downloader_aliyun_recycle_bin__',
+  xunlei: '__all_downloader_xunlei_recycle_bin__',
+  uc: '__all_downloader_uc_recycle_bin__'
+};
 
 export interface CloudAccount { provider: CloudProvider; id: string; displayName: string; authMethod: CloudAuthMethod; expiresAt?: string; }
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; }
