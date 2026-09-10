@@ -63,11 +63,16 @@ pub fn should_enable_peer_discovery(background_ui_test: Option<&str>) -> bool {
 struct TauriDownloadEvents {
     app: tauri::AppHandle,
     store: std::sync::Arc<TaskStore>,
+    cloud: std::sync::Arc<cloud::commands::CloudState>,
 }
 
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
-        if let Ok(payload) = commands::task_payload(&self.store, task.clone()) {
+        if let Ok(payload) = commands::task_payload_with_cleanup(
+            &self.store,
+            Some(&self.cloud.share_plans),
+            task.clone(),
+        ) {
             let _ = self.app.emit("download-task-updated", payload);
         }
         commands::schedule_cloud_share_refresh(self.app.clone(), task);
@@ -128,7 +133,7 @@ pub fn run() {
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
             // calls cannot race a later `manage` call.
-            app.manage(cloud);
+            app.manage(std::sync::Arc::clone(&cloud));
             let manifest_sidecar = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("binaries")
                 .join(aria2_binary_name());
@@ -178,6 +183,7 @@ pub fn run() {
             let events = std::sync::Arc::new(TauriDownloadEvents {
                 app: app.handle().clone(),
                 store: std::sync::Arc::clone(&store),
+                cloud,
             });
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,

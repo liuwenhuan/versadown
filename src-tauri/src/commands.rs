@@ -83,13 +83,18 @@ pub(crate) fn task_payload_with_cleanup(
     plans: Option<&crate::cloud::share::CloudSharePlanStore>,
     task: DownloadTask,
 ) -> Result<DownloadTaskPayload, String> {
-    let cleanup_pending = task.status == TaskStatus::Completed
+    let cleanup_pending = if task.status == TaskStatus::Completed
         && task.source.starts_with("cloud-share://")
-        && plans.is_some_and(|plans| {
-            plans
+    {
+        match plans {
+            Some(plans) => plans
                 .cleanup_pending_for_task(&task.source, task.id)
-                .unwrap_or(false)
-        });
+                .map_err(|_| "无法读取网盘转存清理状态".to_string())?,
+            None => false,
+        }
+    } else {
+        false
+    };
     let files = store.files(task.id).map_err(|error| error.to_string())?;
     Ok(DownloadTaskPayload {
         task,
@@ -1466,6 +1471,31 @@ mod tests {
             .unwrap();
         let ordinary = task_payload_with_cleanup(&store, Some(&plans), ordinary).unwrap();
         assert!(!ordinary.cleanup_pending);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_payload_does_not_clear_cleanup_retry_when_the_plan_state_is_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct(&format!(
+                "cloud-share://baidu/{}/{}",
+                "a".repeat(64),
+                "b".repeat(64)
+            )))
+            .unwrap();
+        let completed = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                ..task
+            })
+            .unwrap();
+
+        assert!(task_payload_with_cleanup(&store, Some(&plans), completed).is_err());
     }
 
     #[test]
