@@ -106,7 +106,8 @@ export function App() {
   const taskEventVersions = useRef(new Map<string, number>());
   const engineEventEpoch = useRef(0);
   const tasksRef = useRef<QueueTask[]>(tasks);
-  const shareConfirmationsInFlight = useRef(new Set<string>());
+  const confirmationGeneration = useRef(0);
+  const shareConfirmationsInFlight = useRef(new Set<number>());
   const duplicateActionInFlight = useRef(false);
   const duplicateCloseInFlight = useRef(false);
   tasksRef.current = tasks;
@@ -114,6 +115,11 @@ export function App() {
 
   function enqueueDuplicate(next: DuplicateDownload) {
     setDuplicateQueue((current) => [...current, next]);
+  }
+
+  function showConfirmation(next: ParseResult) {
+    confirmationGeneration.current += 1;
+    setConfirmation(next);
   }
 
   function dismissDuplicate(taskId: string) {
@@ -322,7 +328,7 @@ export function App() {
   async function parse(input: string, accessCode?: string) {
     const result = await parseDownload(input, accessCode);
     if (result.task) { recordTaskEvent(result.task); setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
-    if (result.confirmation) setConfirmation(result.confirmation);
+    if (result.confirmation) showConfirmation(result.confirmation);
     if (result.duplicate) {
       recordTaskEvent(result.duplicate.task);
       setTasks((current) => upsertTask(current, result.duplicate!.task));
@@ -369,8 +375,9 @@ export function App() {
     if (!confirmation) return;
     if (confirmation.taskId.startsWith('cloud-share://')) {
       const planSource = confirmation.taskId;
-      if (shareConfirmationsInFlight.current.has(planSource)) return;
-      shareConfirmationsInFlight.current.add(planSource);
+      const requestGeneration = confirmationGeneration.current;
+      if (shareConfirmationsInFlight.current.has(requestGeneration)) return;
+      shareConfirmationsInFlight.current.add(requestGeneration);
       try {
         const outcomes = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory);
         const cloudTasks = outcomes.flatMap((outcome) => outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
@@ -379,11 +386,11 @@ export function App() {
         setTasks((current) => cloudTasks.reduce((next, cloudTask) => upsertTask(next, cloudTask), current));
         setSelectedTaskId(cloudTasks.at(-1)?.id ?? null);
         setDuplicateQueue((current) => [...current, ...duplicates]);
-        setConfirmation((current) => current?.taskId === planSource ? null : current);
+        setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? null : current);
       } catch (error) {
         setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
       } finally {
-        shareConfirmationsInFlight.current.delete(planSource);
+        shareConfirmationsInFlight.current.delete(requestGeneration);
       }
       return;
     }
@@ -401,7 +408,7 @@ export function App() {
 
   function reopenTaskConfirmation(task: QueueTask) {
     if (task.status !== 'awaiting_user' || (task.kind !== 'magnet' && task.kind !== 'torrent')) return;
-    setConfirmation({
+    showConfirmation({
       taskId: task.id,
       requiresConfirmation: true,
       resources: (task.files ?? []).map((file) => ({

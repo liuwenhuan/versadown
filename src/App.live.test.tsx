@@ -228,6 +228,49 @@ it('binds in-flight share confirmation to its plan without blocking or clearing 
   expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
 });
 
+it('does not let an old response clear a reparsed confirmation for the same share plan', async () => {
+  const firstSubmission = deferred<never[]>();
+  const secondSubmission = deferred<never[]>();
+  const confirmation = {
+    taskId: 'cloud-share://uc/same-plan', title: '同一分享', requiresConfirmation: true,
+    resources: [
+      { id: 'f1', name: 'first.jpg', size: '1 B', selected: true },
+      { id: 'f2', name: 'second.jpg', size: '1 B', selected: true },
+    ],
+    processing: []
+  };
+  state.parse
+    .mockResolvedValueOnce({ confirmation })
+    .mockResolvedValueOnce({ confirmation });
+  state.confirmCloud
+    .mockReturnValueOnce(firstSubmission.promise)
+    .mockReturnValueOnce(secondSubmission.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/same-plan' }); });
+  fireEvent.click(screen.getByRole('checkbox', { name: '选择 second.jpg' }));
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭确认窗口' }));
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/same-plan' }); });
+  fireEvent.click(screen.getByRole('checkbox', { name: '选择 first.jpg' }));
+  expect(screen.getByRole('checkbox', { name: '选择 second.jpg' })).toBeChecked();
+  const secondSubmit = screen.getByRole('button', { name: /立即下载 1/ });
+  fireEvent.click(secondSubmit);
+  fireEvent.click(secondSubmit);
+  expect(state.confirmCloud).toHaveBeenCalledTimes(2);
+  expect(state.confirmCloud).toHaveBeenLastCalledWith('cloud-share://uc/same-plan', ['f2'], undefined);
+
+  await act(async () => { firstSubmission.resolve([]); });
+
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('同一分享');
+  expect(screen.getByRole('checkbox', { name: '选择 first.jpg' })).not.toBeChecked();
+  expect(screen.getByRole('checkbox', { name: '选择 second.jpg' })).toBeChecked();
+  await act(async () => { secondSubmission.resolve([]); });
+  expect(screen.queryByRole('dialog', { name: '确认下载内容' })).not.toBeInTheDocument();
+});
+
 it('ignores concurrent duplicate resolutions and advances to the next duplicate after success', async () => {
   const resolution = deferred<QueueTask>();
   state.parse.mockResolvedValueOnce({
