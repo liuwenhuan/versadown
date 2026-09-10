@@ -1852,12 +1852,14 @@ async fn cleanup_cloud_share_task_inner(
             .lock()
             .map_err(|_| QuarkError::Storage)?
             .delete_transferred_share_files_after_download;
-        crate::engine_runtime::cleanup_completed_share(
+        let owner = share::credential_owner_fingerprint(provider, &cloud.store)?;
+        crate::engine_runtime::cleanup_completed_share_for_owner(
             &cloud.share_plans,
             &tasks,
             &task,
             enabled,
             retry,
+            &owner,
             |provider, ids| {
                 if provider == CloudProvider::Baidu {
                     baidu::BaiduClient::new(load_provider_session(provider, &cloud.store)?, http)

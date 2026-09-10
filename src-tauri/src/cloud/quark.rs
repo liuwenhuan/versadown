@@ -177,6 +177,34 @@ mod tests {
         assert!(requests[3].url.contains("share/sharepage/save"));
     }
     #[test]
+    fn quark_recorded_transfer_refreshes_personal_file_without_share_save() {
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("quark", b"sid=current").unwrap();
+        let mut replies = listing();
+        replies.push(json!({"code":0,"data":[{"fid":"personal99","download_url":"https://download.quark.cn/personal"}]}));
+        let http = Http::new(replies);
+        let adapter = provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+        let entry = CloudShareResolvedEntry {
+            provider: plan.provider,
+            entry: plan.entries[0].clone(),
+            plan,
+        };
+
+        let refreshed = adapter.refresh_recorded_transfer(&entry, "personal99").unwrap();
+
+        let Ok(RecordedTransferDownload::Available(download)) = refreshed.result else {
+            panic!("a personal direct link is required")
+        };
+        assert_eq!(download.url, "https://download.quark.cn/personal");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].url.contains("file/download"));
+        assert!(!requests.iter().any(|request| request.url.contains("sharepage/save")));
+    }
+    #[test]
     fn quark_share_errors_never_become_transfer_requests() {
         for error in [
             json!({"code":9}),
@@ -493,7 +521,8 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, ShareInspection, ShareResolution, TransferRequest,
+    CloudShareResolvedEntry, RecordedTransferDownload, ShareInspection, ShareOperationResult,
+    ShareResolution, TransferRequest,
 };
 
 pub struct QuarkShareAdapter<'a> {
@@ -674,11 +703,51 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_quark_share(self.credentials, self.http, entry)
     }
+    fn transfer_owner_fingerprint(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<String, QuarkError> {
+        super::share::credential_owner_fingerprint(CloudProvider::Quark, self.credentials)
+    }
+    fn refresh_recorded_transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        created_file_id: &str,
+    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
+        if entry.provider != CloudProvider::Quark
+            || entry.plan.provider != CloudProvider::Quark
+            || created_file_id.is_empty()
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let client = self.client()?;
+        let response = client.share_raw(
+            "POST",
+            "file/download",
+            Some(json!({"fids":[created_file_id]})),
+        )?;
+        let value: Value =
+            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        validate_share_codes(&value)?;
+        response_json(&response).map_err(|error| match error {
+            QuarkError::Provider(_) => {
+                QuarkError::Provider("夸克个人盘文件请求失败".into())
+            }
+            error => error,
+        })?;
+        Ok(ShareOperationResult {
+            result: client
+                .share_download(&response, &entry.entry.name)
+                .map(RecordedTransferDownload::Available),
+            updated_context: None,
+        })
+    }
     fn transfer(
         &self,
         entry: &CloudShareResolvedEntry,
         store: &CloudSharePlanStore,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
+        let owner = self.transfer_owner_fingerprint(entry)?;
         let client = self.client()?;
         let context = &entry.plan.provider_context;
         let file = &context["files"][&entry.entry.entry_id];
@@ -703,7 +772,11 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
                         .as_str()
                         .filter(|id| !id.is_empty())
                         .ok_or(QuarkError::InvalidResponse)?;
-                    store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                    store.record_transfer_with_owner(
+                        &entry.plan.source_for(&entry.entry.entry_id),
+                        id,
+                        &owner,
+                    )?;
                     let response = client.share_request(
                         "POST",
                         "file/download",

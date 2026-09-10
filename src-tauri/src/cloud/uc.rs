@@ -473,8 +473,8 @@ fn https_download_url(value: &str) -> Result<String, QuarkError> {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, ShareInspection, ShareOperationResult, ShareResolution,
-    TransferRequest,
+    CloudShareResolvedEntry, RecordedTransferDownload, ShareInspection, ShareOperationResult,
+    ShareResolution, TransferRequest,
 };
 
 pub struct UcShareAdapter<'a> {
@@ -806,6 +806,41 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
     ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
         resolve_uc_share_with_context(self.credentials, self.http, entry)
     }
+    fn transfer_owner_fingerprint(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<String, QuarkError> {
+        super::share::credential_owner_fingerprint(CloudProvider::Uc, self.credentials)
+    }
+    fn refresh_recorded_transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        created_file_id: &str,
+    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
+        if entry.provider != CloudProvider::Uc
+            || entry.plan.provider != CloudProvider::Uc
+            || created_file_id.is_empty()
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let mut session = self.session(Some(&entry.plan.provider_context))?;
+        let context = entry.plan.provider_context.clone();
+        let result = session.request(
+            "POST",
+            "file/download",
+            Some(json!({"fids":[created_file_id]})),
+        )
+        .and_then(|value| {
+            uc_share_download(
+                &value,
+                created_file_id,
+                &entry.entry.name,
+                session.headers.clone(),
+            )
+            .map(RecordedTransferDownload::Available)
+        });
+        session.updated(result, context)
+    }
     fn transfer(
         &self,
         entry: &CloudShareResolvedEntry,
@@ -821,6 +856,7 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
         if entry.provider != CloudProvider::Uc || entry.plan.provider != CloudProvider::Uc {
             return Err(QuarkError::InvalidResponse);
         }
+        let owner = self.transfer_owner_fingerprint(entry)?;
         let mut session = self.session(Some(&entry.plan.provider_context))?;
         let mut context = entry.plan.provider_context.clone();
         let result = (|| {
@@ -847,7 +883,11 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
                             .as_str()
                             .filter(|s| !s.is_empty())
                             .ok_or(QuarkError::InvalidResponse)?;
-                        store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                        store.record_transfer_with_owner(
+                            &entry.plan.source_for(&entry.entry.entry_id),
+                            id,
+                            &owner,
+                        )?;
                         let headers = session.headers.clone();
                         let value =
                             session.request("POST", "file/download", Some(json!({"fids":[id]})))?;
@@ -1004,6 +1044,30 @@ mod tests {
             assert!(request.headers["Cookie"].contains("__puus=session"));
             assert!(!request.headers["Cookie"].contains("__pus="));
         }
+    }
+    #[test]
+    fn uc_recorded_transfer_refreshes_personal_file_without_share_save() {
+        let credentials = share_credentials();
+        let http = Http::new(vec![json!({
+            "code": 0,
+            "data": [{"fid":"personal-id","download_url":"https://cdn.example/personal"}]
+        })]);
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+
+        let refreshed = adapter
+            .refresh_recorded_transfer(&share_entry(), "personal-id")
+            .unwrap();
+
+        let Ok(RecordedTransferDownload::Available(download)) = refreshed.result else {
+            panic!("a personal direct link is required")
+        };
+        assert_eq!(download.url, "https://cdn.example/personal");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("file/download"));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.contains("share/sharepage/save")));
     }
     struct ShareReplies {
         requests: std::sync::Mutex<Vec<CloudHttpRequest>>,

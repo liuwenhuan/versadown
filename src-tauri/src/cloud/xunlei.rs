@@ -122,6 +122,31 @@ mod tests {
         assert_eq!(credentials.load("xunlei").unwrap(), before);
     }
     #[test]
+    fn xunlei_recorded_transfer_refreshes_personal_file_without_share_restore() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            cap(),
+            json!({
+                "id": "personal-id",
+                "web_content_link": "https://cdn.example/personal"
+            }),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+
+        let refreshed = adapter
+            .refresh_recorded_transfer(&selected(), "personal-id")
+            .unwrap();
+
+        let Ok(RecordedTransferDownload::Available(download)) = refreshed.result else {
+            panic!("a personal direct link is required")
+        };
+        assert_eq!(download.url, "https://cdn.example/personal");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].url.ends_with("/files/personal-id"));
+        assert!(!requests.iter().any(|request| request.url.contains("share/restore")));
+    }
+    #[test]
     fn xunlei_share_pages_recursively_and_exchanges_code() {
         let credentials = credentials();
         let http = Http::new(vec![
@@ -287,7 +312,8 @@ mod tests {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, ShareInspection, ShareResolution, TransferRequest,
+    CloudShareResolvedEntry, RecordedTransferDownload, ShareInspection, ShareOperationResult,
+    ShareResolution, TransferRequest,
 };
 
 pub struct XunleiShareAdapter<'a> {
@@ -528,6 +554,45 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_xunlei_share(self.credentials, self.http, entry)
     }
+    fn transfer_owner_fingerprint(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<String, QuarkError> {
+        super::share::credential_owner_fingerprint(CloudProvider::Xunlei, self.credentials)
+    }
+    fn refresh_recorded_transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        created_file_id: &str,
+    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
+        if entry.provider != CloudProvider::Xunlei
+            || entry.plan.provider != CloudProvider::Xunlei
+            || created_file_id.is_empty()
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let session = self.session()?;
+        let file = session.request(
+            "GET",
+            format!("{DRIVE}/drive/v1/files/{}", encoded(created_file_id)),
+            None,
+        )?;
+        if file["id"].as_str() != Some(created_file_id) {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let url = required(&file, "web_content_link")?;
+        super::share::validate_direct_url(&url)?;
+        Ok(ShareOperationResult {
+            result: Ok(RecordedTransferDownload::Available(
+                super::commands::ResolvedCloudDownload {
+                    url,
+                    name: entry.entry.name.clone(),
+                    headers: session.headers.into_iter().collect(),
+                },
+            )),
+            updated_context: None,
+        })
+    }
     fn transfer(
         &self,
         entry: &CloudShareResolvedEntry,
@@ -536,6 +601,7 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
         if entry.provider != CloudProvider::Xunlei || entry.plan.provider != CloudProvider::Xunlei {
             return Err(QuarkError::InvalidResponse);
         }
+        let owner = self.transfer_owner_fingerprint(entry)?;
         // Re-check login immediately before the mutation; no refresh or CAPTCHA retry.
         let session = self.session()?;
         let token = xunlei_share_pass_token(

@@ -26,6 +26,40 @@ pub(crate) fn cleanup_completed_share(
     retry: bool,
     trash: impl FnOnce(crate::cloud::CloudProvider, &[String]) -> Result<(), crate::cloud::QuarkError>,
 ) -> Result<Option<crate::DownloadTask>, crate::cloud::QuarkError> {
+    cleanup_completed_share_with_owner(plans, tasks, task, enabled, retry, None, trash)
+}
+
+/// Production callers pass the current DPAPI credential fingerprint. This
+/// makes automatic cleanup fail closed after an account or session change.
+pub(crate) fn cleanup_completed_share_for_owner(
+    plans: &crate::cloud::share::CloudSharePlanStore,
+    tasks: &TaskStore,
+    task: &crate::DownloadTask,
+    enabled: bool,
+    retry: bool,
+    owner_fingerprint: &str,
+    trash: impl FnOnce(crate::cloud::CloudProvider, &[String]) -> Result<(), crate::cloud::QuarkError>,
+) -> Result<Option<crate::DownloadTask>, crate::cloud::QuarkError> {
+    cleanup_completed_share_with_owner(
+        plans,
+        tasks,
+        task,
+        enabled,
+        retry,
+        Some(owner_fingerprint),
+        trash,
+    )
+}
+
+fn cleanup_completed_share_with_owner(
+    plans: &crate::cloud::share::CloudSharePlanStore,
+    tasks: &TaskStore,
+    task: &crate::DownloadTask,
+    enabled: bool,
+    retry: bool,
+    owner_fingerprint: Option<&str>,
+    trash: impl FnOnce(crate::cloud::CloudProvider, &[String]) -> Result<(), crate::cloud::QuarkError>,
+) -> Result<Option<crate::DownloadTask>, crate::cloud::QuarkError> {
     use crate::cloud::{share::parse_stable_cloud_share_source, QuarkError};
     if !enabled
         || task.status != TaskStatus::Completed
@@ -39,11 +73,16 @@ pub(crate) fn cleanup_completed_share(
         return Ok(None);
     }
     let attempt = (|| {
-        let ids = plans.mark_local_completion(&task.source, retry, |id, source| {
-            tasks
-                .find(id)
-                .is_ok_and(|local| local.status == TaskStatus::Completed && local.source == source)
-        })?;
+        let ids = plans.mark_local_completion_for_owner(
+            &task.source,
+            retry,
+            owner_fingerprint,
+            |id, source| {
+                tasks.find(id).is_ok_and(|local| {
+                    local.status == TaskStatus::Completed && local.source == source
+                })
+            },
+        )?;
         if ids.is_empty() {
             // aria2 may publish another completion without the cleanup message.
             // Re-project the journal outcome without replaying a provider call.
@@ -618,6 +657,33 @@ mod tests {
             "https://example.com/file",
             "cloud-share://baidu/invalid/invalid",
         ] {
+    #[test]
+    fn cleanup_with_a_different_credential_never_calls_provider_delete() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let source = locals[0].source.clone();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        plans
+            .record_transfer_with_owner(&source, "owned-created-id", &"a".repeat(64))
+            .unwrap();
+
+        cleanup_completed_share_for_owner(
+            &plans,
+            &tasks,
+            &first,
+            true,
+            false,
+            &"b".repeat(64),
+            |_, _| panic!("a different credential must not delete transferred files"),
+        )
+        .unwrap();
+
+        let transfers = plans.resolve_entry(&source).unwrap().plan.transfers;
+        assert!(transfers.iter().all(|transfer| {
+            transfer.cleanup_state == crate::cloud::share::CloudShareCleanupState::Pending
+        }));
+    }
+
             let mut task = stale.clone();
             task.source = source.into();
             let _ = cleanup_completed_share(&plans, &tasks, &task, true, true, |_, _| {
