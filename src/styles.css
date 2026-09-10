@@ -150,6 +150,7 @@ button,input,textarea{font:inherit}button{color:inherit}
 .completed-summary span{overflow:hidden;text-overflow:ellipsis}
 .completed-task .task-actions{gap:8px}
 .completed-task .completed-quick-action{width:34px;height:34px}
+.transfer-live .transfer-paused{color:var(--warning)}
 .cloud-filebar{display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--surface)}
 .cloud-pathbar{min-width:220px;flex:1}.cloud-filebar .cloud-toolbar{flex:0 0 auto}.cloud-filebar .cloud-refresh-button{margin-left:4px}
 .cloud-file-name>i.folder{color:var(--accent)}

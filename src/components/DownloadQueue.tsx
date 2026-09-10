@@ -226,9 +226,10 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
         }));
         const hasChildren = !isCompleted && Boolean(taskChildren?.length);
         const taskName = displayTaskName(task);
-        const speed = task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed);
-        const eta = task.eta ?? (task.eta_seconds !== undefined ? formatEta(task.eta_seconds) : undefined);
-        const hasSpeed = task.speed !== undefined || task.speedBytes !== undefined || task.download_speed !== undefined;
+        const isPaused = task.status === 'paused';
+        const speed = !isPaused ? task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed) : undefined;
+        const eta = !isPaused ? task.eta ?? (task.eta_seconds !== undefined ? formatEta(task.eta_seconds) : undefined) : undefined;
+        const hasSpeed = !isPaused && (task.speed !== undefined || task.speedBytes !== undefined || task.download_speed !== undefined);
         const transferSize = task.total_length !== undefined || task.completed_length !== undefined ? transferProgress(task) : task.size;
         const subtitle = taskSubtitle(task);
         const primaryAction = task.status === 'downloading' ? 'pause' as const
@@ -245,8 +246,8 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
               <span className="task-copy"><b title={taskName}>{taskName}</b></span>
             </div>
-            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</span></div></div>}
-            <div className="task-actions">{!isCompleted && <em className={task.status}>{statusText[task.status]}</em>}
+            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</>}</span></div></div>}
+            <div className="task-actions">
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasVideo ? `播放 ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasVideo ? '播放视频' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasVideo ? 'play_videos' : 'open_directory'); }}><ActionIcon action={completedHasVideo ? 'play' : 'folder'} /></button>}
               {task.status === 'awaiting_user' && (task.kind === 'magnet' || task.kind === 'torrent') && onConfirm && <button aria-label={`确认下载 ${taskName}`} title="确认下载内容" onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认</button>}
               {primaryAction && <button aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} /></button>}

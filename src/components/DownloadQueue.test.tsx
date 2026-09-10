@@ -75,6 +75,36 @@ it('shows transferred bytes, live speed and ETA without exposing peer-count nois
   expect(screen.queryByText('99 个连接')).not.toBeInTheDocument();
 });
 
+it('replaces paused transfer estimates with a single paused label and no status pill', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'paused-transfer', name: 'episode.mkv', kind: 'file', status: 'paused', progress: 42,
+      completed_length: 42 * 1024 * 1024, total_length: 100 * 1024 * 1024,
+      download_speed: 329_700, eta_seconds: 921,
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('已暂停')).toBeVisible();
+  expect(screen.queryByText('剩余 15 分 21 秒')).not.toBeInTheDocument();
+  expect(screen.queryByText('322.0 KB/s')).not.toBeInTheDocument();
+  expect(screen.queryByText('失败')).not.toBeInTheDocument();
+});
+
+it('does not render a failure status pill in task rows', () => {
+  render(<DownloadQueue
+    tasks={[{ id: 'failed-transfer', name: 'archive.zip', kind: 'file', status: 'failed', progress: 30, error: '服务器拒绝连接' }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('服务器拒绝连接')).toBeVisible();
+  expect(screen.queryByText('失败')).not.toBeInTheDocument();
+});
+
 it('renders a completed video task compactly and plays its video files', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();
