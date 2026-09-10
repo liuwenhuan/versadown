@@ -332,6 +332,22 @@ it('offers real state-aware commands when an active task is right-clicked', asyn
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
 });
 
+it('offers cancellation for an invalid link left unsubmitted in parsing state', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{ id: 'invalid-link', name: '非法下载链接', source: 'not-a-download-link', kind: 'file', status: 'parsing', progress: 0 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('非法下载链接'));
+  await user.click(screen.getByRole('menuitem', { name: '取消任务' }));
+
+  expect(onCommand).toHaveBeenCalledWith('invalid-link', 'cancel');
+});
+
 it('keeps modifier-selected tasks together and exposes only batch-safe menu actions', async () => {
   const onSelect = vi.fn();
   const onBatchCommand = vi.fn();

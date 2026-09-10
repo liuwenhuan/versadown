@@ -506,6 +506,33 @@ pub(crate) fn list_tasks_with_cleanup_projection(
     list_tasks_with_cleanup_projection_for_scope(store, plans, None)
 }
 
+fn force_cancel_unsubmitted_task(
+    store: &TaskStore,
+    mut task: DownloadTask,
+) -> Result<DownloadTask, String> {
+    if task.aria_gid.is_some()
+        || !matches!(
+            task.status,
+            TaskStatus::Draft
+                | TaskStatus::Parsing
+                | TaskStatus::AwaitingUser
+                | TaskStatus::Queued
+                | TaskStatus::Downloading
+                | TaskStatus::Processing
+                | TaskStatus::Paused
+        )
+    {
+        return Err("当前任务不能强制取消".to_string());
+    }
+    task.status = TaskStatus::Cancelled;
+    task.download_speed = 0;
+    task.upload_speed = 0;
+    task.eta_seconds = None;
+    store
+        .apply_transfer_snapshot(task)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn task_action(
     task_id: String,
@@ -528,13 +555,12 @@ pub async fn task_action(
             duplicate: None,
         });
     }
-    let service = state
-        .runtime
-        .service()
-        .await
-        .map_err(|error| error.to_string())?;
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
+    if action == "cancel" && current.aria_gid.is_none() {
+        let task = force_cancel_unsubmitted_task(&state.store, current)?;
+        return task_action_outcome(&state.store, task, None);
+    }
     if action == "retry" {
         if !matches!(current.status, TaskStatus::Failed | TaskStatus::Cancelled) {
             return Err("当前任务不能重新下载".to_string());
@@ -553,6 +579,11 @@ pub async fn task_action(
         "cancel" => DownloadAction::Cancel,
         _ => return Err("当前任务不能执行此操作".to_string()),
     };
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| error.to_string())?;
     let task = service
         .control(id, action)
         .await
@@ -1262,6 +1293,23 @@ mod tests {
         cloud::{share::CloudShareEntry, share::CloudSharePlan, CloudProvider},
         DuplicateDownloadState, NewTask,
     };
+
+    #[test]
+    fn unsubmitted_active_task_can_be_force_cancelled_without_engine() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("not-a-download-link"))
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Parsing);
+        assert!(task.aria_gid.is_none());
+
+        let cancelled = force_cancel_unsubmitted_task(&store, task).unwrap();
+
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert_eq!(cancelled.download_speed, 0);
+        assert_eq!(cancelled.upload_speed, 0);
+        assert_eq!(store.find(cancelled.id).unwrap().status, TaskStatus::Cancelled);
+    }
 
     #[cfg(windows)]
     #[test]

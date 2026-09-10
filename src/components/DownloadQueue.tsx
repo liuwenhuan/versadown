@@ -145,7 +145,7 @@ function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: 
   commands.push({ command: 'open_directory', label: '打开下载目录', separated: commands.length > 0 });
   commands.push({ command: 'details', label: '查看任务详情' });
   if (task.source) commands.push({ command: 'copy_link', label: '复制下载链接' });
-  if (['downloading', 'paused', 'queued', 'awaiting_user'].includes(task.status)) commands.push({ command: 'cancel', label: '取消任务', danger: true, separated: true });
+  if (['draft', 'parsing', 'awaiting_user', 'queued', 'downloading', 'processing', 'paused'].includes(task.status)) commands.push({ command: 'cancel', label: '取消任务', danger: true, separated: true });
   if (task.status === 'recycled' || task.status === 'cancelled') commands.push({ command: 'remove_record', label: '彻底删除…', danger: true, separated: true });
   if (['completed', 'failed'].includes(task.status)) commands.push({ command: 'move_to_recycle', label: '移入回收站', danger: true, separated: true });
   return commands;
