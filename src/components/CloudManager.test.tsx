@@ -518,19 +518,22 @@ it('normalizes provider modified times in the list and details while preserving 
   const timestamp = 1_735_787_045_000;
   const date = new Date(timestamp);
   const localTimestamp = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+  const offsetDate = new Date('2025-01-02T03:04:05+08:00');
+  const localOffsetTimestamp = `${offsetDate.getFullYear()}-${String(offsetDate.getMonth() + 1).padStart(2, '0')}-${String(offsetDate.getDate()).padStart(2, '0')} ${String(offsetDate.getHours()).padStart(2, '0')}:${String(offsetDate.getMinutes()).padStart(2, '0')}:${String(offsetDate.getSeconds()).padStart(2, '0')}`;
   const client = createCloudFake({
     listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
       { id: 'seconds', parentId: '0', name: 'seconds.txt', kind: 'file', modifiedAt: String(timestamp / 1_000) },
       { id: 'milliseconds', parentId: '0', name: 'milliseconds.txt', kind: 'file', modifiedAt: String(timestamp) },
       { id: 'iso', parentId: '0', name: 'iso.txt', kind: 'file', modifiedAt: '2025-01-02T03:04:05.000Z' },
+      { id: 'iso-offset', parentId: '0', name: 'iso-offset.txt', kind: 'file', modifiedAt: '2025-01-02T03:04:05+08:00' },
       { id: 'date-only', parentId: '0', name: 'date-only.txt', kind: 'file', modifiedAt: '2025-06-07' },
       { id: 'minute', parentId: '0', name: 'minute.txt', kind: 'file', modifiedAt: '2025-06-07 08:09' },
       { id: 'tianyi', parentId: '0', name: 'tianyi.txt', kind: 'file', modifiedAt: '2025-06-07 08:09:10' },
       { id: 'dst-canonical', parentId: '0', name: 'dst-canonical.txt', kind: 'file', modifiedAt: '2025-03-09 02:30:00' },
-      { id: 'invalid-canonical', parentId: '0', name: 'invalid-canonical.txt', kind: 'file', modifiedAt: '2025-02-30 08:09:10' },
-      { id: 'invalid-time', parentId: '0', name: 'invalid-time.txt', kind: 'file', modifiedAt: '2025-99-99 99:99:99' },
-      { id: 'unknown', parentId: '0', name: 'unknown.txt', kind: 'file', modifiedAt: '昨天' },
-      { id: 'missing', parentId: '0', name: 'missing.txt', kind: 'file' }
+      { id: 'invalid-canonical', parentId: '0', name: 'invalid-canonical.txt', kind: 'file', size: 1024, modifiedAt: '2025-02-30 08:09:10' },
+      { id: 'invalid-time', parentId: '0', name: 'invalid-time.txt', kind: 'file', size: 1024, modifiedAt: '2025-99-99 99:99:99' },
+      { id: 'unknown', parentId: '0', name: 'unknown.txt', kind: 'file', size: 1024, modifiedAt: '昨天' },
+      { id: 'missing', parentId: '0', name: 'missing.txt', kind: 'file', size: 1024 }
     ] })
   });
   render(<CloudManager provider="tianyi" client={client} initialAccounts={[{ id: 't-1', displayName: 'alice', provider: 'tianyi', authMethod: 'web' }]} restoreOnMount={false} />);
@@ -539,6 +542,7 @@ it('normalizes provider modified times in the list and details while preserving 
   expect(within(tree).getByText('seconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
   expect(within(tree).getByText('milliseconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
   expect(within(tree).getByText('iso.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
+  expect(within(tree).getByText('iso-offset.txt').closest('[role="treeitem"]')).toHaveTextContent(localOffsetTimestamp);
   expect(within(tree).getByText('date-only.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 00:00:00');
   expect(within(tree).getByText('minute.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 08:09:00');
   expect(within(tree).getByText('tianyi.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 08:09:10');
