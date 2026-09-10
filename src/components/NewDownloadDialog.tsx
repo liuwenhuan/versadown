@@ -1,20 +1,24 @@
 import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ParseDownloadResult } from '../lib/types';
 
 export type NewDownloadDialogPlacement = 'launcher' | 'modal';
 
 export interface NewDownloadDialogProps {
   open: boolean;
   placement?: NewDownloadDialogPlacement;
-  onParse(input: string): void | Promise<void>;
+  onParse(input: string, accessCode?: string): void | Promise<ParseDownloadResult | void>;
   onClose(): void;
 }
 
 export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClose }: NewDownloadDialogProps) {
   const [input, setInput] = useState('');
+  const [accessCode, setAccessCode] = useState('');
+  const [accessCodePrompt, setAccessCodePrompt] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const accessCodeRef = useRef<HTMLInputElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
 
@@ -30,11 +34,19 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
   }, [open, placement]);
 
   useEffect(() => {
-    if (!open) { setIsSubmitting(false); setError(null); }
+    if (!open) { setIsSubmitting(false); setError(null); setAccessCode(''); setAccessCodePrompt(null); }
   }, [open]);
 
+  useEffect(() => {
+    if (accessCodePrompt) accessCodeRef.current?.focus();
+  }, [accessCodePrompt]);
+
   function requestClose() {
-    if (!isSubmitting) onCloseRef.current();
+    if (!isSubmitting) {
+      setAccessCode('');
+      setAccessCodePrompt(null);
+      onCloseRef.current();
+    }
   }
 
   async function submit(event: FormEvent) {
@@ -45,8 +57,15 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
     setIsSubmitting(true);
     setError(null);
     try {
-      await onParse(text);
+      const result = await onParse(text, accessCode.trim() || undefined);
+      if (result?.shareAccessCodeRequired) {
+        setAccessCodePrompt(result.shareAccessCodeRequired.message);
+        setIsSubmitting(false);
+        return;
+      }
       setInput('');
+      setAccessCode('');
+      setAccessCodePrompt(null);
       onCloseRef.current();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -82,7 +101,9 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
       <form onSubmit={submit} aria-busy={isSubmitting}>
         <label htmlFor="download-input">下载内容</label>
         <textarea ref={inputRef} id="download-input" value={input} disabled={isSubmitting} onChange={(event) => setInput(event.target.value)} placeholder="粘贴链接、分享地址、文本或网页地址" />
+        {accessCodePrompt && <label htmlFor="share-access-code">访问码<input ref={accessCodeRef} id="share-access-code" type="password" autoComplete="off" value={accessCode} disabled={isSubmitting} onChange={(event) => setAccessCode(event.target.value)} /></label>}
         <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>
+        {accessCodePrompt && <p role="status">{accessCodePrompt}</p>}
         {error && <p role="alert">{error}</p>}
         <button className="primary" type="submit" disabled={isSubmitting}>{isSubmitting ? '正在解析…' : '开始解析下载'}</button>
       </form>

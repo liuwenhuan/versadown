@@ -13,6 +13,15 @@ interface ParseConfirmDialogProps {
 
 type ResourceFilter = 'all' | 'video' | 'other';
 
+const cloudProviderLabels: Record<string, string> = {
+  quark: '夸克网盘', pikpak: 'PikPak', baidu: '百度网盘', tianyi: '天翼云盘', aliyun: '阿里云盘', xunlei: '迅雷网盘', uc: 'UC 网盘'
+};
+
+function cloudShareProvider(planSource: string): string | undefined {
+  if (!planSource.startsWith('cloud-share://')) return undefined;
+  return cloudProviderLabels[planSource.slice('cloud-share://'.length).split('/', 1)[0]];
+}
+
 function pathParts(value: string): string[] {
   return value.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').split('/').filter(Boolean);
 }
@@ -74,6 +83,7 @@ export function ParseConfirmDialog({ result, downloadDirectory, browseDirectory,
   const visibleResources = filter === 'all' ? resources : resources.filter((resource) => resourceCategory(resource) === filter);
   const allSelected = resources.length > 0 && selected.length === resources.length;
   const root = result.isBitTorrent ? torrentRoot(resources, downloadDirectory) : undefined;
+  const cloudProvider = cloudShareProvider(result.taskId);
   const taskTitle = root || (result.title && !result.title.startsWith('magnet:') ? result.title : (result.isBitTorrent ? 'BT 下载任务' : '下载内容'));
   const changeSelection = (resourceId: string) => {
     onSelectionChange(resources.map((item) => item.id === resourceId ? { ...item, selected: !item.selected } : item).filter((item) => item.selected).map((item) => item.id));
@@ -85,7 +95,7 @@ export function ParseConfirmDialog({ result, downloadDirectory, browseDirectory,
   };
   return <div className="modal-backdrop" role="presentation"><section className="confirm-dialog" role="dialog" aria-modal="true" aria-label="确认下载内容">
     <header><div className="confirm-dialog-title"><span aria-hidden="true">↓</span><h2>新建任务</h2></div><button aria-label="关闭确认窗口" onClick={onClose}>×</button></header>
-    <div className="parse-task-summary"><span className={`parse-task-icon${result.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{result.isBitTorrent ? 'BT' : '↓'}</span><div><strong title={taskTitle}>{taskTitle}</strong><p>{resources.length ? `已选 ${selected.length} / ${resources.length} 个文件` : '正在连接元数据服务…'}</p></div></div>
+    <div className="parse-task-summary"><span className={`parse-task-icon${result.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{result.isBitTorrent ? 'BT' : '↓'}</span><div><strong title={taskTitle}>{taskTitle}</strong><p>{resources.length ? `已选 ${selected.length} / ${resources.length} 个文件` : '正在连接元数据服务…'}</p>{cloudProvider && <p className="cloud-share-summary"><b>{cloudProvider}分享</b><span>必要时会自动转存后下载</span></p>}</div></div>
     <div className="parse-resource-card">
       {resources.length > 0 && <div className="parse-resource-toolbar">
         <label className="parse-select-all"><SelectAllCheckbox checked={allSelected} indeterminate={selected.length > 0 && !allSelected} onChange={toggleAll} /><span>全选</span></label>

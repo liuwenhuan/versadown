@@ -261,6 +261,7 @@ pub async fn confirm_cloud_share_download(
     app: AppHandle,
     plan_source: String,
     selected_ids: Vec<String>,
+    destination_directory: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<TaskActionOutcome>, crate::cloud::QuarkError> {
     let cloud = app
@@ -271,8 +272,8 @@ pub async fn confirm_cloud_share_download(
         &plan_source,
         &selected_ids,
     )?;
-    let configured =
-        download_submission_options(&state).map_err(crate::cloud::QuarkError::InvalidInput)?;
+    let configured = download_submission_options_for_directory(&state, destination_directory.as_deref())
+        .map_err(crate::cloud::QuarkError::InvalidInput)?;
     let mut outcomes = Vec::new();
     for source in sources {
         outcomes.push(

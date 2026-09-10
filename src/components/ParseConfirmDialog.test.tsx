@@ -48,6 +48,19 @@ it('keeps selection controls hidden while BitTorrent metadata is loading', () =>
   expect(screen.queryByRole('checkbox', { name: '全选文件' })).not.toBeInTheDocument();
 });
 
+it('identifies an opaque cloud share and explains that transfer happens automatically without exposing credentials', () => {
+  render(<ParseConfirmDialog
+    result={{ ...result, taskId: `cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}` }}
+    onConfirm={() => {}}
+    onSelectionChange={() => {}}
+    onClose={() => {}}
+  />);
+
+  expect(screen.getByText('百度网盘分享')).toBeVisible();
+  expect(screen.getByText('必要时会自动转存后下载')).toBeVisible();
+  expect(screen.queryByText('pass-123')).not.toBeInTheDocument();
+});
+
 it('uses the torrent root as the title, hides the local path, formats byte sizes, and lets the user choose this task destination', async () => {
   const user = userEvent.setup();
   const onConfirm = vi.fn();

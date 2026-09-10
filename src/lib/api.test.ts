@@ -45,6 +45,31 @@ it('maps an access-code requirement without creating a task', async () => {
   });
 });
 
+it('passes a transient access code only to the parse command', async () => {
+  native.invoke.mockResolvedValueOnce({
+    kind: 'access_code_required',
+    provider: 'baidu',
+    message: '请输入提取码后重新解析分享链接'
+  });
+  const { parseDownload } = await import('./api');
+
+  await parseDownload('https://pan.baidu.com/s/id', '1234');
+
+  expect(native.invoke).toHaveBeenCalledWith('parse_download', { input: 'https://pan.baidu.com/s/id', accessCode: '1234' });
+});
+
+it('sends opaque share plans to the cloud-share confirmation command', async () => {
+  native.invoke.mockResolvedValueOnce([]);
+  const { confirmCloudShareDownload } = await import('./api');
+
+  await confirmCloudShareDownload(`cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}`, ['f1']);
+
+  expect(native.invoke).toHaveBeenCalledWith('confirm_cloud_share_download', {
+    planSource: `cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}`,
+    selectedIds: ['f1']
+  });
+});
+
 it('maps the tagged native task outcome without changing direct downloads', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'task',

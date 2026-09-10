@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { SettingsPanel } from './SettingsPanel';
+import { defaultSettings } from "../lib/api";
 
 const initial = {
   debugReports: false,
@@ -9,13 +10,21 @@ const initial = {
   launcherVisibility: 'always' as const,
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
-  magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
+  magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+  deleteTransferredShareFilesAfterDownload: true
 };
 
 it('keeps detailed report collection off by default', () => {
   render(<SettingsPanel initial={initial} onChange={() => {}} />);
   expect(screen.getByRole('tab', { name: '显示' })).toHaveAttribute('aria-selected', 'true');
   expect(screen.queryByRole('checkbox', { name: '启用调试报告' })).not.toBeInTheDocument();
+});
+
+it('enables cleanup for application-created transfer files by default', () => {
+  render(<SettingsPanel initial={defaultSettings} onChange={() => {}} />);
+
+  expect(screen.getByLabelText('下载完成后自动删除转存文件')).toBeChecked();
+  expect(screen.getByText('仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。')).toBeVisible();
 });
 
 it('changes the interface theme from display settings', async () => {
@@ -137,6 +146,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     launcherVisibility: 'always',
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
-    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
+    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+    deleteTransferredShareFilesAfterDownload: true
   });
 });

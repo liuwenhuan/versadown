@@ -11,7 +11,7 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace } from './components/CloudWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateAiSettings, updateSettings } from './lib/api';
+import { confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
@@ -304,8 +304,8 @@ export function App() {
     return () => { disposed = true; unlisten?.(); };
   }, []);
 
-  async function parse(input: string) {
-    const result = await parseDownload(input);
+  async function parse(input: string, accessCode?: string) {
+    const result = await parseDownload(input, accessCode);
     if (result.task) { recordTaskEvent(result.task); setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
     if (result.confirmation) setConfirmation(result.confirmation);
     if (result.duplicate) {
@@ -343,6 +343,18 @@ export function App() {
 
   async function confirm(selectedIds: string[], destinationDirectory?: string) {
     if (!confirmation) return;
+    if (confirmation.taskId.startsWith('cloud-share://')) {
+      try {
+        const cloudTasks = await confirmCloudShareDownload(confirmation.taskId, selectedIds, destinationDirectory);
+        cloudTasks.forEach((cloudTask) => recordTaskEvent(cloudTask));
+        setTasks((current) => cloudTasks.reduce((next, cloudTask) => upsertTask(next, cloudTask), current));
+        setSelectedTaskId(cloudTasks.at(-1)?.id ?? null);
+        setConfirmation(null);
+      } catch (error) {
+        setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
     const task: QueueTask = {
       id: confirmation.taskId, name: '多文件下载任务', kind: 'folder', status: 'queued', progress: 0, speed: '等待开始',
       children: confirmation.resources.filter((resource) => selectedIds.includes(resource.id)).map((resource) => ({ id: resource.id, name: resource.name, kind: 'file', status: 'queued', progress: 0, size: resource.size }))
@@ -548,8 +560,8 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => setDuplicate(null)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" onParse={async (input) => {
-        await parse(input);
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" onParse={async (input, accessCode) => {
+        await parse(input, accessCode);
         setView('downloads');
         setDownloadTab('active');
       }} onClose={() => setNewDownloadOpen(false)} />

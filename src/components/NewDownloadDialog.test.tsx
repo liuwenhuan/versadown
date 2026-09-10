@@ -65,6 +65,29 @@ it('keeps the input open and reports a parsing failure', async () => {
   expect(screen.getByRole('button', { name: '开始解析下载' })).toBeEnabled();
 });
 
+it('keeps the share link open, focuses an access-code field, and resubmits the code when required', async () => {
+  const user = userEvent.setup();
+  const onParse = vi.fn()
+    .mockResolvedValueOnce({ shareAccessCodeRequired: { provider: 'baidu', message: '请输入提取码' } })
+    .mockResolvedValueOnce(undefined);
+  const onClose = vi.fn();
+  render(<NewDownloadDialog open placement="modal" onParse={onParse} onClose={onClose} />);
+
+  const shareLink = screen.getByLabelText('下载内容');
+  await user.type(shareLink, 'https://pan.baidu.com/s/example');
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  const accessCode = await screen.findByLabelText('访问码');
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+  expect(shareLink).toHaveValue('https://pan.baidu.com/s/example');
+  expect(accessCode).toHaveFocus();
+  expect(onClose).not.toHaveBeenCalled();
+
+  await user.type(accessCode, '1234');
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  await waitFor(() => expect(onParse).toHaveBeenLastCalledWith('https://pan.baidu.com/s/example', '1234'));
+});
+
 function ModalHost() {
   const [open, setOpen] = useState(false);
   return <><button onClick={() => setOpen(true)}>打开新建下载</button><NewDownloadDialog open={open} placement="modal" onParse={() => {}} onClose={() => setOpen(false)} /></>;

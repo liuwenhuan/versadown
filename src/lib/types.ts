@@ -145,4 +145,5 @@ export interface AppSettings {
   proxy: ProxySettings;
   ai: AiSettings;
   magnetMetadata: MagnetMetadataSettings;
+  deleteTransferredShareFilesAfterDownload: boolean;
 }

@@ -68,7 +68,7 @@ pub enum LauncherVisibility {
     Hidden,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub debug_reports: bool,
@@ -77,6 +77,26 @@ pub struct AppSettings {
     pub proxy: ProxySettings,
     pub ai: AiSettings,
     pub magnet_metadata: MagnetMetadataSettings,
+    #[serde(default = "default_delete_transferred_share_files_after_download")]
+    pub delete_transferred_share_files_after_download: bool,
+}
+
+const fn default_delete_transferred_share_files_after_download() -> bool {
+    true
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            debug_reports: false,
+            download_directory: String::new(),
+            launcher_visibility: LauncherVisibility::default(),
+            proxy: ProxySettings::default(),
+            ai: AiSettings::default(),
+            magnet_metadata: MagnetMetadataSettings::default(),
+            delete_transferred_share_files_after_download: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

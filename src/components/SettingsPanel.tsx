@@ -29,6 +29,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [proxy, setProxy] = useState(initial.proxy);
   const [ai, setAi] = useState<AiSettings>(initial.ai ?? disabledAiSettings);
   const [magnetMetadata, setMagnetMetadata] = useState<MagnetMetadataSettings>(initial.magnetMetadata ?? defaultMagnetMetadataSettings);
+  const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
   const [magnetMetadataSaved, setMagnetMetadataSaved] = useState(false);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
@@ -38,7 +39,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); }, [initial]);
+  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); }, [initial]);
 
   const currentAiInput = (): AiSettingsInput => ({
     enabled: ai.enabled,
@@ -49,7 +50,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   function updateDebugReports(enabled: boolean) {
     setDebugReports(enabled);
-    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata });
+    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
   }
 
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
@@ -59,7 +60,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   function saveProxy(event: FormEvent) {
     event.preventDefault();
-    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() }, ai, magnetMetadata });
+    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() }, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
     setSaved(true);
   }
 
@@ -67,12 +68,17 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     event.preventDefault();
     const normalized = downloadDirectory.trim();
     setDownloadDirectory(normalized);
-    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy, ai, magnetMetadata });
+    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
   }
 
   function updateLauncherVisibility(visibility: LauncherVisibility) {
     setLauncherVisibility(visibility);
-    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy, ai, magnetMetadata });
+    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
+  }
+
+  function updateTransferredShareCleanup(enabled: boolean) {
+    setDeleteTransferredShareFilesAfterDownload(enabled);
+    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload: enabled });
   }
 
   function updateThemeMode(mode: ThemeMode) {
@@ -113,7 +119,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     event.preventDefault();
     const savedMetadata = { ...magnetMetadata, baseUrl: magnetMetadata.baseUrl.trim() };
     setMagnetMetadata(savedMetadata);
-    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata: savedMetadata });
+    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata: savedMetadata, deleteTransferredShareFilesAfterDownload });
     setMagnetMetadataSaved(true);
   }
 
@@ -135,6 +141,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           <button className="primary" type="submit">保存下载目录</button>
         </form>
         <label className="setting-row"><span><b>悬浮球显示</b><small>“关闭显示”后仍可在这里重新开启。</small></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
+        <label className="setting-row"><span><b>下载完成后自动删除转存文件</b><small>仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。</small></span><input aria-label="下载完成后自动删除转存文件" type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
       </>}
       {activeTab === 'network' && <form className="proxy-settings" onSubmit={saveProxy}>
         <div className="setting-row"><span><b>下载代理服务器</b><small>启用后，后续新建任务将携带代理参数启动 aria2。</small></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>

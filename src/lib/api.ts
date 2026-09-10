@@ -58,9 +58,9 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
     : { task: result };
 }
 
-export async function parseDownload(input: string): Promise<ParseDownloadResult> {
+export async function parseDownload(input: string, accessCode?: string): Promise<ParseDownloadResult> {
   if (!isTauriRuntime()) return parseLocally(input);
-  const result = await invoke<NativeParseOutcome>('parse_download', { input });
+  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode });
   if (result.kind === 'share_confirmation') {
     return {
       confirmation: {
@@ -112,6 +112,11 @@ export async function openTaskDirectory(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_directory', { taskId });
 }
 
+export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<QueueTask[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<QueueTask[]>('confirm_cloud_share_download', { planSource, selectedIds, destinationDirectory });
+}
+
 export async function playTaskVideos(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('play_task_videos', { taskId });
 }
@@ -160,7 +165,8 @@ export const defaultSettings: AppSettings = {
   launcherVisibility: 'always',
   proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
-  magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }
+  magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+  deleteTransferredShareFilesAfterDownload: true
 };
 
 export async function getSettings(): Promise<AppSettings> {
