@@ -76,6 +76,29 @@ fn maps_provider_list_and_temporary_download_url_without_inventing_values() {
 }
 
 #[test]
+fn quark_directory_preserves_raw_updated_at_for_files_and_folders() {
+    // Break caught: dropping Quark's `updated_at` loses the modified-time
+    // display for ordinary files and folders in a directory response.
+    let body = r#"{"code":0,"data":{"list":[{"fid":"file-1","file_name":"movie.mkv","dir":false,"size":12,"updated_at":"2026-09-10T09:08:07Z"},{"fid":"folder-1","file_name":"Shows","dir":true,"size":0,"updated_at":1789031287}]},"metadata":{"_total":2}}"#;
+    let parsed = parse_quark_files(body).unwrap();
+    assert_eq!(parsed[0].updated_at.as_deref(), Some("2026-09-10T09:08:07Z"));
+    assert_eq!(parsed[1].updated_at.as_deref(), Some("1789031287"));
+
+    let http = SequencedHttp::new([body]);
+    let directory = QuarkClient::new("sid=local-session".into(), &http)
+        .directory("0")
+        .unwrap();
+    let file = directory.items.iter().find(|item| item.id == "file-1").unwrap();
+    let folder = directory
+        .items
+        .iter()
+        .find(|item| item.id == "folder-1")
+        .unwrap();
+    assert_eq!(file.modified_at.as_deref(), Some("2026-09-10T09:08:07Z"));
+    assert_eq!(folder.modified_at.as_deref(), Some("1789031287"));
+}
+
+#[test]
 fn provider_body_expiry_is_not_treated_as_success() {
     struct Expired;
     impl CloudHttpTransport for Expired {

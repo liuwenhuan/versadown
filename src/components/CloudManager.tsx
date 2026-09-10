@@ -128,6 +128,37 @@ function readableSize(size?: number) {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+function isValidDateTime(year: number, month: number, day: number, hour: number, minute: number, second: number) {
+  if (year < 1 || year > 9_999 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
+}
+
+function formatLocalCloudDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(value);
+  if (!match) return null;
+  const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
+  if (!isValidDateTime(Number(year), Number(month), Number(day), Number(hour), Number(minute), Number(second))) return null;
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
+function formatCloudModifiedAt(value: unknown) {
+  if (typeof value === 'string') {
+    const localDate = formatLocalCloudDate(value);
+    if (localDate) return localDate;
+  }
+
+  const numericValue = typeof value === 'number' ? value : typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+  const isoMatch = typeof value === 'string' ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.exec(value) : null;
+  const timestamp = Number.isFinite(numericValue)
+    ? Math.abs(numericValue) < 100_000_000_000 ? numericValue * 1_000 : numericValue
+    : isoMatch && isValidDateTime(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]), Number(isoMatch[4]), Number(isoMatch[5]), Number(isoMatch[6] ?? '0')) ? Date.parse(isoMatch[0]) : NaN;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+}
+
 function CloudFileIcon({ kind }: { kind: CloudFile['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{kind === 'folder'
     ? <><path d="M3.5 7.5h6l1.8 2h10.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.1l1.8 2h6.7a2.2 2.2 0 0 1 2.2 2.2v1.8" /></>
@@ -289,7 +320,7 @@ function CloudFileDetails({ file, path, onClose }: { file: CloudFile; path: stri
   return createPortal(<div className="cloud-confirm-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section ref={dialogRef} className="cloud-file-details" role="dialog" aria-modal="true" aria-label="文件详情">
       <header><span className={`cloud-details-icon ${file.kind}`}><CloudFileIcon kind={file.kind} /></span><div><h3>{file.name}</h3><small>{file.kind === 'folder' ? '文件夹' : '文件'}</small></div><button ref={closeRef} className="cloud-details-close" aria-label="关闭文件详情" onClick={onClose}>×</button></header>
-      <dl><div><dt>位置</dt><dd>{path}</dd></div>{file.kind === 'file' && <div><dt>大小</dt><dd>{readableSize(file.size)}</dd></div>}<div><dt>修改时间</dt><dd>{file.modifiedAt ?? '—'}</dd></div></dl>
+      <dl><div><dt>位置</dt><dd>{path}</dd></div>{file.kind === 'file' && <div><dt>大小</dt><dd>{readableSize(file.size)}</dd></div>}<div><dt>修改时间</dt><dd>{formatCloudModifiedAt(file.modifiedAt)}</dd></div></dl>
     </section>
   </div>, document.body);
 }
@@ -815,7 +846,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
           <span className="cloud-check-cell"><input type="checkbox" aria-label={`选择 ${item.name}`} checked={isSelected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelection(item.id)} /></span>
           <span className="cloud-file-name"><i className={item.kind}><CloudFileIcon kind={item.kind} /></i><b title={item.name}>{item.name}</b></span>
           <span>{item.kind === 'folder' ? '—' : readableSize(item.size)}</span>
-          <span>{item.modifiedAt ?? '—'}</span>
+          <span>{formatCloudModifiedAt(item.modifiedAt)}</span>
         </div>;
       })}
     </div>}
