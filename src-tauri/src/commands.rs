@@ -467,12 +467,68 @@ fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::
         .ok_or_else(|| "下载文件已不存在，无法打开所在目录".to_string())
 }
 
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "3gp", "asf", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts",
+    "ts", "webm", "wmv",
+];
+
+fn is_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+}
+
+fn task_video_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, String> {
+    Ok(store
+        .files(task_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|file| file.selected)
+        .map(|file| PathBuf::from(file.path))
+        .filter(|path| path.is_file() && is_video_path(path))
+        .collect())
+}
+
+fn video_playlist_path(task_id: Uuid, videos: &[PathBuf]) -> Result<PathBuf, String> {
+    let directory = std::env::temp_dir().join("AllDownloader").join("playlists");
+    fs::create_dir_all(&directory).map_err(|error| format!("无法准备播放列表目录：{error}"))?;
+    let playlist = directory.join(format!("{task_id}-{}.m3u", Uuid::new_v4()));
+    let entries = videos
+        .iter()
+        .map(|path| path.to_string_lossy().replace(['\r', '\n'], ""))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    fs::write(&playlist, format!("#EXTM3U\r\n{entries}\r\n"))
+        .map_err(|error| format!("无法创建视频播放列表：{error}"))?;
+    Ok(playlist)
+}
+
 #[tauri::command]
 pub fn open_task_directory(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let directory = task_output_directory(&state.store, id)?;
     tauri_plugin_opener::open_path(&directory, None::<&str>)
         .map_err(|error| format!("无法打开下载目录：{error}"))
+}
+
+#[tauri::command]
+pub fn play_task_videos(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let task = state.store.find(id).map_err(|error| error.to_string())?;
+    if task.status != TaskStatus::Completed {
+        return Err("仅已完成任务可以播放视频".to_string());
+    }
+    let videos = task_video_paths(&state.store, id)?;
+    if videos.is_empty() {
+        return Err("此任务中没有可播放的视频文件".to_string());
+    }
+    let target = if videos.len() == 1 {
+        videos.into_iter().next().expect("checked non-empty")
+    } else {
+        video_playlist_path(id, &videos)?
+    };
+    tauri_plugin_opener::open_path(&target, None::<&str>)
+        .map_err(|error| format!("无法调用系统默认播放器：{error}"))
 }
 
 #[tauri::command]
@@ -833,6 +889,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(task_output_directory(&store, task.id).unwrap(), root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_existing_video_files_are_collected_for_default_playback() {
+        let root = std::env::temp_dir().join(format!("task-videos-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let video = root.join("episode.MKV");
+        let document = root.join("notes.txt");
+        let skipped_video = root.join("trailer.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        std::fs::write(&document, b"notes").unwrap();
+        std::fs::write(&skipped_video, b"trailer").unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/episode.MKV"))
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[
+                    (0, video.to_string_lossy().into_owned(), 5, 5, true),
+                    (1, document.to_string_lossy().into_owned(), 5, 5, true),
+                    (2, skipped_video.to_string_lossy().into_owned(), 7, 0, false),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(task_video_paths(&store, task.id).unwrap(), vec![video]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

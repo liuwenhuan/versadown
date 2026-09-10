@@ -11,7 +11,7 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace } from './components/CloudWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateAiSettings, updateSettings } from './lib/api';
+import { confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
@@ -388,6 +388,10 @@ export function App() {
       }
       if (command === 'open_directory') {
         await openTaskDirectory(id);
+        return;
+      }
+      if (command === 'play_videos') {
+        await playTaskVideos(id);
         return;
       }
       if (command === 'copy_link') {

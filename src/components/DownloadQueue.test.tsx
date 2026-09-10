@@ -75,6 +75,51 @@ it('shows transferred bytes, live speed and ETA without exposing peer-count nois
   expect(screen.queryByText('99 个连接')).not.toBeInTheDocument();
 });
 
+it('renders a completed video task compactly and plays its video files', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'completed-video', name: '纪录片合集', kind: 'torrent', status: 'completed', progress: 100,
+      updated_at: 1_788_998_400,
+      files: [
+        { index: 1, path: 'D:/Downloads/documentary.mp4', length: 1_073_741_824, completed_length: 1_073_741_824, selected: true },
+        { index: 2, path: 'D:/Downloads/notes.txt', length: 524_288, completed_length: 524_288, selected: true },
+      ],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  expect(screen.getByText('完成于 2026-09-10 08:00')).toBeVisible();
+  expect(screen.getByText('1.0 GB')).toBeVisible();
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  expect(screen.queryByText('已完成')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '播放 纪录片合集' }));
+  expect(onCommand).toHaveBeenCalledWith('completed-video', 'play_videos');
+});
+
+it('opens the download directory for a completed task without video files', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'completed-archive', name: 'archive.zip', kind: 'file', status: 'completed', progress: 100,
+      updated_at: 1_788_998_400,
+      files: [{ index: 1, path: 'D:/Downloads/archive.zip', length: 1_572_864, completed_length: 1_572_864, selected: true }],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  expect(screen.getByText('1.5 MB')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '打开 archive.zip 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith('completed-archive', 'open_directory');
+});
+
 it('keeps destructive cancellation in the menu while the row exposes pause and more actions', async () => {
   const user = userEvent.setup();
   render(<DownloadQueue

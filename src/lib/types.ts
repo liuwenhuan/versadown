@@ -1,7 +1,7 @@
 export type TaskStatus = 'draft' | 'parsing' | 'awaiting_user' | 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'recycled' | 'paused';
 export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'cloud';
 export type DuplicateDownloadState = 'existing_active' | 'resume_available' | 'completed_files_present' | 'completed_files_missing' | 'overwrite_required';
-export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'open_directory' | 'copy_link' | 'details' | 'move_to_recycle' | 'remove_record';
+export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'open_directory' | 'play_videos' | 'copy_link' | 'details' | 'move_to_recycle' | 'remove_record';
 
 export interface QueueTask {
   id: string;
@@ -26,6 +26,7 @@ export interface QueueTask {
   total_length?: number;
   completed_length?: number;
   aria_error_code?: string;
+  updated_at?: number;
   files?: readonly DownloadFile[];
   file_index?: number;
   selected?: boolean;

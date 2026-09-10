@@ -139,6 +139,17 @@ button,input,textarea{font:inherit}button{color:inherit}
 @media(max-width:760px){.app-header{height:64px;padding-left:12px}.brand{width:auto;flex-basis:auto}.brand h1{display:none}.global-search{min-width:120px}.new-download{font-size:0}.new-download span{font-size:22px}.window-controls button{width:34px}.workspace{height:calc(100vh - 64px);grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.workspace.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr);grid-template-rows:unset}nav{flex-direction:row;padding:8px 12px;border-right:0;border-bottom:1px solid var(--border)}nav button{min-height:42px;flex:1;grid-template-columns:28px auto;justify-content:center;padding:0 7px}nav button b,nav small{display:none}.download-tabs{height:56px;flex-basis:56px;padding:0 16px}.workspace-tab-list button{height:56px;font-size:15px}.bulk-pause{height:30px;font-size:11px}.task-row{min-height:82px;padding:10px 16px}.kind-icon{width:42px;height:42px}.task-progress{margin-left:0}.transfer-live{gap:10px}.transfer-live span+span::before{margin-right:10px}.task-actions em{display:none}.children{margin-left:12px}.child-row{grid-template-columns:minmax(0,1fr) 68px}.child-progress{grid-column:1/-1}.task-details dl{grid-template-columns:1fr}.launcher-panel{right:12px;bottom:12px;width:calc(100vw - 24px)}}
 @media(max-width:840px){.cloud-provider-auths{grid-template-columns:minmax(0,1fr)}.cloud-provider-auths .cloud-login-form{grid-template-columns:minmax(0,1fr)}.cloud-provider-auths .cloud-login-form>*{grid-column:1/-1}.cloud-authorization-center{gap:14px}.cloud-provider-auths .cloud-manager{padding:18px}}
 .cloud-file-manager{border:0;border-radius:0;background:transparent}
+
+/* Terminal tasks have a compact, metadata-only row instead of transfer telemetry. */
+.download-queue{border-radius:12px}
+.task-row.completed-task{min-height:64px;grid-template-areas:"expand icon name actions" "expand icon completed actions";padding-top:8px;padding-bottom:8px}
+.completed-task .task-copy{align-self:end}
+.completed-task .kind-icon{width:42px;height:42px}
+.completed-summary{display:flex;grid-area:completed;align-items:center;gap:12px;min-width:0;color:var(--muted);font-size:11px;white-space:nowrap}
+.completed-summary strong{color:var(--muted);font-size:11px;font-weight:600}
+.completed-summary span{overflow:hidden;text-overflow:ellipsis}
+.completed-task .task-actions{gap:8px}
+.completed-task .completed-quick-action{width:34px;height:34px}
 .cloud-filebar{display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--surface)}
 .cloud-pathbar{min-width:220px;flex:1}.cloud-filebar .cloud-toolbar{flex:0 0 auto}.cloud-filebar .cloud-refresh-button{margin-left:4px}
 .cloud-file-name>i.folder{color:var(--accent)}

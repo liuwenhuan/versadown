@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { QueueTask, TaskCommand, TaskStatus } from '../lib/types';
-import { formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
+import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
 
 interface DownloadQueueProps {
   tasks: readonly QueueTask[];
@@ -36,6 +36,39 @@ export function displayTaskName(task: QueueTask): string {
   return candidate || '未命名下载任务';
 }
 
+const videoExtensions = new Set(['3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'ts', 'webm', 'wmv']);
+
+function hasVideoExtension(path: string): boolean {
+  const extension = path.trim().split(/[?#]/, 1)[0].split('.').pop()?.toLowerCase();
+  return extension !== undefined && videoExtensions.has(extension);
+}
+
+export function taskHasVideo(task: QueueTask): boolean {
+  const files = task.files?.filter((file) => file.selected !== false) ?? [];
+  if (files.length) return files.some((file) => hasVideoExtension(file.path));
+  return [task.name, ...(task.children?.map((child) => child.name) ?? [])].some(hasVideoExtension);
+}
+
+export function completedTaskSize(task: QueueTask): string | undefined {
+  const files = task.files?.filter((file) => file.selected !== false) ?? [];
+  if (files.length) {
+    const downloaded = files.reduce((total, file) => total + (file.completed_length > 0 ? file.completed_length : file.length), 0);
+    return downloaded > 0 ? formatBytes(downloaded) : undefined;
+  }
+  const downloaded = task.completed_length && task.completed_length > 0
+    ? task.completed_length
+    : task.total_length && task.total_length > 0 ? task.total_length : undefined;
+  return downloaded !== undefined ? formatBytes(downloaded) : undefined;
+}
+
+export function completedAt(updatedAt: number | undefined): string | undefined {
+  if (!Number.isFinite(updatedAt) || !updatedAt || updatedAt <= 0) return undefined;
+  const date = new Date(updatedAt < 1_000_000_000_000 ? updatedAt * 1000 : updatedAt);
+  if (Number.isNaN(date.getTime())) return undefined;
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `完成于 ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function taskSubtitle(task: QueueTask): string | undefined {
   if (task.error) return task.error;
   if (task.statusMessage) return task.statusMessage;
@@ -53,12 +86,14 @@ function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 
-function ActionIcon({ action }: { action: 'pause' | 'resume' | 'retry' | 'more' }) {
+function ActionIcon({ action }: { action: 'pause' | 'resume' | 'retry' | 'play' | 'folder' | 'more' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause'
     ? <><path d="M8 5v14" /><path d="M16 5v14" /></>
     : action === 'resume' ? <path d="m9 6 9 6-9 6z" />
       : action === 'retry' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
-        : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
+        : action === 'play' ? <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>
+          : action === 'folder' ? <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>
+            : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
 }
 
 interface ContextMenuState { task: QueueTask; x: number; y: number }
@@ -99,6 +134,7 @@ function MenuIcon({ command }: { command: TaskCommand }) {
     pause: <><path d="M8 5v14" /><path d="M16 5v14" /></>, resume: <path d="m9 6 9 6-9 6z" />,
     cancel: <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>, retry: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     open_directory: <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>,
+    play_videos: <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>,
     copy_link: <><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
     details: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5M12 8h.01" /></>,
     move_to_recycle: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="M18.5 4.5 20 6" /></>,
@@ -177,6 +213,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
       <div className="queue-heading"><span>任务</span><span>进度</span><span>状态</span></div>
       {tasks.length === 0 ? <p className="queue-empty">还没有下载任务</p> : tasks.map((task) => {
         const isExpanded = expanded[task.id] ?? false;
+        const isCompleted = task.status === 'completed';
         const taskChildren = task.children?.length ? task.children : task.files?.map((file) => ({
           id: `${task.id}-file-${file.index}`,
           name: file.path,
@@ -187,7 +224,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
           file_index: file.index,
           selected: file.selected,
         }));
-        const hasChildren = Boolean(taskChildren?.length);
+        const hasChildren = !isCompleted && Boolean(taskChildren?.length);
         const taskName = displayTaskName(task);
         const speed = task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed);
         const eta = task.eta ?? (task.eta_seconds !== undefined ? formatEta(task.eta_seconds) : undefined);
@@ -198,15 +235,19 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
           : task.status === 'paused' ? 'resume' as const
             : task.status === 'failed' ? 'retry' as const : null;
         const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : '重新下载';
+        const completedSize = isCompleted ? completedTaskSize(task) : undefined;
+        const completionTime = isCompleted ? completedAt(task.updated_at) : undefined;
+        const completedHasVideo = isCompleted && taskHasVideo(task);
         return <div className="task-group" key={task.id}>
-          <article className={`task-row ${hasChildren ? 'has-children' : ''} ${selectedTaskId === task.id ? 'selected' : ''}`} onClick={() => onSelect(task.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
+          <article className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskId === task.id ? 'selected' : ''}`} onClick={() => onSelect(task.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
               <span className="task-copy"><b title={taskName}>{taskName}</b></span>
             </div>
-            <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</span></div></div>
-            <div className="task-actions"><em className={task.status}>{statusText[task.status]}</em>
+            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</span></div></div>}
+            <div className="task-actions">{!isCompleted && <em className={task.status}>{statusText[task.status]}</em>}
+              {isCompleted && <button className="completed-quick-action" aria-label={completedHasVideo ? `播放 ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasVideo ? '播放视频' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasVideo ? 'play_videos' : 'open_directory'); }}><ActionIcon action={completedHasVideo ? 'play' : 'folder'} /></button>}
               {task.status === 'awaiting_user' && (task.kind === 'magnet' || task.kind === 'torrent') && onConfirm && <button aria-label={`确认下载 ${taskName}`} title="确认下载内容" onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认</button>}
               {primaryAction && <button aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} /></button>}
               <button className="task-more-button" aria-label={`更多操作 ${taskName}`} title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>

@@ -77,6 +77,10 @@ export async function openTaskDirectory(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_directory', { taskId });
 }
 
+export async function playTaskVideos(taskId: string): Promise<void> {
+  if (isTauriRuntime()) await invoke('play_task_videos', { taskId });
+}
+
 export async function resolveDuplicateDownload(taskId: string, action: 'resume' | 'restart_missing' | 'overwrite'): Promise<QueueTask | undefined> {
   return isTauriRuntime() ? invoke<QueueTask>('resolve_duplicate_download', { taskId, action }) : undefined;
 }
