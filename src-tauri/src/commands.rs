@@ -688,7 +688,11 @@ fn aggregate_cloud_directory_root(
         .iter()
         .filter_map(|item| item.total_length)
         .sum::<u64>();
-    let completed_length = leaves.iter().map(|item| item.completed_length).sum::<u64>();
+    let completed_length = leaves
+        .iter()
+        .filter(|item| item.total_length.is_some())
+        .map(|item| item.completed_length)
+        .sum::<u64>();
     let progress = if total_length == 0 {
         u8::from(status == TaskStatus::Completed) * 100
     } else {
@@ -1792,6 +1796,72 @@ mod tests {
                 .unwrap();
         assert_eq!(terminal_scope.len(), 1);
         assert_eq!(terminal_scope[0].status, TaskStatus::Failed);
+    }
+
+    #[test]
+    fn cloud_directory_group_projection_ignores_unknown_size_progress() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Baidu,
+                    "remote-directory",
+                    "Unknown size",
+                    "C:\\Downloads",
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new(
+                        "known",
+                        &[] as &[&str],
+                        "known.bin",
+                        Some(100),
+                    ),
+                    NewCloudDirectoryGroupItem::new(
+                        "unknown",
+                        &[] as &[&str],
+                        "unknown.bin",
+                        None,
+                    ),
+                ],
+            )
+            .unwrap();
+        let items = store.cloud_directory_group_items(group.id).unwrap();
+        let known = store.create(NewTask::direct("https://example.test/known")).unwrap();
+        let known = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(100),
+                completed_length: 25,
+                progress: 25,
+                status: TaskStatus::Downloading,
+                ..known
+            })
+            .unwrap();
+        let unknown = store
+            .create(NewTask::direct("https://example.test/unknown"))
+            .unwrap();
+        let unknown = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: None,
+                completed_length: 900,
+                progress: 0,
+                status: TaskStatus::Downloading,
+                ..unknown
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[0].id, known.id)
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[1].id, unknown.id)
+            .unwrap();
+
+        let projected = project_cloud_directory_groups(&store, store.list().unwrap(), Some("active"))
+            .unwrap();
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].total_length, Some(100));
+        assert_eq!(projected[0].completed_length, 25);
+        assert_eq!(projected[0].progress, 25);
     }
 
     #[test]
