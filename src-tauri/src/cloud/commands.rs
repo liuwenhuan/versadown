@@ -839,6 +839,9 @@ fn list_cloud_directory(
     http: &impl CloudHttpTransport,
     parent_id: &str,
 ) -> Result<CloudDirectory, QuarkError> {
+    if is_provider_recycle_bin(provider, parent_id) {
+        return list_provider_recycle_bin(provider, store, http);
+    }
     match provider {
         CloudProvider::Quark => QuarkClient::new(cookie(store)?, http).directory(parent_id),
         CloudProvider::Pikpak => PikPakClient::new(http, store).list(parent_id),
@@ -857,6 +860,181 @@ fn list_cloud_directory(
         CloudProvider::Uc => {
             uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, http)
                 .directory(parent_id)
+        }
+    }
+}
+
+fn is_provider_recycle_bin(provider: CloudProvider, directory_id: &str) -> bool {
+    match provider {
+        CloudProvider::Quark => directory_id == QUARK_RECYCLE_BIN_ID,
+        CloudProvider::Pikpak => directory_id == PIKPAK_RECYCLE_BIN_ID,
+        CloudProvider::Baidu => directory_id == baidu::BAIDU_RECYCLE_BIN_ID,
+        CloudProvider::Tianyi => directory_id == tianyi::TIANYI_RECYCLE_BIN_ID,
+        CloudProvider::Aliyun => directory_id == aliyun::ALIYUN_RECYCLE_BIN_ID,
+        CloudProvider::Xunlei => directory_id == xunlei::XUNLEI_RECYCLE_BIN_ID,
+        CloudProvider::Uc => directory_id == uc::UC_RECYCLE_BIN_ID,
+    }
+}
+
+fn list_provider_recycle_bin(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<CloudDirectory, QuarkError> {
+    match provider {
+        CloudProvider::Quark => QuarkClient::new(cookie(store)?, http).list_recycle_bin(),
+        CloudProvider::Pikpak => PikPakClient::new(http, store).list(PIKPAK_RECYCLE_BIN_ID),
+        CloudProvider::Baidu => baidu::BaiduClient::new(
+            load_provider_session(CloudProvider::Baidu, store)?,
+            http,
+        )
+        .list_recycle_bin(),
+        CloudProvider::Tianyi => tianyi::TianyiClient::new(
+            load_provider_session(CloudProvider::Tianyi, store)?,
+            http,
+        )
+        .list_recycle_bin(),
+        CloudProvider::Aliyun => aliyun::AliyunClient::new(store, http).list_recycle_bin(),
+        CloudProvider::Xunlei => with_xunlei_client(store, http, |client| client.list_recycle_bin()),
+        CloudProvider::Uc => uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, store)?,
+            http,
+        )
+        .list_recycle_bin(),
+    }
+}
+
+fn validate_recycle_entry_ids(
+    file_ids: &[String],
+    recycle_bin: &CloudDirectory,
+) -> Result<(), QuarkError> {
+    if file_ids.is_empty() {
+        return Err(QuarkError::InvalidInput("请选择至少一个回收站项目".into()));
+    }
+    let entries = recycle_bin
+        .items
+        .iter()
+        .filter(|item| item.parent_id == recycle_bin.id)
+        .map(|item| item.id.as_str())
+        .collect::<HashSet<_>>();
+    if file_ids.iter().any(|id| id.trim().is_empty() || !entries.contains(id.as_str())) {
+        return Err(QuarkError::InvalidInput(
+            "只能操作当前网盘回收站中的项目".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn restore_provider_recycle_entries(
+    provider: CloudProvider,
+    store: &DpapiCredentialStore,
+    http: &impl CloudHttpTransport,
+    file_ids: &[String],
+) -> Result<(), QuarkError> {
+    match provider {
+        CloudProvider::Quark => {
+            let client = QuarkClient::new(cookie(store)?, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }
+        CloudProvider::Pikpak => {
+            let client = PikPakClient::new(http, store);
+            let recycle_bin = client.list(PIKPAK_RECYCLE_BIN_ID)?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }
+        CloudProvider::Baidu => {
+            let client = baidu::BaiduClient::new(
+                load_provider_session(CloudProvider::Baidu, store)?,
+                http,
+            );
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }
+        CloudProvider::Tianyi => {
+            let client = tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, store)?,
+                http,
+            );
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }
+        CloudProvider::Aliyun => {
+            let client = aliyun::AliyunClient::new(store, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }
+        CloudProvider::Xunlei => with_xunlei_client(store, http, |client| {
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }),
+        CloudProvider::Uc => {
+            let client = uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }
+    }
+}
+
+fn delete_provider_recycle_entries(
+    provider: CloudProvider,
+    store: &DpapiCredentialStore,
+    http: &impl CloudHttpTransport,
+    file_ids: &[String],
+) -> Result<(), QuarkError> {
+    match provider {
+        CloudProvider::Quark => {
+            let client = QuarkClient::new(cookie(store)?, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete_recycle_entries(file_ids)
+        }
+        CloudProvider::Pikpak => {
+            let client = PikPakClient::new(http, store);
+            let recycle_bin = client.list(PIKPAK_RECYCLE_BIN_ID)?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete(file_ids)
+        }
+        CloudProvider::Baidu => {
+            let client = baidu::BaiduClient::new(
+                load_provider_session(CloudProvider::Baidu, store)?,
+                http,
+            );
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete_recycle_entries(file_ids)
+        }
+        CloudProvider::Tianyi => {
+            let client = tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, store)?,
+                http,
+            );
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete_recycle_entries(file_ids)
+        }
+        CloudProvider::Aliyun => {
+            let client = aliyun::AliyunClient::new(store, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete_recycle_entries(file_ids)
+        }
+        CloudProvider::Xunlei => with_xunlei_client(store, http, |client| {
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete_recycle_entries(file_ids)
+        }),
+        CloudProvider::Uc => {
+            let client = uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete_recycle_entries(file_ids)
         }
     }
 }
@@ -1445,15 +1623,22 @@ pub async fn cloud_delete(
         app,
         provider,
         SessionWorkKind::Mutation,
-        move |s, h| match provider {
-            // The UI only exposes this operation while browsing PikPak's virtual
-            // recycle-bin directory. Other providers keep their non-destructive
-            // `cloud_trash` behaviour.
-            CloudProvider::Pikpak => PikPakClient::new(h, &s.store).delete(&file_ids),
-            _ => Err(QuarkError::InvalidInput(
-                "只有 PikPak 回收站中的项目可以永久删除".into(),
-            )),
-        },
+        move |s, h| delete_provider_recycle_entries(provider, &s.store, h, &file_ids),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn cloud_restore(
+    app: AppHandle,
+    provider: CloudProvider,
+    file_ids: Vec<String>,
+) -> Result<(), QuarkError> {
+    run_session_work(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| restore_provider_recycle_entries(provider, &s.store, h, &file_ids),
     )
     .await
 }
@@ -2337,6 +2522,35 @@ mod tests {
         QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
+
+    #[test]
+    fn recycle_directory_ids_route_to_provider_recycle_lists() {
+        assert!(super::is_provider_recycle_bin(
+            CloudProvider::Quark,
+            super::QUARK_RECYCLE_BIN_ID,
+        ));
+        assert!(super::is_provider_recycle_bin(
+            CloudProvider::Uc,
+            crate::cloud::uc::UC_RECYCLE_BIN_ID,
+        ));
+    }
+
+    #[test]
+    fn non_recycle_file_ids_are_rejected_by_permanent_delete() {
+        let recycle_bin = crate::cloud::CloudDirectory {
+            id: super::PIKPAK_RECYCLE_BIN_ID.into(),
+            items: vec![crate::cloud::CloudFile {
+                id: "recycle-record".into(),
+                parent_id: super::PIKPAK_RECYCLE_BIN_ID.into(),
+                name: "deleted.txt".into(),
+                kind: "file".into(),
+                size: None,
+                modified_at: None,
+            }],
+        };
+
+        assert!(super::validate_recycle_entry_ids(&["normal-file".into()], &recycle_bin).is_err());
+    }
 
     #[test]
     fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secrets() {
@@ -3613,9 +3827,6 @@ pub async fn cloud_upload_files(
     parent_id: String,
     paths: Option<Vec<String>>,
 ) -> Result<Vec<CloudFile>, QuarkError> {
-    if matches!(provider, CloudProvider::Quark | CloudProvider::Uc) {
-        return Err(QuarkError::UploadUnavailable);
-    }
     let picker = app.clone();
     let provider_label = match provider {
         CloudProvider::Quark => "夸克",
@@ -3654,9 +3865,15 @@ pub async fn cloud_upload_files(
         let mut files = Vec::new();
         for path in paths {
             let file = match provider {
-                CloudProvider::Quark | CloudProvider::Uc => {
-                    return Err(QuarkError::UploadUnavailable)
-                }
+                CloudProvider::Quark => s.with_provider(CloudProvider::Quark, |store| {
+                    run_cloud_work(
+                        CloudProvider::Quark,
+                        SessionWorkKind::Mutation,
+                        store,
+                        &h,
+                        || QuarkClient::new(cookie(store)?, &h).upload_file(&parent_id, &path, &h),
+                    )
+                })?,
                 // PikPak uploads hold provider state only around session refresh
                 // and initialization; its OSS byte transfer remains outside that lock.
                 // Do not hold that lock around the generic recovery callback,
@@ -3728,6 +3945,21 @@ pub async fn cloud_upload_files(
                             let file = client.upload_file(&parent_id, &path)?;
                             save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
                             Ok(file)
+                        },
+                    )
+                })?,
+                CloudProvider::Uc => s.with_provider(CloudProvider::Uc, |store| {
+                    run_cloud_work(
+                        CloudProvider::Uc,
+                        SessionWorkKind::Mutation,
+                        store,
+                        &h,
+                        || {
+                            uc::UcClient::new(
+                                load_provider_session(CloudProvider::Uc, store)?,
+                                &h,
+                            )
+                            .upload_file(&parent_id, &path, &h)
                         },
                     )
                 })?,
