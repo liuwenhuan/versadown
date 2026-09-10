@@ -1,4 +1,4 @@
-use super::{CloudProvider, CredentialStore, QuarkError};
+use super::{provider_capabilities, CloudProvider, CredentialStore, PasswordLoginMode, QuarkError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
@@ -16,13 +16,11 @@ pub struct CloudSessionPolicy {
     pub supports_password_fallback: bool,
 }
 
-pub const fn cloud_session_policy(provider: CloudProvider) -> CloudSessionPolicy {
+pub fn cloud_session_policy(provider: CloudProvider) -> CloudSessionPolicy {
     CloudSessionPolicy {
         provider,
-        supports_password_fallback: matches!(
-            provider,
-            CloudProvider::Pikpak | CloudProvider::Baidu | CloudProvider::Tianyi
-        ),
+        supports_password_fallback: provider_capabilities(provider).password_login_mode
+            == PasswordLoginMode::RustDirect,
     }
 }
 
@@ -104,6 +102,11 @@ impl Zeroize for LoadedPasswordCredential {
 }
 
 fn password_credential_key(provider: CloudProvider) -> Result<&'static str, QuarkError> {
+    if provider_capabilities(provider).password_login_mode != PasswordLoginMode::RustDirect {
+        return Err(QuarkError::InvalidInput(
+            "该网盘不支持账号密码自动恢复".to_owned(),
+        ));
+    }
     match provider {
         CloudProvider::Pikpak => Ok("cloud-password-pikpak"),
         CloudProvider::Baidu => Ok("cloud-password-baidu"),
@@ -111,9 +114,9 @@ fn password_credential_key(provider: CloudProvider) -> Result<&'static str, Quar
         CloudProvider::Quark
         | CloudProvider::Aliyun
         | CloudProvider::Xunlei
-        | CloudProvider::Uc => Err(QuarkError::InvalidInput(
-            "该网盘不支持账号密码自动恢复".to_owned(),
-        )),
+        | CloudProvider::Uc => {
+            unreachable!("RustDirect providers must have a password credential key")
+        }
     }
 }
 

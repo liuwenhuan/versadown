@@ -7,7 +7,7 @@ use alldownloader_lib::cloud::{
     uc::UcSession,
     xunlei::{XunleiClientProfile, XunleiSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudPasswordCredential,
-    CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
+    CloudProvider, CredentialStore, MemoryCredentialStore, PasswordLoginMode, QuarkError,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -103,6 +103,21 @@ fn new_providers_have_stable_sources_and_declared_login_methods() {
         assert!(provider_capabilities(provider).web);
         assert_eq!(provider_capabilities(provider).password, password);
     }
+}
+
+#[test]
+fn capabilities_include_provider_and_distinguish_direct_from_official_web_password_login() {
+    let baidu = provider_capabilities(CloudProvider::Baidu);
+    assert_eq!(serde_json::to_value(baidu).unwrap()["provider"], "baidu");
+    assert_eq!(baidu.password_login_mode, PasswordLoginMode::RustDirect);
+    assert!(baidu.password);
+
+    let aliyun = provider_capabilities(CloudProvider::Aliyun);
+    assert_eq!(
+        aliyun.password_login_mode,
+        PasswordLoginMode::OfficialWebView
+    );
+    assert!(!aliyun.password);
 }
 
 #[test]

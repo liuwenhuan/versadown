@@ -28,25 +28,35 @@ impl CloudProvider {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudAuthorizationCapabilities {
+    pub provider: CloudProvider,
     pub web: bool,
     pub password: bool,
+    pub password_login_mode: PasswordLoginMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PasswordLoginMode {
+    None,
+    RustDirect,
+    OfficialWebView,
 }
 
 pub fn provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapabilities {
-    match provider {
-        CloudProvider::Baidu | CloudProvider::Tianyi | CloudProvider::Pikpak => {
-            CloudAuthorizationCapabilities {
-                web: true,
-                password: true,
-            }
+    let password_login_mode = match provider {
+        CloudProvider::Pikpak | CloudProvider::Baidu | CloudProvider::Tianyi => {
+            PasswordLoginMode::RustDirect
         }
-        CloudProvider::Aliyun
-        | CloudProvider::Xunlei
-        | CloudProvider::Quark
-        | CloudProvider::Uc => CloudAuthorizationCapabilities {
-            web: true,
-            password: false,
-        },
+        CloudProvider::Aliyun | CloudProvider::Xunlei | CloudProvider::Uc => {
+            PasswordLoginMode::OfficialWebView
+        }
+        CloudProvider::Quark => PasswordLoginMode::None,
+    };
+    CloudAuthorizationCapabilities {
+        provider,
+        web: true,
+        password: password_login_mode == PasswordLoginMode::RustDirect,
+        password_login_mode,
     }
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
