@@ -65,6 +65,24 @@ fn uc_restores_only_session_cookie_pairs_from_the_official_web_flow() {
 }
 
 #[test]
+fn uc_web_authorization_waits_until_both_session_cookies_arrive() {
+    // Incomplete browser cookies must keep authorization polling alive while
+    // the user signs in, rather than terminate it as an expired saved session.
+    for (case, cookies) in [
+        ("empty", vec![]),
+        ("only __uid", vec!["__uid=user-42; Path=/".into()]),
+        ("only __pus", vec!["__pus=identity; Path=/".into()]),
+        ("only __puus", vec!["__puus=session; Path=/".into()]),
+    ] {
+        let result = parse_uc_web_session(&cookies);
+        assert!(
+            matches!(result, Err(QuarkError::AuthorizationPending)),
+            "{case}: expected AuthorizationPending, got {result:?}"
+        );
+    }
+}
+
+#[test]
 fn uc_web_session_creates_an_account_without_requiring_an_internal_member_request() {
     // A successful official browser login has already issued the session
     // cookies. Requiring an additional undocumented member endpoint before

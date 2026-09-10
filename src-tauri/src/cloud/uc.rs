@@ -69,7 +69,7 @@ pub fn parse_uc_web_session(cookies: &[String]) -> Result<UcSession, QuarkError>
     if !pairs.iter().any(|(name, _)| name == "__pus")
         || !pairs.iter().any(|(name, _)| name == "__puus")
     {
-        return Err(QuarkError::AuthorizationExpired);
+        return Err(QuarkError::AuthorizationPending);
     }
     Ok(UcSession::cookie(
         pairs
