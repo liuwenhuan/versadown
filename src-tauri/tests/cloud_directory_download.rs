@@ -1,7 +1,11 @@
 use alldownloader_lib::cloud::{
-    commands::{plan_cloud_directory_download, CloudDownloadSourceGate},
+    commands::{
+        create_cloud_directory_group_for_download, plan_cloud_directory_download,
+        CloudDownloadSourceGate,
+    },
     CloudDirectory, CloudFile, CloudProvider, QuarkError,
 };
+use alldownloader_lib::TaskStore;
 use std::{sync::Arc, time::Duration};
 
 fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
@@ -177,6 +181,88 @@ fn rejects_a_file_that_is_a_windows_normalized_ancestor_of_another_target() {
     assert!(
         matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突"))
     );
+}
+
+#[test]
+fn persists_one_directory_group_before_leaf_submission_and_keeps_failed_leaf_retryable() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "课程", |id| match id {
+        "root" => Ok(directory(
+            id,
+            vec![
+                file("first", id, "第一章.txt"),
+                folder("nested", id, "资料"),
+            ],
+        )),
+        "nested" => Ok(directory(id, vec![file("second", id, "第二章.txt")])),
+        _ => Err(QuarkError::InvalidResponse),
+    })
+    .unwrap();
+
+    let group = create_cloud_directory_group_for_download(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        &plan,
+        std::path::Path::new("C:/downloads"),
+    )
+    .unwrap();
+    let items = store.cloud_directory_group_items(group.id).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].remote_file_id, "first");
+    assert_eq!(items[0].size, None);
+    assert_eq!(items[1].remote_file_id, "second");
+    assert_eq!(items[1].relative_directory, vec!["课程", "资料"]);
+
+    store
+        .fail_cloud_directory_group_item(
+            group.id,
+            items[1].id,
+            "provider_error",
+            "网盘拒绝下载请求",
+        )
+        .unwrap();
+    let failed = store
+        .cloud_directory_group_items(group.id)
+        .unwrap()
+        .remove(1);
+    assert!(failed.task_id.is_none());
+    assert_eq!(failed.failure_code.as_deref(), Some("provider_error"));
+}
+
+#[test]
+fn retry_candidate_is_a_single_unlinked_persisted_leaf() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "课程", |id| {
+        Ok(directory(id, vec![file("retry-me", id, "失败后重试.txt")]))
+    })
+    .unwrap();
+    let group = create_cloud_directory_group_for_download(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        &plan,
+        std::path::Path::new("C:/downloads"),
+    )
+    .unwrap();
+    let item = store
+        .cloud_directory_group_items(group.id)
+        .unwrap()
+        .remove(0);
+    store
+        .fail_cloud_directory_group_item(group.id, item.id, "provider_error", "网盘拒绝下载请求")
+        .unwrap();
+
+    let retry = store
+        .cloud_directory_group_items(group.id)
+        .unwrap()
+        .remove(0);
+    assert_eq!(retry.remote_file_id, "retry-me");
+    assert!(
+        retry.task_id.is_none(),
+        "retry must submit only this persisted leaf"
+    );
+    assert_eq!(retry.relative_directory, vec!["课程"]);
 }
 
 #[tokio::test]

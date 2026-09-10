@@ -861,17 +861,23 @@ pub async fn task_action(
         .cloud_directory_groups()
         .map_err(|error| error.to_string())?
     {
-        if state
+        if let Some(item) = state
             .store
             .cloud_directory_group_items(group.id)
             .map_err(|error| error.to_string())?
             .iter()
-            .any(|item| item.id == id && item.task_id.is_none())
+            .find(|item| item.id == id && item.task_id.is_none())
         {
-            return Err(match action.as_str() {
-                "retry" => "网盘目录文件尚未入队，正在等待重新提交支持".to_string(),
-                _ => "未入队的网盘目录文件不能执行此操作".to_string(),
-            });
+            return match action.as_str() {
+                "retry" => crate::cloud::commands::retry_cloud_directory_group_item(
+                    app.clone(),
+                    group.id,
+                    item.id,
+                )
+                .await
+                .map_err(|error| error.to_string()),
+                _ => Err("未入队的网盘目录文件不能执行此操作".to_string()),
+            };
         }
     }
     run_local_task_action(task_id, action, app).await
