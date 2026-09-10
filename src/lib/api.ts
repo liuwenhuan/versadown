@@ -1,4 +1,4 @@
-import { AiSettings, AiSettingsInput, AppSettings, CloudShareAccessCodeRequired, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
+import { AiSettings, AiSettingsInput, AppSettings, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -29,6 +29,7 @@ export function isTauriRuntime() {
 }
 
 type NativeTaskOutcome = QueueTask & { duplicate?: DuplicateDownloadState };
+type NativeCloudShareBatchResult = { outcomes: NativeTaskOutcome[]; failures: CloudShareBatchFailure[] };
 type NativeTaskParseOutcome = {
   kind: 'task';
   task: QueueTask;
@@ -113,10 +114,10 @@ export async function openTaskDirectory(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_directory', { taskId });
 }
 
-export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<TaskActionResult[]> {
-  if (!isTauriRuntime()) return [];
-  const outcomes = await invoke<NativeTaskOutcome[]>('confirm_cloud_share_download', { planSource, selectedIds, destinationDirectory });
-  return outcomes.map(duplicateResult);
+export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<CloudShareBatchResult> {
+  if (!isTauriRuntime()) return { outcomes: [], failures: [] };
+  const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, destinationDirectory });
+  return { outcomes: result.outcomes.map(duplicateResult), failures: result.failures };
 }
 
 export async function playTaskVideos(taskId: string): Promise<void> {

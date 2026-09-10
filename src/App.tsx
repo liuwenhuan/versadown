@@ -384,14 +384,28 @@ export function App() {
       if (shareConfirmationsInFlight.current.has(requestGeneration)) return;
       shareConfirmationsInFlight.current.add(requestGeneration);
       try {
-        const outcomes = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory);
+        const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory);
+        const outcomes = result.outcomes;
         const cloudTasks = outcomes.flatMap((outcome) => outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
         const duplicates = outcomes.flatMap((outcome) => outcome.duplicate ? [outcome.duplicate] : []);
         cloudTasks.forEach((cloudTask) => recordTaskEvent(cloudTask));
         setTasks((current) => cloudTasks.reduce((next, cloudTask) => upsertTask(next, cloudTask), current));
         setSelectedTaskId(cloudTasks.at(-1)?.id ?? null);
         setDuplicateQueue((current) => [...current, ...duplicates]);
-        setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? null : current);
+        if (result.failures.length > 0) {
+          const failedIds = new Set(result.failures.map((failure) => failure.selectedId));
+          setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? {
+            ...current,
+            resources: current.resources.map((resource) => ({ ...resource, selected: failedIds.has(resource.id) })),
+          } : current);
+          if (confirmationGeneration.current === requestGeneration) {
+            const first = result.failures[0];
+            const prefix = result.failures.length > 1 ? `${result.failures.length} 个文件未能开始下载：` : '';
+            setNotice({ kind: 'error', message: `${prefix}${first.message}` });
+          }
+        } else {
+          setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? null : current);
+        }
       } catch (error) {
         if (confirmationGeneration.current === requestGeneration) {
           setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });

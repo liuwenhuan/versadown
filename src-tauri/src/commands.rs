@@ -56,6 +56,21 @@ pub struct TaskActionOutcome {
     pub duplicate: Option<DuplicateDownloadState>,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudShareBatchFailure {
+    pub selected_id: String,
+    pub code: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudShareBatchOutcome {
+    pub outcomes: Vec<TaskActionOutcome>,
+    pub failures: Vec<CloudShareBatchFailure>,
+}
+
 pub(crate) fn task_payload(
     store: &TaskStore,
     task: DownloadTask,
@@ -301,7 +316,7 @@ pub async fn confirm_cloud_share_download(
     selected_ids: Vec<String>,
     destination_directory: Option<String>,
     state: State<'_, AppState>,
-) -> Result<Vec<TaskActionOutcome>, crate::cloud::QuarkError> {
+) -> Result<CloudShareBatchOutcome, crate::cloud::QuarkError> {
     let cloud = app
         .try_state::<Arc<crate::cloud::commands::CloudState>>()
         .ok_or(crate::cloud::QuarkError::Storage)?;
@@ -310,21 +325,64 @@ pub async fn confirm_cloud_share_download(
         &plan_source,
         &selected_ids,
     )?;
-    let configured = download_submission_options_for_directory(&state, destination_directory.as_deref())
-        .map_err(crate::cloud::QuarkError::InvalidInput)?;
-    let mut outcomes = Vec::new();
-    for source in sources {
-        outcomes.push(
-            crate::cloud::commands::submit_cloud_share_file(
-                app.clone(),
-                &state,
-                source,
-                configured.clone(),
-            )
-            .await?,
-        );
+    let configured =
+        download_submission_options_for_directory(&state, destination_directory.as_deref())
+            .map_err(crate::cloud::QuarkError::InvalidInput)?;
+    let selections = selected_ids.into_iter().zip(sources).collect();
+    let state = &*state;
+    Ok(submit_cloud_share_batch_with(selections, |source| {
+        let app = app.clone();
+        let configured = configured.clone();
+        async move {
+            crate::cloud::commands::submit_cloud_share_file(app, state, source, configured).await
+        }
+    })
+    .await)
+}
+
+async fn submit_cloud_share_batch_with<F, Fut>(
+    selections: Vec<(String, String)>,
+    mut submit: F,
+) -> CloudShareBatchOutcome
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<TaskActionOutcome, crate::cloud::QuarkError>>,
+{
+    let mut result = CloudShareBatchOutcome {
+        outcomes: Vec::new(),
+        failures: Vec::new(),
+    };
+    for (selected_id, source) in selections {
+        match submit(source).await {
+            Ok(outcome) => result.outcomes.push(outcome),
+            Err(error) => result.failures.push(CloudShareBatchFailure {
+                selected_id,
+                code: cloud_share_failure_code(&error),
+                message: crate::cloud::commands::share_resolution_failure_message(&error),
+            }),
+        }
     }
-    Ok(outcomes)
+    result
+}
+
+fn cloud_share_failure_code(error: &crate::cloud::QuarkError) -> &'static str {
+    use crate::cloud::QuarkError;
+    match error {
+        QuarkError::NotAuthorized => "not_authorized",
+        QuarkError::AuthorizationExpired => "credentials_expired",
+        QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
+        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
+        QuarkError::PikpakRegionalMembershipRestricted => {
+            "pikpak_regional_membership_restricted"
+        }
+        QuarkError::AuthorizationPending => "authorization_pending",
+        QuarkError::InvalidResponse => "invalid_response",
+        QuarkError::Storage => "credential_storage_error",
+        QuarkError::Transport(_) => "network_error",
+        QuarkError::Provider(_) => "provider_error",
+        QuarkError::InvalidInput(_) => "invalid_input",
+        QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
+    }
 }
 
 fn parse_resources(store: &TaskStore, task_id: Uuid) -> Result<Vec<ParseResource>, String> {
@@ -1280,6 +1338,44 @@ mod tests {
         assert!(reserve < provider);
         assert!(body.contains("share_resolution_failure_message"));
         assert!(!body.contains("无法重新获取网盘下载地址：{error}"));
+    }
+
+    #[tokio::test]
+    async fn cloud_share_batch_keeps_successes_before_and_after_a_typed_failure() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let first = task_action_outcome(
+            &store,
+            store.create(NewTask::direct("https://example.test/first")).unwrap(),
+            None,
+        )
+        .unwrap();
+        let last = task_action_outcome(
+            &store,
+            store.create(NewTask::direct("https://example.test/last")).unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut submissions = std::collections::VecDeque::from([
+            Ok(first),
+            Err(crate::cloud::QuarkError::WebAuthorizationRequired),
+            Ok(last),
+        ]);
+
+        let batch = submit_cloud_share_batch_with(
+            vec![
+                ("first".into(), "source-1".into()),
+                ("failed".into(), "source-2".into()),
+                ("last".into(), "source-3".into()),
+            ],
+            |_| std::future::ready(submissions.pop_front().unwrap()),
+        )
+        .await;
+
+        assert_eq!(batch.outcomes.len(), 2);
+        assert_eq!(batch.failures.len(), 1);
+        assert_eq!(batch.failures[0].selected_id, "failed");
+        assert_eq!(batch.failures[0].code, "web_auth_required");
+        assert_eq!(batch.failures[0].message, "此登录方式需要网页验证，请点击网页授权完成登录");
     }
 
     #[cfg(windows)]

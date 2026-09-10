@@ -59,7 +59,7 @@ it('passes a transient access code only to the parse command', async () => {
 });
 
 it('sends opaque share plans to the cloud-share confirmation command', async () => {
-  native.invoke.mockResolvedValueOnce([]);
+  native.invoke.mockResolvedValueOnce({ outcomes: [], failures: [] });
   const { confirmCloudShareDownload } = await import('./api');
 
   await confirmCloudShareDownload(`cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}`, ['f1']);
@@ -71,23 +71,29 @@ it('sends opaque share plans to the cloud-share confirmation command', async () 
 });
 
 it('preserves every native share task outcome and maps duplicate metadata in order', async () => {
-  native.invoke.mockResolvedValueOnce([
-    { id: 'queued-1', name: 'first.bin', kind: 'cloud', status: 'queued', progress: 0 },
-    { id: 'duplicate-1', name: 'existing.bin', kind: 'cloud', status: 'completed', progress: 100, duplicate: 'completed_files_present' },
-    { id: 'queued-2', name: 'second.bin', kind: 'cloud', status: 'queued', progress: 0 }
-  ]);
+  native.invoke.mockResolvedValueOnce({
+    outcomes: [
+      { id: 'queued-1', name: 'first.bin', kind: 'cloud', status: 'queued', progress: 0 },
+      { id: 'duplicate-1', name: 'existing.bin', kind: 'cloud', status: 'completed', progress: 100, duplicate: 'completed_files_present' },
+      { id: 'queued-2', name: 'second.bin', kind: 'cloud', status: 'queued', progress: 0 }
+    ],
+    failures: [{ selectedId: 'f4', code: 'web_auth_required', message: '网盘需要网页验证' }]
+  });
   const { confirmCloudShareDownload } = await import('./api');
 
-  await expect(confirmCloudShareDownload('cloud-share://baidu/plan', ['f1', 'f2', 'f3'])).resolves.toEqual([
-    { task: { id: 'queued-1', name: 'first.bin', kind: 'cloud', status: 'queued', progress: 0 } },
-    {
-      duplicate: {
-        task: { id: 'duplicate-1', name: 'existing.bin', kind: 'cloud', status: 'completed', progress: 100 },
-        state: 'completed_files_present'
-      }
-    },
-    { task: { id: 'queued-2', name: 'second.bin', kind: 'cloud', status: 'queued', progress: 0 } }
-  ]);
+  await expect(confirmCloudShareDownload('cloud-share://baidu/plan', ['f1', 'f2', 'f3'])).resolves.toEqual({
+    outcomes: [
+      { task: { id: 'queued-1', name: 'first.bin', kind: 'cloud', status: 'queued', progress: 0 } },
+      {
+        duplicate: {
+          task: { id: 'duplicate-1', name: 'existing.bin', kind: 'cloud', status: 'completed', progress: 100 },
+          state: 'completed_files_present'
+        }
+      },
+      { task: { id: 'queued-2', name: 'second.bin', kind: 'cloud', status: 'queued', progress: 0 } }
+    ],
+    failures: [{ selectedId: 'f4', code: 'web_auth_required', message: '网盘需要网页验证' }]
+  });
 });
 
 it('maps the tagged native task outcome without changing direct downloads', async () => {

@@ -51,6 +51,17 @@ export interface TaskActionResult {
   duplicate?: DuplicateDownload;
 }
 
+export interface CloudShareBatchFailure {
+  selectedId: string;
+  code: string;
+  message: string;
+}
+
+export interface CloudShareBatchResult {
+  outcomes: TaskActionResult[];
+  failures: CloudShareBatchFailure[];
+}
+
 export interface DownloadGlobalStat {
   download_speed: number;
   upload_speed: number;
