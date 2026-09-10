@@ -36,6 +36,17 @@ pub trait CloudShareAdapter: Send + Sync {
         candidate: &crate::parser::CloudShareCandidate,
     ) -> Result<ShareInspection, QuarkError>;
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError>;
+    /// Internal-only context rotation. The dispatcher commits this to DPAPI
+    /// before releasing a URL or starting the transfer phase.
+    fn resolve_with_context(
+        &self,
+        entry: &CloudShareResolvedEntry,
+    ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
+        Ok(ShareOperationResult {
+            result: self.resolve(entry)?,
+            updated_context: None,
+        })
+    }
     /// Called only for the matching durable source after a typed transfer
     /// requirement. Implementations recheck login and journal returned personal
     /// IDs before requesting the personal download URL.
@@ -46,6 +57,22 @@ pub trait CloudShareAdapter: Send + Sync {
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
         Err(QuarkError::ProviderUnsupported)
     }
+    fn transfer_with_context(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        store: &CloudSharePlanStore,
+    ) -> Result<ShareOperationResult<super::commands::ResolvedCloudDownload>, QuarkError> {
+        Ok(ShareOperationResult {
+            result: self.transfer(entry, store)?,
+            updated_context: None,
+        })
+    }
+}
+
+/// Never serialize this result into IPC or task records: context is DPAPI-only.
+pub struct ShareOperationResult<T> {
+    pub result: T,
+    pub updated_context: Option<serde_json::Value>,
 }
 
 pub enum ShareInspection {
@@ -269,14 +296,23 @@ pub fn resolve_current_share_download(
     adapter: &dyn CloudShareAdapter,
     source: &str,
 ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-    let entry = store.resolve_entry(source)?;
-    let mut download = match adapter.resolve(&entry)? {
+    let mut entry = store.resolve_entry(source)?;
+    let resolved = adapter.resolve_with_context(&entry)?;
+    if let Some(context) = resolved.updated_context {
+        store.update_provider_context(source, &context)?;
+        entry.plan.provider_context = context;
+    }
+    let mut download = match resolved.result {
         ShareResolution::Direct(download) => download,
         ShareResolution::TransferRequired(request) => {
             if request.source != source {
                 return Err(QuarkError::InvalidResponse);
             }
-            adapter.transfer(&entry, store)?
+            let transferred = adapter.transfer_with_context(&entry, store)?;
+            if let Some(context) = transferred.updated_context {
+                store.update_provider_context(source, &context)?;
+            }
+            transferred.result
         }
     };
     validate_direct_url(&download.url)?;
@@ -846,6 +882,24 @@ impl CloudSharePlanStore {
         })
     }
 
+    fn update_provider_context(
+        &self,
+        source: &str,
+        context: &serde_json::Value,
+    ) -> Result<(), QuarkError> {
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, now| {
+            let key = plan_key(provider, &share);
+            let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            if !plan.entries.iter().any(|entry| entry.entry_fingerprint == fingerprint) {
+                return Err(missing_plan());
+            }
+            plan.provider_context = context.clone();
+            document.touch(&key, now)
+        })
+        .map_err(|_| QuarkError::Storage)
+    }
+
     pub fn record_transfer(&self, source: &str, created_file_id: &str) -> Result<(), QuarkError> {
         let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
         if created_file_id.trim().is_empty() {
@@ -922,6 +976,113 @@ mod tests {
     use super::*;
     use crate::cloud::MemoryCredentialStore;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn rotated_share_context_must_be_persisted_before_transfer_or_download_handoff() {
+        use std::sync::atomic::AtomicBool;
+        struct FailingStore {
+            inner: MemoryCredentialStore,
+            fail: Arc<AtomicBool>,
+        }
+        impl CredentialStore for FailingStore {
+            fn save(&self, key: &str, value: &[u8]) -> Result<(), QuarkError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(QuarkError::Provider("private-write-failure".into()));
+                }
+                self.inner.save(key, value)
+            }
+            fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+                self.inner.load(key)
+            }
+            fn remove(&self, key: &str) -> Result<(), QuarkError> {
+                self.inner.remove(key)
+            }
+        }
+        struct UpdatingAdapter {
+            fail: Arc<AtomicBool>,
+            at_transfer: bool,
+        }
+        impl CloudShareAdapter for UpdatingAdapter {
+            fn inspect(
+                &self,
+                _: &crate::parser::CloudShareCandidate,
+            ) -> Result<ShareInspection, QuarkError> {
+                unreachable!()
+            }
+            fn resolve(&self, _: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+                unreachable!()
+            }
+            fn resolve_with_context(
+                &self,
+                entry: &CloudShareResolvedEntry,
+            ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
+                if !self.at_transfer {
+                    self.fail.store(true, Ordering::SeqCst);
+                }
+                Ok(ShareOperationResult {
+                    result: if self.at_transfer {
+                        ShareResolution::TransferRequired(TransferRequest {
+                            source: entry.plan.source_for(&entry.entry.entry_id),
+                        })
+                    } else {
+                        ShareResolution::Direct(super::super::commands::ResolvedCloudDownload {
+                            url: "https://cdn.example/file".into(),
+                            name: "file".into(),
+                            headers: vec![],
+                        })
+                    },
+                    updated_context: Some(serde_json::json!({"token":"rotated-before-transfer"})),
+                })
+            }
+            fn transfer_with_context(
+                &self,
+                entry: &CloudShareResolvedEntry,
+                store: &CloudSharePlanStore,
+            ) -> Result<ShareOperationResult<super::super::commands::ResolvedCloudDownload>, QuarkError>
+            {
+                assert_eq!(
+                    entry.plan.provider_context["token"],
+                    "rotated-before-transfer"
+                );
+                assert_eq!(
+                    store
+                        .resolve_entry(&entry.plan.source_for(&entry.entry.entry_id))
+                        .unwrap()
+                        .plan
+                        .provider_context["token"],
+                    "rotated-before-transfer"
+                );
+                self.fail.store(true, Ordering::SeqCst);
+                Ok(ShareOperationResult {
+                    result: super::super::commands::ResolvedCloudDownload {
+                        url: "https://cdn.example/personal".into(),
+                        name: "file".into(),
+                        headers: vec![],
+                    },
+                    updated_context: Some(serde_json::json!({"token":"rotated-after-transfer"})),
+                })
+            }
+        }
+        for at_transfer in [false, true] {
+            let fail = Arc::new(AtomicBool::new(false));
+            let credentials = Arc::new(FailingStore {
+                inner: MemoryCredentialStore::default(),
+                fail: fail.clone(),
+            });
+            let store = CloudSharePlanStore {
+                credentials,
+                mutation: Mutex::new(()),
+                now_ms: Arc::new(|| 1000),
+            };
+            let plan = fixture("private-share");
+            store.upsert(&plan).unwrap();
+            let adapter = UpdatingAdapter { fail, at_transfer };
+            assert!(matches!(
+                resolve_current_share_download(&store, &adapter, &plan.source_for("f1")),
+                Err(QuarkError::Storage)
+            ));
+        }
+    }
 
     struct DirectAdapter(AtomicU64);
     impl CloudShareAdapter for DirectAdapter {

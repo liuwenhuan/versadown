@@ -481,7 +481,8 @@ fn https_download_url(value: &str) -> Result<String, QuarkError> {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, ShareInspection, ShareResolution, TransferRequest,
+    CloudShareResolvedEntry, ShareInspection, ShareOperationResult, ShareResolution,
+    TransferRequest,
 };
 
 pub struct UcShareAdapter<'a> {
@@ -491,9 +492,10 @@ pub struct UcShareAdapter<'a> {
 struct UcShareSession<'a> {
     http: &'a dyn CloudHttpTransport,
     headers: BTreeMap<String, String>,
+    account_cookie_hash: String,
 }
 impl UcShareAdapter<'_> {
-    fn session(&self) -> Result<UcShareSession<'_>, QuarkError> {
+    fn session(&self, context: Option<&Value>) -> Result<UcShareSession<'_>, QuarkError> {
         let bytes = self
             .credentials
             .load("uc")?
@@ -518,19 +520,70 @@ impl UcShareAdapter<'_> {
         if let Some(csrf) = cookie_value(&session.cookie, "csrf_token") {
             headers.insert("x-csrf-token".into(), csrf);
         }
+        let account_cookie_hash = format!("{:x}", md5::compute(&session.cookie));
+        if let Some(context) = context.filter(|context| {
+            context
+                .get("account_cookie_hash")
+                .map(|value| value.as_str() == Some(account_cookie_hash.as_str()))
+                .unwrap_or_else(|| {
+                    context
+                        .pointer("/headers/Cookie")
+                        .and_then(Value::as_str)
+                        .is_some_and(|cookie| {
+                            cookie_value(cookie, "__pus") == cookie_value(&session.cookie, "__pus")
+                        })
+                })
+        }) {
+            let saved: BTreeMap<String, String> =
+                serde_json::from_value(context["headers"].clone())
+                    .map_err(|_| QuarkError::InvalidResponse)?;
+            let cookie = saved.get("Cookie").ok_or(QuarkError::InvalidResponse)?;
+            if cookie.chars().any(char::is_control) {
+                return Err(QuarkError::InvalidResponse);
+            }
+            // Restore the provider-issued snapshot, including explicit removals.
+            // Never reintroduce account-cookie values absent from this context.
+            headers.insert("Cookie".into(), cookie.clone());
+            headers.remove("x-csrf-token");
+            if let Some(csrf) = saved.get("x-csrf-token") {
+                if csrf.is_empty() || csrf.chars().any(char::is_control) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                headers.insert("x-csrf-token".into(), csrf.clone());
+            }
+        }
         Ok(UcShareSession {
             http: self.http,
             headers,
+            account_cookie_hash,
         })
     }
 }
 impl UcShareSession<'_> {
+    fn context(&self, mut context: Value) -> Result<Value, QuarkError> {
+        context["headers"] =
+            serde_json::to_value(&self.headers).map_err(|_| QuarkError::InvalidResponse)?;
+        context["account_cookie_hash"] = self.account_cookie_hash.clone().into();
+        Ok(context)
+    }
+    fn updated<T>(&self, result: T, context: Value) -> Result<ShareOperationResult<T>, QuarkError> {
+        Ok(ShareOperationResult {
+            result,
+            updated_context: Some(self.context(context)?),
+        })
+    }
     fn request(
         &mut self,
         method: &'static str,
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
+        if matches!(
+            path,
+            "share/sharepage/download" | "share/sharepage/save" | "file/download"
+        ) {
+            self.require_csrf()?;
+        }
         let response = self.http.send(CloudHttpRequest {
             method,
             url: format!(
@@ -581,22 +634,8 @@ impl UcShareSession<'_> {
         {
             return Err(QuarkError::Provider("UC 分享请求失败".into()));
         }
-        let cookie = cookie_for_download(&self.headers["Cookie"], &response.set_cookies);
-        // Only a newly issued CSRF cookie can replace a newer token-body value.
-        // The merged cookie may still contain an older authenticated-session value.
-        let issued_cookie = cookie_for_download("", &response.set_cookies);
-        if let Some(csrf) = cookie_value(&issued_cookie, "csrf_token") {
-            self.headers.insert("x-csrf-token".into(), csrf);
-        }
-        self.headers.insert("Cookie".into(), cookie);
-        Ok(value)
-    }
-    fn token(&mut self, id: &str, code: Option<&str>) -> Result<String, QuarkError> {
-        let value = self.request(
-            "POST",
-            "share/sharepage/token",
-            Some(json!({"pwd_id":id,"passcode":code.unwrap_or("")})),
-        )?;
+        self.merge_response_cookies(&response.set_cookies);
+        // A newly returned JSON token wins over Set-Cookie, including deletion.
         if let Some(csrf) = value.pointer("/data/csrf_token") {
             let csrf = csrf
                 .as_str()
@@ -604,6 +643,71 @@ impl UcShareSession<'_> {
                 .ok_or(QuarkError::InvalidResponse)?;
             self.headers.insert("x-csrf-token".into(), csrf.into());
         }
+        Ok(value)
+    }
+    fn merge_response_cookies(&mut self, issued: &[String]) {
+        let mut cookies: Vec<(String, String)> = self.headers["Cookie"]
+            .split(';')
+            .filter_map(cookie_pair)
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect();
+        for raw in issued {
+            let mut parts = raw.split(';');
+            let Some((name, value)) = parts.next().unwrap_or("").trim().split_once('=') else {
+                continue;
+            };
+            if name.is_empty()
+                || value.chars().any(char::is_control)
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+            {
+                continue;
+            }
+            let mut max_age = None;
+            let mut expires = None;
+            for attribute in parts {
+                let Some((key, value)) = attribute.trim().split_once('=') else {
+                    continue;
+                };
+                if key.eq_ignore_ascii_case("Max-Age") {
+                    max_age = value.trim().parse::<i64>().ok();
+                }
+                if key.eq_ignore_ascii_case("Expires") {
+                    expires = httpdate::parse_http_date(value.trim()).ok();
+                }
+            }
+            let cleared = value.is_empty()
+                || max_age.map(|age| age <= 0).unwrap_or_else(|| {
+                    expires.is_some_and(|expiry| expiry <= std::time::SystemTime::now())
+                });
+            cookies.retain(|(current, _)| current != name);
+            if !cleared {
+                cookies.push((name.into(), value.into()));
+            }
+            if name == "csrf_token" {
+                if cleared {
+                    self.headers.remove("x-csrf-token");
+                } else {
+                    self.headers.insert("x-csrf-token".into(), value.into());
+                }
+            }
+        }
+        self.headers.insert(
+            "Cookie".into(),
+            cookies
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
+    fn token(&mut self, id: &str, code: Option<&str>) -> Result<String, QuarkError> {
+        let value = self.request(
+            "POST",
+            "share/sharepage/token",
+            Some(json!({"pwd_id":id,"passcode":code.unwrap_or("")})),
+        )?;
         required(&value["data"], "stoken")
     }
     fn require_csrf(&self) -> Result<(), QuarkError> {
@@ -624,7 +728,7 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
         candidate: &crate::parser::CloudShareCandidate,
     ) -> Result<ShareInspection, QuarkError> {
         let id = super::share::share_id(candidate, CloudProvider::Uc)?;
-        let mut session = self.session()?;
+        let mut session = self.session(None)?;
         let token = match session.token(&id, candidate.access_code.as_deref()) {
             Err(QuarkError::InvalidInput(_)) if candidate.access_code.is_none() => {
                 return Ok(ShareInspection::AccessCodeRequired)
@@ -683,8 +787,7 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
             }
         }
         // This internal context is serializable only through the DPAPI plan store.
-        context["headers"] =
-            serde_json::to_value(session.headers).map_err(|_| QuarkError::InvalidResponse)?;
+        context = session.context(context)?;
         Ok(ShareInspection::Plan(CloudSharePlan::new(
             CloudProvider::Uc,
             id,
@@ -696,17 +799,32 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_uc_share(self.credentials, self.http, entry)
     }
+    fn resolve_with_context(
+        &self,
+        entry: &CloudShareResolvedEntry,
+    ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
+        resolve_uc_share_with_context(self.credentials, self.http, entry)
+    }
     fn transfer(
         &self,
         entry: &CloudShareResolvedEntry,
         store: &CloudSharePlanStore,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
+        Ok(self.transfer_with_context(entry, store)?.result)
+    }
+    fn transfer_with_context(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        store: &CloudSharePlanStore,
+    ) -> Result<ShareOperationResult<super::commands::ResolvedCloudDownload>, QuarkError> {
         if entry.provider != CloudProvider::Uc || entry.plan.provider != CloudProvider::Uc {
             return Err(QuarkError::InvalidResponse);
         }
-        let mut session = self.session()?;
+        let mut session = self.session(Some(&entry.plan.provider_context))?;
         let token = session.token(&entry.plan.canonical_share_id, entry.access_code())?;
         session.require_csrf()?;
+        let mut context = entry.plan.provider_context.clone();
+        context["stoken"] = token.clone().into();
         let file = &entry.plan.provider_context["files"][&entry.entry.entry_id];
         let value=session.request("POST","share/sharepage/save",Some(json!({"fid_list":[entry.entry.entry_id],"fid_token_list":[required(file,"token")?],"to_pdir_fid":"0","pwd_id":entry.plan.canonical_share_id,"stoken":token,"pdir_fid":required(file,"parent")?,"scene":"link","pdir_save_all":false,"exclude_fids":[]})))?;
         let task = required(&value["data"], "task_id")?;
@@ -731,7 +849,8 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
                     let headers = session.headers.clone();
                     let value =
                         session.request("POST", "file/download", Some(json!({"fids":[id]})))?;
-                    return uc_share_download(&value, id, &entry.entry.name, headers);
+                    let download = uc_share_download(&value, id, &entry.entry.name, headers)?;
+                    return session.updated(download, context);
                 }
                 Some(0 | 1) => std::thread::sleep(std::time::Duration::from_millis(250)),
                 _ => return Err(QuarkError::Provider("UC 分享转存失败".into())),
@@ -767,26 +886,41 @@ pub fn resolve_uc_share(
     http: &dyn CloudHttpTransport,
     entry: &CloudShareResolvedEntry,
 ) -> Result<ShareResolution, QuarkError> {
+    Ok(resolve_uc_share_with_context(credentials, http, entry)?.result)
+}
+fn resolve_uc_share_with_context(
+    credentials: &dyn super::CredentialStore,
+    http: &dyn CloudHttpTransport,
+    entry: &CloudShareResolvedEntry,
+) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
     if entry.provider != CloudProvider::Uc || entry.plan.provider != CloudProvider::Uc {
         return Err(QuarkError::InvalidResponse);
     }
     let adapter = UcShareAdapter { credentials, http };
-    let mut session = adapter.session()?;
+    let mut session = adapter.session(Some(&entry.plan.provider_context))?;
     let token = session.token(&entry.plan.canonical_share_id, entry.access_code())?;
     session.require_csrf()?;
+    let mut context = entry.plan.provider_context.clone();
+    context["stoken"] = token.clone().into();
     let headers = session.headers.clone();
     let value=session.request("POST","share/sharepage/download",Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":token,"fids":[entry.entry.entry_id],"fids_token":[required(&entry.plan.provider_context["files"][&entry.entry.entry_id],"token")?]})))?;
     if value["data"].as_array().is_some_and(|v| v.is_empty()) {
-        return Ok(ShareResolution::TransferRequired(TransferRequest {
-            source: entry.plan.source_for(&entry.entry.entry_id),
-        }));
+        return session.updated(
+            ShareResolution::TransferRequired(TransferRequest {
+                source: entry.plan.source_for(&entry.entry.entry_id),
+            }),
+            context,
+        );
     }
-    Ok(ShareResolution::Direct(uc_share_download(
-        &value,
-        &entry.entry.entry_id,
-        &entry.entry.name,
-        headers,
-    )?))
+    session.updated(
+        ShareResolution::Direct(uc_share_download(
+            &value,
+            &entry.entry.entry_id,
+            &entry.entry.name,
+            headers,
+        )?),
+        context,
+    )
 }
 
 #[cfg(test)]
@@ -825,6 +959,234 @@ mod tests {
             )],
             json!({"stoken":"old-token","files":{"f1":{"token":"file-token","parent":"0"}}}),
         ))
+    }
+    struct ShareReplies {
+        requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
+        replies: std::sync::Mutex<std::collections::VecDeque<CloudHttpResponse>>,
+    }
+    impl ShareReplies {
+        fn new(replies: Vec<(Value, Vec<&str>)>) -> Self {
+            Self {
+                requests: std::sync::Mutex::new(vec![]),
+                replies: std::sync::Mutex::new(
+                    replies
+                        .into_iter()
+                        .map(|(value, cookies)| CloudHttpResponse {
+                            status: 200,
+                            body: value.to_string(),
+                            set_cookies: cookies.into_iter().map(str::to_owned).collect(),
+                        })
+                        .collect(),
+                ),
+            }
+        }
+    }
+    impl CloudHttpTransport for ShareReplies {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.requests.lock().unwrap().push(request);
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(QuarkError::InvalidResponse)
+        }
+    }
+    #[test]
+    fn uc_share_inspection_cookie_survives_resolve_and_transfer_without_reissue() {
+        let credentials = share_credentials();
+        let token = json!({"code":0,"data":{"stoken":"fresh"}});
+        let http = ShareReplies::new(vec![
+            (token.clone(), vec!["SESSION=issued; Path=/; Secure"]),
+            (
+                json!({"code":0,"data":{"list":[{"fid":"f1","file_name":"one","dir":false,"share_fid_token":"file-token"}]},"metadata":{"_total":1}}),
+                vec![],
+            ),
+            (token.clone(), vec![]),
+            (
+                json!({"code":0,"data":[{"fid":"f1","download_url":"https://cdn.example/f"}]}),
+                vec![],
+            ),
+            (token, vec![]),
+            (json!({"code":0,"data":{"task_id":"t"}}), vec![]),
+            (
+                json!({"code":0,"data":{"status":2,"save_as":{"save_as_top_fids":["personal-id"]}}}),
+                vec![],
+            ),
+            (
+                json!({"code":0,"data":[{"fid":"personal-id","download_url":"https://cdn.example/personal"}]}),
+                vec![],
+            ),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+        let candidate = crate::parser::CloudShareCandidate {
+            provider: CloudProvider::Uc,
+            url: "https://drive.uc.cn/s/share123".into(),
+            access_code: Some("a123".into()),
+        };
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate).unwrap() else {
+            panic!()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(
+            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+        );
+        store.upsert(&plan).unwrap();
+        let selected = store.resolve_entry(&plan.source_for("f1")).unwrap();
+        let ShareResolution::Direct(direct) = adapter.resolve(&selected).unwrap() else {
+            panic!()
+        };
+        let cookie = direct
+            .headers
+            .iter()
+            .find(|(key, _)| key == "Cookie")
+            .unwrap();
+        assert!(cookie.1.contains("SESSION=issued"));
+        let transferred = adapter.transfer(&selected, &store).unwrap();
+        assert!(transferred
+            .headers
+            .iter()
+            .any(|(key, value)| key == "Cookie" && value.contains("SESSION=issued")));
+        for request in http.requests.lock().unwrap().iter().skip(1) {
+            assert!(request.headers["Cookie"].contains("SESSION=issued"));
+        }
+    }
+    #[test]
+    fn uc_share_resolve_cookie_update_survives_reopening_the_dpapi_plan() {
+        let credentials = share_credentials();
+        let token = json!({"code":0,"data":{"stoken":"fresh"}});
+        let http = ShareReplies::new(vec![
+            (token.clone(), vec!["SESSION=resolve-issued; Path=/"]),
+            (
+                json!({"code":0,"data":[{"fid":"f1","download_url":"https://cdn.example/first"}]}),
+                vec![],
+            ),
+        ]);
+        let directory = tempfile::tempdir().unwrap();
+        let source = share_entry().plan.source_for("f1");
+        {
+            let store = CloudSharePlanStore::new(
+                crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            );
+            store.upsert(&share_entry().plan).unwrap();
+            let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+            resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
+        }
+        let store = CloudSharePlanStore::new(
+            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+        );
+        let http = ShareReplies::new(vec![
+            (token, vec![]),
+            (
+                json!({"code":0,"data":[{"fid":"f1","download_url":"https://cdn.example/second"}]}),
+                vec![],
+            ),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+        let direct = resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
+        assert!(direct
+            .headers
+            .iter()
+            .any(|(key, value)| key == "Cookie" && value.contains("SESSION=resolve-issued")));
+        assert!(
+            http.requests.lock().unwrap()[0].headers["Cookie"].contains("SESSION=resolve-issued")
+        );
+    }
+    #[test]
+    fn uc_share_cleared_or_expired_csrf_blocks_download_and_save() {
+        let credentials = share_credentials();
+        for cookie in [
+            "csrf_token=; Max-Age=0; Path=/",
+            "csrf_token=still-present; Max-Age=-1; Path=/",
+            "csrf_token=still-present; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/",
+        ] {
+            for transfer in [false, true] {
+                let http = ShareReplies::new(vec![(
+                    json!({"code":0,"data":{"stoken":"fresh"}}),
+                    vec![cookie],
+                )]);
+                let adapter =
+                    provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+                let directory = tempfile::tempdir().unwrap();
+                let store = CloudSharePlanStore::new(
+                    crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+                );
+                let selected = share_entry();
+                store.upsert(&selected.plan).unwrap();
+                let result = if transfer {
+                    adapter.transfer(&selected, &store).map(|_| ())
+                } else {
+                    adapter.resolve(&selected).map(|_| ())
+                };
+                assert!(matches!(result, Err(QuarkError::WebAuthorizationRequired)));
+                assert_eq!(http.requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+    #[test]
+    fn uc_share_json_csrf_replaces_same_response_cookie_deletion() {
+        let credentials = share_credentials();
+        let http = ShareReplies::new(vec![
+            (
+                json!({"code":0,"data":{"stoken":"fresh","csrf_token":"json-replacement"}}),
+                vec!["csrf_token=; Max-Age=0; Path=/"],
+            ),
+            (
+                json!({"code":0,"data":[{"fid":"f1","download_url":"https://cdn.example/f"}]}),
+                vec![],
+            ),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+        let ShareResolution::Direct(direct) = adapter.resolve(&share_entry()).unwrap() else {
+            panic!()
+        };
+        assert!(direct
+            .headers
+            .contains(&("x-csrf-token".into(), "json-replacement".into())));
+        assert!(!http.requests.lock().unwrap()[1].headers["Cookie"].contains("csrf_token="));
+    }
+    #[test]
+    fn uc_share_transfer_receives_resolve_context_and_persists_its_cookie_rotation() {
+        let credentials = share_credentials();
+        let token = json!({"code":0,"data":{"stoken":"fresh"}});
+        let http = ShareReplies::new(vec![
+            (token.clone(), vec!["SESSION=resolve-issued; Path=/"]),
+            (json!({"code":0,"data":[]}), vec![]),
+            (token, vec![]),
+            (
+                json!({"code":0,"data":{"task_id":"t"}}),
+                vec!["SESSION=transfer-issued; Path=/"],
+            ),
+            (
+                json!({"code":0,"data":{"status":2,"save_as":{"save_as_top_fids":["personal-id"]}}}),
+                vec![],
+            ),
+            (
+                json!({"code":0,"data":[{"fid":"personal-id","download_url":"https://cdn.example/personal"}]}),
+                vec![],
+            ),
+        ]);
+        let directory = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(
+            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+        );
+        let selected = share_entry();
+        store.upsert(&selected.plan).unwrap();
+        let source = selected.plan.source_for("f1");
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+        let direct = resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
+        assert!(direct
+            .headers
+            .iter()
+            .any(|(key, value)| key == "Cookie" && value.contains("SESSION=transfer-issued")));
+        assert!(
+            http.requests.lock().unwrap()[2].headers["Cookie"].contains("SESSION=resolve-issued")
+        );
+        let updated = store.resolve_entry(&source).unwrap();
+        assert!(updated.plan.provider_context["headers"]["Cookie"]
+            .as_str()
+            .unwrap()
+            .contains("SESSION=transfer-issued"));
+        assert_eq!(updated.plan.transfers[0].created_file_id, "personal-id");
     }
     #[test]
     fn uc_share_direct_url_keeps_identity_headers_out_of_source() {
@@ -1076,12 +1438,25 @@ mod tests {
     fn uc_share_http_challenge_without_json_preserves_authorization_error() {
         struct StatusHttp(u16);
         impl CloudHttpTransport for StatusHttp {
-            fn send(&self,_:CloudHttpRequest)->Result<CloudHttpResponse,QuarkError>{Ok(CloudHttpResponse{status:self.0,body:"<html>secret</html>".into(),..Default::default()})}
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                Ok(CloudHttpResponse {
+                    status: self.0,
+                    body: "<html>secret</html>".into(),
+                    ..Default::default()
+                })
+            }
         }
-        let credentials=share_credentials();
-        for status in [401,412] {
-            let http=StatusHttp(status);let result=provider_share_adapter(CloudProvider::Uc,&credentials,&http).unwrap().resolve(&share_entry());
-            assert!(if status==401 {matches!(result,Err(QuarkError::AuthorizationExpired))} else {matches!(result,Err(QuarkError::WebAuthorizationRequired))});
+        let credentials = share_credentials();
+        for status in [401, 412] {
+            let http = StatusHttp(status);
+            let result = provider_share_adapter(CloudProvider::Uc, &credentials, &http)
+                .unwrap()
+                .resolve(&share_entry());
+            assert!(if status == 401 {
+                matches!(result, Err(QuarkError::AuthorizationExpired))
+            } else {
+                matches!(result, Err(QuarkError::WebAuthorizationRequired))
+            });
         }
     }
 }
