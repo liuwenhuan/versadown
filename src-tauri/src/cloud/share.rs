@@ -1054,6 +1054,48 @@ impl CloudSharePlanStore {
         })
     }
 
+    /// Rebuild safe task messages from the durable journal after a restart.
+    /// This reads the document without claiming, pruning, saving or provider IO.
+    pub(crate) fn restore_cleanup_pending_messages(
+        &self,
+        tasks: &crate::TaskStore,
+    ) -> Result<(), QuarkError> {
+        let _guard = self.mutation.lock().map_err(|_| QuarkError::Storage)?;
+        let document = self.load()?;
+        for stored in document.plans.values() {
+            let plan = &stored.plan;
+            let pending = plan.transfers.iter().any(|transfer| {
+                plan.linked_local_tasks
+                    .contains_key(&transfer.entry_fingerprint)
+                    && matches!(
+                        transfer.cleanup_state,
+                        CloudShareCleanupState::Attempted | CloudShareCleanupState::Failed
+                    )
+            });
+            if !pending {
+                continue;
+            }
+            for (entry, ids) in &plan.linked_local_tasks {
+                let source = format!(
+                    "cloud-share://{}/{}/{entry}",
+                    plan.provider.key(),
+                    plan.share_fingerprint
+                );
+                for id in ids {
+                    let Ok(task) = tasks.find(*id) else {
+                        continue;
+                    };
+                    if task.status == crate::TaskStatus::Completed && task.source == source {
+                        tasks
+                            .set_completed_cleanup_message(*id, true)
+                            .map_err(|_| QuarkError::Storage)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn finish_cleanup(
         &self,
         source: &str,

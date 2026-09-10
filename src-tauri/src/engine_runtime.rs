@@ -685,6 +685,211 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    async fn cleanup_plan_gate_blocks_new_sibling_transfer_until_aria2_rebind() {
+        use crate::cloud::{share::*, CloudProvider, DpapiCredentialStore};
+        let root = tempfile::tempdir().unwrap();
+        let plans =
+            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "share".into(),
+            None,
+            ["a", "b"]
+                .into_iter()
+                .map(|id| CloudShareEntry::new("share", id.into(), "file".into(), vec![], Some(1)))
+                .collect(),
+            serde_json::json!({}),
+        );
+        plans.upsert(&plan).unwrap();
+        let a = plan.source_for("a");
+        let b = plan.source_for("b");
+        let tasks = TaskStore::open_in_memory().unwrap();
+        let first = tasks
+            .create(crate::NewTask {
+                source: a.clone(),
+                name: "a".into(),
+                kind: "cloud".into(),
+            })
+            .unwrap();
+        let second = tasks
+            .create(crate::NewTask {
+                source: b.clone(),
+                name: "b".into(),
+                kind: "cloud".into(),
+            })
+            .unwrap();
+        let first = set_status(&tasks, first.id, TaskStatus::Completed);
+        set_status(&tasks, second.id, TaskStatus::Completed);
+        plans.link_local_sources(std::slice::from_ref(&a)).unwrap();
+        plans.link_local_task(&a, first.id).unwrap();
+        plans.record_transfer(&a, "created-a").unwrap();
+        let old_plan = plans.resolve_entry(&a).unwrap().plan;
+        assert_eq!(old_plan.linked_local_tasks.len(), 1);
+
+        let gates = crate::cloud::commands::CloudDownloadSourceGate::default();
+        let overwrite_guard = gates.acquire(&b).await.unwrap();
+        let independent = gates
+            .acquire(&stable_share_source(
+                CloudProvider::Baidu,
+                "other-share",
+                "b",
+            ))
+            .await
+            .unwrap();
+        drop(independent);
+        // B is linked and its new transfer journalled while aria2 still reports
+        // its previous Completed task. A's earlier plan snapshot omits B.
+        plans.link_local_sources(std::slice::from_ref(&b)).unwrap();
+        plans.link_local_task(&b, second.id).unwrap();
+        plans.record_transfer(&b, "new-b-transfer").unwrap();
+        let cleanup_gate = gates.acquire(&a);
+        tokio::pin!(cleanup_gate);
+        assert!(
+            futures_util::poll!(&mut cleanup_gate).is_pending(),
+            "cleanup used the old entry set and bypassed the in-flight sibling overwrite"
+        );
+        set_status(&tasks, second.id, TaskStatus::Downloading);
+        drop(overwrite_guard);
+        let _cleanup_guard = cleanup_gate.await.unwrap();
+        cleanup_completed_share(&plans, &tasks, &first, true, false, |_, _| {
+            panic!("deleted the newly transferred sibling before completion")
+        })
+        .unwrap();
+        assert!(plans
+            .resolve_entry(&a)
+            .unwrap()
+            .plan
+            .transfers
+            .iter()
+            .all(|transfer| transfer.cleanup_state == CloudShareCleanupState::Pending));
+    }
+
+    #[test]
+    fn task_listing_restores_attempted_cleanup_after_restart_without_aria2_or_network() {
+        use crate::cloud::{share::*, CloudProvider, DpapiCredentialStore};
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("tasks.sqlite");
+        let plans =
+            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+        let tasks = TaskStore::open_path(&db).unwrap();
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "secret-share-id".into(),
+            Some("secret-access-code".into()),
+            vec![CloudShareEntry::new(
+                "secret-share-id",
+                "entry".into(),
+                "file".into(),
+                vec![],
+                None,
+            )],
+            serde_json::json!({"cookie":"secret-cookie"}),
+        );
+        plans.upsert(&plan).unwrap();
+        let source = plan.source_for("entry");
+        plans
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        let task = tasks
+            .create(crate::NewTask {
+                source: source.clone(),
+                name: "file".into(),
+                kind: "cloud".into(),
+            })
+            .unwrap();
+        let completed = set_status(&tasks, task.id, TaskStatus::Completed);
+        assert!(completed.aria_gid.is_none());
+        plans.link_local_task(&source, task.id).unwrap();
+        plans.record_transfer(&source, "secret-created-id").unwrap();
+        assert_eq!(
+            plans
+                .mark_local_completion(&source, false, |_, _| true)
+                .unwrap(),
+            vec!["secret-created-id"]
+        );
+        assert!(tasks.find(task.id).unwrap().error.is_none());
+        drop(plans);
+        drop(tasks);
+
+        let reopened_plans =
+            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+        let reopened_tasks = TaskStore::open_path(&db).unwrap();
+        let credentials = DpapiCredentialStore::new(root.path().into()).unwrap();
+        let before = crate::cloud::CredentialStore::load(&credentials, SHARE_PLAN_SECRET).unwrap();
+        let listed = crate::commands::list_tasks_with_cleanup_projection(
+            &reopened_tasks,
+            Some(&reopened_plans),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::cloud::CredentialStore::load(&credentials, SHARE_PLAN_SECRET).unwrap(),
+            before,
+            "listing must not modify or rearm the cleanup journal"
+        );
+        assert_eq!(listed[0].status, TaskStatus::Completed);
+        assert!(listed[0]
+            .error
+            .as_deref()
+            .is_some_and(|message| message.starts_with("cleanup_pending：")));
+        let projection = serde_json::to_string(&listed).unwrap();
+        for secret in [
+            "secret-share-id",
+            "secret-access-code",
+            "secret-cookie",
+            "secret-created-id",
+        ] {
+            assert!(!projection.contains(secret));
+        }
+        // Listing has no provider action dependency and never rearms a claim.
+        assert!(reopened_plans
+            .mark_local_completion(&source, false, |_, _| true)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reopened_plans
+                .resolve_entry(&source)
+                .unwrap()
+                .plan
+                .transfers[0]
+                .cleanup_state,
+            CloudShareCleanupState::Attempted
+        );
+    }
+
+    #[test]
+    fn cleanup_projection_preserves_cancelled_tasks_and_rejects_mismatched_sources() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let completed = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        let cancelled = set_status(&tasks, locals[1].id, TaskStatus::Cancelled);
+        let personal = tasks
+            .create(crate::NewTask {
+                source: "cloud://baidu/personal-file".into(),
+                name: "personal".into(),
+                kind: "cloud".into(),
+            })
+            .unwrap();
+        let personal = set_status(&tasks, personal.id, TaskStatus::Completed);
+        plans
+            .link_local_task(&completed.source, personal.id)
+            .unwrap();
+        plans.mark_cleanup_attempted(&completed.source).unwrap();
+        let listed =
+            crate::commands::list_tasks_with_cleanup_projection(&tasks, Some(&plans)).unwrap();
+        assert!(listed
+            .iter()
+            .find(|task| task.id == completed.id)
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some_and(|message| message.starts_with("cleanup_pending：")));
+        for original in [cancelled, personal] {
+            let restored = listed.iter().find(|task| task.id == original.id).unwrap();
+            assert_eq!(restored.status, original.status);
+            assert_eq!(restored.error, original.error);
+        }
+    }
+
     struct NoEngineEvents;
     impl EngineStateSink for NoEngineEvents {
         fn engine_state_updated(&self, _: &EngineAvailability) {}

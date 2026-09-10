@@ -15,9 +15,10 @@ use tauri::{
 };
 use tauri_plugin_dialog::DialogExt;
 
-/// A stable cloud source has one submission owner from duplicate detection
-/// through aria2 submission. The registry lock is released before awaiting
-/// the source-specific lock, so unrelated files keep flowing concurrently.
+/// Personal files lock their exact source. Share files lock the stable plan,
+/// so new siblings, overwrite, refresh and cleanup cannot bypass each other
+/// while the plan's entry set changes. The guard covers resolution through
+/// aria2 rebinding, or cleanup claiming through the provider mutation.
 #[derive(Default)]
 pub struct CloudDownloadSourceGate {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -28,11 +29,17 @@ impl CloudDownloadSourceGate {
         &self,
         source: &str,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, QuarkError> {
+        let key = if source.starts_with("cloud-share://") {
+            let (provider, share, _) = share::parse_stable_cloud_share_source(source)?;
+            format!("cloud-share://{}/{share}", provider.key())
+        } else {
+            source.to_owned()
+        };
         let lock = {
             let mut locks = self.locks.lock().map_err(|_| QuarkError::Storage)?;
             Arc::clone(
                 locks
-                    .entry(source.to_owned())
+                    .entry(key)
                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
             )
         };
@@ -1678,25 +1685,9 @@ async fn cleanup_cloud_share_task_inner(
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
-    let plan = cloud.share_plans.resolve_entry(&task.source)?.plan;
-    // Lock every linked source in deterministic order, shared with submission,
-    // retry and overwrite, until the provider action completes.
-    let sources: std::collections::BTreeSet<_> = plan
-        .linked_local_tasks
-        .keys()
-        .map(|entry| {
-            format!(
-                "cloud-share://{}/{}/{}",
-                provider.key(),
-                plan.share_fingerprint,
-                entry
-            )
-        })
-        .collect();
-    let mut guards = Vec::new();
-    for source in sources {
-        guards.push(state.cloud_download_sources.acquire(&source).await?);
-    }
+    // Acquire the stable plan lock before reading its current linked tasks.
+    // New entries share this lock even if an earlier plan snapshot omitted them.
+    let _plan_guard = state.cloud_download_sources.acquire(&task.source).await?;
     cloud.share_plans.link_local_task(&task.source, id)?;
     let tasks = Arc::clone(&state.store);
     let worker_app = app.clone();

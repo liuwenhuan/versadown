@@ -347,14 +347,27 @@ fn unbound_torrent_confirmation_error(task: &DownloadTask) -> Option<&'static st
 }
 
 #[tauri::command]
-pub fn list_tasks(state: State<'_, AppState>) -> Result<Vec<DownloadTaskPayload>, String> {
-    state
-        .store
-        .list()
-        .map_err(|error| error.to_string())?
+pub fn list_tasks(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Vec<DownloadTaskPayload>, String> {
+    let cloud = app.try_state::<Arc<crate::cloud::commands::CloudState>>();
+    list_tasks_with_cleanup_projection(&state.store, cloud.as_ref().map(|cloud| &cloud.share_plans))?
         .into_iter()
         .map(|task| task_payload(&state.store, task))
         .collect()
+}
+
+pub(crate) fn list_tasks_with_cleanup_projection(
+    store: &TaskStore,
+    plans: Option<&crate::cloud::share::CloudSharePlanStore>,
+) -> Result<Vec<DownloadTask>, String> {
+    // Listing remains available if credentials are unavailable. The projection
+    // only reads the journal; even an Attempted record never triggers deletion.
+    if let Some(plans) = plans {
+        let _ = plans.restore_cleanup_pending_messages(store);
+    }
+    store.list().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
