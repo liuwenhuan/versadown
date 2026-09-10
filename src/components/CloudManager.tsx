@@ -350,6 +350,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const effectiveAuthorizationCapabilities = authorizationCapabilityState.provider === provider && authorizationCapabilityState.client === client
     ? authorizationCapabilityState.capabilities
     : null;
+  const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities?.password === true && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
@@ -388,6 +389,13 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   useEffect(() => {
     setSelectionMenuAnchor(null);
   }, [selectedIds]);
+
+  useEffect(() => {
+    if (!supportsDirectPasswordLogin) {
+      setUsername('');
+      setPassword('');
+    }
+  }, [supportsDirectPasswordLogin]);
 
   async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
     setDirectoryState('loading');
@@ -468,6 +476,11 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   async function submitPasswordLogin(event: FormEvent) {
     event.preventDefault();
+    if (!supportsDirectPasswordLogin) {
+      setUsername('');
+      setPassword('');
+      return;
+    }
     if (!username.trim() || !password) {
       setAuthorizationStatus('请输入账号和密码后再登录。');
       return;
@@ -706,7 +719,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       <header className="cloud-heading"><h2>{label}网盘</h2></header>
       {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
       {effectiveAuthorizationCapabilities ? <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
-        {effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect' && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+        {supportsDirectPasswordLogin && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label>{label}密码<input aria-label={`${label}密码`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <p className="cloud-login-security-note">账号和密码仅加密保存在本机，用于登录失效后的自动恢复。</p>
         <button className="primary" type="submit">登录{label}账号</button></>}

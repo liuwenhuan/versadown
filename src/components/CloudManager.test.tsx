@@ -93,6 +93,25 @@ it.each(['aliyun', 'xunlei', 'uc'] as const)('opens official account-password lo
   expect(screen.queryByLabelText(/密码$/)).not.toBeInTheDocument();
 });
 
+it('clears direct credentials before switching to official WebView login', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  const { rerender } = render(<CloudManager provider="baidu" client={client} authorizationOnly />);
+
+  await user.type(await screen.findByLabelText('百度账号'), 'alice');
+  await user.type(screen.getByLabelText('百度密码'), 'secret');
+  rerender(<CloudManager provider="aliyun" client={client} authorizationOnly />);
+
+  expect(await screen.findByRole('button', { name: '在官方网页登录（可使用账号密码）' })).toBeVisible();
+  expect(screen.queryByLabelText(/账号$/)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText(/密码$/)).not.toBeInTheDocument();
+  expect(client.loginCloudWithPassword).not.toHaveBeenCalled();
+
+  rerender(<CloudManager provider="baidu" client={client} authorizationOnly />);
+  expect(await screen.findByLabelText('百度账号')).toHaveValue('');
+  expect(screen.getByLabelText('百度密码')).toHaveValue('');
+});
+
 it.each([
   ['is missing its provider', { web: true, password: false, passwordLoginMode: 'none' }],
   ['uses an invalid password mode', { provider: 'quark', web: true, password: false, passwordLoginMode: 'unsupported' }],

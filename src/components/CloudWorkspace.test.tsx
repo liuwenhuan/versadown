@@ -56,7 +56,7 @@ it('fails closed when UC capability lookup is unavailable', async () => {
   const client = createClient();
   client.getCloudAuthorizationCapabilities.mockImplementation((provider: string) => provider === 'uc'
     ? Promise.reject(new Error('能力查询暂不可用'))
-    : Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' }));
+    : Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi', passwordLoginMode: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' ? 'rustDirect' : provider === 'aliyun' || provider === 'xunlei' ? 'officialWebView' : 'none' }));
   render(<CloudWorkspace client={client as never} />);
 
   const ucAuthorization = await screen.findByRole('region', { name: 'UC账号授权' });
