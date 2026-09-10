@@ -80,6 +80,50 @@ async fn changed_snapshots_persist_before_events_and_unchanged_emit_once() {
 }
 
 #[tokio::test]
+async fn paused_task_keeps_persisted_progress_when_aria2_restores_without_lengths() {
+    let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "system.multicall" => {
+            json!([[json!({
+                "gid": "gid-1",
+                "status": "paused",
+                "totalLength": "0",
+                "completedLength": "0",
+                "downloadSpeed": "0",
+                "uploadSpeed": "0",
+                "connections": "0",
+                "files": []
+            })]])
+        }
+        "aria2.getGlobalStat" => global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let mut task = store
+        .create(NewTask::direct("http://127.0.0.1/file"))
+        .unwrap();
+    store.bind_gid(task.id, "gid-1").unwrap();
+    task = store.find(task.id).unwrap();
+    task.status = alldownloader_lib::TaskStatus::Paused;
+    task.progress = 60;
+    task.total_length = Some(100);
+    task.completed_length = 60;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+
+    DownloadService::new(Arc::new(client), store.clone())
+        .reconcile_now()
+        .await
+        .unwrap();
+
+    let restored = store.find(task.id).unwrap();
+    assert_eq!(restored.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(restored.progress, 60);
+    assert_eq!(restored.total_length, Some(100));
+    assert_eq!(restored.completed_length, 60);
+    server.abort();
+}
+
+#[tokio::test]
 async fn followed_by_uses_child_snapshot_without_completing_metadata_parent() {
     let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
         "aria2.tellStatus" if request["params"][1] == "meta" => {

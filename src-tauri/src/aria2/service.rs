@@ -880,6 +880,14 @@ impl DownloadService {
         mut task: DownloadTask,
         snapshot: TransferSnapshot,
     ) -> Result<DownloadTask, DownloadServiceError> {
+        // aria2 may briefly restore a paused session before it has reloaded its
+        // length and file metadata. Treat that all-zero response as incomplete
+        // rather than erasing a durable partial-transfer snapshot.
+        let preserve_paused_progress = snapshot.status == TaskStatus::Paused
+            && snapshot.total_length.is_none()
+            && snapshot.completed_length == 0
+            && snapshot.files.is_empty()
+            && (task.progress > 0 || task.total_length.is_some() || task.completed_length > 0);
         if task.aria_gid.as_deref() != Some(&snapshot.gid) {
             task.followed_by_gid = Some(snapshot.gid.clone());
         }
@@ -890,9 +898,11 @@ impl DownloadService {
         } else {
             snapshot.status
         };
-        task.progress = snapshot.progress_percent.unwrap_or(0);
-        task.total_length = snapshot.total_length;
-        task.completed_length = snapshot.completed_length;
+        if !preserve_paused_progress {
+            task.progress = snapshot.progress_percent.unwrap_or(0);
+            task.total_length = snapshot.total_length;
+            task.completed_length = snapshot.completed_length;
+        }
         task.download_speed = snapshot.download_speed;
         task.upload_speed = snapshot.upload_speed;
         task.connections = snapshot.connections;
