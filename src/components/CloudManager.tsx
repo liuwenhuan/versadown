@@ -93,6 +93,10 @@ function isAuthorizationWindowUnavailable(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'web_auth_required';
 }
 
+function isSessionRenewedRetryOperation(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'session_renewed_retry_operation';
+}
+
 function isTerminalWebAuthorizationError(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && ['provider_error', 'invalid_response', 'credentials_expired'].includes(String((error as { code?: unknown }).code));
 }
@@ -569,6 +573,8 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         // a successful `cloud_complete_authorization` validation.
         setReauthorizationRequired(true);
         setOperation({ kind: 'error', message: `${name}需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重试。` });
+      } else if (isSessionRenewedRetryOperation(error)) {
+        setOperation({ kind: 'error', message: '已自动恢复登录，请重新执行本次操作' });
       } else {
         setOperation({ kind: 'error', message: `${name}失败：${errorMessage(error, '请重试。')}` });
       }
@@ -715,6 +721,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {effectiveAuthorizationCapabilities.password && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label>{label}密码<input aria-label={`${label}密码`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <p className="cloud-login-security-note">账号和密码仅加密保存在本机，用于登录失效后的自动恢复。</p>
         <button className="primary" type="submit">登录{label}账号</button></>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}

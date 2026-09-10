@@ -82,6 +82,83 @@ async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_star
 }
 
 #[tokio::test]
+async fn confirmed_magnet_overwrite_restarts_the_saved_file_selection() {
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_running = running.clone();
+    let selection_applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_selection_applied = selection_applied.clone();
+    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.addTorrent" => {
+            assert_eq!(request["params"][3]["pause"], "true");
+            assert_eq!(request["params"][3]["check-integrity"], "true");
+            assert_eq!(request["params"][3]["allow-overwrite"], "true");
+            json!("replacement-gid")
+        }
+        "aria2.tellStatus" => {
+            let status = if wire_running.load(std::sync::atomic::Ordering::SeqCst) {
+                "active"
+            } else {
+                "paused"
+            };
+            let mut transfer = fixture::status("replacement-gid", status, 0);
+            transfer["files"] = json!([
+                {"index":"1","path":"bundle/keep.bin","length":"10","completedLength":"0","selected":if wire_selection_applied.load(std::sync::atomic::Ordering::SeqCst) {"false"} else {"true"}},
+                {"index":"2","path":"bundle/download.bin","length":"20","completedLength":"0","selected":"true"}
+            ]);
+            transfer
+        }
+        "aria2.changeOption" => {
+            assert_eq!(request["params"][1], "replacement-gid");
+            assert_eq!(request["params"][2]["select-file"], "2");
+            assert_eq!(request["params"][2]["allow-overwrite"], "true");
+            wire_selection_applied.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!("OK")
+        }
+        "aria2.unpause" => {
+            wire_running.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!("replacement-gid")
+        }
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .unwrap();
+    store.bind_gid(task.id, "previous-gid").unwrap();
+    store.fail(task.id, "interrupted").unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[
+                (1, "bundle/keep.bin".into(), 10, 4, false),
+                (2, "bundle/download.bin".into(), 20, 6, true),
+            ],
+        )
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let restarted = service
+        .resubmit_torrent_with_options(
+            task.id,
+            "dG9ycmVudC1ieXRlcw==".into(),
+            vec![],
+            vec![2],
+            UriSubmissionOptions {
+                allow_overwrite: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(restarted.status, TaskStatus::Downloading);
+    assert_eq!(restarted.aria_gid.as_deref(), Some("replacement-gid"));
+    assert!(!store.files(task.id).unwrap()[0].selected);
+    server.abort();
+}
+
+#[tokio::test]
 async fn selected_torrent_uses_the_chosen_destination_before_unpausing() {
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let wire_started = started.clone();

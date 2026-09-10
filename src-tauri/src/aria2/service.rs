@@ -226,11 +226,57 @@ impl DownloadService {
         task_id: Uuid,
         torrent_base64: String,
         web_seed_uris: Vec<String>,
+        options: BTreeMap<String, String>,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        self.submit_torrent_with_mode(task_id, torrent_base64, web_seed_uris, options, false)
+            .await
+    }
+
+    /// Replaces a previously stopped torrent-backed magnet after the caller
+    /// explicitly approved overwriting its files. The prior file selection is
+    /// supplied by the caller and applied before the replacement is unpaused.
+    pub async fn resubmit_torrent_with_options(
+        &self,
+        task_id: Uuid,
+        torrent_base64: String,
+        web_seed_uris: Vec<String>,
+        selected_indices: Vec<u32>,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        let task = self
+            .submit_torrent_with_mode(
+                task_id,
+                torrent_base64,
+                web_seed_uris,
+                options.clone().into_aria2_options()?,
+                true,
+            )
+            .await?;
+        let selected_indices = if selected_indices.is_empty() {
+            self.store
+                .files(task_id)?
+                .into_iter()
+                .filter(|file| file.selected)
+                .map(|file| file.index)
+                .collect()
+        } else {
+            selected_indices
+        };
+        self.select_files_with_options(task.id, selected_indices, options)
+            .await
+    }
+
+    async fn submit_torrent_with_mode(
+        &self,
+        task_id: Uuid,
+        torrent_base64: String,
+        web_seed_uris: Vec<String>,
         mut options: BTreeMap<String, String>,
+        rebind_existing_task: bool,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        if self.store.find(task_id)?.aria_gid.is_some() {
+        if self.store.find(task_id)?.aria_gid.is_some() && !rebind_existing_task {
             return Err(DownloadServiceError::AlreadySubmitted);
         }
         // A torrent must remain paused until the user has reviewed aria2's real
@@ -310,7 +356,13 @@ impl DownloadService {
                         .cleanup_rejected_torrent(task_id, &gid, DownloadServiceError::EmptyTorrent)
                         .await);
                 }
-                let current = match self.store.bind_awaiting_gid(task_id, &gid) {
+                let current = match if rebind_existing_task {
+                    self.store
+                        .rebind_for_resubmission(task_id, &gid)
+                        .and_then(|_| self.store.bind_awaiting_gid(task_id, &gid))
+                } else {
+                    self.store.bind_awaiting_gid(task_id, &gid)
+                } {
                     Ok(task) => task,
                     Err(error) => {
                         return Err(self
@@ -332,7 +384,11 @@ impl DownloadService {
                     snapshot.error_message =
                         Some(format!("aria2 种子任务以 {aria_status} 状态结束"));
                 }
-                let current = match self.store.bind_gid(task_id, &gid) {
+                let current = match if rebind_existing_task {
+                    self.store.rebind_for_resubmission(task_id, &gid)
+                } else {
+                    self.store.bind_gid(task_id, &gid)
+                } {
                     Ok(task) => task,
                     Err(error) => {
                         return Err(self

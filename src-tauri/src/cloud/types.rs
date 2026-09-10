@@ -92,6 +92,8 @@ pub enum QuarkError {
     NotAuthorized,
     #[error("网盘会话已过期，请重新登录授权")]
     AuthorizationExpired,
+    #[error("登录已自动恢复，请重新执行本次操作")]
+    SessionRenewedRetryOperation,
     #[error("此登录方式需要网页验证，请点击网页授权完成登录")]
     WebAuthorizationRequired,
     #[error("网盘要求更新操作验证，请重新网页授权")]
@@ -120,6 +122,7 @@ impl Serialize for QuarkError {
         let code = match self {
             Self::NotAuthorized => "not_authorized",
             Self::AuthorizationExpired => "credentials_expired",
+            Self::SessionRenewedRetryOperation => "session_renewed_retry_operation",
             Self::WebAuthorizationRequired => "web_auth_required",
             Self::CaptchaRequired => "web_auth_required",
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",

@@ -187,6 +187,103 @@ async fn run_when_initialized<T: Send + 'static>(
     .await
     .map_err(|_| QuarkError::Transport("网盘任务中断".into()))?
 }
+
+async fn run_session_work<T: Send + 'static>(
+    app: AppHandle,
+    provider: CloudProvider,
+    kind: SessionWorkKind,
+    mut work: impl FnMut(&CloudState, &ReqwestTransport) -> Result<T, QuarkError> + Send + 'static,
+) -> Result<T, QuarkError> {
+    run(app, provider, move |state, http| {
+        run_cloud_work(provider, kind, &state.store, http, || work(state, http))
+    })
+    .await
+}
+
+fn run_cloud_work<T>(
+    provider: CloudProvider,
+    kind: SessionWorkKind,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+    work: impl FnMut() -> Result<T, QuarkError>,
+) -> Result<T, QuarkError> {
+    run_with_session_recovery(provider, store, kind, work, |credential| {
+        recover_provider_password_session(provider, store, http, credential)
+    })
+}
+
+enum PasswordRecoveredSession {
+    Pikpak(Vec<u8>),
+    Baidu(baidu::BaiduSession),
+    Tianyi(tianyi::TianyiSession),
+}
+
+fn recover_provider_password_session(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+    credential: &CloudPasswordCredential,
+) -> Result<(), QuarkError> {
+    if credential.provider() != provider {
+        return Err(QuarkError::Storage);
+    }
+
+    let (account, session) = match provider {
+        CloudProvider::Pikpak => {
+            let temporary = MemoryCredentialStore::default();
+            let client = PikPakClient::new(http, &temporary);
+            client.login(credential.username(), credential.password())?;
+            let account = client.account()?;
+            client.list("0")?;
+            let session = temporary
+                .load(CloudProvider::Pikpak.key())?
+                .ok_or(QuarkError::Storage)?;
+            (account, PasswordRecoveredSession::Pikpak(session))
+        }
+        CloudProvider::Baidu => {
+            let session = baidu::BaiduClient::login_password(
+                credential.username(),
+                credential.password(),
+                http,
+            )?;
+            let client = baidu::BaiduClient::new(session.clone(), http);
+            let account = client.account()?;
+            (account, PasswordRecoveredSession::Baidu(session))
+        }
+        CloudProvider::Tianyi => {
+            let session = tianyi::TianyiClient::login_password(
+                credential.username(),
+                credential.password(),
+                http,
+            )?;
+            let client = tianyi::TianyiClient::new(session.clone(), http);
+            let account = client.account()?;
+            (account, PasswordRecoveredSession::Tianyi(session))
+        }
+        CloudProvider::Quark
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei
+        | CloudProvider::Uc => return Err(QuarkError::WebAuthorizationRequired),
+    };
+
+    if account.id.is_empty() || account.id != credential.account_id() {
+        remove_password_credential(store, provider)?;
+        return Err(QuarkError::WebAuthorizationRequired);
+    }
+    match session {
+        PasswordRecoveredSession::Pikpak(session) => {
+            store.save(CloudProvider::Pikpak.key(), &session)?
+        }
+        PasswordRecoveredSession::Baidu(session) => {
+            save_provider_session(CloudProvider::Baidu, store, &session)?
+        }
+        PasswordRecoveredSession::Tianyi(session) => {
+            save_provider_session(CloudProvider::Tianyi, store, &session)?
+        }
+    }
+    Ok(())
+}
+
 pub fn restore_account(
     provider: CloudProvider,
     store: &impl CredentialStore,
@@ -351,7 +448,16 @@ pub fn logout_provider(
     store: &impl CredentialStore,
 ) -> Result<(), QuarkError> {
     require_connected_provider(provider)?;
-    store.remove(provider.key())
+    let session_result = store.remove(provider.key());
+    let password_result = if cloud_session_policy(provider).supports_password_fallback {
+        remove_password_credential(store, provider)
+    } else {
+        Ok(())
+    };
+    match (session_result, password_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 fn valid_name(name: &str) -> Result<(), QuarkError> {
@@ -848,9 +954,9 @@ fn finalize_xunlei_web_authorization(
     // A captured bearer plus browser context alone can still be rejected by
     // Xunlei's live drive endpoint.
     let final_error = |error| match error {
-        QuarkError::AuthorizationExpired if modern => QuarkError::Provider(
-            "迅雷登录凭据已失效，请在授权页重新登录后重试".into(),
-        ),
+        QuarkError::AuthorizationExpired if modern => {
+            QuarkError::Provider("迅雷登录凭据已失效，请在授权页重新登录后重试".into())
+        }
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired if modern => {
             QuarkError::Provider("迅雷目录访问仍需操作验证，请在授权页完成验证后重试".into())
         }
@@ -889,7 +995,7 @@ pub async fn cloud_complete_authorization(
         .get_webview_window(&format!("cloud-auth-{}", provider.key()))
         .ok_or(QuarkError::WebAuthorizationRequired)?;
     run(app, provider, move |state, http| {
-        match provider {
+        let account = match provider {
             CloudProvider::Quark => {
                 // Must stay on the blocking worker, never the Windows UI thread (WebView2 deadlock).
                 let cookie = browser_cookies(
@@ -976,7 +1082,11 @@ pub async fn cloud_complete_authorization(
                 let _ = window.close();
                 Ok(account)
             }
+        }?;
+        if cloud_session_policy(provider).supports_password_fallback {
+            clear_password_credential_if_account_differs(&state.store, provider, &account.id)?;
         }
+        Ok(account)
     })
     .await
 }
@@ -990,39 +1100,53 @@ pub async fn cloud_login_password(
     if !provider_capabilities(provider).password {
         return Err(QuarkError::WebAuthorizationRequired);
     }
+    let username = zeroize::Zeroizing::new(username);
     let password = zeroize::Zeroizing::new(password);
-    run(app, provider, move |state, http| match provider {
-        CloudProvider::Pikpak => {
-            let temporary = MemoryCredentialStore::default();
-            let client = PikPakClient::new(http, &temporary);
-            client.login(&username, &password)?;
-            let account = client.account()?;
-            state.store.save(
-                "pikpak",
-                &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
-            )?;
-            Ok(account)
-        }
-        CloudProvider::Baidu => {
-            let session = baidu::BaiduClient::login_password(&username, &password, http)?;
-            let client = baidu::BaiduClient::new(session.clone(), http);
-            let account = client.account()?;
-            client.directory("/")?;
-            save_provider_session(CloudProvider::Baidu, &state.store, &session)?;
-            Ok(account)
-        }
-        CloudProvider::Tianyi => {
-            let session = tianyi::TianyiClient::login_password(&username, &password, http)?;
-            let client = tianyi::TianyiClient::new(session.clone(), http);
-            let account = client.account()?;
-            client.directory("-11")?;
-            save_provider_session(CloudProvider::Tianyi, &state.store, &session)?;
-            Ok(account)
-        }
-        CloudProvider::Quark
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei
-        | CloudProvider::Uc => Err(QuarkError::WebAuthorizationRequired),
+    run(app, provider, move |state, http| {
+        let account = match provider {
+            CloudProvider::Pikpak => {
+                let temporary = MemoryCredentialStore::default();
+                let client = PikPakClient::new(http, &temporary);
+                client.login(&username, &password)?;
+                let account = client.account()?;
+                client.list("0")?;
+                state.store.save(
+                    "pikpak",
+                    &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
+                )?;
+                account
+            }
+            CloudProvider::Baidu => {
+                let session = baidu::BaiduClient::login_password(&username, &password, http)?;
+                let client = baidu::BaiduClient::new(session.clone(), http);
+                let account = client.account()?;
+                client.directory("/")?;
+                save_provider_session(CloudProvider::Baidu, &state.store, &session)?;
+                account
+            }
+            CloudProvider::Tianyi => {
+                let session = tianyi::TianyiClient::login_password(&username, &password, http)?;
+                let client = tianyi::TianyiClient::new(session.clone(), http);
+                let account = client.account()?;
+                client.directory("-11")?;
+                save_provider_session(CloudProvider::Tianyi, &state.store, &session)?;
+                account
+            }
+            CloudProvider::Quark
+            | CloudProvider::Aliyun
+            | CloudProvider::Xunlei
+            | CloudProvider::Uc => return Err(QuarkError::WebAuthorizationRequired),
+        };
+        save_password_credential(
+            &state.store,
+            CloudPasswordCredential::new(
+                provider,
+                account.id.clone(),
+                username.as_str(),
+                password.as_str(),
+            ),
+        )?;
+        Ok(account)
     })
     .await
 }
@@ -1031,7 +1155,7 @@ pub async fn cloud_account(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
-    run(app, provider, move |s, h| {
+    run_session_work(app, provider, SessionWorkKind::Read, move |s, h| {
         restore_account(provider, &s.store, h)
     })
     .await
@@ -1042,7 +1166,7 @@ pub async fn cloud_list_directory(
     provider: CloudProvider,
     parent_id: String,
 ) -> Result<CloudDirectory, QuarkError> {
-    run(app, provider, move |s, h| {
+    run_session_work(app, provider, SessionWorkKind::Read, move |s, h| {
         list_cloud_directory(provider, &s.store, h, &parent_id)
     })
     .await
@@ -1055,45 +1179,56 @@ pub async fn cloud_create_directory(
     name: String,
 ) -> Result<CloudFile, QuarkError> {
     valid_name(&name)?;
-    run(app, provider, move |s, h| match provider {
-        CloudProvider::Quark => {
-            let v =
-                response_json(&QuarkClient::new(cookie(&s.store)?, h).mkdir(&parent_id, &name)?)?;
-            Ok(CloudFile {
-                id: required(&v["data"], "fid")?,
-                parent_id,
-                name,
-                kind: "folder".into(),
-                size: None,
-                modified_at: None,
-            })
-        }
-        CloudProvider::Pikpak => PikPakClient::new(h, &s.store).mkdir(&parent_id, &name),
-        CloudProvider::Baidu => {
-            let client =
-                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h);
-            client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
-        }
-        CloudProvider::Tianyi => {
-            let client = tianyi::TianyiClient::new(
-                load_provider_session(CloudProvider::Tianyi, &s.store)?,
-                h,
-            );
-            client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
-        }
-        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).mkdir(&parent_id, &name),
-        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
-            client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
-        }),
-        CloudProvider::Uc => {
-            let client = uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h);
-            client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
-        }
-    })
+    run_session_work(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| match provider {
+            CloudProvider::Quark => {
+                let v = response_json(
+                    &QuarkClient::new(cookie(&s.store)?, h).mkdir(&parent_id, &name)?,
+                )?;
+                Ok(CloudFile {
+                    id: required(&v["data"], "fid")?,
+                    parent_id: parent_id.clone(),
+                    name: name.clone(),
+                    kind: "folder".into(),
+                    size: None,
+                    modified_at: None,
+                })
+            }
+            CloudProvider::Pikpak => PikPakClient::new(h, &s.store).mkdir(&parent_id, &name),
+            CloudProvider::Baidu => {
+                let client = baidu::BaiduClient::new(
+                    load_provider_session(CloudProvider::Baidu, &s.store)?,
+                    h,
+                );
+                client.mkdir(&parent_id, &name)?;
+                find_created_directory(client.directory(&parent_id)?, &name)
+            }
+            CloudProvider::Tianyi => {
+                let client = tianyi::TianyiClient::new(
+                    load_provider_session(CloudProvider::Tianyi, &s.store)?,
+                    h,
+                );
+                client.mkdir(&parent_id, &name)?;
+                find_created_directory(client.directory(&parent_id)?, &name)
+            }
+            CloudProvider::Aliyun => {
+                aliyun::AliyunClient::new(&s.store, h).mkdir(&parent_id, &name)
+            }
+            CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
+                client.mkdir(&parent_id, &name)?;
+                find_created_directory(client.directory(&parent_id)?, &name)
+            }),
+            CloudProvider::Uc => {
+                let client =
+                    uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h);
+                client.mkdir(&parent_id, &name)?;
+                find_created_directory(client.directory(&parent_id)?, &name)
+            }
+        },
+    )
     .await
 }
 #[tauri::command]
@@ -1104,29 +1239,35 @@ pub async fn cloud_rename(
     name: String,
 ) -> Result<(), QuarkError> {
     valid_name(&name)?;
-    run(app, provider, move |s, h| match provider {
-        CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
-            .rename(&file_id, &name)
-            .map(|_| ()),
-        CloudProvider::Pikpak => PikPakClient::new(h, &s.store).rename(&file_id, &name),
-        CloudProvider::Baidu => {
-            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+    run_session_work(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| match provider {
+            CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
                 .rename(&file_id, &name)
-        }
-        CloudProvider::Tianyi => {
-            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
-                .rename(&file_id, &name)
-        }
-        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).rename(&file_id, &name),
-        CloudProvider::Xunlei => {
-            with_xunlei_client(&s.store, h, |client| client.rename(&file_id, &name))
-        }
-        CloudProvider::Uc => {
-            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
-                .rename(&file_id, &name)
-                .map(|_| ())
-        }
-    })
+                .map(|_| ()),
+            CloudProvider::Pikpak => PikPakClient::new(h, &s.store).rename(&file_id, &name),
+            CloudProvider::Baidu => {
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                    .rename(&file_id, &name)
+            }
+            CloudProvider::Tianyi => tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, &s.store)?,
+                h,
+            )
+            .rename(&file_id, &name),
+            CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).rename(&file_id, &name),
+            CloudProvider::Xunlei => {
+                with_xunlei_client(&s.store, h, |client| client.rename(&file_id, &name))
+            }
+            CloudProvider::Uc => {
+                uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                    .rename(&file_id, &name)
+                    .map(|_| ())
+            }
+        },
+    )
     .await
 }
 #[tauri::command]
@@ -1136,33 +1277,39 @@ pub async fn cloud_move(
     file_ids: Vec<String>,
     target_parent_id: String,
 ) -> Result<(), QuarkError> {
-    run(app, provider, move |s, h| match provider {
-        CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
-            .move_files(&file_ids, &target_parent_id)
-            .map(|_| ()),
-        CloudProvider::Pikpak => {
-            PikPakClient::new(h, &s.store).move_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Baidu => {
-            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+    run_session_work(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| match provider {
+            CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
                 .move_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Tianyi => {
-            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
-                .move_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Aliyun => {
-            aliyun::AliyunClient::new(&s.store, h).move_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
-            client.move_files(&file_ids, &target_parent_id)
-        }),
-        CloudProvider::Uc => {
-            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
-                .move_files(&file_ids, &target_parent_id)
-                .map(|_| ())
-        }
-    })
+                .map(|_| ()),
+            CloudProvider::Pikpak => {
+                PikPakClient::new(h, &s.store).move_files(&file_ids, &target_parent_id)
+            }
+            CloudProvider::Baidu => {
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                    .move_files(&file_ids, &target_parent_id)
+            }
+            CloudProvider::Tianyi => tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, &s.store)?,
+                h,
+            )
+            .move_files(&file_ids, &target_parent_id),
+            CloudProvider::Aliyun => {
+                aliyun::AliyunClient::new(&s.store, h).move_files(&file_ids, &target_parent_id)
+            }
+            CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
+                client.move_files(&file_ids, &target_parent_id)
+            }),
+            CloudProvider::Uc => {
+                uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                    .move_files(&file_ids, &target_parent_id)
+                    .map(|_| ())
+            }
+        },
+    )
     .await
 }
 #[tauri::command]
@@ -1172,33 +1319,39 @@ pub async fn cloud_copy(
     file_ids: Vec<String>,
     target_parent_id: String,
 ) -> Result<(), QuarkError> {
-    run(app, provider, move |s, h| match provider {
-        CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
-            .copy_files(&file_ids, &target_parent_id)
-            .map(|_| ()),
-        CloudProvider::Pikpak => {
-            PikPakClient::new(h, &s.store).copy_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Baidu => {
-            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+    run_session_work(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| match provider {
+            CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
                 .copy_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Tianyi => {
-            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
-                .copy_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Aliyun => {
-            aliyun::AliyunClient::new(&s.store, h).copy_files(&file_ids, &target_parent_id)
-        }
-        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
-            client.copy_files(&file_ids, &target_parent_id)
-        }),
-        CloudProvider::Uc => {
-            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
-                .copy_files(&file_ids, &target_parent_id)
-                .map(|_| ())
-        }
-    })
+                .map(|_| ()),
+            CloudProvider::Pikpak => {
+                PikPakClient::new(h, &s.store).copy_files(&file_ids, &target_parent_id)
+            }
+            CloudProvider::Baidu => {
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                    .copy_files(&file_ids, &target_parent_id)
+            }
+            CloudProvider::Tianyi => tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, &s.store)?,
+                h,
+            )
+            .copy_files(&file_ids, &target_parent_id),
+            CloudProvider::Aliyun => {
+                aliyun::AliyunClient::new(&s.store, h).copy_files(&file_ids, &target_parent_id)
+            }
+            CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| {
+                client.copy_files(&file_ids, &target_parent_id)
+            }),
+            CloudProvider::Uc => {
+                uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                    .copy_files(&file_ids, &target_parent_id)
+                    .map(|_| ())
+            }
+        },
+    )
     .await
 }
 #[tauri::command]
@@ -1207,27 +1360,35 @@ pub async fn cloud_trash(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run(app, provider, move |s, h| match provider {
-        CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
-            .trash(&file_ids)
-            .map(|_| ()),
-        CloudProvider::Pikpak => PikPakClient::new(h, &s.store).trash(&file_ids),
-        CloudProvider::Baidu => {
-            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+    run_session_work(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| match provider {
+            CloudProvider::Quark => QuarkClient::new(cookie(&s.store)?, h)
                 .trash(&file_ids)
-        }
-        CloudProvider::Tianyi => {
-            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &s.store)?, h)
-                .trash(&file_ids)
-        }
-        CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).trash(&file_ids),
-        CloudProvider::Xunlei => with_xunlei_client(&s.store, h, |client| client.trash(&file_ids)),
-        CloudProvider::Uc => {
-            uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
-                .trash(&file_ids)
-                .map(|_| ())
-        }
-    })
+                .map(|_| ()),
+            CloudProvider::Pikpak => PikPakClient::new(h, &s.store).trash(&file_ids),
+            CloudProvider::Baidu => {
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &s.store)?, h)
+                    .trash(&file_ids)
+            }
+            CloudProvider::Tianyi => tianyi::TianyiClient::new(
+                load_provider_session(CloudProvider::Tianyi, &s.store)?,
+                h,
+            )
+            .trash(&file_ids),
+            CloudProvider::Aliyun => aliyun::AliyunClient::new(&s.store, h).trash(&file_ids),
+            CloudProvider::Xunlei => {
+                with_xunlei_client(&s.store, h, |client| client.trash(&file_ids))
+            }
+            CloudProvider::Uc => {
+                uc::UcClient::new(load_provider_session(CloudProvider::Uc, &s.store)?, h)
+                    .trash(&file_ids)
+                    .map(|_| ())
+            }
+        },
+    )
     .await
 }
 #[tauri::command]
@@ -1236,15 +1397,20 @@ pub async fn cloud_delete(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run(app, provider, move |s, h| match provider {
-        // The UI only exposes this operation while browsing PikPak's virtual
-        // recycle-bin directory. Other providers keep their non-destructive
-        // `cloud_trash` behaviour.
-        CloudProvider::Pikpak => PikPakClient::new(h, &s.store).delete(&file_ids),
-        _ => Err(QuarkError::InvalidInput(
-            "只有 PikPak 回收站中的项目可以永久删除".into(),
-        )),
-    })
+    run_session_work(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| match provider {
+            // The UI only exposes this operation while browsing PikPak's virtual
+            // recycle-bin directory. Other providers keep their non-destructive
+            // `cloud_trash` behaviour.
+            CloudProvider::Pikpak => PikPakClient::new(h, &s.store).delete(&file_ids),
+            _ => Err(QuarkError::InvalidInput(
+                "只有 PikPak 回收站中的项目可以永久删除".into(),
+            )),
+        },
+    )
     .await
 }
 pub fn enqueue_cloud_download(
@@ -1353,7 +1519,7 @@ pub async fn resolve_stable_cloud_download(
     source: &str,
 ) -> Result<ResolvedCloudDownload, QuarkError> {
     let (provider, file_id) = parse_stable_cloud_source(source)?;
-    run(app, provider, move |state, http| {
+    run_session_work(app, provider, SessionWorkKind::Read, move |state, http| {
         resolve_download(provider, &file_id, &state.store, http)
     })
     .await
@@ -1476,6 +1642,10 @@ fn directory_download_failure(
         QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
             ("credentials_expired", "网盘会话已过期")
         }
+        QuarkError::SessionRenewedRetryOperation => (
+            "session_renewed_retry_operation",
+            "登录已自动恢复，请重新执行本次操作",
+        ),
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => {
             ("web_auth_required", "网盘需要网页验证")
         }
@@ -1527,11 +1697,16 @@ pub async fn cloud_download_directory(
     directory_id: String,
     directory_name: String,
 ) -> Result<CloudDirectoryDownloadOutcome, QuarkError> {
-    let plan = run(app.clone(), provider, move |state, http| {
-        plan_cloud_directory_download(provider, &directory_id, &directory_name, |id| {
-            list_cloud_directory(provider, &state.store, http, id)
-        })
-    })
+    let plan = run_session_work(
+        app.clone(),
+        provider,
+        SessionWorkKind::Read,
+        move |state, http| {
+            plan_cloud_directory_download(provider, &directory_id, &directory_name, |id| {
+                list_cloud_directory(provider, &state.store, http, id)
+            })
+        },
+    )
     .await?;
 
     let state = app.state::<AppState>();
@@ -1748,16 +1923,18 @@ mod startup_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{cell::Cell, collections::VecDeque, sync::Mutex};
 
     use super::{create_cloud_task, resolve_download};
     use crate::cloud::{
         baidu::{parse_baidu_web_session, BaiduSession},
+        save_password_credential,
         tianyi::TianyiSession,
         uc::UcSession,
         xunlei::{XunleiClientProfile, XunleiSession, XunleiWebContext},
-        CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CredentialStore,
-        MemoryCredentialStore, QuarkError, QUARK_DESKTOP_USER_AGENT,
+        CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudPasswordCredential,
+        CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError, SessionWorkKind,
+        QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
 
@@ -2080,7 +2257,8 @@ mod tests {
         ])));
         let result = super::restore_account(CloudProvider::Xunlei, &store, &transport);
         assert!(matches!(result, Err(QuarkError::Provider(_))));
-        let saved: XunleiSession = super::load_provider_session(CloudProvider::Xunlei, &store).unwrap();
+        let saved: XunleiSession =
+            super::load_provider_session(CloudProvider::Xunlei, &store).unwrap();
         assert_eq!(saved.refresh_token, "rotated-refresh");
         assert_eq!(saved.user_id, "fixture-user");
     }
@@ -2099,6 +2277,136 @@ mod tests {
                 ..Default::default()
             })
         }
+    }
+
+    struct SessionRecoveryTransport(Mutex<VecDeque<CloudHttpResponse>>);
+
+    impl SessionRecoveryTransport {
+        fn baidu_password_relogin(account_id: &str) -> Self {
+            Self(Mutex::new(VecDeque::from([
+                CloudHttpResponse {
+                    status: 200,
+                    body: r#"{"err_no":0}"#.into(),
+                    set_cookies: vec!["BDUSS=renewed".into()],
+                    ..Default::default()
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: format!(
+                        r#"{{"errno":0,"user":{{"uk":"{account_id}","netdisk_name":"fixture"}}}}"#
+                    ),
+                    ..Default::default()
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: r#"{"errno":0,"list":[]}"#.into(),
+                    ..Default::default()
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: format!(
+                        r#"{{"errno":0,"user":{{"uk":"{account_id}","netdisk_name":"fixture"}}}}"#
+                    ),
+                    ..Default::default()
+                },
+            ])))
+        }
+
+        fn remaining(&self) -> usize {
+            self.0
+                .lock()
+                .map(|responses| responses.len())
+                .unwrap_or_default()
+        }
+    }
+
+    impl CloudHttpTransport for SessionRecoveryTransport {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.0
+                .lock()
+                .map_err(|_| QuarkError::Storage)?
+                .pop_front()
+                .ok_or(QuarkError::InvalidResponse)
+        }
+    }
+
+    #[test]
+    fn expired_baidu_read_uses_a_matching_saved_password_and_retries_once() {
+        let store = MemoryCredentialStore::default();
+        super::save_provider_session(
+            CloudProvider::Baidu,
+            &store,
+            &BaiduSession::cookie("BDUSS=expired"),
+        )
+        .unwrap();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Baidu, "account-1", "user", "secret"),
+        )
+        .unwrap();
+        let transport = SessionRecoveryTransport::baidu_password_relogin("account-1");
+        let calls = Cell::new(0);
+
+        let result = super::run_cloud_work(
+            CloudProvider::Baidu,
+            SessionWorkKind::Read,
+            &store,
+            &transport,
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Err(QuarkError::AuthorizationExpired)
+                } else {
+                    Ok("listed after recovery")
+                }
+            },
+        );
+
+        assert_eq!(result.unwrap(), "listed after recovery");
+        assert_eq!(calls.get(), 2);
+        let saved: BaiduSession =
+            super::load_provider_session(CloudProvider::Baidu, &store).unwrap();
+        assert!(saved.cookie.contains("BDUSS=renewed"));
+        assert_eq!(transport.remaining(), 0);
+    }
+
+    #[test]
+    fn expired_baidu_mutation_restores_the_session_without_replaying_the_request() {
+        let store = MemoryCredentialStore::default();
+        super::save_provider_session(
+            CloudProvider::Baidu,
+            &store,
+            &BaiduSession::cookie("BDUSS=expired"),
+        )
+        .unwrap();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Baidu, "account-1", "user", "secret"),
+        )
+        .unwrap();
+        let transport = SessionRecoveryTransport::baidu_password_relogin("account-1");
+        let calls = Cell::new(0);
+
+        let result: Result<(), QuarkError> = super::run_cloud_work(
+            CloudProvider::Baidu,
+            SessionWorkKind::Mutation,
+            &store,
+            &transport,
+            || {
+                calls.set(calls.get() + 1);
+                Err(QuarkError::AuthorizationExpired)
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(QuarkError::SessionRenewedRetryOperation)
+        ));
+        assert_eq!(calls.get(), 1);
+        let saved: BaiduSession =
+            super::load_provider_session(CloudProvider::Baidu, &store).unwrap();
+        assert!(saved.cookie.contains("BDUSS=renewed"));
+        assert_eq!(transport.remaining(), 0);
     }
 
     struct XunleiRootAcceptingTransport(Mutex<Vec<CloudHttpRequest>>);
@@ -2418,8 +2726,12 @@ mod tests {
             session.refresh_token.clear();
             let rejecting = SequenceTransport(Mutex::new(VecDeque::from([rejection, rejection])));
             let error = super::finalize_xunlei_web_authorization(
-                session, XunleiWebContext::default(), &credentials, &rejecting,
-            ).unwrap_err();
+                session,
+                XunleiWebContext::default(),
+                &credentials,
+                &rejecting,
+            )
+            .unwrap_err();
             assert!(matches!(&error, QuarkError::Provider(message) if !message.is_empty()));
             assert!(!error.to_string().contains("private-response"));
             assert_eq!(credentials.load("xunlei").unwrap(), Some(previous));
@@ -2433,10 +2745,15 @@ mod tests {
             r#"{"files":[],"next_page_token":""}"#,
         ])));
         let account = super::finalize_xunlei_web_authorization(
-            modern_xunlei_fixture(), XunleiWebContext::default(), &credentials, &transport,
-        ).unwrap();
+            modern_xunlei_fixture(),
+            XunleiWebContext::default(),
+            &credentials,
+            &transport,
+        )
+        .unwrap();
         assert_eq!(account.id, "fixture-user");
-        let saved: XunleiSession = super::load_provider_session(CloudProvider::Xunlei, &credentials).unwrap();
+        let saved: XunleiSession =
+            super::load_provider_session(CloudProvider::Xunlei, &credentials).unwrap();
         assert_eq!(saved.user_id, account.id);
     }
 
@@ -2772,30 +3089,77 @@ pub async fn cloud_upload_files(
                 }
                 // PikPak uploads hold provider state only around session refresh
                 // and initialization; its OSS byte transfer remains outside that lock.
-                CloudProvider::Pikpak => s.upload_pikpak_file(&h, &parent_id, &path)?,
+                // Do not hold that lock around the generic recovery callback,
+                // otherwise its own session snapshot would self-deadlock.
+                CloudProvider::Pikpak => run_with_session_recovery(
+                    CloudProvider::Pikpak,
+                    &s.store,
+                    SessionWorkKind::Mutation,
+                    || s.upload_pikpak_file(&h, &parent_id, &path),
+                    |credential| {
+                        s.with_provider(CloudProvider::Pikpak, |store| {
+                            recover_provider_password_session(
+                                CloudProvider::Pikpak,
+                                store,
+                                &h,
+                                credential,
+                            )
+                        })
+                    },
+                )?,
                 CloudProvider::Baidu => s.with_provider(CloudProvider::Baidu, |store| {
-                    let client = baidu::BaiduClient::new(
-                        load_provider_session(CloudProvider::Baidu, store)?,
+                    run_cloud_work(
+                        CloudProvider::Baidu,
+                        SessionWorkKind::Mutation,
+                        store,
                         &h,
-                    );
-                    client.upload_file(&parent_id, &path, &h)
+                        || {
+                            let client = baidu::BaiduClient::new(
+                                load_provider_session(CloudProvider::Baidu, store)?,
+                                &h,
+                            );
+                            client.upload_file(&parent_id, &path, &h)
+                        },
+                    )
                 })?,
                 CloudProvider::Tianyi => s.with_provider(CloudProvider::Tianyi, |store| {
-                    let client = tianyi::TianyiClient::new(
-                        load_provider_session(CloudProvider::Tianyi, store)?,
+                    run_cloud_work(
+                        CloudProvider::Tianyi,
+                        SessionWorkKind::Mutation,
+                        store,
                         &h,
-                    );
-                    client.upload_file(&parent_id, &path, &h)
+                        || {
+                            let client = tianyi::TianyiClient::new(
+                                load_provider_session(CloudProvider::Tianyi, store)?,
+                                &h,
+                            );
+                            client.upload_file(&parent_id, &path, &h)
+                        },
+                    )
                 })?,
                 CloudProvider::Aliyun => s.with_provider(CloudProvider::Aliyun, |store| {
-                    aliyun::AliyunClient::new(store, &h).upload_file(&parent_id, &path)
+                    run_cloud_work(
+                        CloudProvider::Aliyun,
+                        SessionWorkKind::Mutation,
+                        store,
+                        &h,
+                        || aliyun::AliyunClient::new(store, &h).upload_file(&parent_id, &path),
+                    )
                 })?,
                 CloudProvider::Xunlei => s.with_provider(CloudProvider::Xunlei, |store| {
-                    let session = load_provider_session(CloudProvider::Xunlei, store)?;
-                    let client = xunlei::XunleiClient::new(session, &h);
-                    let file = client.upload_file(&parent_id, &path)?;
-                    save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
-                    Ok(file)
+                    run_cloud_work(
+                        CloudProvider::Xunlei,
+                        SessionWorkKind::Mutation,
+                        store,
+                        &h,
+                        || {
+                            let session = load_provider_session(CloudProvider::Xunlei, store)?;
+                            let client = xunlei::XunleiClient::new(session, &h);
+                            let file = client.upload_file(&parent_id, &path)?;
+                            save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
+                            Ok(file)
+                        },
+                    )
                 })?,
             };
             files.push(file);
@@ -2809,7 +3173,7 @@ pub async fn cloud_upload_files(
 pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(), QuarkError> {
     require_connected_provider(provider)?;
     let copy = app.clone();
-    run(app, provider, move |s, _| {
+    run_session_work(app, provider, SessionWorkKind::Logout, move |s, _| {
         logout_provider(provider, &s.store)?;
         if let Some(w) = copy.get_webview_window(&format!("cloud-auth-{}", provider.key())) {
             let _ = w.close();

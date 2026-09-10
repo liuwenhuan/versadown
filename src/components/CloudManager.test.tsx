@@ -59,6 +59,16 @@ it.each([
   else expect(screen.queryByRole('button', { name: `登录${label}账号` })).not.toBeInTheDocument();
 });
 
+it('explains encrypted automatic recovery only for a password-capable provider', async () => {
+  const client = createCloudFake();
+  const { rerender } = render(<CloudManager provider="pikpak" client={client} authorizationOnly />);
+
+  expect(await screen.findByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).toBeVisible();
+
+  rerender(<CloudManager provider="xunlei" client={client} authorizationOnly />);
+  await waitFor(() => expect(screen.queryByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).not.toBeInTheDocument());
+});
+
 it('clears a supported provider password after a failed native login', async () => {
   const user = userEvent.setup();
   const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockRejectedValue({ code: 'invalid_input', message: '账号或密码不正确' }) });
@@ -71,6 +81,25 @@ it('clears a supported provider password after a failed native login', async () 
   expect(await screen.findByRole('status')).toHaveTextContent('账号或密码不正确');
   expect(screen.getByLabelText('百度账号')).toHaveValue('');
   expect(screen.getByLabelText('百度密码')).toHaveValue('');
+});
+
+it('asks to repeat a mutation after the session was automatically restored', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    pickAndUploadFiles: vi.fn().mockRejectedValue({
+      code: 'session_renewed_retry_operation',
+      message: 'this provider response must not be shown'
+    })
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccounts={[
+    { id: 'account-1', displayName: 'alice', provider: 'baidu', authMethod: 'password' }
+  ]} restoreOnMount={false} />);
+
+  await screen.findByRole('tree', { name: '百度网盘文件' });
+  await user.click(screen.getByRole('button', { name: '上传' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('已自动恢复登录，请重新执行本次操作');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('this provider response must not be shown');
 });
 
 it('rejects a password login account returned for another provider', async () => {

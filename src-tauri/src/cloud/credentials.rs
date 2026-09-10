@@ -40,6 +40,9 @@ impl DpapiCredentialStore {
         if !matches!(
             key,
             "quark" | "pikpak" | "baidu" | "tianyi" | "aliyun" | "xunlei" | "uc" | "ai-api-key"
+        ) && !matches!(
+            key,
+            "cloud-password-pikpak" | "cloud-password-baidu" | "cloud-password-tianyi"
         ) {
             return Err(QuarkError::Storage);
         }

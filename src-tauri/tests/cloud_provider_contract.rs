@@ -1,14 +1,18 @@
 use alldownloader_lib::cloud::{
     baidu::BaiduSession,
     commands::{logout_provider, restore_account},
-    parse_stable_cloud_source, provider_capabilities,
+    load_password_credential, parse_stable_cloud_source, provider_capabilities,
+    save_password_credential,
     tianyi::TianyiSession,
     uc::UcSession,
     xunlei::{XunleiClientProfile, XunleiSession},
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CredentialStore,
-    MemoryCredentialStore, QuarkError,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudPasswordCredential,
+    CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
 };
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Mutex,
+};
 
 struct RecordingHttp(Mutex<VecDeque<&'static str>>);
 
@@ -31,6 +35,58 @@ impl CloudHttpTransport for RecordingHttp {
                 .into(),
             ..Default::default()
         })
+    }
+}
+
+struct FailingSessionRemovalStore {
+    values: Mutex<BTreeMap<String, Vec<u8>>>,
+    removals: Mutex<Vec<String>>,
+}
+
+impl FailingSessionRemovalStore {
+    fn new() -> Self {
+        Self {
+            values: Mutex::new(BTreeMap::new()),
+            removals: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn removals(&self) -> Vec<String> {
+        self.removals.lock().unwrap().clone()
+    }
+}
+
+impl CredentialStore for FailingSessionRemovalStore {
+    fn save(&self, key: &str, value: &[u8]) -> Result<(), QuarkError> {
+        self.values
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .insert(key.into(), value.into());
+        Ok(())
+    }
+
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+        Ok(self
+            .values
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .get(key)
+            .cloned())
+    }
+
+    fn remove(&self, key: &str) -> Result<(), QuarkError> {
+        self.removals
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .push(key.into());
+        if key == "baidu" {
+            return Err(QuarkError::Storage);
+        }
+        self.values
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .remove(key);
+        Ok(())
     }
 }
 
@@ -57,6 +113,47 @@ fn logout_for_a_connected_new_provider_removes_its_credential() {
     logout_provider(CloudProvider::Baidu, &store).unwrap();
 
     assert!(store.load("baidu").unwrap().is_none());
+}
+
+#[test]
+fn logout_removes_the_password_recovery_credential_too() {
+    let store = MemoryCredentialStore::default();
+    store.save("baidu", b"still-authorized").unwrap();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "account-1", "user", "secret"),
+    )
+    .unwrap();
+
+    logout_provider(CloudProvider::Baidu, &store).unwrap();
+
+    assert!(store.load("baidu").unwrap().is_none());
+    assert!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn logout_attempts_password_recovery_cleanup_when_normal_session_removal_fails() {
+    let store = FailingSessionRemovalStore::new();
+    store.save("baidu", b"still-authorized").unwrap();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "account-1", "user", "secret"),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        logout_provider(CloudProvider::Baidu, &store),
+        Err(QuarkError::Storage)
+    ));
+    assert!(store.removals().contains(&"baidu".to_owned()));
+    assert!(store
+        .removals()
+        .contains(&"cloud-password-baidu".to_owned()));
+    assert!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

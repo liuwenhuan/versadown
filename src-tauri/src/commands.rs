@@ -423,7 +423,28 @@ async fn resubmit_task(
         return Err("种子任务请重新添加后再选择文件下载".to_string());
     }
     if task.kind == "magnet" {
-        return Err("磁力任务请重新添加后再选择文件下载".to_string());
+        let selected_indices = state
+            .store
+            .files(task.id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|file| file.selected)
+            .map(|file| file.index)
+            .collect();
+        let metadata_settings = state
+            .settings
+            .lock()
+            .map_err(|_| "设置锁不可用".to_string())?
+            .magnet_metadata
+            .clone();
+        let torrent = resolve_magnet_torrent(&metadata_settings, &task.source)
+            .await
+            .map_err(|error| format!("无法重新解析磁链：{error}"))?
+            .ok_or_else(|| "磁链解析服务未返回种子文件，无法安全覆盖下载".to_string())?;
+        return service
+            .resubmit_torrent_with_options(task.id, torrent, vec![], selected_indices, options)
+            .await
+            .map_err(|error| error.to_string());
     }
     options.output_name = None;
     service
