@@ -581,6 +581,69 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_with_a_different_credential_never_calls_provider_delete() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let source = locals[0].source.clone();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        plans
+            .record_transfer_with_owner(&source, "owned-created-id", &"a".repeat(64))
+            .unwrap();
+
+        cleanup_completed_share_for_owner(
+            &plans,
+            &tasks,
+            &first,
+            true,
+            false,
+            &"b".repeat(64),
+            |_, _| panic!("a different credential must not delete transferred files"),
+        )
+        .unwrap();
+
+        let transfers = plans.resolve_entry(&source).unwrap().plan.transfers;
+        assert!(transfers.iter().all(|transfer| {
+            transfer.cleanup_state == crate::cloud::share::CloudShareCleanupState::Pending
+        }));
+    }
+
+    #[test]
+    fn cleanup_with_a_renewed_session_for_the_same_account_deletes_transfer() {
+        use crate::cloud::{share::stable_owner_fingerprint, CloudProvider};
+
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let source = locals[0].source.clone();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        let before = stable_owner_fingerprint(CloudProvider::Baidu, "account-7").unwrap();
+        let after = stable_owner_fingerprint(CloudProvider::Baidu, "account-7").unwrap();
+        assert_eq!(before, after);
+        plans
+            .record_transfer_with_owner(&source, "owned-created-id", &before)
+            .unwrap();
+        let mut deleted = Vec::new();
+
+        cleanup_completed_share_for_owner(
+            &plans,
+            &tasks,
+            &first,
+            true,
+            false,
+            &after,
+            |provider, ids| {
+                deleted.push((provider, ids.to_vec()));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            deleted,
+            vec![(CloudProvider::Baidu, vec!["owned-created-id".into()])]
+        );
+    }
+
+    #[test]
     fn disabled_cleanup_or_failed_sibling_keeps_transfer() {
         for sibling_status in [
             TaskStatus::Completed,
@@ -657,33 +720,6 @@ mod tests {
             "https://example.com/file",
             "cloud-share://baidu/invalid/invalid",
         ] {
-    #[test]
-    fn cleanup_with_a_different_credential_never_calls_provider_delete() {
-        let (_root, plans, tasks, locals) = cleanup_fixture();
-        let source = locals[0].source.clone();
-        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
-        set_status(&tasks, locals[1].id, TaskStatus::Completed);
-        plans
-            .record_transfer_with_owner(&source, "owned-created-id", &"a".repeat(64))
-            .unwrap();
-
-        cleanup_completed_share_for_owner(
-            &plans,
-            &tasks,
-            &first,
-            true,
-            false,
-            &"b".repeat(64),
-            |_, _| panic!("a different credential must not delete transferred files"),
-        )
-        .unwrap();
-
-        let transfers = plans.resolve_entry(&source).unwrap().plan.transfers;
-        assert!(transfers.iter().all(|transfer| {
-            transfer.cleanup_state == crate::cloud::share::CloudShareCleanupState::Pending
-        }));
-    }
-
             let mut task = stale.clone();
             task.source = source.into();
             let _ = cleanup_completed_share(&plans, &tasks, &task, true, true, |_, _| {

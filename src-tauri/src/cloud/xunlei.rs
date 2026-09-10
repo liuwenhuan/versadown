@@ -147,6 +147,25 @@ mod tests {
         assert!(!requests.iter().any(|request| request.url.contains("share/restore")));
     }
     #[test]
+    fn xunlei_transfer_owner_uses_user_id_not_rotating_access_token() {
+        let credentials = credentials();
+        let http = Http::new(vec![]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+
+        let before = adapter.transfer_owner_fingerprint(&selected()).unwrap();
+        let mut renewed: XunleiSession = serde_json::from_slice(
+            &credentials.load("xunlei").unwrap().unwrap(),
+        )
+        .unwrap();
+        renewed.access_token = "renewed-access".into();
+        credentials
+            .save("xunlei", &serde_json::to_vec(&renewed).unwrap())
+            .unwrap();
+        let after = adapter.transfer_owner_fingerprint(&selected()).unwrap();
+
+        assert_eq!(before, after);
+    }
+    #[test]
     fn xunlei_share_pages_recursively_and_exchanges_code() {
         let credentials = credentials();
         let http = Http::new(vec![
@@ -558,7 +577,13 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<String, QuarkError> {
-        super::share::credential_owner_fingerprint(CloudProvider::Xunlei, self.credentials)
+        let bytes = self
+            .credentials
+            .load("xunlei")?
+            .ok_or(QuarkError::NotAuthorized)?;
+        let session: XunleiSession =
+            serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
+        super::share::stable_owner_fingerprint(CloudProvider::Xunlei, &session.user_id)
     }
     fn refresh_recorded_transfer(
         &self,
@@ -630,7 +655,11 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
                     }
                     .filter(|s| !s.is_empty() && *s != entry.entry.entry_id)
                     .ok_or(QuarkError::InvalidResponse)?;
-                    store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                    store.record_transfer_with_owner(
+                        &entry.plan.source_for(&entry.entry.entry_id),
+                        id,
+                        &owner,
+                    )?;
                     let file = session.request(
                         "GET",
                         format!("{DRIVE}/drive/v1/files/{}", encoded(id)),

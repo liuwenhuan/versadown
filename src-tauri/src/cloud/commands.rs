@@ -1852,7 +1852,9 @@ async fn cleanup_cloud_share_task_inner(
             .lock()
             .map_err(|_| QuarkError::Storage)?
             .delete_transferred_share_files_after_download;
-        let owner = share::credential_owner_fingerprint(provider, &cloud.store)?;
+        let entry = cloud.share_plans.resolve_entry(&task.source)?;
+        let adapter = share::provider_share_adapter(provider, &cloud.store, http)?;
+        let owner = adapter.transfer_owner_fingerprint(&entry)?;
         crate::engine_runtime::cleanup_completed_share_for_owner(
             &cloud.share_plans,
             &tasks,

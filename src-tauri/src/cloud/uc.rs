@@ -85,12 +85,12 @@ pub struct UcDownload {
     pub headers: BTreeMap<String, String>,
 }
 
-pub struct UcClient<'a, T: CloudHttpTransport> {
+pub struct UcClient<'a, T: CloudHttpTransport + ?Sized> {
     session: UcSession,
     http: &'a T,
 }
 
-impl<'a, T: CloudHttpTransport> UcClient<'a, T> {
+impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     pub fn new(session: UcSession, http: &'a T) -> Self {
         Self { session, http }
     }
@@ -200,6 +200,23 @@ impl<'a, T: CloudHttpTransport> UcClient<'a, T> {
             display_name,
             auth_method: self.session.auth_method,
         })
+    }
+
+    fn stable_account_id(&self) -> Result<String, QuarkError> {
+        if let Some(id) = cookie_value(self.cookie()?, "__uid").filter(|id| !id.is_empty()) {
+            return Ok(id);
+        }
+        let value = self.request_json(
+            "GET",
+            "member",
+            "fetch_subscribe=true&_ch=home&fetch_identity=true",
+            None,
+        )?;
+        value["data"]
+            .get("user_id")
+            .and_then(string_or_number)
+            .filter(|id| !id.is_empty())
+            .ok_or(QuarkError::InvalidResponse)
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
@@ -488,7 +505,7 @@ struct UcShareSession<'a> {
     context_changed: bool,
 }
 impl UcShareAdapter<'_> {
-    fn session(&self, context: Option<&Value>) -> Result<UcShareSession<'_>, QuarkError> {
+    fn stored_session(&self) -> Result<UcSession, QuarkError> {
         let bytes = self
             .credentials
             .load("uc")?
@@ -497,6 +514,10 @@ impl UcShareAdapter<'_> {
         if session.cookie.is_empty() {
             return Err(QuarkError::NotAuthorized);
         }
+        Ok(session)
+    }
+    fn session(&self, context: Option<&Value>) -> Result<UcShareSession<'_>, QuarkError> {
+        let session = self.stored_session()?;
         // Use the same authenticated cookie snapshot for signing and downloading.
         let valid = cookie_value(&session.cookie, "__puus").is_some();
         if !valid {
@@ -810,7 +831,8 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<String, QuarkError> {
-        super::share::credential_owner_fingerprint(CloudProvider::Uc, self.credentials)
+        let account_id = UcClient::new(self.stored_session()?, self.http).stable_account_id()?;
+        super::share::stable_owner_fingerprint(CloudProvider::Uc, &account_id)
     }
     fn refresh_recorded_transfer(
         &self,
@@ -979,7 +1001,7 @@ mod tests {
             .save(
                 "uc",
                 &serde_json::to_vec(&UcSession::cookie(
-                    "__pus=identity; __puus=session; csrf_token=csrf-secret",
+                    "__uid=account-7; __pus=identity; __puus=session; csrf_token=csrf-secret",
                 ))
                 .unwrap(),
             )
@@ -1068,6 +1090,49 @@ mod tests {
         assert!(!requests
             .iter()
             .any(|request| request.url.contains("share/sharepage/save")));
+    }
+    #[test]
+    fn uc_transfer_owner_uses_uid_not_rotating_session_cookie() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "uc",
+                &serde_json::to_vec(&UcSession::cookie(
+                    "__uid=account-7; __puus=before; csrf_token=csrf",
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        let http = Http::new(vec![]);
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+
+        let before = adapter.transfer_owner_fingerprint(&share_entry()).unwrap();
+        credentials
+            .save(
+                "uc",
+                &serde_json::to_vec(&UcSession::cookie(
+                    "__uid=account-7; __puus=renewed; csrf_token=csrf",
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        let after = adapter.transfer_owner_fingerprint(&share_entry()).unwrap();
+
+        assert_eq!(before, after);
+    }
+    #[test]
+    fn uc_transfer_owner_without_uid_or_authenticated_account_id_fails_closed() {
+        let credentials = share_credentials_with_server_session_only();
+        let http = Http::new(vec![json!({"code":0,"data":{}})]);
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+
+        assert!(matches!(
+            adapter.transfer_owner_fingerprint(&share_entry()),
+            Err(QuarkError::InvalidResponse)
+        ));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("/member?"));
     }
     struct ShareReplies {
         requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
@@ -1374,7 +1439,7 @@ mod tests {
         for (name, value) in [
             (
                 "Cookie",
-                "__pus=identity; __puus=session; csrf_token=csrf-secret; SESSION=issued",
+                "__uid=account-7; __pus=identity; __puus=session; csrf_token=csrf-secret; SESSION=issued",
             ),
             ("x-csrf-token", "csrf-secret"),
             ("User-Agent", UC_DESKTOP_USER_AGENT),
@@ -1461,7 +1526,8 @@ mod tests {
         no_csrf
             .save(
                 "uc",
-                &serde_json::to_vec(&UcSession::cookie("__pus=i; __puus=s")).unwrap(),
+                &serde_json::to_vec(&UcSession::cookie("__uid=account-7; __pus=i; __puus=s"))
+                    .unwrap(),
             )
             .unwrap();
         let http = Http::new(vec![json!({"code":0,"data":{"stoken":"fresh"}})]);
@@ -1478,7 +1544,8 @@ mod tests {
         credentials
             .save(
                 "uc",
-                &serde_json::to_vec(&UcSession::cookie("__pus=i; __puus=s")).unwrap(),
+                &serde_json::to_vec(&UcSession::cookie("__uid=account-7; __pus=i; __puus=s"))
+                    .unwrap(),
             )
             .unwrap();
         let token = json!({"code":0,"data":{"stoken":"fresh","csrf_token":"issued-csrf"}});

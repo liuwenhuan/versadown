@@ -250,6 +250,7 @@ mod tests {
             listing(),
             json!({"errno":0,"data":{"sign":"sign","timestamp":123}}),
             json!({"errno":0,"list":[]}),
+            json!({"user":{"uk":"account-7"}}),
             json!({"errno":0,"result":{"bdstoken":"write-token"}}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/movie.mp4","to":"/movie (1).mp4"}]}}),
             json!({"errno":0,"list":[{"fs_id":99,"server_filename":"movie (1).mp4","dlink":"https://d.pcs.baidu.com/file?sign=personal"}]}),
@@ -271,8 +272,8 @@ mod tests {
             "99"
         );
         let requests = http.requests.lock().unwrap();
-        assert!(requests[4].url.contains("ondup=newcopy"));
-        assert!(requests[5].url.contains("fsids=%5B99%5D"));
+        assert!(requests[5].url.contains("ondup=newcopy"));
+        assert!(requests[6].url.contains("fsids=%5B99%5D"));
     }
     #[test]
     fn baidu_recorded_transfer_refreshes_personal_file_without_share_transfer() {
@@ -303,6 +304,35 @@ mod tests {
         assert!(!requests.iter().any(|request| request.url.contains("/share/transfer")));
     }
     #[test]
+    fn baidu_transfer_owner_survives_cookie_rotation_for_the_same_account() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            listing(),
+            json!({"user":{"uk":"account-7"}}),
+            json!({"user":{"uk":"account-7"}}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+        let entry = CloudShareResolvedEntry {
+            provider: plan.provider,
+            entry: plan.entries[0].clone(),
+            plan,
+        };
+
+        let before = adapter.transfer_owner_fingerprint(&entry).unwrap();
+        credentials
+            .save(
+                "baidu",
+                &serde_json::to_vec(&BaiduSession::cookie("BDUSS_BFESS=renewed")).unwrap(),
+            )
+            .unwrap();
+        let after = adapter.transfer_owner_fingerprint(&entry).unwrap();
+
+        assert_eq!(before, after);
+    }
+    #[test]
     fn baidu_share_transfer_accepts_verify_filename_and_http_download() {
         let credentials = credentials();
         let mut listing = listing();
@@ -312,6 +342,7 @@ mod tests {
             listing,
             json!({"errno":0,"data":{"sign":"sign","timestamp":123}}),
             json!({"errno":0,"list":[]}),
+            json!({"user":{"uk":"account-7"}}),
             json!({"errno":0,"result":{"bdstoken":"write-token"}}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/verify.mp4","to":"/verify.mp4"}]}}),
             json!({"errno":0,"list":[{"fs_id":99,"server_filename":"verify.mp4","dlink":"http://d.pcs.baidu.com/file?sign=personal"}]}),
@@ -333,7 +364,7 @@ mod tests {
         assert_eq!(transfers.len(), 1);
         assert_eq!(transfers[0].created_file_id, "99");
         assert_eq!(transfers[0].cleanup_state, CloudShareCleanupState::Pending);
-        assert_eq!(http.requests.lock().unwrap().len(), 6);
+        assert_eq!(http.requests.lock().unwrap().len(), 7);
     }
     #[test]
     fn baidu_share_errors_never_become_transfer_requests() {
@@ -1445,7 +1476,8 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<String, QuarkError> {
-        super::share::credential_owner_fingerprint(CloudProvider::Baidu, self.credentials)
+        let account = self.client()?.account()?;
+        super::share::stable_owner_fingerprint(CloudProvider::Baidu, &account.id)
     }
     fn refresh_recorded_transfer(
         &self,

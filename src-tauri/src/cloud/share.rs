@@ -381,16 +381,18 @@ pub fn resolve_current_share_download(
             if request.source != source {
                 return Err(QuarkError::InvalidResponse);
             }
-            let owner = adapter.transfer_owner_fingerprint(&entry)?;
             let mut reused = None;
-            if let Some(record) = store.reusable_transfer(source, &owner)? {
-                let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
-                if let Some(context) = refreshed.updated_context {
-                    store.update_provider_context(source, &context)?;
-                    entry.plan.provider_context = context;
+            if store.has_pending_transfer(source)? {
+                let owner = adapter.transfer_owner_fingerprint(&entry)?;
+                if let Some(record) = store.reusable_transfer(source, &owner)? {
+                    let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
+                    if let Some(context) = refreshed.updated_context {
+                        store.update_provider_context(source, &context)?;
+                        entry.plan.provider_context = context;
+                    }
+                    let RecordedTransferDownload::Available(download) = refreshed.result?;
+                    reused = Some(download);
                 }
-                let RecordedTransferDownload::Available(download) = refreshed.result?;
-                reused = Some(download);
             }
             if let Some(download) = reused {
                 download
@@ -606,22 +608,22 @@ fn valid_owner_fingerprint(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// The credential value never crosses IPC or the task database. Hashing the
-/// exact encrypted-store plaintext here makes account/session changes fail
-/// closed even for providers without a stable account-ID endpoint.
-pub(crate) fn credential_owner_fingerprint(
+/// Hash a provider's stable personal-drive identity for the local DPAPI plan
+/// journal. Session cookies, bearer tokens and password material must never
+/// participate: those rotate while the same account still owns a transfer.
+pub(crate) fn stable_owner_fingerprint(
     provider: CloudProvider,
-    credentials: &dyn CredentialStore,
+    account_id: &str,
 ) -> Result<String, QuarkError> {
-    let credential = credentials
-        .load(provider.key())?
-        .filter(|value| !value.is_empty())
-        .ok_or(QuarkError::NotAuthorized)?;
+    let account_id = account_id.trim();
+    if account_id.is_empty() || account_id.chars().any(char::is_control) {
+        return Err(QuarkError::InvalidResponse);
+    }
     let mut hash = Sha256::new();
     hash.update(b"cloud-share-owner/v1\0");
     hash.update(provider.key().as_bytes());
     hash.update([0]);
-    hash.update(&credential);
+    hash.update(account_id.as_bytes());
     Ok(format!("{:x}", hash.finalize()))
 }
 
@@ -1618,6 +1620,10 @@ mod tests {
         refresh_calls: AtomicU64,
     }
 
+    fn recorded_transfer_owner() -> String {
+        stable_owner_fingerprint(CloudProvider::Baidu, "account-7").unwrap()
+    }
+
     impl CloudShareAdapter for RecordedTransferAdapter {
         fn inspect(
             &self,
@@ -1637,7 +1643,7 @@ mod tests {
             &self,
             _: &CloudShareResolvedEntry,
         ) -> Result<String, QuarkError> {
-            Ok("a".repeat(64))
+            Ok(recorded_transfer_owner())
         }
 
         fn transfer(
@@ -1649,7 +1655,7 @@ mod tests {
             store.record_transfer_with_owner(
                 &entry.plan.source_for(&entry.entry.entry_id),
                 "personal-id",
-                &"a".repeat(64),
+                &recorded_transfer_owner(),
             )?;
             Ok(super::super::commands::ResolvedCloudDownload {
                 url: "https://cdn.example/new-transfer".into(),
@@ -1704,10 +1710,38 @@ mod tests {
         let (store, _, _) = memory_store();
         let plan = fixture("recorded-transfer-before-share-resolve");
         let source = plan.source_for("f1");
-        let owner = "a".repeat(64);
+        let owner = recorded_transfer_owner();
         store.upsert(&plan).unwrap();
         store
             .record_transfer_with_owner(&source, "personal-id", &owner)
+            .unwrap();
+        let adapter = RecordedTransferAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            refresh_calls: AtomicU64::new(0),
+        };
+
+        let resolved = resolve_current_share_download(&store, &adapter, &source).unwrap();
+
+        assert_eq!(resolved.url, "https://cdn.example/reused-transfer");
+        assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.refresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stable_account_owner_reuses_pending_transfer_after_credential_renewal() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("recorded-transfer-renewed-account");
+        let source = plan.source_for("f1");
+        // The credential changed, but the provider's stable account identity
+        // did not. Only the identity-derived journal hash may gate reuse.
+        let before = stable_owner_fingerprint(CloudProvider::Baidu, "account-7").unwrap();
+        let after = stable_owner_fingerprint(CloudProvider::Baidu, "account-7").unwrap();
+        assert_eq!(before, after);
+        store.upsert(&plan).unwrap();
+        store
+            .record_transfer_with_owner(&source, "personal-id", &before)
             .unwrap();
         let adapter = RecordedTransferAdapter {
             resolve_calls: AtomicU64::new(0),
@@ -1772,7 +1806,7 @@ mod tests {
         let (store, _, _) = memory_store();
         let plan = fixture("succeeded-transfer-retry");
         let source = plan.source_for("f1");
-        let owner = "a".repeat(64);
+        let owner = recorded_transfer_owner();
         store.upsert(&plan).unwrap();
         store
             .record_transfer_with_owner(&source, "personal-id", &owner)

@@ -150,6 +150,7 @@ mod tests {
         let mut replies = listing();
         replies.extend([
             json!({"code":0,"data":[]}),
+            json!({"code":0,"data":{"uid":"account-7","nickname":"owner"}}),
             json!({"code":0,"data":{"task_id":"task1"}}),
             json!({"code":0,"data":{"status":2,"save_as":{"save_as_top_fids":["personal99"]}}}),
             json!({"code":9,"message":"secret-server-detail"}),
@@ -172,9 +173,9 @@ mod tests {
             "personal99"
         );
         let requests = http.requests.lock().unwrap();
-        let body: Value = serde_json::from_str(requests[5].body.as_ref().unwrap()).unwrap();
+        let body: Value = serde_json::from_str(requests[6].body.as_ref().unwrap()).unwrap();
         assert_eq!(body["fids"], json!(["personal99"]));
-        assert!(requests[3].url.contains("share/sharepage/save"));
+        assert!(requests[4].url.contains("share/sharepage/save"));
     }
     #[test]
     fn quark_recorded_transfer_refreshes_personal_file_without_share_save() {
@@ -203,6 +204,31 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert!(requests[2].url.contains("file/download"));
         assert!(!requests.iter().any(|request| request.url.contains("sharepage/save")));
+    }
+    #[test]
+    fn quark_transfer_owner_uses_uid_not_rotating_session_cookie() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("quark", b"__uid=account-7; sid=before")
+            .unwrap();
+        let http = Http::new(listing());
+        let adapter = provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+        let entry = CloudShareResolvedEntry {
+            provider: plan.provider,
+            entry: plan.entries[0].clone(),
+            plan,
+        };
+
+        let before = adapter.transfer_owner_fingerprint(&entry).unwrap();
+        credentials
+            .save("quark", b"__uid=account-7; sid=renewed")
+            .unwrap();
+        let after = adapter.transfer_owner_fingerprint(&entry).unwrap();
+
+        assert_eq!(before, after);
     }
     #[test]
     fn quark_share_errors_never_become_transfer_requests() {
@@ -544,6 +570,30 @@ impl QuarkShareAdapter<'_> {
 }
 
 impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
+    fn stable_account_id(&self) -> Result<String, QuarkError> {
+        if let Some(id) = self.cookie.split(';').find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == "__uid" && !value.is_empty()).then(|| value.to_owned())
+        }) {
+            return Ok(id);
+        }
+        let response = self.request_url(
+            "GET",
+            "https://pan.quark.cn/account/info?fr=pc&platform=pc".into(),
+            None,
+        )?;
+        let value = response_json(&response)?;
+        value["data"]
+            .get("uid")
+            .or_else(|| value["data"].get("user_id"))
+            .and_then(|id| {
+                id.as_str()
+                    .map(str::to_owned)
+                    .or_else(|| id.as_u64().map(|id| id.to_string()))
+            })
+            .filter(|id| !id.is_empty())
+            .ok_or(QuarkError::InvalidResponse)
+    }
     fn share_raw(
         &self,
         method: &'static str,
@@ -707,7 +757,8 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<String, QuarkError> {
-        super::share::credential_owner_fingerprint(CloudProvider::Quark, self.credentials)
+        let account_id = self.client()?.stable_account_id()?;
+        super::share::stable_owner_fingerprint(CloudProvider::Quark, &account_id)
     }
     fn refresh_recorded_transfer(
         &self,
