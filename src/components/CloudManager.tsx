@@ -128,13 +128,33 @@ function readableSize(size?: number) {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+function isValidDateTime(year: number, month: number, day: number, hour: number, minute: number, second: number) {
+  const date = new Date(0);
+  date.setFullYear(year, month - 1, day);
+  date.setHours(hour, minute, second, 0);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+    && date.getHours() === hour && date.getMinutes() === minute && date.getSeconds() === second;
+}
+
+function formatLocalCloudDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(value);
+  if (!match) return null;
+  const [, year, month, day, hour = '00', minute = '00', second = '00'] = match;
+  if (!isValidDateTime(Number(year), Number(month), Number(day), Number(hour), Number(minute), Number(second))) return null;
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
 function formatCloudModifiedAt(value: unknown) {
-  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return value;
+  if (typeof value === 'string') {
+    const localDate = formatLocalCloudDate(value);
+    if (localDate) return localDate;
+  }
 
   const numericValue = typeof value === 'number' ? value : typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+  const isoMatch = typeof value === 'string' ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.exec(value) : null;
   const timestamp = Number.isFinite(numericValue)
     ? Math.abs(numericValue) < 100_000_000_000 ? numericValue * 1_000 : numericValue
-    : typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? Date.parse(value) : NaN;
+    : isoMatch && isValidDateTime(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]), Number(isoMatch[4]), Number(isoMatch[5]), Number(isoMatch[6] ?? '0')) ? Date.parse(isoMatch[0]) : NaN;
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return '—';
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;

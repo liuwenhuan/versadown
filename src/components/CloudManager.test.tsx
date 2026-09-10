@@ -513,17 +513,21 @@ it('closes the destination picker and requires official web authorization when i
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
 });
 
-it('normalizes provider modified times in the list and preserves Tianyi canonical timestamps in details', async () => {
+it('normalizes provider modified times in the list and details while preserving valid Tianyi timestamps', async () => {
   const user = userEvent.setup();
   const timestamp = 1_735_787_045_000;
   const date = new Date(timestamp);
   const localTimestamp = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
   const client = createCloudFake({
     listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
-      { id: 'seconds', parentId: '0', name: 'seconds.txt', kind: 'file', modifiedAt: timestamp / 1_000 },
-      { id: 'milliseconds', parentId: '0', name: 'milliseconds.txt', kind: 'file', modifiedAt: timestamp },
+      { id: 'seconds', parentId: '0', name: 'seconds.txt', kind: 'file', modifiedAt: String(timestamp / 1_000) },
+      { id: 'milliseconds', parentId: '0', name: 'milliseconds.txt', kind: 'file', modifiedAt: String(timestamp) },
       { id: 'iso', parentId: '0', name: 'iso.txt', kind: 'file', modifiedAt: '2025-01-02T03:04:05.000Z' },
+      { id: 'date-only', parentId: '0', name: 'date-only.txt', kind: 'file', modifiedAt: '2025-06-07' },
+      { id: 'minute', parentId: '0', name: 'minute.txt', kind: 'file', modifiedAt: '2025-06-07 08:09' },
       { id: 'tianyi', parentId: '0', name: 'tianyi.txt', kind: 'file', modifiedAt: '2025-06-07 08:09:10' },
+      { id: 'invalid-canonical', parentId: '0', name: 'invalid-canonical.txt', kind: 'file', modifiedAt: '2025-02-30 08:09:10' },
+      { id: 'invalid-time', parentId: '0', name: 'invalid-time.txt', kind: 'file', modifiedAt: '2025-99-99 99:99:99' },
       { id: 'unknown', parentId: '0', name: 'unknown.txt', kind: 'file', modifiedAt: '昨天' },
       { id: 'missing', parentId: '0', name: 'missing.txt', kind: 'file' }
     ] })
@@ -534,14 +538,28 @@ it('normalizes provider modified times in the list and preserves Tianyi canonica
   expect(within(tree).getByText('seconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
   expect(within(tree).getByText('milliseconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
   expect(within(tree).getByText('iso.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
+  expect(within(tree).getByText('date-only.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 00:00:00');
+  expect(within(tree).getByText('minute.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 08:09:00');
   expect(within(tree).getByText('tianyi.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 08:09:10');
+  expect(within(tree).getByText('invalid-canonical.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
+  expect(within(tree).getByText('invalid-time.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
   expect(within(tree).getByText('unknown.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
   expect(within(tree).getByText('missing.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
 
-  await user.click(within(tree).getByText('tianyi.txt'));
-  await user.click(screen.getByRole('button', { name: '更多文件操作' }));
-  await user.click(within(screen.getByRole('menu', { name: '更多文件操作' })).getByRole('menuitem', { name: '文件详情' }));
-  expect(screen.getByRole('dialog', { name: '文件详情' })).toHaveTextContent('2025-06-07 08:09:10');
+  async function openDetails(name: string) {
+    await user.click(within(tree).getByText(name));
+    await user.click(screen.getByRole('button', { name: '更多文件操作' }));
+    await user.click(within(screen.getByRole('menu', { name: '更多文件操作' })).getByRole('menuitem', { name: '文件详情' }));
+    return screen.getByRole('dialog', { name: '文件详情' });
+  }
+
+  expect(await openDetails('seconds.txt')).toHaveTextContent(localTimestamp);
+  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  expect(await openDetails('invalid-canonical.txt')).toHaveTextContent('—');
+  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  expect(await openDetails('missing.txt')).toHaveTextContent('—');
+  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  expect(await openDetails('tianyi.txt')).toHaveTextContent('2025-06-07 08:09:10');
 });
 
 it('shows concise file details in a separate dialog', async () => {
