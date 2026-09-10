@@ -1,15 +1,27 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use thiserror::Error;
 use url::Url;
 
 use crate::cloud::CloudProvider;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct CloudShareCandidate {
     pub provider: CloudProvider,
     pub url: String,
     pub access_code: Option<String>,
+}
+
+impl fmt::Debug for CloudShareCandidate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CloudShareCandidate")
+            .field("provider", &self.provider)
+            .field("url", &"<redacted>")
+            .field("access_code", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -188,6 +200,25 @@ pub fn extract_candidates(text: &str) -> Vec<Candidate> {
 mod tests {
     use super::*;
     use crate::cloud::CloudProvider;
+
+    #[test]
+    fn cloud_share_candidate_debug_keeps_provider_but_redacts_url_and_access_code() {
+        let candidate = CloudShareCandidate {
+            provider: CloudProvider::Baidu,
+            url: "https://pan.baidu.com/s/private-share-secret".into(),
+            access_code: Some("FAKE-CODE-SECRET".into()),
+        };
+
+        assert_eq!(candidate.clone(), candidate);
+        let debug = format!("{candidate:?}");
+        assert!(debug.contains("Baidu"));
+        for secret in ["private-share-secret", "FAKE-CODE-SECRET", "pan.baidu.com"] {
+            assert!(
+                !debug.contains(secret),
+                "debug output leaked {secret}: {debug}"
+            );
+        }
+    }
 
     #[test]
     fn recognizes_all_provider_hosts_and_strips_pwd_from_canonical_url() {
