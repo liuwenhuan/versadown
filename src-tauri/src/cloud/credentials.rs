@@ -1,5 +1,10 @@
 use super::QuarkError;
-use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 pub trait CredentialStore: Send + Sync {
     fn save(&self, key: &str, value: &[u8]) -> Result<(), QuarkError>;
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError>;
@@ -30,11 +35,28 @@ impl CredentialStore for MemoryCredentialStore {
 }
 pub struct DpapiCredentialStore {
     root: PathBuf,
+    #[cfg(test)]
+    publish_failpoint: Option<fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>>,
 }
 impl DpapiCredentialStore {
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            #[cfg(test)]
+            publish_failpoint: None,
+        })
+    }
+    #[cfg(test)]
+    fn with_publish_failpoint(
+        root: PathBuf,
+        publish_failpoint: fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+    ) -> Result<Self, QuarkError> {
+        std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
+        Ok(Self {
+            root,
+            publish_failpoint: Some(publish_failpoint),
+        })
     }
     fn path(&self, key: &str) -> Result<PathBuf, QuarkError> {
         if !matches!(
@@ -49,12 +71,56 @@ impl DpapiCredentialStore {
         }
         Ok(self.root.join(format!("{key}.bin")))
     }
+    fn create_temp_file(&self, target: &Path) -> Result<(PathBuf, std::fs::File), QuarkError> {
+        let parent = target.parent().ok_or(QuarkError::Storage)?;
+        let filename = target
+            .file_name()
+            .ok_or(QuarkError::Storage)?
+            .to_string_lossy();
+        for _ in 0..16 {
+            let temp = parent.join(format!(".{filename}.tmp-{}", uuid::Uuid::new_v4()));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+            {
+                Ok(file) => return Ok((temp, file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(QuarkError::Storage),
+            }
+        }
+        Err(QuarkError::Storage)
+    }
+    fn write_temp_file(&self, target: &Path, ciphertext: &[u8]) -> Result<PathBuf, QuarkError> {
+        let (temp, mut file) = self.create_temp_file(target)?;
+        let result = file.write_all(ciphertext).and_then(|()| file.sync_all());
+        drop(file);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+            return Err(QuarkError::Storage);
+        }
+        Ok(temp)
+    }
+    fn publish(&self, temp: &Path, target: &Path) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(publish_failpoint) = self.publish_failpoint {
+            return publish_failpoint(temp, target);
+        }
+        publish_file(temp, target)
+    }
 }
 impl CredentialStore for DpapiCredentialStore {
     fn save(&self, k: &str, v: &[u8]) -> Result<(), QuarkError> {
         let path = self.path(k)?;
         let bytes = protect(v, true)?;
-        std::fs::write(path, bytes).map_err(|_| QuarkError::Storage)
+        let temp = self.write_temp_file(&path, &bytes)?;
+        match self.publish(&temp, &path) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                let _ = std::fs::remove_file(temp);
+                Err(QuarkError::Storage)
+            }
+        }
     }
     fn load(&self, k: &str) -> Result<Option<Vec<u8>>, QuarkError> {
         match std::fs::read(self.path(k)?) {
@@ -116,4 +182,134 @@ fn protect(input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
 #[cfg(not(windows))]
 fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, QuarkError> {
     Err(QuarkError::Storage)
+}
+
+#[cfg(windows)]
+fn publish_file(temp: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        },
+    };
+
+    let temp = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(temp.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|_| std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(windows))]
+fn publish_file(temp: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp, target)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::{
+        io,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    static TEMP_CONTAINS_PLAINTEXT: AtomicBool = AtomicBool::new(false);
+
+    fn fail_after_inspecting_temp(temp: &std::path::Path, _: &std::path::Path) -> io::Result<()> {
+        let ciphertext = std::fs::read(temp)?;
+        TEMP_CONTAINS_PLAINTEXT.store(
+            ciphertext
+                .windows(b"new-plan-secret".len())
+                .any(|bytes| bytes == b"new-plan-secret"),
+            Ordering::SeqCst,
+        );
+        Err(io::Error::other("publish failed"))
+    }
+
+    #[test]
+    fn dpapi_publish_failure_cannot_replace_existing_journal_or_leave_a_plaintext_temp() {
+        TEMP_CONTAINS_PLAINTEXT.store(false, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let original = DpapiCredentialStore::new(directory.path().into()).unwrap();
+        original
+            .save("cloud-share-plans-v1", b"old-plan-secret")
+            .unwrap();
+        let failing = DpapiCredentialStore::with_publish_failpoint(
+            directory.path().into(),
+            fail_after_inspecting_temp,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            failing.save("cloud-share-plans-v1", b"new-plan-secret"),
+            Err(QuarkError::Storage)
+        ));
+        assert_eq!(
+            original.load("cloud-share-plans-v1").unwrap(),
+            Some(b"old-plan-secret".to_vec())
+        );
+        assert!(!TEMP_CONTAINS_PLAINTEXT.load(Ordering::SeqCst));
+        assert!(std::fs::read_dir(directory.path())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")));
+    }
+
+    #[test]
+    fn dpapi_successful_overwrite_replaces_the_journal_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DpapiCredentialStore::new(directory.path().into()).unwrap();
+        store
+            .save("cloud-share-plans-v1", b"old-plan-secret")
+            .unwrap();
+        store
+            .save("cloud-share-plans-v1", b"new-plan-secret")
+            .unwrap();
+
+        assert_eq!(
+            store.load("cloud-share-plans-v1").unwrap(),
+            Some(b"new-plan-secret".to_vec())
+        );
+    }
+
+    #[test]
+    fn dpapi_concurrent_different_keys_keep_each_credential_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        std::thread::scope(|scope| {
+            let quark_root = root.clone();
+            scope.spawn(move || {
+                let store = DpapiCredentialStore::new(quark_root).unwrap();
+                store.save("quark", b"quark-secret").unwrap();
+            });
+            scope.spawn(move || {
+                let store = DpapiCredentialStore::new(root).unwrap();
+                store.save("pikpak", b"pikpak-secret").unwrap();
+            });
+        });
+        let store = DpapiCredentialStore::new(directory.path().into()).unwrap();
+
+        assert_eq!(store.load("quark").unwrap(), Some(b"quark-secret".to_vec()));
+        assert_eq!(
+            store.load("pikpak").unwrap(),
+            Some(b"pikpak-secret".to_vec())
+        );
+    }
 }
