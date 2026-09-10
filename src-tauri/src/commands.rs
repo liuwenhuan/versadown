@@ -114,10 +114,15 @@ pub(crate) fn task_action_outcome(
     task: DownloadTask,
     duplicate: Option<DuplicateDownloadState>,
 ) -> Result<TaskActionOutcome, String> {
+    let queue_task = store
+        .cloud_directory_group_for_task(task.id)
+        .map_err(|error| error.to_string())?
+        .map(|group| cloud_directory_group_queue_task(store, group.id))
+        .transpose()?;
     Ok(TaskActionOutcome {
         payload: task_payload(store, task)?,
         duplicate,
-        queue_task: None,
+        queue_task,
     })
 }
 
@@ -1995,6 +2000,49 @@ mod tests {
         assert_eq!(payload.progress, 50);
         assert_eq!(payload.children[0].name, "资料");
         assert_eq!(payload.children[0].children[0].name, "讲义.pdf");
+    }
+
+    #[test]
+    fn local_action_outcome_for_a_directory_member_returns_its_group_root() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote-directory",
+                    "课程",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "remote-file",
+                    &[] as &[&str],
+                    "讲义.pdf",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
+        let task = store.create(NewTask::direct("cloud://quark/remote-file")).unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Paused,
+                total_length: Some(100),
+                completed_length: 40,
+                progress: 40,
+                ..task
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+
+        let action = task_action_outcome(&store, task, None).unwrap();
+        let root = action
+            .queue_task
+            .expect("a local directory member action must return its group root");
+        assert_eq!(root.id, group.id.to_string());
+        assert_eq!(root.progress, 40);
+        assert_eq!(root.children[0].name, "remote-file");
     }
 
     #[test]
