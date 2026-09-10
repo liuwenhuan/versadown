@@ -2525,14 +2525,17 @@ mod tests {
 
     #[test]
     fn recycle_directory_ids_route_to_provider_recycle_lists() {
-        assert!(super::is_provider_recycle_bin(
-            CloudProvider::Quark,
-            super::QUARK_RECYCLE_BIN_ID,
-        ));
-        assert!(super::is_provider_recycle_bin(
-            CloudProvider::Uc,
-            crate::cloud::uc::UC_RECYCLE_BIN_ID,
-        ));
+        for (provider, recycle_bin_id) in [
+            (CloudProvider::Quark, super::QUARK_RECYCLE_BIN_ID),
+            (CloudProvider::Pikpak, super::PIKPAK_RECYCLE_BIN_ID),
+            (CloudProvider::Baidu, crate::cloud::baidu::BAIDU_RECYCLE_BIN_ID),
+            (CloudProvider::Tianyi, crate::cloud::tianyi::TIANYI_RECYCLE_BIN_ID),
+            (CloudProvider::Aliyun, crate::cloud::aliyun::ALIYUN_RECYCLE_BIN_ID),
+            (CloudProvider::Xunlei, crate::cloud::xunlei::XUNLEI_RECYCLE_BIN_ID),
+            (CloudProvider::Uc, crate::cloud::uc::UC_RECYCLE_BIN_ID),
+        ] {
+            assert!(super::is_provider_recycle_bin(provider, recycle_bin_id));
+        }
     }
 
     #[test]
@@ -3312,7 +3315,12 @@ mod tests {
 
         assert_eq!(account.id, "b1");
         assert_eq!(restored.id, "b1");
-        assert!(root.items.is_empty());
+        assert!(root.items.iter().any(|item| {
+            item.id == crate::cloud::baidu::BAIDU_RECYCLE_BIN_ID
+                && item.parent_id == "/"
+                && item.name == "回收站"
+                && item.kind == "folder"
+        }));
     }
 
     #[test]
