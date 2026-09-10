@@ -52,6 +52,8 @@ export interface DuplicateDownload {
 export interface TaskActionResult {
   task?: QueueTask;
   duplicate?: DuplicateDownload;
+  /** Durable cloud-directory actions return their authoritative recursive root here. */
+  queueTask?: QueueTask;
 }
 
 export interface CloudShareBatchFailure {

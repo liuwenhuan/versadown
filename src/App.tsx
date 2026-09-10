@@ -464,9 +464,10 @@ export function App() {
         failure ??= result.reason;
         continue;
       }
-      if (result.value.task) {
-        recordTaskEvent(result.value.task);
-        setTasks((current) => upsertTask(current, result.value.task!));
+      const snapshot = result.value.queueTask ?? result.value.task;
+      if (snapshot) {
+        recordTaskEvent(snapshot);
+        setTasks((current) => upsertTask(current, snapshot));
       }
     }
     if (failure) setNotice({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) });
@@ -567,7 +568,7 @@ export function App() {
       try {
         const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory);
         const outcomes = result.outcomes;
-        const cloudTasks = outcomes.flatMap((outcome) => outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
+        const cloudTasks = outcomes.flatMap((outcome) => outcome.queueTask ? [outcome.queueTask] : outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
         const duplicates = outcomes.flatMap((outcome) => outcome.duplicate ? [outcome.duplicate] : []);
         cloudTasks.forEach((cloudTask) => recordTaskEvent(cloudTask));
         setTasks((current) => cloudTasks.reduce((next, cloudTask) => upsertTask(next, cloudTask), current));
@@ -656,7 +657,10 @@ export function App() {
         return;
       }
       const result = await runTaskAction(id, command);
-      if (result.duplicate) {
+      if (result.queueTask) {
+        recordTaskEvent(result.queueTask);
+        setTasks((current) => upsertTask(current, result.queueTask!));
+      } else if (result.duplicate) {
         recordTaskEvent(result.duplicate.task);
         setTasks((current) => upsertTask(current, result.duplicate!.task));
         setSelectedTaskId(id);
@@ -698,17 +702,17 @@ export function App() {
 
       const operations = targets.flatMap((task) => {
         if (command === 'pause') return task.status === 'downloading'
-          ? [{ task, operation: runTaskAction(task.id, 'pause').then((result) => result.task) }]
+          ? [{ task, operation: runTaskAction(task.id, 'pause').then((result) => result.queueTask ?? result.task) }]
           : [];
         if (command === 'resume') {
-          if (task.status === 'paused') return [{ task, operation: runTaskAction(task.id, 'resume').then((result) => result.task) }];
-          if (task.status === 'failed') return [{ task, operation: runTaskAction(task.id, 'retry').then((result) => result.task) }];
+          if (task.status === 'paused') return [{ task, operation: runTaskAction(task.id, 'resume').then((result) => result.queueTask ?? result.task) }];
+          if (task.status === 'failed') return [{ task, operation: runTaskAction(task.id, 'retry').then((result) => result.queueTask ?? result.task) }];
           return [];
         }
         if (task.status === 'completed' || task.status === 'failed') {
           return [{ task, operation: moveTaskToRecycle(task.id) }];
         }
-        return [{ task, operation: runTaskAction(task.id, 'cancel').then((result) => result.task) }];
+        return [{ task, operation: runTaskAction(task.id, 'cancel').then((result) => result.queueTask ?? result.task) }];
       });
       const results = await Promise.allSettled(operations.map(({ operation }) => operation));
       let failure: unknown;
@@ -804,6 +808,13 @@ export function App() {
 
   function acceptCloudDownload(value: unknown) {
     const outcome = value as TaskActionResult | undefined;
+    if (outcome?.queueTask) {
+      recordTaskEvent(outcome.queueTask);
+      setTasks((current) => upsertTask(current, outcome.queueTask!));
+      setSelectedTaskId(outcome.queueTask.id);
+      setNotice({ kind: 'success', message: `已将「${outcome.queueTask.name}」加入下载队列` });
+      return;
+    }
     if (outcome?.duplicate) {
       recordTaskEvent(outcome.duplicate.task);
       setTasks((current) => upsertTask(current, outcome.duplicate!.task));

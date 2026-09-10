@@ -28,7 +28,7 @@ export function isTauriRuntime() {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
-type NativeTaskOutcome = QueueTask & { duplicate?: DuplicateDownloadState };
+type NativeTaskOutcome = QueueTask & { duplicate?: DuplicateDownloadState; queueTask?: QueueTask };
 type NativeCloudShareBatchResult = { outcomes: NativeTaskOutcome[]; failures: CloudShareBatchFailure[] };
 type NativeTaskParseOutcome = {
   kind: 'task';
@@ -54,10 +54,10 @@ type NativeAccessCodeRequiredOutcome = {
 type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome;
 
 function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
-  const { duplicate, ...task } = result;
+  const { duplicate, queueTask, ...task } = result;
   return duplicate
-    ? { duplicate: { task, state: duplicate } }
-    : { task };
+    ? { duplicate: { task, state: duplicate }, ...(queueTask ? { queueTask } : {}) }
+    : { task, ...(queueTask ? { queueTask } : {}) };
 }
 
 export async function parseDownload(input: string, accessCode?: string): Promise<ParseDownloadResult> {

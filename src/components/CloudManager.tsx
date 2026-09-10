@@ -717,7 +717,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       await Promise.all(selected.map(async (item) => {
         if (item.kind === 'folder') {
           const outcome = await client.downloadCloudDirectory(provider, item.id, item.name);
-          onDownloadTask?.(outcome.task);
+          onDownloadTask?.(outcome.task.queueTask ?? outcome.task);
           directoryFailures.push(...outcome.failures);
           queuedDirectoryFiles += outcome.queuedCount;
           return;

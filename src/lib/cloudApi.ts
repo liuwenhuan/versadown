@@ -17,14 +17,17 @@ export const trashCloudFiles = (provider: CloudProvider, fileIds: string[]) => i
 export const deleteCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_delete', { provider, fileIds });
 /** Restores files already displayed inside a provider recycle bin. */
 export const restoreCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_restore', { provider, fileIds });
-type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState };
+type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState; queueTask?: QueueTask };
 type NativeCloudDirectoryDownload = {
   task: NativeCloudDownload;
   queuedCount: number;
   failures: CloudDirectoryDownloadFailure[];
 };
 function cloudDownloadResult(result: NativeCloudDownload): TaskActionResult {
-  return result.duplicate ? { duplicate: { task: result, state: result.duplicate } } : { task: result };
+  const { duplicate, queueTask, ...task } = result;
+  return duplicate
+    ? { duplicate: { task, state: duplicate }, ...(queueTask ? { queueTask } : {}) }
+    : { task, ...(queueTask ? { queueTask } : {}) };
 }
 export const downloadCloudFile = (provider: CloudProvider, fileId: string): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', { provider, fileId })
   .then(cloudDownloadResult);

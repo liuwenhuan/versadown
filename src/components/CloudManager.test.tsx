@@ -953,7 +953,8 @@ it('queues a selected cloud folder as one directory parent task', async () => {
   const user = userEvent.setup();
   const onDownloadTask = vi.fn();
   const queuedTask = { id: 'folder-download-1', name: '归档', kind: 'folder' as const, status: 'queued' as const, progress: 0 };
-  const downloadCloudDirectory = vi.fn().mockResolvedValue({ task: { task: queuedTask }, queuedCount: 1, failures: [] });
+  const root = { id: 'group-root', name: '归档', kind: 'folder' as const, status: 'queued' as const, progress: 0, children: [queuedTask] };
+  const downloadCloudDirectory = vi.fn().mockResolvedValue({ task: { task: queuedTask, queueTask: root }, queuedCount: 1, failures: [] });
   const client = createCloudFake({ downloadCloudDirectory });
   render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} onDownloadTask={onDownloadTask} />);
 
@@ -964,7 +965,7 @@ it('queues a selected cloud folder as one directory parent task', async () => {
   await waitFor(() => expect(downloadCloudDirectory).toHaveBeenCalledWith('quark', 'folder-1', '归档'));
   expect(client.downloadCloudFile).not.toHaveBeenCalled();
   expect(onDownloadTask).toHaveBeenCalledTimes(1);
-  expect(onDownloadTask).toHaveBeenCalledWith({ task: queuedTask });
+  expect(onDownloadTask).toHaveBeenCalledWith(root);
 });
 
 it('reports queued count and redacted per-file directory download failures instead of silently succeeding', async () => {

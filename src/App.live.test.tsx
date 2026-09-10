@@ -858,6 +858,71 @@ it('keeps a same-ID event update that arrives while a focus snapshot is pending'
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
 });
 
+it('keeps a cloud directory member inside its authoritative root through member events and actions', async () => {
+  const user = userEvent.setup();
+  const root: QueueTask = {
+    id: 'cloud-directory-root', name: 'Season 1', kind: 'folder', status: 'downloading', progress: 20,
+    download_speed: 1024,
+    children: [{ id: 'cloud-member-1', name: 'episode-01.mkv', kind: 'cloud', status: 'downloading', progress: 20, download_speed: 1024 }],
+  };
+  const memberEventRoot: QueueTask = {
+    ...root, progress: 40, download_speed: 4096,
+    children: [{ ...root.children![0], progress: 40, download_speed: 4096 }],
+  };
+  const actionRoot: QueueTask = {
+    ...memberEventRoot, progress: 45, download_speed: 2048,
+    children: [{ ...memberEventRoot.children![0], status: 'paused', progress: 45, download_speed: 0 }],
+  };
+  state.taskAction.mockResolvedValueOnce({
+    task: { ...actionRoot.children![0] },
+    queueTask: actionRoot,
+  });
+  render(<App />);
+  await waitFor(() => expect(state.onTask).toBeDefined());
+
+  act(() => { state.onTask?.(root); });
+  await user.click(await screen.findByRole('button', { name: '展开 Season 1' }));
+  expect(screen.getByText('episode-01.mkv')).toBeVisible();
+  expect(document.querySelectorAll('.task-row')).toHaveLength(1);
+
+  act(() => { state.onTask?.(memberEventRoot); });
+  expect(screen.getByRole('progressbar', { name: 'Season 1 下载进度' })).toHaveAttribute('aria-valuenow', '40');
+
+  await user.click(screen.getByRole('button', { name: '暂停 episode-01.mkv' }));
+  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('cloud-member-1', 'pause'));
+  expect(screen.getByRole('progressbar', { name: 'Season 1 下载进度' })).toHaveAttribute('aria-valuenow', '45');
+  expect(document.querySelectorAll('.task-row')).toHaveLength(1);
+});
+
+it('replaces a virtual failed directory leaf from its retry root without adding its new member at top level', async () => {
+  const user = userEvent.setup();
+  const root: QueueTask = {
+    id: 'cloud-directory-root', name: 'Season 1', kind: 'folder', status: 'failed', progress: 0,
+    children: [{ id: 'virtual-failed-leaf', name: 'unavailable.mkv', kind: 'cloud', status: 'failed', progress: 0, error: '链接生成失败' }],
+  };
+  const retriedRoot: QueueTask = {
+    ...root, status: 'queued',
+    children: [{ id: 'new-cloud-member', name: 'unavailable.mkv', kind: 'cloud', status: 'queued', progress: 0 }],
+  };
+  state.list.mockResolvedValueOnce([root]);
+  state.taskAction.mockResolvedValueOnce({
+    task: { ...retriedRoot.children![0] },
+    queueTask: retriedRoot,
+  });
+  render(<App />);
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
+
+  await user.click(await screen.findByRole('button', { name: '展开 Season 1' }));
+  expect(screen.getByText('链接生成失败')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '重新下载 unavailable.mkv' }));
+
+  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('virtual-failed-leaf', 'retry'));
+  expect(screen.queryByText('链接生成失败')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  expect(document.querySelectorAll('.task-row')).toHaveLength(1);
+  expect(screen.getByText('unavailable.mkv')).toBeVisible();
+});
+
 it('reopens awaiting magnet file confirmation and confirms only through the dialog', async () => {
   const user = userEvent.setup();
   const awaitingTask: QueueTask = {

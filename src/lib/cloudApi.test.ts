@@ -14,9 +14,9 @@ it('permanently deletes only the selected cloud recycle-bin files', async () => 
   });
 });
 
-it('maps one directory parent task while preserving the queued count and redacted failures', async () => {
+it('maps one directory parent task with its authoritative group root while preserving the queued count and redacted failures', async () => {
   native.invoke.mockResolvedValueOnce({
-    task: { id: 'directory-1', name: '归档', kind: 'folder', status: 'queued', progress: 0 },
+    task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0, queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'queued', progress: 0, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }] } },
     queuedCount: 1,
     failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
   });
@@ -28,7 +28,7 @@ it('maps one directory parent task while preserving the queued count and redacte
     provider: 'quark', directoryId: 'folder-1', directoryName: '归档'
   });
   expect(outcome).toEqual({
-    task: { task: { id: 'directory-1', name: '归档', kind: 'folder', status: 'queued', progress: 0 } },
+    task: { task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }, queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'queued', progress: 0, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }] } },
     queuedCount: 1,
     failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
   });
