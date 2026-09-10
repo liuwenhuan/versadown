@@ -18,7 +18,12 @@ use crate::{
     TaskStatus, TaskStore,
 };
 
-pub(crate) fn cleanup_completed_share(
+#[cfg(test)]
+const TEST_CLEANUP_OWNER: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[cfg(test)]
+fn cleanup_completed_share(
     plans: &crate::cloud::share::CloudSharePlanStore,
     tasks: &TaskStore,
     task: &crate::DownloadTask,
@@ -26,7 +31,15 @@ pub(crate) fn cleanup_completed_share(
     retry: bool,
     trash: impl FnOnce(crate::cloud::CloudProvider, &[String]) -> Result<(), crate::cloud::QuarkError>,
 ) -> Result<Option<crate::DownloadTask>, crate::cloud::QuarkError> {
-    cleanup_completed_share_with_owner(plans, tasks, task, enabled, retry, None, trash)
+    cleanup_completed_share_with_owner(
+        plans,
+        tasks,
+        task,
+        enabled,
+        retry,
+        Some(TEST_CLEANUP_OWNER),
+        trash,
+    )
 }
 
 /// Production callers pass the current account-v2 owner fingerprint. Missing
@@ -533,7 +546,9 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-        plans.record_transfer(&sources[0], "created-id").unwrap();
+        plans
+            .record_transfer_with_owner(&sources[0], "created-id", TEST_CLEANUP_OWNER)
+            .unwrap();
         let tasks = TaskStore::open_in_memory().unwrap();
         let locals = sources
             .into_iter()
