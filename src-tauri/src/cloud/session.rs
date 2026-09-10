@@ -77,15 +77,26 @@ impl fmt::Debug for CloudPasswordCredential {
 
 #[derive(Serialize)]
 struct StoredPasswordCredential<'a> {
-    version: u8,
-    provider: CloudProvider,
     account_id: &'a str,
     username: &'a str,
     password: &'a str,
 }
 
+#[derive(Serialize)]
+struct StoredPasswordCredentials<'a> {
+    version: u8,
+    provider: CloudProvider,
+    active_account_id: Option<&'a str>,
+    credentials: Vec<StoredPasswordCredential<'a>>,
+}
+
 #[derive(Deserialize)]
-struct LoadedPasswordCredential {
+struct PasswordCredentialVersion {
+    version: u8,
+}
+
+#[derive(Deserialize)]
+struct LoadedPasswordCredentialV1 {
     version: u8,
     provider: CloudProvider,
     account_id: String,
@@ -93,11 +104,44 @@ struct LoadedPasswordCredential {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct LoadedPasswordCredential {
+    account_id: String,
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct LoadedPasswordCredentials {
+    version: u8,
+    provider: CloudProvider,
+    active_account_id: Option<String>,
+    credentials: Vec<LoadedPasswordCredential>,
+}
+
+impl Zeroize for LoadedPasswordCredentialV1 {
+    fn zeroize(&mut self) {
+        self.account_id.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+    }
+}
+
 impl Zeroize for LoadedPasswordCredential {
     fn zeroize(&mut self) {
         self.account_id.zeroize();
         self.username.zeroize();
         self.password.zeroize();
+    }
+}
+
+impl Zeroize for LoadedPasswordCredentials {
+    fn zeroize(&mut self) {
+        if let Some(active_account_id) = self.active_account_id.as_mut() {
+            active_account_id.zeroize();
+        }
+        self.active_account_id = None;
+        self.credentials.zeroize();
     }
 }
 
@@ -120,17 +164,90 @@ fn password_credential_key(provider: CloudProvider) -> Result<&'static str, Quar
     }
 }
 
-pub fn save_password_credential(
+fn load_password_credentials(
     store: &impl CredentialStore,
-    credential: CloudPasswordCredential,
+    provider: CloudProvider,
+) -> Result<Option<LoadedPasswordCredentials>, QuarkError> {
+    let key = password_credential_key(provider)?;
+    let Some(mut bytes) = store.load(key)? else {
+        return Ok(None);
+    };
+    let version = match serde_json::from_slice::<PasswordCredentialVersion>(&bytes) {
+        Ok(version) => version,
+        Err(_) => {
+            bytes.zeroize();
+            return Err(QuarkError::Storage);
+        }
+    };
+    let mut credentials = match version.version {
+        // Version 1 stored one credential per provider. It remains readable and
+        // becomes the active account when next persisted as version 2.
+        1 => {
+            let mut legacy = match serde_json::from_slice::<LoadedPasswordCredentialV1>(&bytes) {
+                Ok(legacy) => legacy,
+                Err(_) => {
+                    bytes.zeroize();
+                    return Err(QuarkError::Storage);
+                }
+            };
+            if legacy.version != 1 || legacy.provider != provider {
+                legacy.zeroize();
+                bytes.zeroize();
+                return Err(QuarkError::Storage);
+            }
+            let account_id = std::mem::take(&mut legacy.account_id);
+            let username = std::mem::take(&mut legacy.username);
+            let password = std::mem::take(&mut legacy.password);
+            legacy.zeroize();
+            LoadedPasswordCredentials {
+                version: 2,
+                provider,
+                active_account_id: Some(account_id.clone()),
+                credentials: vec![LoadedPasswordCredential {
+                    account_id,
+                    username,
+                    password,
+                }],
+            }
+        }
+        2 => match serde_json::from_slice::<LoadedPasswordCredentials>(&bytes) {
+            Ok(credentials) => credentials,
+            Err(_) => {
+                bytes.zeroize();
+                return Err(QuarkError::Storage);
+            }
+        },
+        _ => {
+            bytes.zeroize();
+            return Err(QuarkError::Storage);
+        }
+    };
+    bytes.zeroize();
+    if credentials.provider != provider || credentials.version != 2 {
+        credentials.zeroize();
+        return Err(QuarkError::Storage);
+    }
+    Ok(Some(credentials))
+}
+
+fn persist_password_credentials(
+    store: &impl CredentialStore,
+    credentials: &LoadedPasswordCredentials,
 ) -> Result<(), QuarkError> {
-    let key = password_credential_key(credential.provider())?;
-    let stored = StoredPasswordCredential {
-        version: 1,
-        provider: credential.provider(),
-        account_id: credential.account_id(),
-        username: credential.username(),
-        password: credential.password(),
+    let key = password_credential_key(credentials.provider)?;
+    let stored = StoredPasswordCredentials {
+        version: 2,
+        provider: credentials.provider,
+        active_account_id: credentials.active_account_id.as_deref(),
+        credentials: credentials
+            .credentials
+            .iter()
+            .map(|credential| StoredPasswordCredential {
+                account_id: &credential.account_id,
+                username: &credential.username,
+                password: &credential.password,
+            })
+            .collect(),
     };
     let mut bytes = serde_json::to_vec(&stored).map_err(|_| QuarkError::Storage)?;
     let result = store.save(key, &bytes);
@@ -138,29 +255,72 @@ pub fn save_password_credential(
     result
 }
 
+pub fn save_password_credential(
+    store: &impl CredentialStore,
+    credential: CloudPasswordCredential,
+) -> Result<(), QuarkError> {
+    let provider = credential.provider();
+    let account_id = credential.account_id().to_owned();
+    let username = credential.username().to_owned();
+    let password = credential.password().to_owned();
+    let mut credentials =
+        load_password_credentials(store, provider)?.unwrap_or(LoadedPasswordCredentials {
+            version: 2,
+            provider,
+            active_account_id: None,
+            credentials: Vec::new(),
+        });
+    if let Some(existing) = credentials
+        .credentials
+        .iter_mut()
+        .find(|existing| existing.account_id == account_id)
+    {
+        existing.username.zeroize();
+        existing.password.zeroize();
+        existing.username = username;
+        existing.password = password;
+    } else {
+        credentials.credentials.push(LoadedPasswordCredential {
+            account_id: account_id.clone(),
+            username,
+            password,
+        });
+    }
+    if let Some(active_account_id) = credentials.active_account_id.as_mut() {
+        active_account_id.zeroize();
+    }
+    credentials.active_account_id = Some(account_id);
+    let result = persist_password_credentials(store, &credentials);
+    credentials.zeroize();
+    result
+}
+
 pub fn load_password_credential(
     store: &impl CredentialStore,
     provider: CloudProvider,
 ) -> Result<Option<CloudPasswordCredential>, QuarkError> {
-    let key = password_credential_key(provider)?;
-    let Some(mut bytes) = store.load(key)? else {
+    let Some(mut credentials) = load_password_credentials(store, provider)? else {
         return Ok(None);
     };
-    let parsed = serde_json::from_slice::<LoadedPasswordCredential>(&bytes);
-    bytes.zeroize();
-    let mut parsed = parsed.map_err(|_| QuarkError::Storage)?;
-    if parsed.version != 1 || parsed.provider != provider {
-        parsed.zeroize();
-        return Err(QuarkError::Storage);
-    }
-    let credential = CloudPasswordCredential::new(
-        parsed.provider,
-        std::mem::take(&mut parsed.account_id),
-        std::mem::take(&mut parsed.username),
-        std::mem::take(&mut parsed.password),
-    );
-    parsed.zeroize();
-    Ok(Some(credential))
+    let credential = credentials
+        .active_account_id
+        .as_deref()
+        .and_then(|account_id| {
+            credentials
+                .credentials
+                .iter()
+                .find(|credential| credential.account_id == account_id)
+        })
+        .map(|credential| {
+            CloudPasswordCredential::new(
+                provider,
+                credential.account_id.clone(),
+                credential.username.clone(),
+                credential.password.clone(),
+            )
+        });
+    credentials.zeroize();
+    Ok(credential)
 }
 
 pub fn remove_password_credential(
@@ -170,17 +330,23 @@ pub fn remove_password_credential(
     store.remove(password_credential_key(provider)?)
 }
 
-pub fn clear_password_credential_if_account_differs(
+/// Records which account owns the current session without deleting password
+/// credentials for the provider's other accounts.
+pub fn select_password_credential_account(
     store: &impl CredentialStore,
     provider: CloudProvider,
     account_id: &str,
 ) -> Result<(), QuarkError> {
-    if let Some(credential) = load_password_credential(store, provider)? {
-        if credential.account_id() != account_id {
-            remove_password_credential(store, provider)?;
-        }
+    let Some(mut credentials) = load_password_credentials(store, provider)? else {
+        return Ok(());
+    };
+    if let Some(active_account_id) = credentials.active_account_id.as_mut() {
+        active_account_id.zeroize();
     }
-    Ok(())
+    credentials.active_account_id = Some(account_id.to_owned());
+    let result = persist_password_credentials(store, &credentials);
+    credentials.zeroize();
+    result
 }
 
 pub fn run_with_session_recovery<T>(
@@ -218,4 +384,55 @@ fn is_recoverable_authorization_error(error: &QuarkError) -> bool {
         error,
         QuarkError::AuthorizationExpired | QuarkError::NotAuthorized
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        load_password_credential, save_password_credential, select_password_credential_account,
+        CloudPasswordCredential,
+    };
+    use crate::cloud::{CloudProvider, CredentialStore, MemoryCredentialStore};
+
+    #[test]
+    fn preserves_another_accounts_password_after_web_authorization_switches_accounts() {
+        let store = MemoryCredentialStore::default();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Baidu, "account-a", "alice", "secret-a"),
+        )
+        .unwrap();
+
+        // A web authorization for account B must stop automatic login as A, but it
+        // must not erase A's encrypted password. The user may switch back later.
+        select_password_credential_account(&store, CloudProvider::Baidu, "account-b").unwrap();
+        assert!(load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .is_none());
+
+        select_password_credential_account(&store, CloudProvider::Baidu, "account-a").unwrap();
+        let credential = load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .expect("the prior direct-login credential remains available");
+        assert_eq!(credential.username(), "alice");
+        assert_eq!(credential.password(), "secret-a");
+    }
+
+    #[test]
+    fn restores_a_legacy_single_account_password_without_discarding_it() {
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "cloud-password-baidu",
+                br#"{"version":1,"provider":"baidu","account_id":"account-a","username":"alice","password":"secret-a"}"#,
+            )
+            .unwrap();
+
+        let credential = load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .expect("existing version-one credentials remain usable after the upgrade");
+        assert_eq!(credential.account_id(), "account-a");
+        assert_eq!(credential.username(), "alice");
+        assert_eq!(credential.password(), "secret-a");
+    }
 }

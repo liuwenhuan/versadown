@@ -267,7 +267,13 @@ fn recover_provider_password_session(
     };
 
     if account.id.is_empty() || account.id != credential.account_id() {
-        remove_password_credential(store, provider)?;
+        // Keep the encrypted credential. A provider can return a different
+        // account after a risk challenge or an account switch; selecting that
+        // account prevents an unsafe automatic login without losing the prior
+        // account's saved password.
+        if !account.id.is_empty() {
+            select_password_credential_account(store, provider, &account.id)?;
+        }
         return Err(QuarkError::WebAuthorizationRequired);
     }
     match session {
@@ -1084,7 +1090,7 @@ pub async fn cloud_complete_authorization(
             }
         }?;
         if cloud_session_policy(provider).supports_password_fallback {
-            clear_password_credential_if_account_differs(&state.store, provider, &account.id)?;
+            select_password_credential_account(&state.store, provider, &account.id)?;
         }
         Ok(account)
     })
