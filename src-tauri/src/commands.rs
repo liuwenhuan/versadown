@@ -723,7 +723,11 @@ pub fn play_task_videos(task_id: String, state: State<'_, AppState>) -> Result<(
 }
 
 #[tauri::command]
-pub fn remove_task_record(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
+pub fn remove_task_record(
+    task_id: String,
+    state: State<'_, AppState>,
+    cloud: State<'_, Arc<crate::cloud::commands::CloudState>>,
+) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let task = state.store.find(id).map_err(|error| error.to_string())?;
     if matches!(
@@ -738,10 +742,23 @@ pub fn remove_task_record(task_id: String, state: State<'_, AppState>) -> Result
     ) {
         return Err("请先取消活动下载任务，再移除任务记录".to_string());
     }
-    state
-        .store
-        .remove_task_record(id)
-        .map_err(|error| error.to_string())
+    remove_task_record_and_unlink_share(&state.store, &cloud.share_plans, &task)
+}
+
+fn remove_task_record_and_unlink_share(
+    store: &TaskStore,
+    plans: &crate::cloud::share::CloudSharePlanStore,
+    task: &DownloadTask,
+) -> Result<(), String> {
+    store
+        .remove_task_record(task.id)
+        .map_err(|error| error.to_string())?;
+    if task.source.starts_with("cloud-share://") {
+        plans
+            .unlink_local_task(&task.source, task.id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -795,6 +812,7 @@ pub fn purge_recycled_tasks(
     task_ids: Vec<String>,
     delete_files: bool,
     state: State<'_, AppState>,
+    cloud: State<'_, Arc<crate::cloud::commands::CloudState>>,
 ) -> Result<(), String> {
     let mut ids = Vec::with_capacity(task_ids.len());
     for task_id in task_ids {
@@ -803,25 +821,33 @@ pub fn purge_recycled_tasks(
             ids.push(id);
         }
     }
+    purge_recycled_task_records(&state.store, &cloud.share_plans, &ids, delete_files)
+}
+
+fn purge_recycled_task_records(
+    store: &TaskStore,
+    plans: &crate::cloud::share::CloudSharePlanStore,
+    ids: &[Uuid],
+    delete_files: bool,
+) -> Result<(), String> {
     if ids.is_empty() {
         return Ok(());
     }
-    for id in &ids {
-        let task = state.store.find(*id).map_err(|error| error.to_string())?;
+    let mut tasks = Vec::with_capacity(ids.len());
+    for id in ids {
+        let task = store.find(*id).map_err(|error| error.to_string())?;
         if !matches!(task.status, TaskStatus::Recycled | TaskStatus::Cancelled) {
             return Err("只有回收站中的任务可以彻底删除".to_string());
         }
+        tasks.push(task);
     }
     if delete_files {
-        for id in &ids {
-            remove_task_payload_files(&state.store, *id)?;
+        for id in ids {
+            remove_task_payload_files(store, *id)?;
         }
     }
-    for id in ids {
-        state
-            .store
-            .remove_task_record(id)
-            .map_err(|error| error.to_string())?;
+    for task in tasks {
+        remove_task_record_and_unlink_share(store, plans, &task)?;
     }
     Ok(())
 }
@@ -1000,7 +1026,149 @@ pub fn update_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DuplicateDownloadState, NewTask};
+    use crate::{
+        cloud::{share::CloudShareEntry, share::CloudSharePlan, CloudProvider},
+        DuplicateDownloadState, NewTask,
+    };
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_task_delete_unlinks_only_after_sqlite_delete_succeeds() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "delete-order".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "delete-order",
+                "entry".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            serde_json::json!({}),
+        );
+        let source = plan.source_for("entry");
+        plans.upsert(&plan).unwrap();
+        plans
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store.create(NewTask::direct(&source)).unwrap();
+        plans.link_local_task(&source, task.id).unwrap();
+
+        store.remove_task_record(task.id).unwrap();
+        assert!(remove_task_record_and_unlink_share(&store, &plans, &task).is_err());
+        assert!(plans
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .linked_local_tasks
+            .values()
+            .any(|ids| ids.contains(&task.id)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_task_delete_uses_original_exact_source_and_id_for_unlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let mut plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "exact-delete".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "exact-delete",
+                "first".into(),
+                "first.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            serde_json::json!({}),
+        );
+        plan.entries.push(CloudShareEntry::new(
+            "exact-delete",
+            "second".into(),
+            "second.bin".into(),
+            vec![],
+            Some(2),
+        ));
+        let first_source = plan.source_for("first");
+        let second_source = plan.source_for("second");
+        plans.upsert(&plan).unwrap();
+        plans
+            .link_local_sources(&[first_source.clone(), second_source.clone()])
+            .unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let first = store.create(NewTask::direct(&first_source)).unwrap();
+        let second = store.create(NewTask::direct(&second_source)).unwrap();
+        plans.link_local_task(&first_source, first.id).unwrap();
+        plans.link_local_task(&second_source, second.id).unwrap();
+
+        remove_task_record_and_unlink_share(&store, &plans, &first).unwrap();
+
+        assert!(matches!(
+            store.find(first.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
+        assert!(store.find(second.id).is_ok());
+        let remaining = plans.resolve_entry(&second_source).unwrap().plan;
+        assert_eq!(remaining.linked_local_tasks.len(), 1);
+        assert!(remaining
+            .linked_local_tasks
+            .values()
+            .any(|ids| ids.contains(&second.id)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_purge_unlinks_each_recycled_cloud_share_task_after_sqlite_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "purge".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "purge",
+                "entry".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            serde_json::json!({}),
+        );
+        let source = plan.source_for("entry");
+        plans.upsert(&plan).unwrap();
+        plans
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store.create(NewTask::direct(&source)).unwrap();
+        let task = store.fail(task.id, "fixture").unwrap();
+        let task = store.transition(task.id, TaskStatus::Recycled).unwrap();
+        plans.link_local_task(&source, task.id).unwrap();
+
+        purge_recycled_task_records(&store, &plans, &[task.id], false).unwrap();
+
+        assert!(matches!(
+            store.find(task.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
+        assert!(plans
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .linked_local_tasks
+            .is_empty());
+    }
 
     #[test]
     fn disabled_proxy_does_not_leak_process_proxy_settings_into_aria2() {

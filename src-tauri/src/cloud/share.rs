@@ -713,6 +713,28 @@ impl CloudSharePlan {
         }
         Ok(())
     }
+
+    fn is_pinned(&self) -> bool {
+        !self.linked_local_tasks.is_empty()
+            || self
+                .transfers
+                .iter()
+                .any(|transfer| transfer.cleanup_state != CloudShareCleanupState::Succeeded)
+    }
+
+    fn remove_terminal_empty_link(&mut self, fingerprint: &str) {
+        let has_unfinished_transfer = self.transfers.iter().any(|transfer| {
+            transfer.entry_fingerprint == fingerprint
+                && transfer.cleanup_state != CloudShareCleanupState::Succeeded
+        });
+        let is_empty = self
+            .linked_local_tasks
+            .get(fingerprint)
+            .is_some_and(BTreeSet::is_empty);
+        if is_empty && !has_unfinished_transfer {
+            self.linked_local_tasks.remove(fingerprint);
+        }
+    }
 }
 
 /// Deliberately not serializable: callers must build a safe IPC projection.
@@ -793,15 +815,20 @@ impl PlanDocument {
 
     fn prune(&mut self, now: u64) -> usize {
         let previous = self.plans.len();
-        self.plans
-            .retain(|_, stored| now.saturating_sub(stored.plan.last_used_at_ms) < RETENTION_MS);
+        self.plans.retain(|_, stored| {
+            stored.plan.is_pinned()
+                || now.saturating_sub(stored.plan.last_used_at_ms) < RETENTION_MS
+        });
         while self.plans.len() > MAX_PLANS {
-            let oldest = self
+            let Some(oldest) = self
                 .plans
                 .iter()
+                .filter(|(_, stored)| !stored.plan.is_pinned())
                 .min_by_key(|(_, stored)| stored.last_used_order)
                 .map(|(key, _)| key.clone())
-                .unwrap();
+            else {
+                break;
+            };
             self.plans.remove(&oldest);
         }
         previous - self.plans.len()
@@ -877,38 +904,53 @@ impl CloudSharePlanStore {
 
     pub fn upsert(&self, plan: &CloudSharePlan) -> Result<(), QuarkError> {
         plan.validate()?;
-        self.update(|document, now| {
-            let key = plan_key(plan.provider, &plan.share_fingerprint);
-            let mut incoming = plan.clone();
-            // Reinspection refreshes secrets/metadata without discarding recovery
-            // context for existing tasks or rearming an already claimed cleanup.
-            if let Some(previous) = document.plans.get(&key) {
-                incoming.created_at_ms = previous.plan.created_at_ms;
-                incoming.transfers = previous.plan.transfers.clone();
-                incoming.linked_local_tasks = previous.plan.linked_local_tasks.clone();
-                for entry in &previous.plan.entries {
-                    if !incoming
-                        .entries
-                        .iter()
-                        .any(|current| current.entry_fingerprint == entry.entry_fingerprint)
-                    {
-                        incoming.entries.push(entry.clone());
-                    }
+        let _guard = self.mutation.lock().map_err(|_| QuarkError::Storage)?;
+        let now = (self.now_ms)();
+        let mut document = self.load()?;
+        document.prune(now);
+        let key = plan_key(plan.provider, &plan.share_fingerprint);
+        if !document.plans.contains_key(&key)
+            && document.plans.len() >= MAX_PLANS
+            && !document
+                .plans
+                .values()
+                .any(|stored| !stored.plan.is_pinned())
+        {
+            return Err(QuarkError::InvalidInput(
+                "网盘分享计划存储已满，请先永久删除已完成的相关下载任务".into(),
+            ));
+        }
+        let mut incoming = plan.clone();
+        // Reinspection refreshes secrets/metadata without discarding recovery
+        // context for existing tasks or rearming an already claimed cleanup.
+        if let Some(previous) = document.plans.get(&key) {
+            incoming.created_at_ms = previous.plan.created_at_ms;
+            incoming.transfers = previous.plan.transfers.clone();
+            incoming.linked_local_tasks = previous.plan.linked_local_tasks.clone();
+            for entry in &previous.plan.entries {
+                if !incoming
+                    .entries
+                    .iter()
+                    .any(|current| current.entry_fingerprint == entry.entry_fingerprint)
+                {
+                    incoming.entries.push(entry.clone());
                 }
-            } else {
-                incoming.created_at_ms = now;
-                incoming.transfers.clear();
-                incoming.linked_local_tasks.clear();
             }
-            document.plans.insert(
-                key.clone(),
-                StoredPlan {
-                    plan: incoming,
-                    last_used_order: 0,
-                },
-            );
-            document.touch(&key, now)
-        })
+        } else {
+            incoming.created_at_ms = now;
+            incoming.transfers.clear();
+            incoming.linked_local_tasks.clear();
+        }
+        document.plans.insert(
+            key.clone(),
+            StoredPlan {
+                plan: incoming,
+                last_used_order: 0,
+            },
+        );
+        document.touch(&key, now)?;
+        document.prune(now);
+        self.save(&document)
     }
 
     pub fn resolve_entry(&self, source: &str) -> Result<CloudShareResolvedEntry, QuarkError> {
@@ -1047,6 +1089,22 @@ impl CloudSharePlanStore {
         })
     }
 
+    pub fn unlink_local_task(&self, source: &str, task_id: uuid::Uuid) -> Result<(), QuarkError> {
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, now| {
+            let key = plan_key(provider, &share);
+            let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            if plan
+                .linked_local_tasks
+                .get_mut(&fingerprint)
+                .is_some_and(|ids| ids.remove(&task_id))
+            {
+                plan.remove_terminal_empty_link(&fingerprint);
+            }
+            document.touch(&key, now)
+        })
+    }
+
     /// Claim under the encrypted document lock, checking every exact linked task
     /// against current SQLite state. The caller holds submission gates while the
     /// claim and provider mutation run. Returning IDs requires a successful save.
@@ -1140,6 +1198,7 @@ impl CloudSharePlanStore {
         self.update(|document, now| {
             let key = plan_key(provider, &share);
             let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            let mut terminal_entries = BTreeSet::new();
             for transfer in &mut plan.transfers {
                 if transfer.cleanup_state == CloudShareCleanupState::Attempted
                     && ids.contains(&transfer.created_file_id)
@@ -1149,7 +1208,13 @@ impl CloudSharePlanStore {
                     } else {
                         CloudShareCleanupState::Failed
                     };
+                    if succeeded {
+                        terminal_entries.insert(transfer.entry_fingerprint.clone());
+                    }
                 }
+            }
+            for fingerprint in terminal_entries {
+                plan.remove_terminal_empty_link(&fingerprint);
             }
             document.touch(&key, now)
         })
@@ -1774,6 +1839,257 @@ mod tests {
         assert_eq!(store.prune().unwrap(), 1);
         assert!(store.resolve_entry(&old.source_for("f1")).is_err());
         assert!(store.resolve_entry(&active.source_for("f1")).is_ok());
+    }
+
+    #[test]
+    fn ttl_pruning_keeps_every_live_plan_and_removes_only_terminal_or_unbound_plans() {
+        let (store, _, now) = memory_store();
+        let reservation = fixture("reservation");
+        let linked = fixture("linked");
+        let pending = fixture("pending");
+        let attempted = fixture("attempted");
+        let failed = fixture("failed");
+        let succeeded = fixture("succeeded");
+        let unbound = fixture("unbound");
+
+        for plan in [
+            &reservation,
+            &linked,
+            &pending,
+            &attempted,
+            &failed,
+            &succeeded,
+            &unbound,
+        ] {
+            store.upsert(plan).unwrap();
+        }
+        store
+            .link_local_sources(&[reservation.source_for("f1")])
+            .unwrap();
+        store
+            .link_local_sources(&[linked.source_for("f1")])
+            .unwrap();
+        store
+            .link_local_task(&linked.source_for("f1"), uuid::Uuid::new_v4())
+            .unwrap();
+        store
+            .record_transfer(&pending.source_for("f1"), "pending-id")
+            .unwrap();
+        store
+            .record_transfer(&attempted.source_for("f1"), "attempted-id")
+            .unwrap();
+        store
+            .mark_cleanup_attempted(&attempted.source_for("f1"))
+            .unwrap();
+        store
+            .record_transfer(&failed.source_for("f1"), "failed-id")
+            .unwrap();
+        store
+            .mark_cleanup_attempted(&failed.source_for("f1"))
+            .unwrap();
+        store
+            .finish_cleanup(&failed.source_for("f1"), &["failed-id".into()], false)
+            .unwrap();
+        store
+            .record_transfer(&succeeded.source_for("f1"), "succeeded-id")
+            .unwrap();
+        store
+            .mark_cleanup_attempted(&succeeded.source_for("f1"))
+            .unwrap();
+        store
+            .finish_cleanup(&succeeded.source_for("f1"), &["succeeded-id".into()], true)
+            .unwrap();
+
+        now.store(1_000 + RETENTION_MS, Ordering::SeqCst);
+        assert_eq!(store.prune().unwrap(), 2);
+        for plan in [&reservation, &linked, &pending, &attempted, &failed] {
+            assert!(store.resolve_entry(&plan.source_for("f1")).is_ok());
+        }
+        for plan in [&succeeded, &unbound] {
+            assert!(store.resolve_entry(&plan.source_for("f1")).is_err());
+        }
+    }
+
+    #[test]
+    fn distinct_upsert_fails_without_rewriting_a_full_pinned_document_but_update_is_allowed() {
+        let (store, credentials, _) = memory_store();
+        let mut first = fixture("share-0");
+        for index in 0..MAX_PLANS {
+            let plan = fixture(&format!("share-{index}"));
+            store.upsert(&plan).unwrap();
+            store.link_local_sources(&[plan.source_for("f1")]).unwrap();
+        }
+        let before = credentials.load(SHARE_PLAN_SECRET).unwrap().unwrap();
+
+        assert!(store.upsert(&fixture("overflow")).is_err());
+        assert_eq!(
+            credentials.load(SHARE_PLAN_SECRET).unwrap().unwrap(),
+            before
+        );
+
+        first.provider_context = serde_json::json!({"token":"updated"});
+        store.upsert(&first).unwrap();
+        assert_eq!(
+            store
+                .resolve_entry(&first.source_for("f1"))
+                .unwrap()
+                .plan
+                .provider_context["token"],
+            "updated"
+        );
+        assert!(store
+            .resolve_entry(&fixture("overflow").source_for("f1"))
+            .is_err());
+    }
+
+    #[test]
+    fn unlink_is_exact_and_releases_an_empty_entry_only_after_cleanup_is_terminal() {
+        let (store, _, _) = memory_store();
+        let mut plan = fixture("unlink");
+        plan.entries.push(CloudShareEntry::new(
+            "unlink",
+            "f2".into(),
+            "other.txt".into(),
+            vec![],
+            Some(9),
+        ));
+        let first = plan.source_for("f1");
+        let second = plan.source_for("f2");
+        let first_task = uuid::Uuid::new_v4();
+        let second_task = uuid::Uuid::new_v4();
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(&[first.clone(), second.clone()])
+            .unwrap();
+        store.link_local_task(&first, first_task).unwrap();
+        store.link_local_task(&second, second_task).unwrap();
+        store.record_transfer(&first, "created-id").unwrap();
+
+        store.unlink_local_task(&first, first_task).unwrap();
+        let pending = store.resolve_entry(&second).unwrap().plan;
+        assert_eq!(
+            pending.linked_local_tasks[&parse_stable_cloud_share_source(&first).unwrap().2].len(),
+            0
+        );
+        assert_eq!(
+            pending.linked_local_tasks[&parse_stable_cloud_share_source(&second).unwrap().2],
+            BTreeSet::from([second_task])
+        );
+
+        store.mark_cleanup_attempted(&first).unwrap();
+        store
+            .finish_cleanup(&first, &["created-id".into()], true)
+            .unwrap();
+        let terminal = store.resolve_entry(&second).unwrap().plan;
+        assert!(!terminal
+            .linked_local_tasks
+            .contains_key(&parse_stable_cloud_share_source(&first).unwrap().2));
+        assert_eq!(terminal.linked_local_tasks.len(), 1);
+    }
+
+    #[test]
+    fn finishing_one_unlinked_transfer_keeps_an_unrelated_empty_submission_reservation() {
+        let (store, _, _) = memory_store();
+        let mut plan = fixture("reservation-isolation");
+        plan.entries.push(CloudShareEntry::new(
+            "reservation-isolation",
+            "f2".into(),
+            "reserved.txt".into(),
+            vec![],
+            Some(9),
+        ));
+        let transferred = plan.source_for("f1");
+        let reserved = plan.source_for("f2");
+        let task_id = uuid::Uuid::new_v4();
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(&[transferred.clone(), reserved.clone()])
+            .unwrap();
+        store.link_local_task(&transferred, task_id).unwrap();
+        store.record_transfer(&transferred, "created-id").unwrap();
+        store.unlink_local_task(&transferred, task_id).unwrap();
+        store.mark_cleanup_attempted(&transferred).unwrap();
+
+        store
+            .finish_cleanup(&transferred, &["created-id".into()], true)
+            .unwrap();
+
+        let current = store.resolve_entry(&reserved).unwrap().plan;
+        let reserved_fingerprint = parse_stable_cloud_share_source(&reserved).unwrap().2;
+        assert!(current
+            .linked_local_tasks
+            .contains_key(&reserved_fingerprint));
+        assert!(current.linked_local_tasks[&reserved_fingerprint].is_empty());
+    }
+
+    #[test]
+    fn unlink_with_an_unregistered_task_id_cannot_release_a_submission_reservation() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("reserved-without-task");
+        let source = plan.source_for("f1");
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+
+        store
+            .unlink_local_task(&source, uuid::Uuid::new_v4())
+            .unwrap();
+
+        let current = store.resolve_entry(&source).unwrap().plan;
+        let fingerprint = parse_stable_cloud_share_source(&source).unwrap().2;
+        assert!(current.linked_local_tasks.contains_key(&fingerprint));
+        assert!(current.linked_local_tasks[&fingerprint].is_empty());
+    }
+
+    #[test]
+    fn failed_unlink_save_preserves_the_durable_task_pin() {
+        use std::sync::atomic::AtomicBool;
+        struct FailingCredentials {
+            inner: MemoryCredentialStore,
+            fail: AtomicBool,
+        }
+        impl CredentialStore for FailingCredentials {
+            fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+                self.inner.load(key)
+            }
+            fn remove(&self, key: &str) -> Result<(), QuarkError> {
+                self.inner.remove(key)
+            }
+            fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    Err(QuarkError::Storage)
+                } else {
+                    self.inner.save(key, bytes)
+                }
+            }
+        }
+        let credentials = Arc::new(FailingCredentials {
+            inner: MemoryCredentialStore::default(),
+            fail: AtomicBool::new(false),
+        });
+        let store = CloudSharePlanStore {
+            credentials: credentials.clone(),
+            mutation: Mutex::new(()),
+            now_ms: Arc::new(|| 1_000),
+        };
+        let plan = fixture("unlink-save-failure");
+        let source = plan.source_for("f1");
+        let task_id = uuid::Uuid::new_v4();
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        store.link_local_task(&source, task_id).unwrap();
+
+        credentials.fail.store(true, Ordering::SeqCst);
+        assert!(store.unlink_local_task(&source, task_id).is_err());
+        credentials.fail.store(false, Ordering::SeqCst);
+        let durable = store.resolve_entry(&source).unwrap().plan;
+        assert!(durable
+            .linked_local_tasks
+            .values()
+            .any(|ids| ids.contains(&task_id)));
     }
 
     #[test]
