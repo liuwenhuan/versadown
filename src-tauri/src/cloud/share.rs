@@ -264,10 +264,7 @@ pub fn inspect_share_with_adapter(
                     .map(|name| super::commands::safe_filename(name))
                     .collect::<Vec<_>>()
                     .join("/"),
-                size: entry
-                    .size
-                    .map(format_confirmation_size)
-                    .unwrap_or_default(),
+                size: entry.size.map(format_confirmation_size).unwrap_or_default(),
                 selected: true,
             })
             .collect(),
@@ -359,7 +356,8 @@ pub fn resolve_current_share_download(
     if store.has_pending_transfer(source)? {
         if let Some(owner) = adapter.transfer_owner_fingerprint(&entry)? {
             if let Some(record) = store.reusable_transfer(source, &owner)? {
-                let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
+                let refreshed =
+                    adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
                 if let Some(context) = refreshed.updated_context {
                     store.update_provider_context(source, &context)?;
                     entry.plan.provider_context = context;
@@ -386,7 +384,8 @@ pub fn resolve_current_share_download(
             if store.has_pending_transfer(source)? {
                 if let Some(owner) = adapter.transfer_owner_fingerprint(&entry)? {
                     if let Some(record) = store.reusable_transfer(source, &owner)? {
-                        let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
+                        let refreshed =
+                            adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
                         if let Some(context) = refreshed.updated_context {
                             store.update_provider_context(source, &context)?;
                             entry.plan.provider_context = context;
@@ -1586,20 +1585,76 @@ mod tests {
                 error_message: None,
             })
         }
-        async fn add_torrent(&self, _: String, _: Vec<String>, _: crate::aria2::Aria2Options) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
-        async fn tell_active(&self) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> { unreachable!() }
-        async fn tell_waiting(&self, _: i64, _: u32) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> { unreachable!() }
-        async fn tell_stopped(&self, _: i64, _: u32) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> { unreachable!() }
-        async fn get_global_stat(&self) -> Result<crate::aria2::Aria2GlobalStat, crate::aria2::Aria2Error> { unreachable!() }
-        async fn multicall(&self, _: Vec<crate::aria2::RpcCall>) -> Result<Vec<Result<serde_json::Value, crate::aria2::RpcFault>>, crate::aria2::Aria2Error> { unreachable!() }
-        async fn pause(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
-        async fn unpause(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
-        async fn remove(&self, gid: &str) -> Result<String, crate::aria2::Aria2Error> { Ok(gid.into()) }
-        async fn force_remove(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
-        async fn change_option(&self, _: &str, _: crate::aria2::Aria2Options) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
-        async fn get_option(&self, _: &str) -> Result<crate::aria2::Aria2Options, crate::aria2::Aria2Error> { unreachable!() }
-        async fn save_session(&self) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
-        async fn shutdown(&self) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+        async fn add_torrent(
+            &self,
+            _: String,
+            _: Vec<String>,
+            _: crate::aria2::Aria2Options,
+        ) -> Result<String, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn tell_active(
+            &self,
+        ) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn tell_waiting(
+            &self,
+            _: i64,
+            _: u32,
+        ) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn tell_stopped(
+            &self,
+            _: i64,
+            _: u32,
+        ) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn get_global_stat(
+            &self,
+        ) -> Result<crate::aria2::Aria2GlobalStat, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn multicall(
+            &self,
+            _: Vec<crate::aria2::RpcCall>,
+        ) -> Result<Vec<Result<serde_json::Value, crate::aria2::RpcFault>>, crate::aria2::Aria2Error>
+        {
+            unreachable!()
+        }
+        async fn pause(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn unpause(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn remove(&self, gid: &str) -> Result<String, crate::aria2::Aria2Error> {
+            Ok(gid.into())
+        }
+        async fn force_remove(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn change_option(
+            &self,
+            _: &str,
+            _: crate::aria2::Aria2Options,
+        ) -> Result<String, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn get_option(
+            &self,
+            _: &str,
+        ) -> Result<crate::aria2::Aria2Options, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn save_session(&self) -> Result<String, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
+        async fn shutdown(&self) -> Result<String, crate::aria2::Aria2Error> {
+            unreachable!()
+        }
     }
 
     struct SagaAdapter {
@@ -1842,10 +1897,8 @@ mod tests {
         store
             .record_transfer_with_owner(&source, "legacy-personal-id", &owner)
             .unwrap();
-        let mut persisted: serde_json::Value = serde_json::from_slice(
-            &credentials.load(SHARE_PLAN_SECRET).unwrap().unwrap(),
-        )
-        .unwrap();
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&credentials.load(SHARE_PLAN_SECRET).unwrap().unwrap()).unwrap();
         persisted["plans"]
             .as_object_mut()
             .unwrap()
@@ -1948,7 +2001,10 @@ mod tests {
 
         let resolved = resolve_current_share_download(&store, &adapter, &source).unwrap();
 
-        assert_eq!(resolved.url, "https://cdn.example/identity-unavailable-transfer");
+        assert_eq!(
+            resolved.url,
+            "https://cdn.example/identity-unavailable-transfer"
+        );
         assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 1);
         let transfers = store.resolve_entry(&source).unwrap().plan.transfers;
         assert_eq!(transfers.len(), 1);
@@ -2077,21 +2133,33 @@ mod tests {
         store.link_local_task(&source, linked_task).unwrap();
         store.record_transfer(&source, "created-id").unwrap();
 
-        assert!(!store.cleanup_pending_for_task(&source, linked_task).unwrap());
+        assert!(!store
+            .cleanup_pending_for_task(&source, linked_task)
+            .unwrap());
         let ids = store
             .mark_local_completion(&source, false, |_, _| true)
             .unwrap();
-        assert!(store.cleanup_pending_for_task(&source, linked_task).unwrap());
-        assert!(!store.cleanup_pending_for_task(&source, unrelated_task).unwrap());
-        assert!(!store.cleanup_pending_for_task(&other_source, linked_task).unwrap());
+        assert!(store
+            .cleanup_pending_for_task(&source, linked_task)
+            .unwrap());
+        assert!(!store
+            .cleanup_pending_for_task(&source, unrelated_task)
+            .unwrap());
+        assert!(!store
+            .cleanup_pending_for_task(&other_source, linked_task)
+            .unwrap());
 
         store.finish_cleanup(&source, &ids, false).unwrap();
-        assert!(store.cleanup_pending_for_task(&source, linked_task).unwrap());
+        assert!(store
+            .cleanup_pending_for_task(&source, linked_task)
+            .unwrap());
         let retry_ids = store
             .mark_local_completion(&source, true, |_, _| true)
             .unwrap();
         store.finish_cleanup(&source, &retry_ids, true).unwrap();
-        assert!(!store.cleanup_pending_for_task(&source, linked_task).unwrap());
+        assert!(!store
+            .cleanup_pending_for_task(&source, linked_task)
+            .unwrap());
     }
 
     #[test]
@@ -2986,9 +3054,7 @@ mod tests {
             source,
             crate::UriSubmissionOptions::default(),
             || async { Ok(service) },
-            || async {
-                resolve_current_share_download(&plans, &adapter, &resolve_source)
-            },
+            || async { resolve_current_share_download(&plans, &adapter, &resolve_source) },
         )
         .await;
 
@@ -3043,7 +3109,10 @@ mod tests {
             outcome.payload.task.error.as_deref(),
             Some("网盘分享下载准备失败，请重试")
         );
-        assert_eq!(tasks.find(outcome.payload.task.id).unwrap().status, crate::TaskStatus::Failed);
+        assert_eq!(
+            tasks.find(outcome.payload.task.id).unwrap().status,
+            crate::TaskStatus::Failed
+        );
         assert_eq!(api.add_calls.load(Ordering::SeqCst), 0);
         assert!(plans
             .resolve_entry(&source)
@@ -3157,7 +3226,10 @@ mod tests {
             outcome.payload.task.error.as_deref(),
             Some("网盘会话已过期，请重新登录授权")
         );
-        assert_eq!(tasks.find(outcome.payload.task.id).unwrap().status, crate::TaskStatus::Failed);
+        assert_eq!(
+            tasks.find(outcome.payload.task.id).unwrap().status,
+            crate::TaskStatus::Failed
+        );
         assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 0);
         assert_eq!(api.add_calls.load(Ordering::SeqCst), 0);
@@ -3204,7 +3276,10 @@ mod tests {
             outcome.payload.task.error.as_deref(),
             Some("aria2 未能接受网盘分享下载任务")
         );
-        assert_eq!(tasks.find(outcome.payload.task.id).unwrap().status, crate::TaskStatus::Failed);
+        assert_eq!(
+            tasks.find(outcome.payload.task.id).unwrap().status,
+            crate::TaskStatus::Failed
+        );
         assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
         assert_eq!(api.add_calls.load(Ordering::SeqCst), 1);
     }

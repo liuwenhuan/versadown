@@ -81,14 +81,21 @@ fn quark_directory_preserves_raw_updated_at_for_files_and_folders() {
     // display for ordinary files and folders in a directory response.
     let body = r#"{"code":0,"data":{"list":[{"fid":"file-1","file_name":"movie.mkv","dir":false,"size":12,"updated_at":"2026-09-10T09:08:07Z"},{"fid":"folder-1","file_name":"Shows","dir":true,"size":0,"updated_at":1789031287}]},"metadata":{"_total":2}}"#;
     let parsed = parse_quark_files(body).unwrap();
-    assert_eq!(parsed[0].updated_at.as_deref(), Some("2026-09-10T09:08:07Z"));
+    assert_eq!(
+        parsed[0].updated_at.as_deref(),
+        Some("2026-09-10T09:08:07Z")
+    );
     assert_eq!(parsed[1].updated_at.as_deref(), Some("1789031287"));
 
     let http = SequencedHttp::new([body]);
     let directory = QuarkClient::new("sid=local-session".into(), &http)
         .directory("0")
         .unwrap();
-    let file = directory.items.iter().find(|item| item.id == "file-1").unwrap();
+    let file = directory
+        .items
+        .iter()
+        .find(|item| item.id == "file-1")
+        .unwrap();
     let folder = directory
         .items
         .iter()
@@ -180,10 +187,7 @@ struct MutatingHttp {
 }
 
 impl MutatingHttp {
-    fn new<T: Into<String>>(
-        path: std::path::PathBuf,
-        bodies: impl IntoIterator<Item = T>,
-    ) -> Self {
+    fn new<T: Into<String>>(path: std::path::PathBuf, bodies: impl IntoIterator<Item = T>) -> Self {
         Self {
             inner: SequencedHttp::new(bodies),
             replacement_path: path,
@@ -424,10 +428,7 @@ fn quark_upload_rejects_an_oversized_callback_before_authorizing_object_store() 
         }
     })
     .to_string();
-    let http = SequencedHttp::new(vec![
-        pre,
-        r#"{"code":0,"data":{"finish":false}}"#.into(),
-    ]);
+    let http = SequencedHttp::new(vec![pre, r#"{"code":0,"data":{"finish":false}}"#.into()]);
     let upload = RecordingUpload::new([]);
     let fixture = upload_fixture();
     let client = QuarkClient::new("sid=local-session".into(), &http);

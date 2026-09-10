@@ -204,7 +204,9 @@ mod tests {
             plan,
         };
 
-        let refreshed = adapter.refresh_recorded_transfer(&entry, "personal99").unwrap();
+        let refreshed = adapter
+            .refresh_recorded_transfer(&entry, "personal99")
+            .unwrap();
 
         let Ok(RecordedTransferDownload::Available(download)) = refreshed.result else {
             panic!("a personal direct link is required")
@@ -213,7 +215,9 @@ mod tests {
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert!(requests[2].url.contains("file/download"));
-        assert!(!requests.iter().any(|request| request.url.contains("sharepage/save")));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.contains("sharepage/save")));
     }
     #[test]
     fn quark_transfer_owner_uses_uid_not_rotating_session_cookie() {
@@ -938,9 +942,7 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
             serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
         validate_share_codes(&value)?;
         response_json(&response).map_err(|error| match error {
-            QuarkError::Provider(_) => {
-                QuarkError::Provider("夸克个人盘文件请求失败".into())
-            }
+            QuarkError::Provider(_) => QuarkError::Provider("夸克个人盘文件请求失败".into()),
             error => error,
         })?;
         Ok(ShareOperationResult {

@@ -32,6 +32,7 @@ it('places multi-file controls and child progress in stable aligned columns', as
     expect(getComputedStyle(childRow!).paddingLeft).toBe('21px');
     expect(getComputedStyle(childRow!).paddingTop).toBe('6px');
     expect(getComputedStyle(childRow!).paddingBottom).toBe('6px');
+    expect(getComputedStyle(childRow!).fontSize).toBe('13px');
     expect(getComputedStyle(childMarker!).width).toBe('48px');
     expect(getComputedStyle(childRow!).gridTemplateColumns).toBe('minmax(0,1fr) minmax(140px,220px) 44px 120px 56px');
     expect(getComputedStyle(childRow!).paddingRight).toBe('24px');

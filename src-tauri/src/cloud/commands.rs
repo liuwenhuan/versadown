@@ -22,9 +22,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static s
         QuarkError::NotAuthorized => "尚未授权此网盘，请登录后使用",
         QuarkError::AuthorizationExpired => "网盘会话已过期，请重新登录授权",
         QuarkError::SessionRenewedRetryOperation => "登录已自动恢复，请重新执行本次操作",
-        QuarkError::WebAuthorizationRequired => {
-            "此登录方式需要网页验证，请点击网页授权完成登录"
-        }
+        QuarkError::WebAuthorizationRequired => "此登录方式需要网页验证，请点击网页授权完成登录",
         QuarkError::CaptchaRequired => "网盘要求更新操作验证，请重新网页授权",
         QuarkError::PikpakRegionalMembershipRestricted => {
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
@@ -884,23 +882,22 @@ fn list_provider_recycle_bin(
     match provider {
         CloudProvider::Quark => QuarkClient::new(cookie(store)?, http).list_recycle_bin(),
         CloudProvider::Pikpak => PikPakClient::new(http, store).list(PIKPAK_RECYCLE_BIN_ID),
-        CloudProvider::Baidu => baidu::BaiduClient::new(
-            load_provider_session(CloudProvider::Baidu, store)?,
-            http,
-        )
-        .list_recycle_bin(),
-        CloudProvider::Tianyi => tianyi::TianyiClient::new(
-            load_provider_session(CloudProvider::Tianyi, store)?,
-            http,
-        )
-        .list_recycle_bin(),
+        CloudProvider::Baidu => {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http)
+                .list_recycle_bin()
+        }
+        CloudProvider::Tianyi => {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, store)?, http)
+                .list_recycle_bin()
+        }
         CloudProvider::Aliyun => aliyun::AliyunClient::new(store, http).list_recycle_bin(),
-        CloudProvider::Xunlei => with_xunlei_client(store, http, |client| client.list_recycle_bin()),
-        CloudProvider::Uc => uc::UcClient::new(
-            load_provider_session(CloudProvider::Uc, store)?,
-            http,
-        )
-        .list_recycle_bin(),
+        CloudProvider::Xunlei => {
+            with_xunlei_client(store, http, |client| client.list_recycle_bin())
+        }
+        CloudProvider::Uc => {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, http)
+                .list_recycle_bin()
+        }
     }
 }
 
@@ -917,7 +914,10 @@ fn validate_recycle_entry_ids(
         .filter(|item| item.parent_id == recycle_bin.id)
         .map(|item| item.id.as_str())
         .collect::<HashSet<_>>();
-    if file_ids.iter().any(|id| id.trim().is_empty() || !entries.contains(id.as_str())) {
+    if file_ids
+        .iter()
+        .any(|id| id.trim().is_empty() || !entries.contains(id.as_str()))
+    {
         return Err(QuarkError::InvalidInput(
             "只能操作当前网盘回收站中的项目".into(),
         ));
@@ -945,10 +945,8 @@ fn restore_provider_recycle_entries(
             client.restore_recycle_entries(file_ids)
         }
         CloudProvider::Baidu => {
-            let client = baidu::BaiduClient::new(
-                load_provider_session(CloudProvider::Baidu, store)?,
-                http,
-            );
+            let client =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http);
             let recycle_bin = client.list_recycle_bin()?;
             validate_recycle_entry_ids(file_ids, &recycle_bin)?;
             client.restore_recycle_entries(file_ids)
@@ -1002,10 +1000,8 @@ fn delete_provider_recycle_entries(
             client.delete(file_ids)
         }
         CloudProvider::Baidu => {
-            let client = baidu::BaiduClient::new(
-                load_provider_session(CloudProvider::Baidu, store)?,
-                http,
-            );
+            let client =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http);
             let recycle_bin = client.list_recycle_bin()?;
             validate_recycle_entry_ids(file_ids, &recycle_bin)?;
             client.delete_recycle_entries(file_ids)
@@ -1619,12 +1615,9 @@ pub async fn cloud_delete(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run_session_work(
-        app,
-        provider,
-        SessionWorkKind::Mutation,
-        move |s, h| delete_provider_recycle_entries(provider, &s.store, h, &file_ids),
-    )
+    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+        delete_provider_recycle_entries(provider, &s.store, h, &file_ids)
+    })
     .await
 }
 
@@ -1634,12 +1627,9 @@ pub async fn cloud_restore(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run_session_work(
-        app,
-        provider,
-        SessionWorkKind::Mutation,
-        move |s, h| restore_provider_recycle_entries(provider, &s.store, h, &file_ids),
-    )
+    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+        restore_provider_recycle_entries(provider, &s.store, h, &file_ids)
+    })
     .await
 }
 pub fn enqueue_cloud_download(
@@ -2528,10 +2518,22 @@ mod tests {
         for (provider, recycle_bin_id) in [
             (CloudProvider::Quark, super::QUARK_RECYCLE_BIN_ID),
             (CloudProvider::Pikpak, super::PIKPAK_RECYCLE_BIN_ID),
-            (CloudProvider::Baidu, crate::cloud::baidu::BAIDU_RECYCLE_BIN_ID),
-            (CloudProvider::Tianyi, crate::cloud::tianyi::TIANYI_RECYCLE_BIN_ID),
-            (CloudProvider::Aliyun, crate::cloud::aliyun::ALIYUN_RECYCLE_BIN_ID),
-            (CloudProvider::Xunlei, crate::cloud::xunlei::XUNLEI_RECYCLE_BIN_ID),
+            (
+                CloudProvider::Baidu,
+                crate::cloud::baidu::BAIDU_RECYCLE_BIN_ID,
+            ),
+            (
+                CloudProvider::Tianyi,
+                crate::cloud::tianyi::TIANYI_RECYCLE_BIN_ID,
+            ),
+            (
+                CloudProvider::Aliyun,
+                crate::cloud::aliyun::ALIYUN_RECYCLE_BIN_ID,
+            ),
+            (
+                CloudProvider::Xunlei,
+                crate::cloud::xunlei::XUNLEI_RECYCLE_BIN_ID,
+            ),
             (CloudProvider::Uc, crate::cloud::uc::UC_RECYCLE_BIN_ID),
         ] {
             assert!(super::is_provider_recycle_bin(provider, recycle_bin_id));
@@ -2559,7 +2561,10 @@ mod tests {
     fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secrets() {
         let typed = [
             (QuarkError::NotAuthorized, "尚未授权此网盘，请登录后使用"),
-            (QuarkError::AuthorizationExpired, "网盘会话已过期，请重新登录授权"),
+            (
+                QuarkError::AuthorizationExpired,
+                "网盘会话已过期，请重新登录授权",
+            ),
             (
                 QuarkError::SessionRenewedRetryOperation,
                 "登录已自动恢复，请重新执行本次操作",
@@ -3963,11 +3968,8 @@ pub async fn cloud_upload_files(
                         store,
                         &h,
                         || {
-                            uc::UcClient::new(
-                                load_provider_session(CloudProvider::Uc, store)?,
-                                &h,
-                            )
-                            .upload_file(&parent_id, &path, &h)
+                            uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, &h)
+                                .upload_file(&parent_id, &path, &h)
                         },
                     )
                 })?,

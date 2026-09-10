@@ -57,8 +57,17 @@ fn task_store_lists_active_and_terminal_tasks_separately() {
     let active_tasks = store.list_active().unwrap();
     let terminal_tasks = store.list_terminal().unwrap();
 
-    assert_eq!(active_tasks.iter().map(|task| task.id).collect::<Vec<_>>(), [active.id]);
-    assert_eq!(terminal_tasks.iter().map(|task| task.id).collect::<Vec<_>>(), [completed.id]);
+    assert_eq!(
+        active_tasks.iter().map(|task| task.id).collect::<Vec<_>>(),
+        [active.id]
+    );
+    assert_eq!(
+        terminal_tasks
+            .iter()
+            .map(|task| task.id)
+            .collect::<Vec<_>>(),
+        [completed.id]
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { ParseConfirmDialog } from './ParseConfirmDialog';
 
@@ -27,6 +28,22 @@ it('labels BitTorrent confirmation choices as select-file semantics', () => {
   expect(screen.getByRole('heading', { name: '新建任务' })).toBeVisible();
   expect(screen.getAllByText('已选 2 / 2 个文件')).toHaveLength(2);
   expect(screen.getByRole('button', { name: /立即下载 2/ })).toBeVisible();
+});
+
+it('uses readable type for the confirmation download destination', () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<ParseConfirmDialog result={result} downloadDirectory="D:\\" onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
+
+    const destination = screen.getByRole('button', { name: '选择下载目录' });
+    expect(getComputedStyle(destination).fontSize).toBe('14px');
+    expect(getComputedStyle(destination.querySelector('strong')!).fontSize).toBe('14px');
+    expect(getComputedStyle(destination.querySelector('i')!).fontSize).toBe('14px');
+  } finally {
+    stylesheet.remove();
+  }
 });
 
 it('offers a compact file-selection toolbar with select-all controls', async () => {

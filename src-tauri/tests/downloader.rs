@@ -287,9 +287,10 @@ async fn cloud_share_cancel_after_outer_check_prevents_waiting_refresh_submissio
         headers: vec![],
     };
     let prepared = prepared_cloud_share_task(&store, &source, "file");
-    let checked = submit_current_share_download(&service, &prepared, resolved(), Default::default())
-        .await
-        .unwrap();
+    let checked =
+        submit_current_share_download(&service, &prepared, resolved(), Default::default())
+            .await
+            .unwrap();
     assert_eq!(checked.status, TaskStatus::Failed);
 
     // The caller's outer check has completed. Cancellation now owns the
@@ -400,9 +401,10 @@ async fn cloud_share_stale_gid_is_skipped_even_when_task_is_failed_again() {
         headers: vec![],
     };
     let prepared = prepared_cloud_share_task(&store, &source, "file");
-    let checked = submit_current_share_download(&service, &prepared, resolved(), Default::default())
-        .await
-        .unwrap();
+    let checked =
+        submit_current_share_download(&service, &prepared, resolved(), Default::default())
+            .await
+            .unwrap();
     store
         .rebind_for_resubmission(checked.id, "replacement-gid")
         .unwrap();

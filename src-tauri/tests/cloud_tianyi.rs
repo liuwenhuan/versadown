@@ -239,7 +239,10 @@ fn tianyi_recycle_list_collects_following_pages_and_stops_after_a_short_page() {
     .to_string();
     let second = r#"{"res_code":0,"fileList":[{"id":201,"name":"deleted-201.txt","isFolder":false,"size":201,"lastOpTime":"2026-09-10"},{"id":202,"name":"deleted-202.txt","isFolder":false,"size":202,"lastOpTime":"2026-09-10"}]}"#;
     let http = RecordingHttp::sequence(&[&first, second]);
-    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=paged-session"), &http);
+    let client = TianyiClient::new(
+        TianyiSession::cookie("COOKIE_LOGIN_USER=paged-session"),
+        &http,
+    );
 
     let directory = client.list_recycle_bin().unwrap();
 
@@ -265,10 +268,7 @@ fn tianyi_recycle_list_collects_following_pages_and_stops_after_a_short_page() {
 fn tianyi_recycle_list_stops_after_an_empty_following_page() {
     let first = tianyi_recycle_page(1);
     let http = RecordingHttp::sequence(&[&first, r#"{"res_code":0,"fileList":[]}"#]);
-    let client = TianyiClient::new(
-        TianyiSession::cookie("COOKIE_LOGIN_USER=empty-page"),
-        &http,
-    );
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=empty-page"), &http);
 
     let directory = client.list_recycle_bin().unwrap();
 
@@ -316,10 +316,7 @@ fn tianyi_recycle_list_rejects_ten_thousand_full_pages() {
         .collect::<Vec<_>>();
     let replies = pages.iter().map(String::as_str).collect::<Vec<_>>();
     let http = RecordingHttp::sequence(&replies);
-    let client = TianyiClient::new(
-        TianyiSession::cookie("COOKIE_LOGIN_USER=page-limit"),
-        &http,
-    );
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=page-limit"), &http);
 
     assert!(matches!(
         client.list_recycle_bin(),

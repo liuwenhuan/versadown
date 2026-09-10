@@ -301,7 +301,9 @@ mod tests {
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].url.contains("filemetas"));
-        assert!(!requests.iter().any(|request| request.url.contains("/share/transfer")));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.contains("/share/transfer")));
     }
     #[test]
     fn baidu_transfer_owner_survives_cookie_rotation_for_the_same_account() {

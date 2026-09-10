@@ -972,20 +972,21 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
         }
         let mut session = self.session(Some(&entry.plan.provider_context))?;
         let context = entry.plan.provider_context.clone();
-        let result = session.request(
-            "POST",
-            "file/download",
-            Some(json!({"fids":[created_file_id]})),
-        )
-        .and_then(|value| {
-            uc_share_download(
-                &value,
-                created_file_id,
-                &entry.entry.name,
-                session.headers.clone(),
+        let result = session
+            .request(
+                "POST",
+                "file/download",
+                Some(json!({"fids":[created_file_id]})),
             )
-            .map(RecordedTransferDownload::Available)
-        });
+            .and_then(|value| {
+                uc_share_download(
+                    &value,
+                    created_file_id,
+                    &entry.entry.name,
+                    session.headers.clone(),
+                )
+                .map(RecordedTransferDownload::Available)
+            });
         session.updated(result, context)
     }
     fn transfer(
@@ -1037,7 +1038,10 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
                                 owner,
                             )?;
                         } else {
-                            store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                            store.record_transfer(
+                                &entry.plan.source_for(&entry.entry.entry_id),
+                                id,
+                            )?;
                         }
                         let headers = session.headers.clone();
                         let value =
@@ -1142,10 +1146,8 @@ mod tests {
         credentials
             .save(
                 "uc",
-                &serde_json::to_vec(&UcSession::cookie(
-                    "__puus=session; csrf_token=csrf-secret",
-                ))
-                .unwrap(),
+                &serde_json::to_vec(&UcSession::cookie("__puus=session; csrf_token=csrf-secret"))
+                    .unwrap(),
             )
             .unwrap();
         credentials

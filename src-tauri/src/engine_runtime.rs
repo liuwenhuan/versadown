@@ -19,8 +19,7 @@ use crate::{
 };
 
 #[cfg(test)]
-const TEST_CLEANUP_OWNER: &str =
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const TEST_CLEANUP_OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 #[cfg(test)]
 fn cleanup_completed_share(
@@ -53,15 +52,7 @@ pub(crate) fn cleanup_completed_share_for_owner(
     owner_fingerprint: Option<&str>,
     trash: impl FnOnce(crate::cloud::CloudProvider, &[String]) -> Result<(), crate::cloud::QuarkError>,
 ) -> Result<Option<crate::DownloadTask>, crate::cloud::QuarkError> {
-    cleanup_completed_share_with_owner(
-        plans,
-        tasks,
-        task,
-        enabled,
-        retry,
-        owner_fingerprint,
-        trash,
-    )
+    cleanup_completed_share_with_owner(plans, tasks, task, enabled, retry, owner_fingerprint, trash)
 }
 
 fn cleanup_completed_share_with_owner(
@@ -711,17 +702,12 @@ mod tests {
         let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
         set_status(&tasks, locals[1].id, TaskStatus::Completed);
 
-        let updated = cleanup_completed_share_for_owner(
-            &plans,
-            &tasks,
-            &first,
-            true,
-            false,
-            None,
-            |_, _| panic!("identity-unavailable cleanup must not call provider delete"),
-        )
-        .unwrap()
-        .unwrap();
+        let updated =
+            cleanup_completed_share_for_owner(&plans, &tasks, &first, true, false, None, |_, _| {
+                panic!("identity-unavailable cleanup must not call provider delete")
+            })
+            .unwrap()
+            .unwrap();
 
         assert!(updated
             .error

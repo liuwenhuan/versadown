@@ -125,7 +125,10 @@ mod tests {
             .headers
             .contains(&("Referer".into(), "https://pan.xunlei.com/".into())));
         assert!(!direct.headers.iter().any(|(key, _)| {
-            matches!(key.as_str(), "Authorization" | "X-Captcha-Token" | "X-Device-Id")
+            matches!(
+                key.as_str(),
+                "Authorization" | "X-Captcha-Token" | "X-Device-Id"
+            )
         }));
         let requests = http.requests.lock().unwrap();
         let body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
@@ -158,7 +161,9 @@ mod tests {
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[1].url.ends_with("/files/personal-id"));
-        assert!(!requests.iter().any(|request| request.url.contains("share/restore")));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.contains("share/restore")));
     }
     #[test]
     fn xunlei_recorded_transfer_waits_for_a_personal_download_link_without_leaking_api_headers() {
@@ -195,7 +200,10 @@ mod tests {
             .headers
             .contains(&("Referer".into(), "https://pan.xunlei.com/".into())));
         assert!(!download.headers.iter().any(|(key, _)| {
-            matches!(key.as_str(), "Authorization" | "X-Captcha-Token" | "X-Device-Id")
+            matches!(
+                key.as_str(),
+                "Authorization" | "X-Captcha-Token" | "X-Device-Id"
+            )
         }));
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
@@ -203,7 +211,9 @@ mod tests {
         assert_eq!(captcha["action"], "GET:/drive/v1/files/personal-id");
         assert!(requests[1].url.ends_with("/files/personal-id"));
         assert!(requests[2].url.ends_with("/files/personal-id"));
-        assert!(!requests.iter().any(|request| request.url.contains("share/restore")));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.contains("share/restore")));
     }
     #[test]
     fn xunlei_recorded_transfer_persists_the_refreshed_personal_download_session() {
@@ -224,7 +234,10 @@ mod tests {
             .unwrap();
 
         let persisted: XunleiSession = serde_json::from_slice(
-            &credentials.load("xunlei").unwrap().expect("saved Xunlei session"),
+            &credentials
+                .load("xunlei")
+                .unwrap()
+                .expect("saved Xunlei session"),
         )
         .unwrap();
         assert_eq!(persisted.web_security.captcha_token, "share-captcha");
@@ -234,7 +247,10 @@ mod tests {
     fn xunlei_personal_download_rejects_a_response_for_another_file() {
         let credentials = credentials();
         let session: XunleiSession = serde_json::from_slice(
-            &credentials.load("xunlei").unwrap().expect("saved Xunlei session"),
+            &credentials
+                .load("xunlei")
+                .unwrap()
+                .expect("saved Xunlei session"),
         )
         .unwrap();
         let http = Http::new(vec![
@@ -259,10 +275,8 @@ mod tests {
         let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
 
         let before = adapter.transfer_owner_fingerprint(&selected()).unwrap();
-        let mut renewed: XunleiSession = serde_json::from_slice(
-            &credentials.load("xunlei").unwrap().unwrap(),
-        )
-        .unwrap();
+        let mut renewed: XunleiSession =
+            serde_json::from_slice(&credentials.load("xunlei").unwrap().unwrap()).unwrap();
         renewed.access_token = "renewed-access".into();
         credentials
             .save("xunlei", &serde_json::to_vec(&renewed).unwrap())
@@ -392,7 +406,10 @@ mod tests {
 
         assert_eq!(download.url, "https://cdn.example/personal");
         assert!(!download.headers.iter().any(|(key, _)| {
-            matches!(key.as_str(), "Authorization" | "X-Captcha-Token" | "X-Device-Id")
+            matches!(
+                key.as_str(),
+                "Authorization" | "X-Captcha-Token" | "X-Device-Id"
+            )
         }));
         assert_eq!(
             store.resolve_entry(&source).unwrap().plan.transfers[0].created_file_id,
@@ -1959,7 +1976,12 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 None,
             )?;
             let file = value.get("data").unwrap_or(&value);
-            if file.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) != Some(id) {
+            if file
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                != Some(id)
+            {
                 return Err(QuarkError::InvalidResponse);
             }
             let name = required(file, "name")?;

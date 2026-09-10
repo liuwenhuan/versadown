@@ -211,7 +211,11 @@ impl TaskStore {
             "UPDATE cloud_directory_group_items
              SET task_id = ?1, failure_code = NULL, failure_message = NULL
              WHERE id = ?2 AND group_id = ?3",
-            params![task_id.to_string(), item_id.to_string(), group_id.to_string()],
+            params![
+                task_id.to_string(),
+                item_id.to_string(),
+                group_id.to_string()
+            ],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(item_id));
@@ -241,7 +245,12 @@ impl TaskStore {
             "UPDATE cloud_directory_group_items
              SET task_id = NULL, failure_code = ?1, failure_message = ?2
              WHERE id = ?3 AND group_id = ?4",
-            params![failure_code.as_ref(), failure_message.as_ref(), item_id.to_string(), group_id.to_string()],
+            params![
+                failure_code.as_ref(),
+                failure_message.as_ref(),
+                item_id.to_string(),
+                group_id.to_string()
+            ],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(item_id));
@@ -304,9 +313,7 @@ impl TaskStore {
     }
 
     pub fn list_active(&self) -> Result<Vec<DownloadTask>, StoreError> {
-        self.list_matching(
-            "WHERE status NOT IN ('completed', 'failed', 'cancelled', 'recycled')",
-        )
+        self.list_matching("WHERE status NOT IN ('completed', 'failed', 'cancelled', 'recycled')")
     }
 
     pub fn list_terminal(&self) -> Result<Vec<DownloadTask>, StoreError> {
@@ -833,9 +840,7 @@ fn cloud_directory_group_from_row(row: &Row<'_>) -> rusqlite::Result<CloudDirect
     })
 }
 
-fn cloud_directory_group_item_from_row(
-    row: &Row<'_>,
-) -> rusqlite::Result<CloudDirectoryGroupItem> {
+fn cloud_directory_group_item_from_row(row: &Row<'_>) -> rusqlite::Result<CloudDirectoryGroupItem> {
     let id: String = row.get(0)?;
     let group_id: String = row.get(1)?;
     let relative_directory: String = row.get(4)?;
@@ -898,7 +903,9 @@ fn validate_new_cloud_directory_group(group: &NewCloudDirectoryGroup) -> Result<
     validate_plain_text(&group.remote_directory_id, "remote directory ID")?;
     validate_path_component(&group.relative_directory)?;
     if group.output_directory.as_os_str().is_empty() {
-        return Err(StoreError::InvalidCloudDirectoryGroupData("output directory"));
+        return Err(StoreError::InvalidCloudDirectoryGroupData(
+            "output directory",
+        ));
     }
     Ok(())
 }
@@ -947,12 +954,7 @@ mod tests {
             let store = TaskStore::open_path(&database).unwrap();
             let group = store
                 .create_cloud_directory_group(
-                    NewCloudDirectoryGroup::new(
-                        CloudProvider::Quark,
-                        "root-id",
-                        "Season 1",
-                        &base,
-                    ),
+                    NewCloudDirectoryGroup::new(CloudProvider::Quark, "root-id", "Season 1", &base),
                     &[NewCloudDirectoryGroupItem::new(
                         "remote-1",
                         &["Season 1", "Extras"],
@@ -961,14 +963,20 @@ mod tests {
                     )],
                 )
                 .unwrap();
-            let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
+            let item = store
+                .cloud_directory_group_items(group.id)
+                .unwrap()
+                .remove(0);
             assert_eq!(item.relative_directory, vec!["Season 1", "Extras"]);
             (group.id, item.id)
         };
 
         let store = TaskStore::open_path(&database).unwrap();
         let group = store.cloud_directory_group(group_id).unwrap().unwrap();
-        let item = store.cloud_directory_group_items(group_id).unwrap().remove(0);
+        let item = store
+            .cloud_directory_group_items(group_id)
+            .unwrap()
+            .remove(0);
         assert_eq!(group.id, group_id);
         assert_eq!(group.provider, CloudProvider::Quark);
         assert_eq!(group.remote_directory_id, "root-id");
@@ -986,12 +994,7 @@ mod tests {
         let base = std::path::PathBuf::from("C:/downloads");
         let group = store
             .create_cloud_directory_group(
-                NewCloudDirectoryGroup::new(
-                    CloudProvider::Quark,
-                    "root-id",
-                    "Season 1",
-                    &base,
-                ),
+                NewCloudDirectoryGroup::new(CloudProvider::Quark, "root-id", "Season 1", &base),
                 &[
                     NewCloudDirectoryGroupItem::new(
                         "remote-episode",
@@ -1025,8 +1028,14 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(store.cloud_directory_group_for_task(task.id).unwrap(), Some(group.clone()));
-        assert_eq!(store.cloud_directory_group_items(group.id).unwrap()[1].task_id, None);
+        assert_eq!(
+            store.cloud_directory_group_for_task(task.id).unwrap(),
+            Some(group.clone())
+        );
+        assert_eq!(
+            store.cloud_directory_group_items(group.id).unwrap()[1].task_id,
+            None
+        );
         assert_eq!(
             store.cloud_directory_group_items(group.id).unwrap()[1]
                 .failure_code

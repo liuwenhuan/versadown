@@ -1,7 +1,21 @@
 import { render, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
-import { vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 import { DuplicateDownloadDialog } from './DuplicateDownloadDialog';
+
+let stylesheet: HTMLStyleElement;
+
+beforeEach(() => {
+  stylesheet = document.createElement('style');
+  // jsdom does not apply the browser's :hover pseudo-state.  Use an
+  // equivalent attribute only inside this integration-style CSS test so the
+  // real cascade, including selector specificity, is still exercised.
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8').replaceAll(':hover', '[data-ui-hover]');
+  document.head.appendChild(stylesheet);
+});
+
+afterEach(() => stylesheet.remove());
 
 it('clearly explains that a completed record has no files and requires a new download', async () => {
   const user = userEvent.setup();
@@ -38,4 +52,38 @@ it('only exposes overwrite after explaining that a safe resume is unavailable', 
 
   expect(screen.getByText(/无法安全续传/)).toBeVisible();
   expect(screen.getByRole('button', { name: '覆盖并重新下载' })).toBeVisible();
+});
+
+it('keeps the existing-task primary action colored while hovered', () => {
+  render(
+    <DuplicateDownloadDialog
+      task={{ id: 'task-1', name: 'fixture.mkv', kind: 'file', status: 'downloading', progress: 28 }}
+      state="existing_active"
+      onOpenDirectory={() => {}}
+      onResolve={() => {}}
+      onRestartMissing={() => {}}
+      onClose={() => {}}
+    />,
+  );
+
+  const action = screen.getByRole('button', { name: '查看现有任务' });
+  action.setAttribute('data-ui-hover', '');
+  expect(getComputedStyle(action).filter).toBe('brightness(.94)');
+});
+
+it('keeps the overwrite action colored while hovered', () => {
+  render(
+    <DuplicateDownloadDialog
+      task={{ id: 'task-1', name: 'fixture.mkv', kind: 'file', status: 'failed', progress: 28 }}
+      state="overwrite_required"
+      onOpenDirectory={() => {}}
+      onResolve={() => {}}
+      onRestartMissing={() => {}}
+      onClose={() => {}}
+    />,
+  );
+
+  const action = screen.getByRole('button', { name: '覆盖并重新下载' });
+  action.setAttribute('data-ui-hover', '');
+  expect(getComputedStyle(action).filter).toBe('brightness(.94)');
 });
