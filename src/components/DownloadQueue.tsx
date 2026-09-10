@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { QueueTask, TaskCommand, TaskStatus } from '../lib/types';
 import { formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
@@ -63,6 +63,23 @@ function ActionIcon({ action }: { action: 'pause' | 'resume' | 'retry' | 'more' 
 
 interface ContextMenuState { task: QueueTask; x: number; y: number }
 
+interface TaskContextMenuPositionInput {
+  x: number;
+  y: number;
+  menuWidth: number;
+  menuHeight: number;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+export function taskContextMenuPosition({ x, y, menuWidth, menuHeight, viewportWidth, viewportHeight }: TaskContextMenuPositionInput) {
+  const inset = 8;
+  return {
+    left: Math.max(inset, Math.min(x, viewportWidth - menuWidth - inset)),
+    top: Math.max(inset, Math.min(y, viewportHeight - menuHeight - inset)),
+  };
+}
+
 function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> {
   const commands: Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
@@ -93,10 +110,23 @@ function MenuIcon({ command }: { command: TaskCommand }) {
 function TaskContextMenu({ state, onClose, onCommand }: { state: ContextMenuState; onClose(): void; onCommand(command: TaskCommand): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const commands = contextCommands(state.task);
-  const width = 224;
-  const estimatedHeight = commands.length * 38 + 20;
-  const left = Math.max(8, Math.min(state.x, window.innerWidth - width - 8));
-  const top = Math.max(8, Math.min(state.y, window.innerHeight - estimatedHeight - 8));
+  const [menuSize, setMenuSize] = useState({ width: 224, height: commands.length * 38 + 64 });
+  const { left, top } = taskContextMenuPosition({
+    x: state.x,
+    y: state.y,
+    menuWidth: menuSize.width,
+    menuHeight: menuSize.height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  });
+
+  useLayoutEffect(() => {
+    const rect = menuRef.current?.getBoundingClientRect();
+    if (!rect?.width || !rect.height) return;
+    setMenuSize((current) => current.width === rect.width && current.height === rect.height
+      ? current
+      : { width: rect.width, height: rect.height });
+  }, [state.x, state.y, commands.length]);
 
   useEffect(() => {
     menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();

@@ -1,12 +1,23 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
-import { DownloadQueue } from './DownloadQueue';
+import { DownloadQueue, taskContextMenuPosition } from './DownloadQueue';
 
 const folderTask = {
   id: 'folder-1', name: 'Season 1', kind: 'folder', status: 'downloading', progress: 42,
   children: [{ id: 'file-1', name: 'episode-01.mkv', kind: 'file', status: 'downloading', progress: 50 }]
 } as const;
+
+it('positions a bottom task menu fully inside the viewport', () => {
+  expect(taskContextMenuPosition({
+    x: 980,
+    y: 386,
+    menuWidth: 224,
+    menuHeight: 344,
+    viewportWidth: 1560,
+    viewportHeight: 460,
+  })).toEqual({ left: 980, top: 108 });
+});
 
 it('keeps a folder as one row until the user expands it', async () => {
   const user = userEvent.setup();
