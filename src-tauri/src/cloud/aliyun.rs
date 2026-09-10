@@ -18,6 +18,174 @@ const TOKEN_URL: &str = "https://api.aliyundrive.com/token/refresh";
 const API: &str = "https://api.aliyundrive.com";
 const WEB_REFERER: &str = "https://www.aliyundrive.com/";
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud::{
+        share::{test_support::*, *},
+        MemoryCredentialStore,
+    };
+    fn listing() -> Value {
+        json!({"items":[{"file_id":"f1","name":"verify.mp4","type":"file","size":7}],"next_marker":""})
+    }
+    #[test]
+    fn aliyun_share_url_uses_share_token_not_personal_bearer() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("aliyun", br#"{"access_token":"personal-secret"}"#)
+            .unwrap();
+        let http = Http::new(vec![
+            json!({"share_token":"share-secret"}),
+            listing(),
+            json!({"share_token":"fresh-secret"}),
+            json!({"url":"https://cdn.example/file"}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Aliyun, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) =
+            adapter.inspect(&candidate(CloudProvider::Aliyun)).unwrap()
+        else {
+            panic!()
+        };
+        let ShareResolution::Direct(direct) = adapter.resolve(&entry(plan)).unwrap() else {
+            panic!()
+        };
+        assert!(direct
+            .headers
+            .contains(&("x-share-token".into(), "fresh-secret".into())));
+        assert!(!direct
+            .headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("authorization")));
+        let requests = http.requests.lock().unwrap();
+        assert!(requests.iter().all(|r| !r
+            .headers
+            .keys()
+            .any(|n| n.eq_ignore_ascii_case("authorization"))));
+        assert!(requests[3].url.ends_with("/v2/file/get_download_url"));
+        let download_body: Value =
+            serde_json::from_str(requests[3].body.as_ref().unwrap()).unwrap();
+        assert_eq!(download_body["share_id"], "share123");
+        assert_eq!(download_body["file_id"], "f1");
+        assert!(download_body.get("drive_id").is_none());
+        assert_eq!(
+            serde_json::from_str::<Value>(requests[0].body.as_ref().unwrap()).unwrap()["share_pwd"],
+            "a123"
+        );
+    }
+    #[test]
+    fn aliyun_share_recurses_and_pages_and_rejects_cycles() {
+        let credentials = MemoryCredentialStore::default();
+        let http = Http::new(vec![
+            json!({"share_token":"s"}),
+            json!({"items":[{"file_id":"d","name":"dir","type":"folder"}],"next_marker":"page2"}),
+            json!({"items":[],"next_marker":""}),
+            listing(),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Aliyun, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) =
+            adapter.inspect(&candidate(CloudProvider::Aliyun)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(plan.entries[0].relative_directory, vec!["dir"]);
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(requests[2].body.as_ref().unwrap()).unwrap()["marker"],
+            "page2"
+        );
+        drop(requests);
+        let http = Http::new(vec![
+            json!({"share_token":"s"}),
+            json!({"items":[],"next_marker":"same"}),
+            json!({"items":[],"next_marker":"same"}),
+        ]);
+        assert!(
+            provider_share_adapter(CloudProvider::Aliyun, &credentials, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Aliyun))
+                .is_err()
+        );
+    }
+    #[test]
+    fn aliyun_share_access_code_and_expiry_fail_closed() {
+        let credentials = MemoryCredentialStore::default();
+        let mut input = candidate(CloudProvider::Aliyun);
+        input.access_code = None;
+        let http = Http::new(vec![
+            json!({"code":"ShareLink.PasswordRequired","message":"secret"}),
+        ]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Aliyun, &credentials, &http)
+                .unwrap()
+                .inspect(&input),
+            Ok(ShareInspection::AccessCodeRequired)
+        ));
+        for code in [
+            "ShareLink.PasswordMismatch",
+            "ShareLink.Cancelled",
+            "ShareLink.Expired",
+            "Forbidden",
+            "TooManyRequests",
+            "ShareLinkTokenInvalid",
+        ] {
+            let http = Http::new(vec![json!({"code":code,"message":"secret"})]);
+            let result = provider_share_adapter(CloudProvider::Aliyun, &credentials, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Aliyun));
+            assert!(result.is_err(), "accepted {code}");
+            assert_eq!(http.requests.lock().unwrap().len(), 1);
+        }
+        for value in [
+            json!({}),
+            json!({"download_url":""}),
+            json!({"download_url":"https://www.alipan.com/s/other"}),
+            json!({"code":"Forbidden","download_url":"https://cdn.example/f"}),
+        ] {
+            let http = Http::new(vec![
+                json!({"share_token":"s"}),
+                listing(),
+                json!({"share_token":"s"}),
+                value,
+            ]);
+            let adapter =
+                provider_share_adapter(CloudProvider::Aliyun, &credentials, &http).unwrap();
+            let ShareInspection::Plan(plan) =
+                adapter.inspect(&candidate(CloudProvider::Aliyun)).unwrap()
+            else {
+                panic!()
+            };
+            assert!(adapter.resolve(&entry(plan)).is_err());
+            assert_eq!(http.requests.lock().unwrap().len(), 4);
+        }
+    }
+
+    #[test]
+    fn aliyun_share_rejects_malformed_error_fields_even_with_a_url() {
+        let credentials = MemoryCredentialStore::default();
+        for response in [
+            json!({"error_code":"Forbidden","url":"https://cdn.example/f"}),
+            json!({"error":{"code":"Forbidden"},"url":"https://cdn.example/f"}),
+            json!({"status":"403","url":"https://cdn.example/f"}),
+        ] {
+            let http = Http::new(vec![
+                json!({"share_token":"s"}),
+                listing(),
+                json!({"share_token":"s"}),
+                response,
+            ]);
+            let adapter =
+                provider_share_adapter(CloudProvider::Aliyun, &credentials, &http).unwrap();
+            let ShareInspection::Plan(plan) =
+                adapter.inspect(&candidate(CloudProvider::Aliyun)).unwrap()
+            else {
+                panic!()
+            };
+            assert!(adapter.resolve(&entry(plan)).is_err());
+            assert_eq!(http.requests.lock().unwrap().len(), 4);
+        }
+    }
+}
+
 /// The minimum durable state obtained after the user finishes the official web login.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AliyunSession {
@@ -592,4 +760,202 @@ fn parse_file(value: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
             .and_then(Value::as_str)
             .map(str::to_owned),
     })
+}
+
+use super::share::{
+    CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspection,
+    ShareResolution,
+};
+
+/// Share-token authorization is deliberately separate from personal-drive sessions.
+pub struct AliyunShareAdapter<'a> {
+    pub http: &'a dyn CloudHttpTransport,
+}
+impl AliyunShareAdapter<'_> {
+    fn headers(token: Option<&str>) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::from([
+            ("Referer".into(), WEB_REFERER.into()),
+            ("User-Agent".into(), "Mozilla/5.0".into()),
+        ]);
+        if let Some(token) = token {
+            headers.insert("x-share-token".into(), token.into());
+        }
+        headers
+    }
+    fn raw(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        body: Value,
+    ) -> Result<CloudHttpResponse, QuarkError> {
+        self.http.send(CloudHttpRequest {
+            method: "POST",
+            url: format!("{API}{path}"),
+            headers: Self::headers(token),
+            body: Some(body.to_string()),
+        })
+    }
+    fn request(&self, path: &str, token: Option<&str>, body: Value) -> Result<Value, QuarkError> {
+        aliyun_share_json(&self.raw(path, token, body)?)
+    }
+    fn token(&self, id: &str, code: Option<&str>) -> Result<CloudHttpResponse, QuarkError> {
+        self.raw(
+            "/v2/share_link/get_share_token",
+            None,
+            json!({"share_id":id,"share_pwd":code.unwrap_or("")}),
+        )
+    }
+}
+fn aliyun_share_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
+    let value: Value =
+        serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+    if !value.is_object() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    for key in ["error_code", "status"] {
+        if value.get(key).is_some_and(|value| value.as_i64().is_none()) {
+            return Err(QuarkError::InvalidResponse);
+        }
+    }
+    if value
+        .get("error")
+        .is_some_and(|value| value.as_str().is_none())
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    if response.status == 401 {
+        return Err(QuarkError::AuthorizationExpired);
+    }
+    if let Some(code) = value.get("code") {
+        let code = code.as_str().ok_or(QuarkError::InvalidResponse)?;
+        if !code.is_empty() {
+            return Err(match code {
+                "ShareLink.PasswordMismatch" | "ShareLink.PasswordRequired" => {
+                    QuarkError::InvalidInput("阿里云盘分享访问码错误或缺失".into())
+                }
+                "ShareLinkTokenInvalid"
+                | "ShareLinkTokenExpired"
+                | "AccessTokenInvalid"
+                | "AccessTokenExpired" => QuarkError::AuthorizationExpired,
+                "TooManyRequests" | "Forbidden.RiskControl" | "CaptchaRequired" => {
+                    QuarkError::WebAuthorizationRequired
+                }
+                _ => QuarkError::Provider("阿里云盘分享不可用，请检查分享有效期及访问权限".into()),
+            });
+        }
+    }
+    // The common decoder catches numeric error_code and HTTP errors; redact its text.
+    response_json(response).map_err(|error| match error {
+        QuarkError::Provider(_) => QuarkError::Provider("阿里云盘分享请求失败".into()),
+        error => error,
+    })?;
+    Ok(value)
+}
+impl CloudShareAdapter for AliyunShareAdapter<'_> {
+    fn inspect(
+        &self,
+        candidate: &crate::parser::CloudShareCandidate,
+    ) -> Result<ShareInspection, QuarkError> {
+        let id = super::share::share_id(candidate, CloudProvider::Aliyun)?;
+        let response = self.token(&id, candidate.access_code.as_deref())?;
+        let value: Value =
+            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        if (200..500).contains(&response.status)
+            && candidate.access_code.is_none()
+            && matches!(
+                value["code"].as_str(),
+                Some("ShareLink.PasswordRequired" | "ShareLink.PasswordMismatch")
+            )
+        {
+            return Ok(ShareInspection::AccessCodeRequired);
+        }
+        let token = required(&aliyun_share_json(&response)?, "share_token")?;
+        let mut queue = std::collections::VecDeque::from([("root".to_string(), vec![])]);
+        let mut seen = std::collections::BTreeSet::from(["root".to_string()]);
+        let mut entries = vec![];
+        let mut requests = 0usize;
+        while let Some((parent, directory)) = queue.pop_front() {
+            let mut marker = String::new();
+            let mut markers = std::collections::BTreeSet::new();
+            loop {
+                requests += 1;
+                if requests > 10_000 || directory.len() > 128 {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                let value = self.request(
+                    "/adrive/v3/file/list",
+                    Some(&token),
+                    json!({"share_id":id,"parent_file_id":parent,"limit":200,"marker":marker}),
+                )?;
+                for raw in value["items"]
+                    .as_array()
+                    .ok_or(QuarkError::InvalidResponse)?
+                {
+                    let file = parse_file(raw, &parent)?;
+                    if !seen.insert(file.id.clone()) {
+                        return Err(QuarkError::InvalidResponse);
+                    }
+                    match file.kind.as_str() {
+                        "folder" => {
+                            let mut path = directory.clone();
+                            path.push(file.name);
+                            queue.push_back((file.id, path));
+                        }
+                        "file" => entries.push(CloudShareEntry::new(
+                            &id,
+                            file.id,
+                            file.name,
+                            directory.clone(),
+                            file.size,
+                        )),
+                        _ => return Err(QuarkError::InvalidResponse),
+                    }
+                }
+                marker = match value.get("next_marker") {
+                    None => String::new(),
+                    Some(value) => value.as_str().ok_or(QuarkError::InvalidResponse)?.into(),
+                };
+                if marker.is_empty() {
+                    break;
+                }
+                if !markers.insert(marker.clone()) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+            }
+        }
+        Ok(ShareInspection::Plan(CloudSharePlan::new(
+            CloudProvider::Aliyun,
+            id,
+            candidate.access_code.clone(),
+            entries,
+            json!({"share_token":token}),
+        )))
+    }
+    fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+        resolve_aliyun_share(self.http, entry)
+    }
+}
+pub fn resolve_aliyun_share(
+    http: &dyn CloudHttpTransport,
+    entry: &CloudShareResolvedEntry,
+) -> Result<ShareResolution, QuarkError> {
+    if entry.provider != CloudProvider::Aliyun || entry.plan.provider != CloudProvider::Aliyun {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let adapter = AliyunShareAdapter { http };
+    let response = adapter.token(&entry.plan.canonical_share_id, entry.access_code())?;
+    let token = required(&aliyun_share_json(&response)?, "share_token")?;
+    // Official GetDownloadUrl: share_id + x-share-token, no drive_id or personal bearer.
+    let value = adapter.request("/v2/file/get_download_url",Some(&token),json!({"share_id":entry.plan.canonical_share_id,"file_id":entry.entry.entry_id,"expire_sec":900}))?;
+    let url = required(&value, "url").or_else(|_| required(&value, "download_url"))?;
+    super::share::validate_direct_url(&url)?;
+    Ok(ShareResolution::Direct(
+        super::commands::ResolvedCloudDownload {
+            url,
+            name: entry.entry.name.clone(),
+            headers: AliyunShareAdapter::headers(Some(&token))
+                .into_iter()
+                .collect(),
+        },
+    ))
 }

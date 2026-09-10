@@ -69,6 +69,73 @@ pub enum ShareResolution {
     TransferRequired(TransferRequest),
 }
 
+#[cfg(test)]
+pub(super) mod test_support {
+    use super::*;
+    use crate::cloud::{CloudHttpRequest, CloudHttpResponse, CloudHttpTransport};
+    use serde_json::Value;
+    pub struct Http {
+        pub requests: Mutex<Vec<CloudHttpRequest>>,
+        replies: Mutex<std::collections::VecDeque<Value>>,
+    }
+    impl Http {
+        pub fn new(replies: Vec<Value>) -> Self {
+            Self {
+                requests: Mutex::new(vec![]),
+                replies: Mutex::new(replies.into()),
+            }
+        }
+    }
+    impl CloudHttpTransport for Http {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: self
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected share HTTP request")
+                    .to_string(),
+                set_cookies: vec!["SESSION=issued; Path=/; Secure".into()],
+            })
+        }
+    }
+    pub fn candidate(provider: CloudProvider) -> crate::parser::CloudShareCandidate {
+        let url = match provider {
+            CloudProvider::Aliyun => "https://www.alipan.com/s/share123",
+            CloudProvider::Pikpak => "https://mypikpak.com/s/share123",
+            CloudProvider::Tianyi => "https://cloud.189.cn/t/share123",
+            _ => unreachable!(),
+        };
+        crate::parser::CloudShareCandidate {
+            provider,
+            url: url.into(),
+            access_code: Some("a123".into()),
+        }
+    }
+    pub fn entry(plan: CloudSharePlan) -> CloudShareResolvedEntry {
+        CloudShareResolvedEntry {
+            provider: plan.provider,
+            entry: plan.entries[0].clone(),
+            plan,
+        }
+    }
+    #[test]
+    fn unregistered_share_providers_remain_unsupported() {
+        let credentials = crate::cloud::MemoryCredentialStore::default();
+        let http = Http::new(vec![]);
+        for provider in [CloudProvider::Xunlei, CloudProvider::Uc] {
+            assert!(matches!(
+                provider_share_adapter(provider, &credentials, &http),
+                Err(QuarkError::ProviderUnsupported)
+            ));
+        }
+        assert!(http.requests.lock().unwrap().is_empty());
+    }
+}
+
 /// Tasks 5–7 register audited provider adapters here. Failing closed is vital:
 /// a recognized share page must never fall back to ordinary URI downloading.
 pub fn provider_share_adapter<'a>(
@@ -82,6 +149,15 @@ pub fn provider_share_adapter<'a>(
             http,
         })),
         CloudProvider::Baidu => Ok(Box::new(super::baidu::BaiduShareAdapter {
+            credentials,
+            http,
+        })),
+        CloudProvider::Aliyun => Ok(Box::new(super::aliyun::AliyunShareAdapter { http })),
+        CloudProvider::Pikpak => Ok(Box::new(super::pikpak::PikPakShareAdapter {
+            credentials,
+            http,
+        })),
+        CloudProvider::Tianyi => Ok(Box::new(super::tianyi::TianyiShareAdapter {
             credentials,
             http,
         })),
@@ -207,17 +283,31 @@ pub(super) fn share_id(
         return Err(QuarkError::InvalidResponse);
     }
     let url = url::Url::parse(&candidate.url).map_err(|_| QuarkError::InvalidResponse)?;
-    let expected = match provider {
-        CloudProvider::Quark => "pan.quark.cn",
-        CloudProvider::Baidu => "pan.baidu.com",
+    let expected: &[&str] = match provider {
+        CloudProvider::Quark => &["pan.quark.cn"],
+        CloudProvider::Baidu => &["pan.baidu.com"],
+        CloudProvider::Pikpak => &["mypikpak.com", "www.mypikpak.com"],
+        CloudProvider::Tianyi => &["cloud.189.cn"],
+        CloudProvider::Aliyun => &[
+            "alipan.com",
+            "www.alipan.com",
+            "aliyundrive.com",
+            "www.aliyundrive.com",
+        ],
         _ => return Err(QuarkError::ProviderUnsupported),
     };
-    if url.host_str() != Some(expected) || !matches!(url.scheme(), "https" | "http") {
+    if !url.host_str().is_some_and(|host| expected.contains(&host))
+        || !matches!(url.scheme(), "https" | "http")
+    {
         return Err(QuarkError::InvalidResponse);
     }
     let id = url
         .path()
-        .strip_prefix("/s/")
+        .strip_prefix(if provider == CloudProvider::Tianyi {
+            "/t/"
+        } else {
+            "/s/"
+        })
         .filter(|id| {
             !id.is_empty()
                 && id

@@ -9,6 +9,206 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 const AUTH: &str = "https://user.mypikpak.com";
 const DRIVE: &str = "https://api-drive.mypikpak.com";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cloud::share::{test_support::*, *};
+    fn credentials() -> MemoryCredentialStore {
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "pikpak",
+                &serde_json::to_vec(&PikPakSession {
+                    access_token: "current-user".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: u64::MAX,
+                    device_id: "device".into(),
+                    captcha_token: "personal-captcha".into(),
+                    client_id: Some("YUMx5nI8ZU8Ap8pm".into()),
+                    user_id: "u1".into(),
+                    captcha_expires_at: u64::MAX,
+                    auth_method: CloudAuthMethod::Web,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        store
+    }
+    fn cap() -> Value {
+        json!({"captcha_token":"share-captcha","expires_in":300,"url":""})
+    }
+    fn pass() -> Value {
+        json!({"share_status":"OK","pass_code_token":"pass-secret"})
+    }
+    fn listing() -> Value {
+        json!({"share_status":"OK","files":[{"id":"f1","kind":"drive#file","name":"verify.mp4","size":"7"}],"next_page_token":""})
+    }
+    #[test]
+    fn pikpak_share_web_context_and_current_identity_reach_direct_download() {
+        let store = credentials();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            listing(),
+            cap(),
+            pass(),
+            json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":"http://cdn.example/file"}}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
+        let ShareInspection::Plan(plan) =
+            adapter.inspect(&candidate(CloudProvider::Pikpak)).unwrap()
+        else {
+            panic!()
+        };
+        assert!(plan.provider_context.to_string().contains("pass-secret"));
+        let ShareResolution::Direct(direct) = adapter.resolve(&entry(plan)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(direct.url, "http://cdn.example/file");
+        assert!(direct
+            .headers
+            .contains(&("Authorization".into(), "Bearer current-user".into())));
+        assert!(direct
+            .headers
+            .contains(&("X-Captcha-Token".into(), "share-captcha".into())));
+        let requests = http.requests.lock().unwrap();
+        let body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(body["client_id"], "YUMx5nI8ZU8Ap8pm");
+        assert_eq!(body["action"], "GET:/drive/v1/share:batch_file_info");
+        assert_eq!(body["meta"]["package_name"], "mypikpak.com");
+        assert_eq!(body["meta"]["client_version"], "2.0.0");
+        assert_eq!(body["captcha_token"], "");
+        assert!(requests[5].url.contains("/drive/v1/share/file_info?"));
+        assert!(requests[5].url.contains("pass_code_token=pass-secret"));
+    }
+    #[test]
+    fn pikpak_share_pages_recursively_and_never_retries_challenges() {
+        let store = credentials();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            json!({"share_status":"OK","files":[{"id":"d","kind":"drive#folder","name":"dir"}],"next_page_token":"p2"}),
+            json!({"share_status":"OK","files":[],"next_page_token":""}),
+            listing(),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
+        let ShareInspection::Plan(plan) =
+            adapter.inspect(&candidate(CloudProvider::Pikpak)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(plan.entries[0].relative_directory, vec!["dir"]);
+        assert!(http.requests.lock().unwrap()[3]
+            .url
+            .contains("page_token=p2"));
+        for reply in [
+            json!({"error_code":9,"error":"captcha_required"}),
+            json!({"error_code":4031}),
+            json!({"error":"forbidden"}),
+            json!({"share_status":"EXPIRED"}),
+            json!({"share_status":"PASS_CODE_ERROR"}),
+        ] {
+            let http = Http::new(vec![cap(), reply]);
+            assert!(provider_share_adapter(CloudProvider::Pikpak, &store, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Pikpak))
+                .is_err());
+            assert_eq!(http.requests.lock().unwrap().len(), 2);
+        }
+        let http = Http::new(vec![
+            cap(),
+            json!({"error_code":10,"error_description":"Regional Premium restricted, upgrade to Global Premium"}),
+        ]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Pikpak, &store, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Pikpak)),
+            Err(QuarkError::PikpakRegionalMembershipRestricted)
+        ));
+        let http = Http::new(vec![cap(), json!({"share_status":"PASS_CODE_EMPTY"})]);
+        let mut input = candidate(CloudProvider::Pikpak);
+        input.access_code = None;
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Pikpak, &store, &http)
+                .unwrap()
+                .inspect(&input),
+            Ok(ShareInspection::AccessCodeRequired)
+        ));
+    }
+
+    #[test]
+    fn pikpak_share_rejects_malformed_error_fields_even_with_a_url() {
+        let store = credentials();
+        for error in [
+            json!({"error":{"code":"forbidden"}}),
+            json!({"status":"403"}),
+        ] {
+            let mut response = json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":"https://cdn.example/f"}});
+            response
+                .as_object_mut()
+                .unwrap()
+                .extend(error.as_object().unwrap().clone());
+            let http = Http::new(vec![cap(), pass(), listing(), cap(), pass(), response]);
+            let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
+            let ShareInspection::Plan(plan) =
+                adapter.inspect(&candidate(CloudProvider::Pikpak)).unwrap()
+            else {
+                panic!()
+            };
+            assert!(adapter.resolve(&entry(plan)).is_err());
+            assert_eq!(http.requests.lock().unwrap().len(), 6);
+        }
+    }
+
+    #[test]
+    fn pikpak_share_missing_original_url_and_web_challenge_never_transfer() {
+        let store = credentials();
+        let original = store.load("pikpak").unwrap().unwrap();
+        for file in [
+            json!({"id":"f1","kind":"drive#file"}),
+            json!({"id":"other","kind":"drive#file","web_content_link":"https://cdn.example/f"}),
+            json!({"id":"f1","kind":"drive#file","web_content_link":"https://mypikpak.com/s/other"}),
+        ] {
+            let http = Http::new(vec![
+                cap(),
+                pass(),
+                listing(),
+                cap(),
+                pass(),
+                json!({"share_status":"OK","file_info":file}),
+            ]);
+            let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
+            let ShareInspection::Plan(plan) =
+                adapter.inspect(&candidate(CloudProvider::Pikpak)).unwrap()
+            else {
+                panic!()
+            };
+            assert!(adapter.resolve(&entry(plan)).is_err());
+            assert_eq!(http.requests.lock().unwrap().len(), 6);
+            assert_eq!(store.load("pikpak").unwrap().unwrap(), original);
+        }
+        let http = Http::new(vec![
+            json!({"captcha_token":"token","url":"https://verify.example/challenge"}),
+        ]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Pikpak, &store, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Pikpak)),
+            Err(QuarkError::WebAuthorizationRequired)
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+        let empty = MemoryCredentialStore::default();
+        let http = Http::new(vec![]);
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Pikpak, &empty, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Pikpak)),
+            Err(QuarkError::NotAuthorized)
+        ));
+        assert!(http.requests.lock().unwrap().is_empty());
+    }
+}
 pub(crate) const PIKPAK_RECYCLE_BIN_ID: &str = "__all_downloader_pikpak_recycle_bin__";
 const PIKPAK_RECYCLE_BIN_NAME: &str = "回收站";
 const CAPTCHA_SALTS: &[&str] = &[
@@ -607,6 +807,299 @@ fn root(p: &str) -> &str {
     } else {
         p
     }
+}
+
+use super::share::{
+    CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspection,
+    ShareResolution,
+};
+const SHARE_DRIVE: &str = "https://api-drive.mypikpak.net";
+const SHARE_AUTH: &str = "https://user.mypikpak.net";
+const SHARE_WEB_CLIENT: &str = "YUMx5nI8ZU8Ap8pm";
+const SHARE_WEB_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
+pub struct PikPakShareAdapter<'a> {
+    pub credentials: &'a dyn CredentialStore,
+    pub http: &'a dyn CloudHttpTransport,
+}
+struct PikPakShareSession<'a> {
+    http: &'a dyn CloudHttpTransport,
+    headers: BTreeMap<String, String>,
+}
+impl PikPakShareAdapter<'_> {
+    fn session(&self) -> Result<PikPakShareSession<'_>, QuarkError> {
+        let bytes = self
+            .credentials
+            .load("pikpak")?
+            .ok_or(QuarkError::NotAuthorized)?;
+        let session: PikPakSession =
+            serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
+        if session.access_token.is_empty() {
+            return Err(QuarkError::NotAuthorized);
+        }
+        if session.expires_at <= now() {
+            return Err(QuarkError::AuthorizationExpired);
+        }
+        if session.device_id.is_empty() {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let mut client = PikPakShareSession {
+            http: self.http,
+            headers: BTreeMap::from([
+                (
+                    "Authorization".into(),
+                    format!("Bearer {}", session.access_token),
+                ),
+                ("X-Client-Id".into(), SHARE_WEB_CLIENT.into()),
+                ("X-Device-Id".into(), session.device_id.clone()),
+                ("User-Agent".into(), SHARE_WEB_UA.into()),
+                ("Referer".into(), "https://mypikpak.com/".into()),
+            ]),
+        };
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .to_string();
+        // A separate web-share challenge is initialized once; do not reuse or overwrite
+        // the personal-drive CAPTCHA or enter its automatic renewal loop.
+        let response = client.request("POST",format!("{SHARE_AUTH}/v1/shield/captcha/init"),Some(json!({
+            "client_id":SHARE_WEB_CLIENT,"device_id":session.device_id,"captcha_token":"",
+            "action":"GET:/drive/v1/share:batch_file_info",
+            "meta":{"client_version":"2.0.0","package_name":"mypikpak.com","user_id":session.user_id,
+                "timestamp":timestamp,"captcha_sign":pikpak_share_captcha_sign(&session.device_id,&timestamp)}
+        })))?;
+        if response
+            .get("url")
+            .is_some_and(|value| value.as_str() != Some(""))
+        {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        client.headers.insert(
+            "X-Captcha-Token".into(),
+            required(&response, "captcha_token")?,
+        );
+        Ok(client)
+    }
+}
+fn pikpak_share_captcha_sign(device: &str, timestamp: &str) -> String {
+    let mut value = format!("{SHARE_WEB_CLIENT}2.0.0mypikpak.com{device}{timestamp}");
+    for salt in [
+        "C9qPpZLN8ucRTaTiUMWYS9cQvWOE",
+        "+r6CQVxjzJV6LCV",
+        "F",
+        "pFJRC",
+        "9WXYIDGrwTCz2OiVlgZa90qpECPD6olt",
+        "/750aCr4lm/Sly/c",
+        "RB+DT/gZCrbV",
+        "",
+        "CyLsf7hdkIRxRm215hl",
+        "7xHvLi2tOYP0Y92b",
+        "ZGTXXxu8E/MIWaEDB+Sm/",
+        "1UI3",
+        "E7fP5Pfijd+7K+t6Tg/NhuLq0eEUVChpJSkrKxpO",
+        "ihtqpG6FMt65+Xk+tWUH2",
+        "NhXXU9rg4XXdzo7u5o",
+    ] {
+        value = format!("{:x}", md5::compute(format!("{value}{salt}")));
+    }
+    format!("1.{value}")
+}
+impl PikPakShareSession<'_> {
+    fn request(
+        &self,
+        method: &'static str,
+        url: String,
+        body: Option<Value>,
+    ) -> Result<Value, QuarkError> {
+        let response = self.http.send(CloudHttpRequest {
+            method,
+            url,
+            headers: self.headers.clone(),
+            body: body.map(|v| v.to_string()),
+        })?;
+        let value: Value =
+            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        if !value.is_object() {
+            return Err(QuarkError::InvalidResponse);
+        }
+        // Numeric fields must not hide one another or default malformed errors to success.
+        for key in ["code", "error_code", "status"] {
+            if let Some(code) = value.get(key) {
+                if code.as_i64().is_none() {
+                    return Err(QuarkError::InvalidResponse);
+                }
+            }
+        }
+        if value
+            .get("error")
+            .is_some_and(|value| value.as_str().is_none())
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        if let (Some(a), Some(b)) = (value.get("code"), value.get("error_code")) {
+            if a != b {
+                return Err(QuarkError::InvalidResponse);
+            }
+        }
+        if pikpak_regional_membership_restriction(&response) {
+            return Err(QuarkError::PikpakRegionalMembershipRestricted);
+        }
+        response_json(&response).map_err(|error| match error {
+            QuarkError::Provider(_) => {
+                QuarkError::Provider("PikPak 分享请求失败，请检查分享有效期及权限".into())
+            }
+            error => error,
+        })
+    }
+    fn pass(&self, id: &str, code: Option<&str>) -> Result<Value, QuarkError> {
+        self.request("GET",format!("{SHARE_DRIVE}/drive/v1/share?share_id={}&pass_code={}&thumbnail_size=SIZE_LARGE&limit=100",encoded(id),encoded(code.unwrap_or(""))),None)
+    }
+}
+fn pikpak_share_status(value: &Value) -> Result<(), QuarkError> {
+    match value["share_status"].as_str() {
+        Some("OK") => Ok(()),
+        Some("PASS_CODE_EMPTY" | "PASS_CODE_ERROR") => Err(QuarkError::InvalidInput(
+            "PikPak 分享访问码错误或缺失".into(),
+        )),
+        Some(_) => Err(QuarkError::Provider("PikPak 分享已失效或无权访问".into())),
+        None => Err(QuarkError::InvalidResponse),
+    }
+}
+impl CloudShareAdapter for PikPakShareAdapter<'_> {
+    fn inspect(
+        &self,
+        candidate: &crate::parser::CloudShareCandidate,
+    ) -> Result<ShareInspection, QuarkError> {
+        let id = super::share::share_id(candidate, CloudProvider::Pikpak)?;
+        let session = self.session()?;
+        let pass = session.pass(&id, candidate.access_code.as_deref())?;
+        if candidate.access_code.is_none()
+            && matches!(
+                pass["share_status"].as_str(),
+                Some("PASS_CODE_EMPTY" | "PASS_CODE_ERROR")
+            )
+        {
+            return Ok(ShareInspection::AccessCodeRequired);
+        }
+        pikpak_share_status(&pass)?;
+        let token = pass
+            .get("pass_code_token")
+            .map(|value| value.as_str().ok_or(QuarkError::InvalidResponse))
+            .transpose()?
+            .unwrap_or("");
+        if candidate.access_code.is_some() && token.is_empty() {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let mut queue = std::collections::VecDeque::from([(String::new(), vec![])]);
+        let mut seen = HashSet::new();
+        let mut entries = vec![];
+        let mut requests = 0usize;
+        while let Some((parent, directory)) = queue.pop_front() {
+            let mut page = String::new();
+            let mut pages = HashSet::new();
+            loop {
+                requests += 1;
+                if requests > 10_000 || directory.len() > 128 {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                let value = session.request("GET",format!("{SHARE_DRIVE}/drive/v1/share/detail?share_id={}&parent_id={}&pass_code_token={}&page_token={}&limit=100&thumbnail_size=SIZE_LARGE&with_audit=true",encoded(&id),encoded(&parent),encoded(token),encoded(&page)),None)?;
+                pikpak_share_status(&value)?;
+                for raw in value["files"]
+                    .as_array()
+                    .ok_or(QuarkError::InvalidResponse)?
+                {
+                    let file = parse_pikpak_file(raw, &parent)?;
+                    if !seen.insert(file.id.clone()) {
+                        return Err(QuarkError::InvalidResponse);
+                    }
+                    match raw["kind"].as_str() {
+                        Some("drive#folder") => {
+                            let mut path = directory.clone();
+                            path.push(file.name);
+                            queue.push_back((file.id, path));
+                        }
+                        Some("drive#file") => entries.push(CloudShareEntry::new(
+                            &id,
+                            file.id,
+                            file.name,
+                            directory.clone(),
+                            file.size,
+                        )),
+                        _ => return Err(QuarkError::InvalidResponse),
+                    }
+                }
+                page = value
+                    .get("next_page_token")
+                    .map(|v| v.as_str().ok_or(QuarkError::InvalidResponse))
+                    .transpose()?
+                    .unwrap_or("")
+                    .into();
+                if page.is_empty() {
+                    break;
+                }
+                if !pages.insert(page.clone()) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+            }
+        }
+        Ok(ShareInspection::Plan(CloudSharePlan::new(
+            CloudProvider::Pikpak,
+            id,
+            candidate.access_code.clone(),
+            entries,
+            json!({"pass_code_token":token}),
+        )))
+    }
+    fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+        resolve_pikpak_share(self.credentials, self.http, entry)
+    }
+}
+pub fn resolve_pikpak_share(
+    credentials: &dyn CredentialStore,
+    http: &dyn CloudHttpTransport,
+    entry: &CloudShareResolvedEntry,
+) -> Result<ShareResolution, QuarkError> {
+    if entry.provider != CloudProvider::Pikpak || entry.plan.provider != CloudProvider::Pikpak {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let adapter = PikPakShareAdapter { credentials, http };
+    let session = adapter.session()?;
+    let pass = session.pass(&entry.plan.canonical_share_id, entry.access_code())?;
+    pikpak_share_status(&pass)?;
+    let token = pass
+        .get("pass_code_token")
+        .map(|value| value.as_str().ok_or(QuarkError::InvalidResponse))
+        .transpose()?
+        .unwrap_or("");
+    if entry.access_code().is_some() && token.is_empty() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let value = session.request(
+        "GET",
+        format!(
+            "{SHARE_DRIVE}/drive/v1/share/file_info?share_id={}&file_id={}&pass_code_token={}",
+            encoded(&entry.plan.canonical_share_id),
+            encoded(&entry.entry.entry_id),
+            encoded(token)
+        ),
+        None,
+    )?;
+    pikpak_share_status(&value)?;
+    let file = &value["file_info"];
+    if file["id"].as_str() != Some(entry.entry.entry_id.as_str()) || file["kind"] != "drive#file" {
+        return Err(QuarkError::InvalidResponse);
+    }
+    // A missing original URL is not permission to save a file or substitute a transcode.
+    let url = required(file, "web_content_link")?;
+    super::share::validate_direct_url(&url)?;
+    Ok(ShareResolution::Direct(
+        super::commands::ResolvedCloudDownload {
+            url,
+            name: entry.entry.name.clone(),
+            headers: session.headers.into_iter().collect(),
+        },
+    ))
 }
 pub fn parse_pikpak_file(v: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
     Ok(CloudFile {
