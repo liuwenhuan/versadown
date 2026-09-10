@@ -1,7 +1,8 @@
 use alldownloader_lib::cloud::{
     commands::{
         plan_cloud_directory_download, submit_cloud_directory_plan, CloudDownloadSourceGate,
-        retry_cloud_directory_group_item_with, DirectoryLeafSubmission,
+        retry_cloud_directory_group_item_with, retry_cloud_directory_group_with,
+        DirectoryLeafSubmission,
     },
     CloudDirectory, CloudFile, CloudProvider, QuarkError,
 };
@@ -223,6 +224,13 @@ async fn directory_submission_persists_parent_links_success_and_keeps_provider_f
     assert_eq!(outcome.queued_count, 1);
     assert_eq!(outcome.task.payload.task.kind, "folder");
     let group = store.cloud_directory_group(outcome.task.payload.task.id).unwrap().unwrap();
+    let result = serde_json::to_value(&outcome.task).unwrap();
+    assert_eq!(
+        result["queueTask"]["id"],
+        serde_json::Value::String(group.id.to_string()),
+        "directory submission must return the authoritative recursive queue root"
+    );
+    assert_eq!(result["queueTask"]["children"].as_array().map(Vec::len), Some(2));
     let items = store.cloud_directory_group_items(group.id).unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].remote_file_id, "first");
@@ -231,7 +239,9 @@ async fn directory_submission_persists_parent_links_success_and_keeps_provider_f
     assert_eq!(items[1].relative_directory, vec!["课程", "资料"]);
     assert!(items[1].task_id.is_none());
     assert_eq!(items[1].failure_code.as_deref(), Some("provider_error"));
-    assert_eq!(submitted.lock().unwrap().as_slice(), ["first", "second"]);
+    let mut submitted = submitted.lock().unwrap().clone();
+    submitted.sort();
+    assert_eq!(submitted, ["first", "second"]);
 }
 
 #[tokio::test]
@@ -324,6 +334,12 @@ async fn resubmitting_a_persisted_failed_leaf_does_not_touch_linked_siblings() {
     ).await.unwrap();
     assert_eq!(submitted.lock().unwrap().as_slice(), ["retry-me"]);
     assert_eq!(retried.payload.task.source, "cloud://quark/retry-me");
+    let retried_json = serde_json::to_value(&retried).unwrap();
+    assert_eq!(
+        retried_json["queueTask"]["id"],
+        serde_json::Value::String(group.id.to_string()),
+        "a retried virtual leaf must refresh the same directory root"
+    );
     let retried_items = store.cloud_directory_group_items(group.id).unwrap();
     assert_eq!(retried_items.iter().find(|item| item.id == linked.id).unwrap().task_id, linked.task_id);
     assert!(retried_items.iter().find(|item| item.id == failed.id).unwrap().task_id.is_some());
@@ -335,6 +351,61 @@ async fn resubmitting_a_persisted_failed_leaf_does_not_touch_linked_siblings() {
         |_, _, _| async { panic!("linked items must be rejected before submission") },
     ).await;
     assert!(matches!(rejected, Err(QuarkError::InvalidInput(message)) if message.contains("已经入队")));
+}
+
+#[tokio::test]
+async fn group_retry_submits_each_unlinked_leaf_once_and_returns_the_group_root() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "课程", |id| {
+        Ok(directory(
+            id,
+            vec![file("linked", id, "已入队.txt"), file("first", id, "一.txt"), file("second", id, "二.txt")],
+        ))
+    })
+    .unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let first = submit_cloud_directory_plan(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        plan,
+        UriSubmissionOptions { directory: Some(destination.path().to_path_buf()), ..Default::default() },
+        |_, file_id, _| {
+            let result = if file_id == "linked" {
+                Ok(DirectoryLeafSubmission::Queued(
+                    store.create(NewTask::direct("cloud://quark/linked")).unwrap().id,
+                ))
+            } else {
+                Err(QuarkError::Provider("fixture failure".into()))
+            };
+            std::future::ready(result)
+        },
+    )
+    .await
+    .unwrap();
+    let group_id = first.task.payload.task.id;
+    let submitted = Arc::new(Mutex::new(Vec::new()));
+    let submitted_for_callback = Arc::clone(&submitted);
+
+    let retried = retry_cloud_directory_group_with(
+        &store,
+        group_id,
+        UriSubmissionOptions { directory: Some(destination.path().to_path_buf()), ..Default::default() },
+        |_, file_id, _| {
+            submitted_for_callback.lock().unwrap().push(file_id.clone());
+            let task = store.create(NewTask::direct(format!("cloud://quark/{file_id}"))).unwrap();
+            std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut submitted = submitted.lock().unwrap().clone();
+    submitted.sort();
+    assert_eq!(submitted, ["first", "second"]);
+    let json = serde_json::to_value(retried).unwrap();
+    assert_eq!(json["queueTask"]["id"], group_id.to_string());
+    assert_eq!(json["queueTask"]["children"].as_array().map(Vec::len), Some(3));
 }
 
 #[tokio::test]

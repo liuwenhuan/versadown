@@ -71,7 +71,7 @@ struct TauriDownloadEvents {
 
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
-        if let Ok(payload) = commands::task_payload_with_cleanup(
+        if let Ok(payload) = commands::task_update_payload(
             &self.store,
             Some(&self.cloud.share_plans),
             task.clone(),

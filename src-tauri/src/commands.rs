@@ -56,6 +56,10 @@ pub struct TaskActionOutcome {
     pub payload: DownloadTaskPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duplicate: Option<DuplicateDownloadState>,
+    /// Present only when an action affects a durable cloud-directory group.
+    /// Ordinary task and torrent action JSON remains unchanged.
+    #[serde(rename = "queueTask", skip_serializing_if = "Option::is_none")]
+    pub queue_task: Option<QueueTaskPayload>,
 }
 
 #[derive(Clone, Serialize)]
@@ -113,6 +117,7 @@ pub(crate) fn task_action_outcome(
     Ok(TaskActionOutcome {
         payload: task_payload(store, task)?,
         duplicate,
+        queue_task: None,
     })
 }
 
@@ -489,6 +494,43 @@ pub fn list_queue_tasks_for_scope(
 ) -> Result<Vec<QueueTaskPayload>, String> {
     let leaves = list_tasks_with_cleanup_projection_for_scope(store, None, None)?;
     project_cloud_directory_groups(store, leaves, scope)
+}
+
+/// Produces the single durable queue root for one cloud-directory group.
+/// This is intentionally derived through the same projection used by
+/// `list_tasks`, so actions and task-update events cannot publish a stale or
+/// flat representation of a directory member.
+pub fn cloud_directory_group_queue_task(
+    store: &TaskStore,
+    group_id: Uuid,
+) -> Result<QueueTaskPayload, String> {
+    list_queue_tasks_for_scope(store, None)?
+        .into_iter()
+        .find(|task| task.id == group_id.to_string())
+        .ok_or_else(|| "网盘目录下载任务不存在".to_string())
+}
+
+#[derive(Clone, Serialize)]
+#[serde(untagged)]
+pub(crate) enum TaskUpdatePayload {
+    Queue(QueueTaskPayload),
+    Task(DownloadTaskPayload),
+}
+
+/// Selects the externally visible event representation for one task update.
+/// A member of a cloud-directory group always updates its synthetic root.
+pub(crate) fn task_update_payload(
+    store: &TaskStore,
+    plans: Option<&crate::cloud::share::CloudSharePlanStore>,
+    task: DownloadTask,
+) -> Result<TaskUpdatePayload, String> {
+    if let Some(group) = store
+        .cloud_directory_group_for_task(task.id)
+        .map_err(|error| error.to_string())?
+    {
+        return cloud_directory_group_queue_task(store, group.id).map(TaskUpdatePayload::Queue);
+    }
+    task_payload_with_cleanup(store, plans, task).map(TaskUpdatePayload::Task)
 }
 
 fn apply_queue_cleanup_projection(
@@ -922,11 +964,20 @@ async fn run_cloud_directory_group_action(
         .store
         .cloud_directory_group_items(group.id)
         .map_err(|error| error.to_string())?;
+    let mut directory_retry = if action == "retry"
+        && items.iter().any(|item| item.task_id.is_none())
+    {
+        Some(
+            crate::cloud::commands::retry_cloud_directory_group(app.clone(), group.id)
+                .await
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
     let mut first_outcome = None;
-    let mut has_virtual_retry = false;
     for item in items {
         let Some(task_id) = item.task_id else {
-            has_virtual_retry |= action == "retry";
             continue;
         };
         let current = state
@@ -950,10 +1001,12 @@ async fn run_cloud_directory_group_action(
         }
     }
     if let Some(outcome) = first_outcome {
+        let mut outcome = directory_retry.take().unwrap_or(outcome);
+        outcome.queue_task = Some(cloud_directory_group_queue_task(&state.store, group.id)?);
         return Ok(outcome);
     }
-    if has_virtual_retry {
-        return Err("网盘目录文件尚未入队，正在等待重新提交支持".to_string());
+    if let Some(outcome) = directory_retry {
+        return Ok(outcome);
     }
     Err("目录内没有可执行此操作的下载任务".to_string())
 }
@@ -977,6 +1030,7 @@ async fn run_local_task_action(
                 task,
             )?,
             duplicate: None,
+            queue_task: None,
         });
     }
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
@@ -1894,6 +1948,53 @@ mod tests {
         assert_eq!(projected[0].total_length, Some(100));
         assert_eq!(projected[0].completed_length, 25);
         assert_eq!(projected[0].progress, 25);
+    }
+
+    #[test]
+    fn directory_member_update_emits_its_recursive_group_root() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote-directory",
+                    "课程",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "remote-file",
+                    &["资料"],
+                    "讲义.pdf",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
+        let mut new_task = NewTask::direct("cloud://quark/remote-file");
+        new_task.name = "讲义.pdf".into();
+        let task = store.create(new_task).unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Downloading,
+                total_length: Some(100),
+                completed_length: 50,
+                progress: 50,
+                ..task
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+
+        let TaskUpdatePayload::Queue(payload) =
+            task_update_payload(&store, None, task).unwrap()
+        else {
+            panic!("a cloud-directory member update must not emit a top-level leaf");
+        };
+        assert_eq!(payload.id, group.id.to_string());
+        assert_eq!(payload.progress, 50);
+        assert_eq!(payload.children[0].name, "资料");
+        assert_eq!(payload.children[0].children[0].name, "讲义.pdf");
     }
 
     #[test]

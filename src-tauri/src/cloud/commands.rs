@@ -1,7 +1,7 @@
 use super::{http::response_json, types::required, *};
 use crate::models::{CloudDirectoryGroup, NewCloudDirectoryGroup, NewCloudDirectoryGroupItem};
 use crate::{
-    commands::{task_action_outcome, AppState, TaskActionOutcome},
+    commands::{cloud_directory_group_queue_task, task_action_outcome, AppState, TaskActionOutcome},
     duplicate_state, DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -1941,6 +1941,7 @@ fn cloud_share_task_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskAction
             cleanup_pending: false,
         },
         duplicate: None,
+        queue_task: None,
     }
 }
 
@@ -2282,8 +2283,11 @@ fn directory_download_failure_fields(error: &QuarkError) -> (&'static str, &'sta
     }
 }
 
-fn cloud_directory_group_task_outcome(group: &CloudDirectoryGroup) -> TaskActionOutcome {
-    TaskActionOutcome {
+fn cloud_directory_group_task_outcome(
+    store: &TaskStore,
+    group: &CloudDirectoryGroup,
+) -> Result<TaskActionOutcome, QuarkError> {
+    Ok(TaskActionOutcome {
         payload: crate::commands::DownloadTaskPayload {
             task: DownloadTask {
                 id: group.id,
@@ -2311,7 +2315,10 @@ fn cloud_directory_group_task_outcome(group: &CloudDirectoryGroup) -> TaskAction
             cleanup_pending: false,
         },
         duplicate: None,
-    }
+        queue_task: Some(
+            cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
+        ),
+    })
 }
 
 /// Executes a previously validated plan through a narrow, injectable leaf
@@ -2347,11 +2354,8 @@ where
     if items.len() != plan.files.len() {
         return Err(QuarkError::Storage);
     }
-    let mut outcome = CloudDirectoryDownloadOutcome {
-        task: cloud_directory_group_task_outcome(&group),
-        queued_count: 0,
-        failures: Vec::new(),
-    };
+    let mut failures = Vec::new();
+    let mut queued_count = 0;
     for (file, item) in plan.files.into_iter().zip(items) {
         let relative_path = planned_relative_path(&file);
         let output_directory = match directory_download_output_directory(
@@ -2360,7 +2364,7 @@ where
         ) {
             Ok(directory) => directory,
             Err(error) => {
-                persist_directory_failure(store, group.id, item.id, &file, &error, &mut outcome)?;
+                persist_directory_failure(store, group.id, item.id, &file, &error, &mut failures)?;
                 continue;
             }
         };
@@ -2372,7 +2376,7 @@ where
                 store
                     .link_cloud_directory_group_item_task(group.id, item.id, task_id)
                     .map_err(|_| QuarkError::Storage)?;
-                outcome.queued_count += 1;
+                queued_count += 1;
             }
             Ok(DirectoryLeafSubmission::Duplicate) => {
                 let failure = CloudDirectoryDownloadFailure {
@@ -2388,14 +2392,18 @@ where
                         failure.message,
                     )
                     .map_err(|_| QuarkError::Storage)?;
-                outcome.failures.push(failure);
+                failures.push(failure);
             }
             Err(error) => {
-                persist_directory_failure(store, group.id, item.id, &file, &error, &mut outcome)?;
+                persist_directory_failure(store, group.id, item.id, &file, &error, &mut failures)?;
             }
         }
     }
-    Ok(outcome)
+    Ok(CloudDirectoryDownloadOutcome {
+        task: cloud_directory_group_task_outcome(store, &group)?,
+        queued_count,
+        failures,
+    })
 }
 
 fn persist_directory_failure(
@@ -2404,13 +2412,13 @@ fn persist_directory_failure(
     item_id: uuid::Uuid,
     file: &PlannedCloudFile,
     error: &QuarkError,
-    outcome: &mut CloudDirectoryDownloadOutcome,
+    failures: &mut Vec<CloudDirectoryDownloadFailure>,
 ) -> Result<(), QuarkError> {
     let failure = directory_download_failure(file, error);
     store
         .fail_cloud_directory_group_item(group_id, item_id, failure.code, failure.message)
         .map_err(|_| QuarkError::Storage)?;
-    outcome.failures.push(failure);
+    failures.push(failure);
     Ok(())
 }
 
@@ -2515,6 +2523,74 @@ pub async fn retry_cloud_directory_group_item(
     .await
 }
 
+/// Resubmits every unlinked failed leaf in one durable directory group. Linked
+/// leaves are deliberately excluded: their existing local task remains the
+/// authority and must never be submitted a second time.
+pub async fn retry_cloud_directory_group_with<F, Fut>(
+    store: &TaskStore,
+    group_id: uuid::Uuid,
+    configured: UriSubmissionOptions,
+    mut submit: F,
+) -> Result<TaskActionOutcome, QuarkError>
+where
+    F: FnMut(CloudProvider, String, UriSubmissionOptions) -> Fut,
+    Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
+{
+    let group = store
+        .cloud_directory_group(group_id)
+        .map_err(|_| QuarkError::Storage)?
+        .ok_or_else(|| QuarkError::InvalidInput("网盘目录下载任务不存在".into()))?;
+    let pending = store
+        .cloud_directory_group_items(group.id)
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .filter(|item| item.task_id.is_none())
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Err(QuarkError::InvalidInput(
+            "目录内没有可重新提交的网盘文件".into(),
+        ));
+    }
+    for item in pending {
+        // A failed provider attempt is recorded by the single-item path. Keep
+        // trying sibling leaves so one transient failure cannot starve the
+        // remainder of a directory retry.
+        let _ = retry_cloud_directory_group_item_with(
+            store,
+            group.id,
+            item.id,
+            configured.clone(),
+            |provider, file_id, options| submit(provider, file_id, options),
+        )
+        .await;
+    }
+    cloud_directory_group_task_outcome(store, &group)
+}
+
+pub async fn retry_cloud_directory_group(
+    app: AppHandle,
+    group_id: uuid::Uuid,
+) -> Result<TaskActionOutcome, QuarkError> {
+    let state = app.state::<AppState>();
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    let store = Arc::clone(&state.store);
+    let submit_app = app.clone();
+    retry_cloud_directory_group_with(&store, group_id, configured, move |provider, file_id, options| {
+        let app = submit_app.clone();
+        async move {
+            let state = app.state::<AppState>();
+            match submit_cloud_file(app.clone(), &state, provider, file_id, options).await? {
+                CloudFileSubmission::Queued(outcome) => {
+                    Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
+                }
+                CloudFileSubmission::Duplicate(_) => Ok(DirectoryLeafSubmission::Duplicate),
+            }
+        }
+    })
+    .await
+}
+
 pub async fn retry_cloud_directory_group_item_with<F, Fut>(
     store: &TaskStore,
     group_id: uuid::Uuid,
@@ -2551,12 +2627,17 @@ where
             store
                 .link_cloud_directory_group_item_task(group.id, item.id, task_id)
                 .map_err(|_| QuarkError::Storage)?;
-            task_action_outcome(
+            let mut outcome = task_action_outcome(
                 store,
                 store.find(task_id).map_err(|_| QuarkError::Storage)?,
                 None,
             )
-            .map_err(QuarkError::Transport)
+            .map_err(QuarkError::Transport)?;
+            outcome.queue_task = Some(
+                cloud_directory_group_queue_task(store, group.id)
+                    .map_err(QuarkError::Transport)?,
+            );
+            Ok(outcome)
         }
         Ok(DirectoryLeafSubmission::Duplicate) => {
             store
