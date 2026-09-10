@@ -466,16 +466,29 @@ pub fn list_tasks(
     scope: Option<String>,
 ) -> Result<Vec<QueueTaskPayload>, String> {
     let cloud = app.try_state::<Arc<crate::cloud::commands::CloudState>>();
-    let leaves = list_tasks_with_cleanup_projection_for_scope(
-        &state.store,
-        cloud.as_ref().map(|cloud| &cloud.share_plans),
-        None,
-    )?;
-    let mut tasks = project_cloud_directory_groups(&state.store, leaves, scope.as_deref())?;
+    // Restore share-cleanup messages before reading the same projected list that
+    // the command returns. The reusable helper below deliberately has no
+    // application-state dependency, so the durable directory grouping boundary
+    // can be exercised outside a running Tauri webview.
+    if let Some(cloud) = cloud.as_ref() {
+        let _ = cloud.share_plans.restore_cleanup_pending_messages(&state.store);
+    }
+    let mut tasks = list_queue_tasks_for_scope(&state.store, scope.as_deref())?;
     if let Some(plans) = cloud.as_ref().map(|cloud| &cloud.share_plans) {
         apply_queue_cleanup_projection(&mut tasks, plans)?;
     }
     Ok(tasks)
+}
+
+/// Returns the durable queue projection used by [`list_tasks`] for a scope.
+/// Cloud-directory children are removed from the top level and nested beneath
+/// their one synthetic folder root.
+pub fn list_queue_tasks_for_scope(
+    store: &TaskStore,
+    scope: Option<&str>,
+) -> Result<Vec<QueueTaskPayload>, String> {
+    let leaves = list_tasks_with_cleanup_projection_for_scope(store, None, None)?;
+    project_cloud_directory_groups(store, leaves, scope)
 }
 
 fn apply_queue_cleanup_projection(
@@ -774,10 +787,18 @@ pub(crate) fn project_cloud_directory_groups(
                         .or_else(|| Some("关联的下载任务不存在，需重新提交网盘文件".to_string())),
                 ),
             };
+            // Planned paths include the selected directory itself because that
+            // component is needed for the local output path. The synthetic
+            // group root already represents it in the queue, so omit exactly
+            // that leading component from its visible child tree.
+            let visible_components = item
+                .relative_directory
+                .strip_prefix(&[group.relative_directory.clone()])
+                .unwrap_or(&item.relative_directory);
             insert_cloud_directory_leaf(
                 &group,
                 &mut root,
-                &item.relative_directory,
+                visible_components,
                 &mut Vec::new(),
                 leaf,
             );

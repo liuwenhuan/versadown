@@ -19,6 +19,7 @@ mod store;
 mod window_lifecycle;
 
 pub use aria2::*;
+pub use commands::list_queue_tasks_for_scope;
 pub use connectors::{
     CloudConnector, CloudDirectory, CloudItem, ConnectorError, MockConnector, Provider,
 };

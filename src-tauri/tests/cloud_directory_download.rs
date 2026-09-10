@@ -5,7 +5,7 @@ use alldownloader_lib::cloud::{
     },
     CloudDirectory, CloudFile, CloudProvider, QuarkError,
 };
-use alldownloader_lib::{NewTask, TaskStore, UriSubmissionOptions};
+use alldownloader_lib::{list_queue_tasks_for_scope, NewTask, TaskStore, UriSubmissionOptions};
 use std::{sync::{Arc, Mutex}, time::Duration};
 
 fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
@@ -232,6 +232,53 @@ async fn directory_submission_persists_parent_links_success_and_keeps_provider_f
     assert!(items[1].task_id.is_none());
     assert_eq!(items[1].failure_code.as_deref(), Some("provider_error"));
     assert_eq!(submitted.lock().unwrap().as_slice(), ["first", "second"]);
+}
+
+#[tokio::test]
+async fn active_list_projects_a_submitted_directory_as_one_nested_folder_root() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "课程", |id| match id {
+        "root" => Ok(directory(
+            id,
+            vec![file("first", id, "第一章.txt"), folder("nested", id, "资料")],
+        )),
+        "nested" => Ok(directory(id, vec![file("second", id, "第二章.txt")])),
+        _ => Err(QuarkError::InvalidResponse),
+    })
+    .unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    submit_cloud_directory_plan(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        plan,
+        UriSubmissionOptions { directory: Some(destination.path().to_path_buf()), ..Default::default() },
+        |_, file_id, _| {
+            let mut new_task = NewTask::direct(format!("cloud://quark/{file_id}"));
+            new_task.name = match file_id.as_str() {
+                "first" => "第一章.txt".into(),
+                "second" => "第二章.txt".into(),
+                _ => unreachable!("fixture only submits planned leaves"),
+            };
+            let task = store.create(new_task).unwrap();
+            std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+        },
+    )
+    .await
+    .unwrap();
+
+    let visible = list_queue_tasks_for_scope(&store, Some("active")).unwrap();
+
+    assert_eq!(visible.len(), 1, "linked directory leaves must not remain top-level");
+    assert_eq!(visible.iter().filter(|task| task.kind == "folder").count(), 1);
+    let root = &visible[0];
+    assert_eq!(root.name, "课程");
+    assert_eq!(root.children.len(), 2);
+    assert_eq!(root.children[0].name, "第一章.txt");
+    assert_eq!(root.children[1].kind, "folder");
+    assert_eq!(root.children[1].name, "资料");
+    assert_eq!(root.children[1].children.len(), 1);
+    assert_eq!(root.children[1].children[0].name, "第二章.txt");
 }
 
 #[tokio::test]
