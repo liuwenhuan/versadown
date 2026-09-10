@@ -19,8 +19,8 @@ export const deleteCloudFiles = (provider: CloudProvider, fileIds: string[]) => 
 export const restoreCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_restore', { provider, fileIds });
 type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState };
 type NativeCloudDirectoryDownload = {
+  task: NativeCloudDownload;
   queuedCount: number;
-  tasks: NativeCloudDownload[];
   failures: CloudDirectoryDownloadFailure[];
 };
 function cloudDownloadResult(result: NativeCloudDownload): TaskActionResult {
@@ -29,7 +29,7 @@ function cloudDownloadResult(result: NativeCloudDownload): TaskActionResult {
 export const downloadCloudFile = (provider: CloudProvider, fileId: string): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', { provider, fileId })
   .then(cloudDownloadResult);
 export const downloadCloudDirectory = (provider: CloudProvider, directoryId: string, directoryName: string): Promise<CloudDirectoryDownloadOutcome> => invoke<NativeCloudDirectoryDownload>('cloud_download_directory', { provider, directoryId, directoryName })
-  .then((result) => ({ ...result, tasks: result.tasks.map(cloudDownloadResult) }));
+  .then((result) => ({ ...result, task: cloudDownloadResult(result.task) }));
 export const logoutCloud = (provider: CloudProvider) => invoke<void>('cloud_logout', { provider });
 export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[]) => invoke<CloudFile[]>('cloud_upload_files', { provider, parentId, paths: paths ?? null });
 export const pickAndUploadFiles = (provider: CloudProvider, parentId: string) => uploadCloudFiles(provider, parentId);

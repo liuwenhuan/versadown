@@ -71,6 +71,35 @@ it('keeps a folder as one row until the user expands it', async () => {
   expect(onCommand).toHaveBeenCalledWith('file-1', 'pause');
 });
 
+it('reveals nested cloud directory files only after each directory is expanded', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue tasks={[{
+    id: 'season-1', name: 'Season 1', kind: 'folder', status: 'downloading', progress: 40,
+    children: [
+      {
+        id: 'extras', name: 'Extras', kind: 'folder', status: 'downloading', progress: 25,
+        children: [{ id: 'behind', name: 'behind.mkv', kind: 'cloud', status: 'downloading', progress: 50, size: '50 MB / 100 MB' }],
+      },
+      { id: 'failed-link', name: 'unavailable.mkv', kind: 'cloud', status: 'failed', progress: 0, error: 'link generation failed' },
+    ],
+  }]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  expect(screen.queryByText('Extras')).not.toBeInTheDocument();
+  expect(screen.queryByText('behind.mkv')).not.toBeInTheDocument();
+  expect(screen.queryByText('link generation failed')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '展开 Season 1' }));
+  expect(screen.getByText('Extras')).toBeVisible();
+  expect(screen.getByText('link generation failed')).toBeVisible();
+  expect(screen.queryByText('behind.mkv')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '展开 Extras' }));
+  expect(screen.getByText('behind.mkv')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '暂停 behind.mkv' }));
+  expect(onCommand).toHaveBeenCalledWith('behind', 'pause');
+});
+
 it('does not expose expansion for a single-file torrent task', () => {
   render(<DownloadQueue
     tasks={[{

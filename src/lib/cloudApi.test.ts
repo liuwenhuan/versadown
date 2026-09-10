@@ -14,10 +14,10 @@ it('permanently deletes only the selected cloud recycle-bin files', async () => 
   });
 });
 
-it('maps every directory download task while preserving the queued count and redacted failures', async () => {
+it('maps one directory parent task while preserving the queued count and redacted failures', async () => {
   native.invoke.mockResolvedValueOnce({
+    task: { id: 'directory-1', name: '归档', kind: 'folder', status: 'queued', progress: 0 },
     queuedCount: 1,
-    tasks: [{ id: 'cloud-1', name: '说明.txt', kind: 'cloud', status: 'queued', progress: 0 }],
     failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
   });
   const api = await import('./cloudApi');
@@ -28,8 +28,8 @@ it('maps every directory download task while preserving the queued count and red
     provider: 'quark', directoryId: 'folder-1', directoryName: '归档'
   });
   expect(outcome).toEqual({
+    task: { task: { id: 'directory-1', name: '归档', kind: 'folder', status: 'queued', progress: 0 } },
     queuedCount: 1,
-    tasks: [{ task: { id: 'cloud-1', name: '说明.txt', kind: 'cloud', status: 'queued', progress: 0 } }],
     failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
   });
 });

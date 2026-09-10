@@ -26,7 +26,7 @@ const client = {
   deleteCloudFiles: async () => undefined,
   restoreCloudFiles: async () => undefined,
   downloadCloudFile: async () => undefined,
-  downloadCloudDirectory: async () => ({ queuedCount: 0, tasks: [], failures: [] }),
+  downloadCloudDirectory: async () => ({ task: { task: { id: 'visual-directory-download', name: '游戏备份', kind: 'folder' as const, status: 'queued' as const, progress: 0 } }, queuedCount: 0, failures: [] }),
   logoutCloud: async () => undefined,
   pickAndUploadFiles: async () => undefined,
 };

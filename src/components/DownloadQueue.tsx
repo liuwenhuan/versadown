@@ -235,6 +235,64 @@ function TaskContextMenu({ state, onClose, onCommand }: { state: ContextMenuStat
   </div>, document.body);
 }
 
+interface QueueTreeRowsProps {
+  nodes: readonly QueueTask[];
+  depth: number;
+  expanded: Record<string, boolean>;
+  onToggle(id: string): void;
+  onCommand(id: string, command: TaskCommand): void;
+  onFileSelection?: DownloadQueueProps['onFileSelection'];
+  onFileCancel?: DownloadQueueProps['onFileCancel'];
+  parentTaskId: string;
+  isBtFileTree: boolean;
+  childRoot?: string;
+}
+
+function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSelection, onFileCancel, parentTaskId, isBtFileTree, childRoot }: QueueTreeRowsProps) {
+  return <>{nodes.map((node) => {
+    const nodeChildren = node.children ?? [];
+    const hasChildren = nodeChildren.length > 0;
+    const isFolder = node.kind === 'folder';
+    const isExpanded = expanded[node.id] ?? false;
+    const nodeName = isBtFileTree ? displayChildName(node, childRoot) : displayTaskName(node);
+    const fileIsSelected = node.selected !== false;
+    const selectionAction = node.status === 'paused' || !fileIsSelected ? 'resume' as const : 'pause' as const;
+    const primaryAction = node.status === 'downloading' ? 'pause' as const
+      : node.status === 'paused' ? 'resume' as const
+        : node.status === 'failed' ? 'retry' as const : null;
+    const isBtFile = isBtFileTree && node.file_index !== undefined;
+    const canUseFileSelection = isBtFile && Boolean(onFileSelection) && ['downloading', 'paused', 'queued'].includes(node.status);
+    const canUseTaskCommand = !isBtFile && !isFolder && Boolean(primaryAction);
+    const error = node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
+    return <div className="queue-tree-node" key={node.id}>
+      <article className={`child-row queue-tree-row${hasChildren ? ' has-children' : ''}`} style={{ paddingLeft: `${21 + depth * 22}px` }}>
+        <span className="child-name">
+          <i aria-hidden="true">↳</i>
+          {hasChildren && <button className="queue-tree-expand" aria-label={`${isExpanded ? '收起' : '展开'} ${nodeName}`} onClick={() => onToggle(node.id)}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}
+          <b title={nodeName}>{nodeName}</b>
+          {error && <small className="queue-tree-error" title={error}>{error}</small>}
+        </span>
+        <span className="child-progress" aria-hidden="true"><i><b style={{ width: `${node.progress}%` }} /></i></span>
+        <small className="child-progress-value">{node.progress}%</small>
+        <small className="child-transfer-size" title={node.size}>{node.size || '—'}</small>
+        {(canUseFileSelection || canUseTaskCommand) && <span className="child-actions">
+          <button aria-label={`${primaryAction === 'retry' ? '重新下载' : selectionAction === 'pause' ? '暂停' : '继续'} ${nodeName}`} title={primaryAction === 'retry' ? '重新下载' : `${selectionAction === 'pause' ? '暂停' : '继续'}此文件`} onClick={(event) => {
+            event.stopPropagation();
+            if (isBtFile) onFileSelection!(parentTaskId, node.file_index!, selectionAction === 'resume');
+            else if (primaryAction) onCommand(node.id, primaryAction);
+          }}><ActionIcon action={primaryAction === 'retry' ? 'retry' : selectionAction} /></button>
+          {isBtFile && fileIsSelected && onFileCancel
+            ? <button className="child-cancel" aria-label={`取消 ${nodeName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onFileCancel(parentTaskId, node.file_index!); }}><ActionIcon action="cancel" /></button>
+            : !isBtFile && canUseTaskCommand && node.status !== 'failed'
+              ? <button className="child-cancel" aria-label={`取消 ${nodeName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onCommand(node.id, 'cancel'); }}><ActionIcon action="cancel" /></button>
+              : null}
+        </span>}
+      </article>
+      {hasChildren && isExpanded && <div className="queue-tree-children"><QueueTreeRows nodes={nodeChildren} depth={depth + 1} expanded={expanded} onToggle={onToggle} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={parentTaskId} isBtFileTree={isBtFileTree} /></div>}
+    </div>;
+  })}</>;
+}
+
 export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBatchCommand, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
@@ -306,7 +364,8 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
           file_index: file.index,
           selected: file.selected,
         }));
-        const hasChildren = !isCompleted && Boolean(taskChildren?.length)
+        const isBtFileTree = !task.children?.length && Boolean(task.files?.length);
+        const hasChildren = Boolean(taskChildren?.length)
           && (task.kind === 'folder' || taskChildren!.length > 1);
         const childRoot = taskChildren ? sharedChildRoot(taskChildren) : undefined;
         const taskName = displayTaskName(task);
@@ -339,21 +398,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
               <button className="task-more-button" aria-label={`更多操作 ${taskName}`} title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>
             </div>
           </article>
-          {hasChildren && isExpanded && <div className="children">{taskChildren!.map((child) => {
-            const childName = displayChildName(child, childRoot);
-            const fileIsSelected = child.selected !== false;
-            const fileAction = task.status === 'paused' || !fileIsSelected ? 'resume' as const : 'pause' as const;
-            const fileActionLabel = fileAction === 'pause' ? '暂停' : '继续';
-            const canControlChild = ['downloading', 'paused', 'queued'].includes(task.status)
-              && (child.file_index === undefined || Boolean(onFileSelection));
-            return <article className="child-row" key={child.id}>
-              <span className="child-name"><i aria-hidden="true">↳</i><b title={childName}>{childName}</b></span>
-              <span className="child-progress" aria-hidden="true"><i><b style={{ width: `${child.progress}%` }} /></i></span>
-              <small className="child-progress-value">{child.progress}%</small>
-              <small className="child-transfer-size" title={child.size}>{child.size || '—'}</small>
-              {canControlChild && <span className="child-actions"><button aria-label={`${fileActionLabel} ${childName}`} title={`${fileActionLabel}此文件`} onClick={(event) => { event.stopPropagation(); if (child.file_index !== undefined) onFileSelection!(task.id, child.file_index, fileAction === 'resume'); else onCommand(child.id, fileAction); }}><ActionIcon action={fileAction} /></button>{fileIsSelected && (child.file_index !== undefined && onFileCancel ? <button className="child-cancel" aria-label={`取消 ${childName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onFileCancel(task.id, child.file_index!); }}><ActionIcon action="cancel" /></button> : child.file_index === undefined ? <button className="child-cancel" aria-label={`取消 ${childName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onCommand(child.id, 'cancel'); }}><ActionIcon action="cancel" /></button> : null)}</span>}
-            </article>;
-          })}</div>}
+          {hasChildren && isExpanded && <div className="children queue-tree"><QueueTreeRows nodes={taskChildren!} depth={0} expanded={expanded} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={task.id} isBtFileTree={isBtFileTree} childRoot={childRoot} /></div>}
         </div>;
       })}
       {contextMenu && <TaskContextMenu state={contextMenu} onClose={closeContextMenu} onCommand={runCommand} />}

@@ -19,7 +19,7 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     createCloudDirectory: vi.fn().mockResolvedValue(undefined),
     pickAndUploadFiles: vi.fn().mockResolvedValue(undefined),
     downloadCloudFile: vi.fn().mockResolvedValue('https://download.example/file'),
-    downloadCloudDirectory: vi.fn().mockResolvedValue({ queuedCount: 0, tasks: [], failures: [] }),
+    downloadCloudDirectory: vi.fn().mockResolvedValue({ task: { id: 'folder-download-empty', name: '空目录', kind: 'folder', status: 'queued', progress: 0 }, queuedCount: 0, failures: [] }),
     renameCloudFile: vi.fn().mockResolvedValue(undefined),
     moveCloudFiles: vi.fn().mockResolvedValue(undefined),
     copyCloudFiles: vi.fn().mockResolvedValue(undefined),
@@ -949,11 +949,11 @@ it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
   await waitFor(() => expect(client.listCloudDirectory).toHaveBeenLastCalledWith('pikpak', recycleBinId));
 });
 
-it('queues a selected cloud folder through the directory download command and reports every queued task', async () => {
+it('queues a selected cloud folder as one directory parent task', async () => {
   const user = userEvent.setup();
   const onDownloadTask = vi.fn();
-  const queuedTask = { id: 'folder-download-1', source: 'cloud://quark/child-1', name: '说明.txt', kind: 'cloud' as const, status: 'queued' as const, progress: 0 };
-  const downloadCloudDirectory = vi.fn().mockResolvedValue({ queuedCount: 1, tasks: [{ task: queuedTask }], failures: [] });
+  const queuedTask = { id: 'folder-download-1', name: '归档', kind: 'folder' as const, status: 'queued' as const, progress: 0 };
+  const downloadCloudDirectory = vi.fn().mockResolvedValue({ task: { task: queuedTask }, queuedCount: 1, failures: [] });
   const client = createCloudFake({ downloadCloudDirectory });
   render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} onDownloadTask={onDownloadTask} />);
 
@@ -963,16 +963,17 @@ it('queues a selected cloud folder through the directory download command and re
 
   await waitFor(() => expect(downloadCloudDirectory).toHaveBeenCalledWith('quark', 'folder-1', '归档'));
   expect(client.downloadCloudFile).not.toHaveBeenCalled();
+  expect(onDownloadTask).toHaveBeenCalledTimes(1);
   expect(onDownloadTask).toHaveBeenCalledWith({ task: queuedTask });
 });
 
 it('reports queued count and redacted per-file directory download failures instead of silently succeeding', async () => {
   const user = userEvent.setup();
-  const queuedTask = { id: 'folder-download-1', source: 'cloud://quark/child-1', name: '说明.txt', kind: 'cloud' as const, status: 'queued' as const, progress: 0 };
+  const queuedTask = { id: 'folder-download-1', name: '归档', kind: 'folder' as const, status: 'queued' as const, progress: 0 };
   const client = createCloudFake({
     downloadCloudDirectory: vi.fn().mockResolvedValue({
       queuedCount: 1,
-      tasks: [{ task: queuedTask }],
+      task: { task: queuedTask },
       failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
     })
   });
