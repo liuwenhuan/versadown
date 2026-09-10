@@ -356,6 +356,7 @@ pub struct QuarkFile {
     pub name: String,
     pub is_folder: bool,
     pub size: Option<u64>,
+    pub updated_at: Option<String>,
 }
 pub fn parse_quark_files(body: &str) -> Result<Vec<QuarkFile>, QuarkError> {
     let v: Value = serde_json::from_str(body).map_err(|_| QuarkError::InvalidResponse)?;
@@ -371,6 +372,12 @@ pub fn parse_quark_files(body: &str) -> Result<Vec<QuarkFile>, QuarkError> {
                     .as_bool()
                     .unwrap_or(x["file_type"].as_i64() == Some(0)),
                 size: x["size"].as_u64(),
+                updated_at: x.get("updated_at").and_then(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| value.is_number().then(|| value.to_string()))
+                }),
             })
         })
         .collect()
@@ -486,7 +493,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
                     name: f.name,
                     kind: if f.is_folder { "folder" } else { "file" }.into(),
                     size: f.size,
-                    modified_at: None,
+                    modified_at: f.updated_at,
                 })
             }
             let total = v.pointer("/metadata/_total").and_then(Value::as_u64);
