@@ -12,12 +12,25 @@ use uuid::Uuid;
 
 use crate::downloader::load_torrent_base64;
 use crate::{
-    cloud::{CredentialStore, DpapiCredentialStore},
+    cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, DpapiCredentialStore},
     confirm_download, duplicate_state, prepare_download, resolve_magnet_torrent,
     retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings,
     DownloadAction, DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome,
     ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
+
+// Share branches are deliberately declared before Task 4 wires its resolver.
+#[allow(dead_code)]
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ParseDownloadOutcome {
+    Task(ParseOutcome),
+    ShareConfirmation(CloudShareConfirmation),
+    AccessCodeRequired {
+        provider: CloudProvider,
+        message: &'static str,
+    },
+}
 
 pub struct AppState {
     pub store: Arc<TaskStore>,
@@ -136,7 +149,7 @@ pub(crate) fn download_submission_options(state: &AppState) -> Result<UriSubmiss
 pub async fn parse_download(
     input: String,
     state: State<'_, AppState>,
-) -> Result<ParseOutcome, String> {
+) -> Result<ParseDownloadOutcome, String> {
     let service = state
         .runtime
         .service()
@@ -144,7 +157,7 @@ pub async fn parse_download(
         .map_err(|error| error.to_string())?;
     let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
     if outcome.duplicate.is_some() {
-        return Ok(outcome);
+        return Ok(ParseDownloadOutcome::Task(outcome));
     }
     if outcome.task.kind == "torrent" {
         let options = download_submission_options(&state)?
@@ -220,7 +233,7 @@ pub async fn parse_download(
         }
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     }
-    Ok(outcome)
+    Ok(ParseDownloadOutcome::Task(outcome))
 }
 
 fn parse_resources(store: &TaskStore, task_id: Uuid) -> Result<Vec<ParseResource>, String> {

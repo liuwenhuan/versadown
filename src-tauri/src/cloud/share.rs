@@ -9,6 +9,24 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// The only cloud-share plan projection permitted across the IPC boundary.
+/// Its source is an opaque, validated `cloud-share://` reference; credentials,
+/// provider session context, and canonical share identifiers remain DPAPI-only.
+#[derive(Clone, Serialize)]
+pub struct CloudShareConfirmation {
+    pub plan_source: String,
+    pub title: String,
+    pub resources: Vec<CloudShareConfirmationResource>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct CloudShareConfirmationResource {
+    pub id: String,
+    pub name: String,
+    pub size: String,
+    pub selected: bool,
+}
 use zeroize::Zeroizing;
 
 pub const SHARE_PLAN_SECRET: &str = "cloud-share-plans-v1";

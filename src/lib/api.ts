@@ -1,4 +1,4 @@
-import { AiSettings, AiSettingsInput, AppSettings, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownload, DuplicateDownloadState, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
+import { AiSettings, AiSettingsInput, AppSettings, CloudShareAccessCodeRequired, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -8,7 +8,7 @@ function fileNameFrom(value: string) {
 
 function id() { return `local-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 
-export function parseLocally(input: string): { task?: QueueTask; confirmation?: ParseResult } {
+export function parseLocally(input: string): ParseDownloadResult {
   const trimmed = input.trim();
   const isMulti = /^(magnet:|thunder:)/i.test(trimmed) || /\.torrent(?:\?|$)/i.test(trimmed) || /(?:pan\.quark\.cn|mypikpak\.com|pikpak\.me)/i.test(trimmed);
   if (isMulti) {
@@ -29,12 +29,28 @@ export function isTauriRuntime() {
 }
 
 type NativeTaskOutcome = QueueTask & { duplicate?: DuplicateDownloadState };
-type NativeParseOutcome = {
+type NativeTaskParseOutcome = {
+  kind: 'task';
   task: QueueTask;
   requires_confirmation: boolean;
   resources?: ConfirmResource[];
   duplicate?: DuplicateDownloadState;
 };
+
+type NativeShareConfirmationOutcome = {
+  kind: 'share_confirmation';
+  plan_source: string;
+  title: string;
+  resources: ConfirmResource[];
+};
+
+type NativeAccessCodeRequiredOutcome = {
+  kind: 'access_code_required';
+  provider: CloudShareAccessCodeRequired['provider'];
+  message: string;
+};
+
+type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome;
 
 function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
   return result.duplicate
@@ -42,9 +58,28 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
     : { task: result };
 }
 
-export async function parseDownload(input: string): Promise<{ task?: QueueTask; confirmation?: ParseResult; duplicate?: DuplicateDownload }> {
+export async function parseDownload(input: string): Promise<ParseDownloadResult> {
   if (!isTauriRuntime()) return parseLocally(input);
   const result = await invoke<NativeParseOutcome>('parse_download', { input });
+  if (result.kind === 'share_confirmation') {
+    return {
+      confirmation: {
+        taskId: result.plan_source,
+        title: result.title,
+        requiresConfirmation: true,
+        resources: result.resources,
+        processing: ['确认后开始网盘下载']
+      }
+    };
+  }
+  if (result.kind === 'access_code_required') {
+    return {
+      shareAccessCodeRequired: {
+        provider: result.provider,
+        message: result.message
+      }
+    };
+  }
   if (result.duplicate) return { duplicate: { task: result.task, state: result.duplicate } };
   if (!result.requires_confirmation) return { task: result.task };
   return {

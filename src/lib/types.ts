@@ -83,6 +83,19 @@ export interface ParseResult {
   isBitTorrent?: boolean;
 }
 
+export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
+
+export interface CloudShareAccessCodeRequired {
+  provider: CloudShareProvider;
+  message: string;
+}
+
+export type ParseDownloadResult =
+  | { task: QueueTask; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never }
+  | { confirmation: ParseResult; task?: never; shareAccessCodeRequired?: never; duplicate?: never }
+  | { shareAccessCodeRequired: CloudShareAccessCodeRequired; task?: never; confirmation?: never; duplicate?: never }
+  | { duplicate: DuplicateDownload; task?: never; confirmation?: never; shareAccessCodeRequired?: never };
+
 export type Provider = 'quark' | 'pikpak';
 
 export interface CloudItem {
