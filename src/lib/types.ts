@@ -29,6 +29,8 @@ export interface QueueTask {
   aria_error_code?: string;
   created_at?: number;
   updated_at?: number;
+  completed_at?: number;
+  completedAt?: number;
   files?: readonly DownloadFile[];
   file_index?: number;
   selected?: boolean;

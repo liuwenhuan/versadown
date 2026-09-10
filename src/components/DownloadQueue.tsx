@@ -79,9 +79,9 @@ export function completedTaskSize(task: QueueTask): string | undefined {
   return downloaded !== undefined ? formatBytes(downloaded) : undefined;
 }
 
-export function completedAt(updatedAt: number | undefined): string | undefined {
-  if (!Number.isFinite(updatedAt) || !updatedAt || updatedAt <= 0) return undefined;
-  const date = new Date(updatedAt < 1_000_000_000_000 ? updatedAt * 1000 : updatedAt);
+export function completedAt(completedAt: number | undefined): string | undefined {
+  if (!Number.isFinite(completedAt) || !completedAt || completedAt <= 0) return undefined;
+  const date = new Date(completedAt < 1_000_000_000_000 ? completedAt * 1000 : completedAt);
   if (Number.isNaN(date.getTime())) return undefined;
   const pad = (value: number) => String(value).padStart(2, '0');
   return `完成于 ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -321,7 +321,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
             : task.status === 'failed' ? 'retry' as const : null;
         const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : '重新下载';
         const completedSize = isCompleted ? completedTaskSize(task) : undefined;
-        const completionTime = isCompleted ? completedAt(task.updated_at) : undefined;
+        const completionTime = isCompleted ? completedAt(task.completed_at ?? task.completedAt) : undefined;
         const completedHasVideo = isCompleted && taskHasVideo(task);
         return <div className="task-group" key={task.id}>
           <article className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>

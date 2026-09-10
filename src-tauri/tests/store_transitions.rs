@@ -35,6 +35,30 @@ fn newly_created_task_exposes_a_stable_creation_time() {
 }
 
 #[test]
+fn completing_a_task_records_a_durable_completion_time() {
+    let store = TaskStore::open_in_memory().expect("memory store");
+    let task = store
+        .create(NewTask::direct("https://host/completed.iso"))
+        .expect("task");
+    let completed = store
+        .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+            status: TaskStatus::Completed,
+            progress: 100,
+            ..task
+        })
+        .expect("complete task");
+    let completed_at = serde_json::to_value(&completed).unwrap()["completed_at"]
+        .as_i64()
+        .expect("completion time");
+
+    assert!(completed_at > 0);
+    assert_eq!(
+        serde_json::to_value(store.find(completed.id).unwrap()).unwrap()["completed_at"],
+        completed_at
+    );
+}
+
+#[test]
 fn task_store_lists_active_and_terminal_tasks_separately() {
     let store = TaskStore::open_in_memory().expect("memory store");
     let active = store

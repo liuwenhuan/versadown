@@ -104,7 +104,7 @@ fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        4
+        6
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -144,6 +144,10 @@ fn version_three_database_backfills_creation_time_from_the_existing_timestamp() 
         serde_json::to_value(task).unwrap()["created_at"],
         1_725_000_000
     );
+    assert_eq!(
+        serde_json::to_value(store.find(id).unwrap()).unwrap()["completed_at"],
+        1_725_000_000
+    );
     drop(store);
 
     let connection = Connection::open(&path).unwrap();
@@ -151,7 +155,7 @@ fn version_three_database_backfills_creation_time_from_the_existing_timestamp() 
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        4
+        6
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -212,6 +216,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             aria_error_code: None,
             created_at: task.created_at,
             updated_at: 1_725_000_000,
+            completed_at: None,
         })
         .expect("persist snapshot");
     store

@@ -298,6 +298,8 @@ pub struct DownloadTask {
     pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -360,6 +362,7 @@ pub struct QueueTaskPayload {
     pub aria_error_code: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub completed_at: Option<i64>,
     pub files: Vec<TransferFile>,
     pub cleanup_pending: bool,
     #[serde(default)]

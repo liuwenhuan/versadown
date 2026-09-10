@@ -87,6 +87,7 @@ impl TaskStore {
             aria_error_code: None,
             created_at,
             updated_at: created_at,
+            completed_at: None,
         };
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -297,13 +298,19 @@ impl TaskStore {
         } else {
             current.progress
         };
+        let completed_at = if next == TaskStatus::Completed {
+            current.completed_at.or(Some(current_timestamp()))
+        } else {
+            current.completed_at
+        };
         connection.execute(
-            "UPDATE tasks SET status = ?1, progress = ?2 WHERE id = ?3",
-            params![next.as_db(), progress, id.to_string()],
+            "UPDATE tasks SET status = ?1, progress = ?2, completed_at = ?3 WHERE id = ?4",
+            params![next.as_db(), progress, completed_at, id.to_string()],
         )?;
         Ok(DownloadTask {
             status: next,
             progress,
+            completed_at,
             ..current
         })
     }
@@ -429,7 +436,7 @@ impl TaskStore {
         connection.execute(
             "UPDATE tasks SET status='parsing',progress=0,error=NULL,aria_gid=?1,followed_by_gid=NULL,
              metadata_gid=NULL,total_length=NULL,completed_length=0,download_speed=0,upload_speed=0,
-             connections=0,eta_seconds=NULL,aria_error_code=NULL,selection_confirmed=0,updated_at=?2
+             connections=0,eta_seconds=NULL,aria_error_code=NULL,selection_confirmed=0,completed_at=NULL,updated_at=?2
              WHERE id=?3",
             params![gid, current_timestamp(), id.to_string()],
         )?;
@@ -556,17 +563,24 @@ impl TaskStore {
     ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
+        let current = find_with_transaction(&transaction, snapshot.id)?
+            .ok_or(StoreError::NotFound(snapshot.id))?;
+        let completed_at = if snapshot.status == TaskStatus::Completed {
+            current.completed_at.or(Some(current_timestamp()))
+        } else {
+            current.completed_at
+        };
         let changed = transaction.execute(
             "UPDATE tasks SET name = ?1, status = ?2, progress = ?3, error = ?4, aria_gid = ?5, followed_by_gid = ?6,
              total_length = ?7, completed_length = ?8, download_speed = ?9, upload_speed = ?10,
-             connections = ?11, eta_seconds = ?12, aria_error_code = ?13, updated_at = ?14 WHERE id = ?15",
+             connections = ?11, eta_seconds = ?12, aria_error_code = ?13, updated_at = ?14, completed_at = ?15 WHERE id = ?16",
             params![
                 snapshot.name, snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.aria_gid,
                 snapshot.followed_by_gid, snapshot.total_length.map(|value| sqlite_i64("total_length", value)).transpose()?,
                 sqlite_i64("completed_length", snapshot.completed_length)?, sqlite_i64("download_speed", snapshot.download_speed)?,
                 sqlite_i64("upload_speed", snapshot.upload_speed)?, snapshot.connections,
                 snapshot.eta_seconds.map(|value| sqlite_i64("eta_seconds", value)).transpose()?,
-                snapshot.aria_error_code, current_timestamp(), snapshot.id.to_string(),
+                snapshot.aria_error_code, current_timestamp(), completed_at, snapshot.id.to_string(),
             ],
         )?;
         if changed == 0 {
@@ -641,11 +655,11 @@ impl TaskStore {
     }
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, metadata_gid, created_at FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 5 {
+    if version >= 6 {
         return Ok(());
     }
 
@@ -661,6 +675,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         ("eta_seconds", "INTEGER"),
         ("aria_error_code", "TEXT"),
         ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("completed_at", "INTEGER"),
         ("selection_confirmed", "INTEGER NOT NULL DEFAULT 0"),
         ("metadata_gid", "TEXT"),
         ("created_at", "INTEGER NOT NULL DEFAULT 0"),
@@ -710,7 +725,8 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS cloud_directory_group_items_task_id ON cloud_directory_group_items(task_id) WHERE task_id IS NOT NULL;
          UPDATE tasks SET created_at = updated_at WHERE created_at = 0;
-         PRAGMA user_version = 5;",
+         UPDATE tasks SET completed_at = updated_at WHERE status = 'completed' AND completed_at IS NULL AND updated_at > 0;
+         PRAGMA user_version = 6;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -811,8 +827,9 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         eta_seconds: optional_u64(row, 14)?,
         aria_error_code: row.get(15)?,
         updated_at: row.get(16)?,
-        metadata_gid: row.get(17)?,
-        created_at: row.get(18)?,
+        completed_at: row.get(17)?,
+        metadata_gid: row.get(18)?,
+        created_at: row.get(19)?,
     })
 }
 
