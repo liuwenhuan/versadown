@@ -1742,8 +1742,12 @@ mod tests {
         .expect("a successful UC directory response is not a web-verification response");
 
         assert_eq!(directory.id, "0");
-        assert_eq!(directory.items.len(), 1);
-        assert_eq!(directory.items[0].id, "file-1");
+        assert_eq!(directory.items.len(), 2);
+        assert!(directory.items.iter().any(|item| item.id == "file-1"));
+        assert!(directory
+            .items
+            .iter()
+            .any(|item| item.id == UC_RECYCLE_BIN_ID));
     }
 
     #[test]
