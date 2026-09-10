@@ -70,12 +70,11 @@ it('resizes around the launcher bottom-right corner and clamps it to the work ar
   expect(resized).toEqual({ x: 414, y: 373 });
 });
 
-it('uses the hexagon height as the complete live-speed viewport without a shadow margin', () => {
-  expect(launcherWindow.launcherCompactSize(false)).toEqual({ width: 64, height: 64 });
-  expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 146, height: 64 });
+it('uses the hexagon as the complete compact launcher viewport', () => {
+  expect(launcherWindow.launcherCompactSize()).toEqual({ width: 64, height: 64 });
 });
 
-it('requests the clipped native live shape instead of a transparent rectangle', async () => {
+it('requests the clipped native compact shape instead of a transparent rectangle', async () => {
   native.launcherPosition.mockResolvedValueOnce({ x: 1000, y: 800 });
   native.launcherSize.mockResolvedValueOnce({ width: 64, height: 64 });
   native.currentMonitor.mockResolvedValueOnce({
@@ -83,15 +82,15 @@ it('requests the clipped native live shape instead of a transparent rectangle', 
     workArea: { position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } }
   });
 
-  await launcherWindow.setLauncherLiveSpeedVisible(true);
+  await launcherWindow.setLauncherCompact();
 
   expect(native.invoke).toHaveBeenCalledWith('set_launcher_bounds', {
-    x: 918,
+    x: 1000,
     y: 800,
-    width: 146,
+    width: 64,
     height: 64,
-    compact: false,
-    live: true
+    compact: true,
+    live: false
   });
 });
 

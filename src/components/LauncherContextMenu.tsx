@@ -4,6 +4,7 @@ import type { LauncherVisibility } from '../lib/types';
 export type LauncherMenuAction = 'hide_manager' | 'new_download' | 'start_all' | 'pause_all' | 'quit';
 
 interface LauncherContextMenuProps {
+  downloadSpeed: string;
   managerVisible: boolean;
   visibility: LauncherVisibility;
   onAction(action: LauncherMenuAction): void;
@@ -33,7 +34,7 @@ const visibilityOptions: Array<{ value: LauncherVisibility; label: string; icon:
   { value: 'hidden', label: '关闭显示', icon: 'hidden' },
 ];
 
-export function LauncherContextMenu({ managerVisible, visibility, onAction, onVisibilityChange, onClose }: LauncherContextMenuProps) {
+export function LauncherContextMenu({ downloadSpeed, managerVisible, visibility, onAction, onVisibilityChange, onClose }: LauncherContextMenuProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -70,6 +71,7 @@ export function LauncherContextMenu({ managerVisible, visibility, onAction, onVi
         <header><b>悬浮球显示</b><button type="button" aria-label="返回悬浮球菜单" onClick={() => setSettingsOpen(false)}><LauncherMenuIcon action="back" /></button></header>
         {visibilityOptions.map((option) => <div key={option.value}><button role="menuitemradio" aria-checked={visibility === option.value} className={visibility === option.value ? 'selected' : undefined} onClick={() => { onVisibilityChange(option.value); onClose(); }}><LauncherMenuIcon action={option.icon} /><span>{option.label}</span>{visibility === option.value && <i aria-hidden="true">✓</i>}</button></div>)}
       </> : <>
+        <div className="launcher-menu-speed" aria-label="当前整体下载速度"><span>当前下载速度</span><strong>{downloadSpeed}</strong></div>
         <div><button role="menuitem" onClick={() => runAction('hide_manager')}><LauncherMenuIcon action="hide_manager" /><span>{managerVisible ? '隐藏主界面' : '显示主界面'}</span></button></div>
         <div><button role="menuitem" onClick={() => runAction('new_download')}><LauncherMenuIcon action="new_download" /><span>新建下载</span></button></div>
         <div><button role="menuitem" onClick={() => runAction('start_all')}><LauncherMenuIcon action="start_all" /><span>开始全部任务</span></button></div>

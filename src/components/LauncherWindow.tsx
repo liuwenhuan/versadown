@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { FloatingLauncher } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, getLauncherManagerVisible, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherLiveSpeedVisible, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
-import { getDownloadEngineState, getDownloadGlobalStat, getSettings, isTauriRuntime, updateSettings } from '../lib/api';
-import { formatCompactSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
-import type { DownloadEngineState, DownloadGlobalStat, LauncherVisibility } from '../lib/types';
+import { anchorLauncherToWorkArea, getLauncherManagerVisible, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
+import { getDownloadGlobalStat, getSettings, isTauriRuntime, updateSettings } from '../lib/api';
+import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
+import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
 
 function waitForLauncherTransitionPaint() {
   return new Promise<void>((resolve) => {
@@ -20,7 +20,6 @@ function waitForLauncherTransitionPaint() {
 export function LauncherWindow() {
   const [activeCount, setActiveCount] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
-  const [engineAvailable, setEngineAvailable] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [expandedTransitioning, setExpandedTransitioning] = useState(false);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
@@ -30,10 +29,8 @@ export function LauncherWindow() {
   const [settingsReady, setSettingsReady] = useState(false);
   const [anchored, setAnchored] = useState(false);
   const statEventEpoch = useRef(0);
-  const engineEventEpoch = useRef(0);
   const hasActiveDownload = activeCount > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
-  const liveSpeedVisible = shouldShowLauncher && hasActiveDownload && engineAvailable;
 
   useEffect(() => {
     void anchorLauncherToWorkArea().catch(() => undefined).finally(() => setAnchored(true));
@@ -54,16 +51,15 @@ export function LauncherWindow() {
 
   useEffect(() => {
     if (!settingsReady || !anchored || expanded || expandedTransitioning || contextMenuOpen || contextMenuTransitioning) return;
-    void setLauncherLiveSpeedVisible(liveSpeedVisible)
+    void setLauncherCompact()
       .then(() => setLauncherWindowVisible(shouldShowLauncher))
       .catch(() => undefined);
-  }, [anchored, contextMenuOpen, contextMenuTransitioning, expanded, expandedTransitioning, liveSpeedVisible, settingsReady, shouldShowLauncher]);
+  }, [anchored, contextMenuOpen, contextMenuTransitioning, expanded, expandedTransitioning, settingsReady, shouldShowLauncher]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let disposed = false;
     let unlistenDownloads: (() => void) | undefined;
-    let unlistenEngine: (() => void) | undefined;
     const applyStat = (stat: DownloadGlobalStat) => {
       setActiveCount(stat.num_active);
       setDownloadSpeed(stat.download_speed);
@@ -77,21 +73,12 @@ export function LauncherWindow() {
     }).then(async (stop) => {
       if (disposed) { stop(); return; }
       unlistenDownloads = stop;
-      unlistenEngine = await listen<DownloadEngineState>('download-engine-state-updated', (event) => {
-        engineEventEpoch.current += 1;
-        if (!disposed) setEngineAvailable(event.payload.available);
-      });
-      if (disposed) { unlistenEngine(); return; }
       const statEpoch = statEventEpoch.current;
-      const engineEpoch = engineEventEpoch.current;
       void getDownloadGlobalStat().then((stat) => {
         if (!disposed && statEventEpoch.current === statEpoch) applyStat(stat);
       }).catch(() => undefined);
-      void getDownloadEngineState().then((state) => {
-        if (!disposed && engineEventEpoch.current === engineEpoch) setEngineAvailable(state.available);
-      }).catch(() => { if (!disposed) setEngineAvailable(false); });
     }).catch(() => undefined);
-    return () => { disposed = true; unlistenDownloads?.(); unlistenEngine?.(); };
+    return () => { disposed = true; unlistenDownloads?.(); };
   }, []);
 
   function openContextMenu() {
@@ -100,7 +87,7 @@ export function LauncherWindow() {
     void (async () => {
       try {
         await waitForLauncherTransitionPaint();
-        await setLauncherContextMenuVisible(true, liveSpeedVisible);
+        await setLauncherContextMenuVisible(true);
         setContextMenuOpen(true);
         void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
         void showLauncherMenu().catch(() => undefined);
@@ -117,7 +104,7 @@ export function LauncherWindow() {
     setContextMenuTransitioning(true);
     setContextMenuOpen(false);
     void waitForLauncherTransitionPaint()
-      .then(() => setLauncherContextMenuVisible(false, liveSpeedVisible))
+      .then(() => setLauncherContextMenuVisible(false))
       .catch(() => undefined)
       .finally(() => setContextMenuTransitioning(false));
   }
@@ -127,7 +114,7 @@ export function LauncherWindow() {
     setExpanded(nextExpanded);
     setExpandedTransitioning(true);
     void waitForLauncherTransitionPaint()
-      .then(() => setLauncherExpanded(nextExpanded, liveSpeedVisible))
+      .then(() => setLauncherExpanded(nextExpanded))
       .catch(() => undefined)
       .finally(() => setExpandedTransitioning(false));
   }
@@ -146,17 +133,15 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${liveSpeedVisible ? 'launcher-has-live-speed' : ''} ${liveSpeedVisible && !expanded ? 'launcher-speed-active' : ''} ${expanded ? 'launcher-expanded' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''} ${expandedTransitioning || contextMenuTransitioning ? 'launcher-viewport-transitioning' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${expanded ? 'launcher-expanded' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''} ${expandedTransitioning || contextMenuTransitioning ? 'launcher-viewport-transitioning' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
-        liveSpeed={liveSpeedVisible && !expanded ? { label: `下载速度 ${Math.round(downloadSpeed / 1024)} KB/s`, value: formatCompactSpeed(downloadSpeed) } : undefined}
         onParse={(input) => { void sendLauncherInput(input); }}
         onOpenTaskList={() => { void openLauncherManager(); }}
         onExpandedChange={changeExpanded}
         onDragStart={() => { void startLauncherDragging(); }}
         onContextMenu={openContextMenu}
       />
-      {liveSpeedVisible && expanded && <span className="launcher-live-speed">↓ {Math.round(downloadSpeed / 1024)} KB/s</span>}
-      {contextMenuOpen && <LauncherContextMenu managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}
+      {contextMenuOpen && <LauncherContextMenu downloadSpeed={formatSpeed(downloadSpeed)} managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}
     </main>
   );
 }

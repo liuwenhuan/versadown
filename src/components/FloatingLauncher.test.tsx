@@ -1,5 +1,4 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -131,50 +130,4 @@ it('switches the launcher graphic when the theme changes', () => {
     theme.listeners.forEach((listener) => listener());
   });
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
-});
-
-it('matches the live-speed strip to the active launcher graphic theme', () => {
-  theme.resolved = 'light';
-  render(<FloatingLauncher onParse={vi.fn()} liveSpeed={{ label: '下载速度 204 KB/s', value: '204K' }} />);
-
-  const speed = screen.getByLabelText('下载速度 204 KB/s');
-  expect(speed).toHaveAttribute('data-icon-variant', 'light');
-
-  act(() => {
-    theme.resolved = 'dark';
-    theme.listeners.forEach((listener) => listener());
-  });
-  expect(speed).toHaveAttribute('data-icon-variant', 'dark');
-});
-
-it('renders the live launcher without rectangular chrome or seams around the hexagon', () => {
-  const stylesheet = document.createElement('style');
-  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
-  document.head.appendChild(stylesheet);
-  document.documentElement.classList.add('launcher-window');
-  try {
-    render(<FloatingLauncher onParse={vi.fn()} liveSpeed={{ label: '下载速度 204 KB/s', value: '204K' }} />);
-
-    const trigger = screen.getByRole('button', { name: '打开下载输入' });
-    const image = trigger.querySelector('img');
-    const speed = screen.getByLabelText('下载速度 204 KB/s');
-
-    expect(getComputedStyle(document.body).transition).toBe('none');
-    expect(getComputedStyle(trigger).appearance).toBe('none');
-    expect(getComputedStyle(trigger).transition).toBe('none');
-    expect(getComputedStyle(image!).filter).toBe('none');
-    expect(getComputedStyle(image!).clipPath).not.toBe('none');
-    expect(getComputedStyle(speed).borderTopWidth).toBe('0px');
-    expect(getComputedStyle(speed).boxShadow).toBe('none');
-    expect(getComputedStyle(speed).top).toBe('20px');
-    expect(getComputedStyle(speed).left).toBe('54px');
-    expect(getComputedStyle(speed).width).toBe('92px');
-    expect(getComputedStyle(speed).height).toBe('25px');
-    expect(getComputedStyle(speed).justifyContent).toBe('center');
-    expect(speed).toHaveTextContent('204K/s');
-    expect(speed).not.toHaveTextContent('↓');
-  } finally {
-    document.documentElement.classList.remove('launcher-window');
-    stylesheet.remove();
-  }
 });

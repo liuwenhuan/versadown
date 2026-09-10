@@ -6,7 +6,6 @@ import { isTauriRuntime } from './api';
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
 export const launcherDimensions = {
   compact: { width: 64, height: 64 },
-  live: { width: 146, height: 64 },
   menu: { width: 304, height: 392 },
   expanded: { width: 410, height: 364 }
 } as const;
@@ -43,8 +42,8 @@ export function isLauncherWindow() {
   return isTauriRuntime() && getCurrentWindow().label === LAUNCHER_WINDOW_LABEL;
 }
 
-export function launcherCompactSize(hasLiveSpeed: boolean) {
-  return hasLiveSpeed ? launcherDimensions.live : launcherDimensions.compact;
+export function launcherCompactSize() {
+  return launcherDimensions.compact;
 }
 
 async function resizeLauncherNow(size: NativeWindowSize, useCompactShape: boolean, logicalPositionOffset: number) {
@@ -76,7 +75,7 @@ async function resizeLauncherNow(size: NativeWindowSize, useCompactShape: boolea
       width: nextSize.width,
       height: nextSize.height,
       compact: useCompactShape,
-      live: !useCompactShape && size.width === launcherDimensions.live.width && size.height === launcherDimensions.live.height
+      live: false
     });
     return;
   }
@@ -91,21 +90,21 @@ function resizeLauncher(size: NativeWindowSize, useCompactShape: boolean, logica
   return operation;
 }
 
-export async function setLauncherExpanded(expanded: boolean, hasLiveSpeed = false) {
+export async function setLauncherExpanded(expanded: boolean) {
   await resizeLauncher(
-    expanded ? launcherDimensions.expanded : launcherCompactSize(hasLiveSpeed),
-    !expanded && !hasLiveSpeed
+    expanded ? launcherDimensions.expanded : launcherCompactSize(),
+    !expanded
   );
 }
 
-export async function setLauncherLiveSpeedVisible(visible: boolean) {
-  await resizeLauncher(launcherCompactSize(visible), !visible);
+export async function setLauncherCompact() {
+  await resizeLauncher(launcherCompactSize(), true);
 }
 
-export async function setLauncherContextMenuVisible(visible: boolean, hasLiveSpeed = false) {
+export async function setLauncherContextMenuVisible(visible: boolean) {
   await resizeLauncher(
-    visible ? launcherDimensions.menu : launcherCompactSize(hasLiveSpeed),
-    !visible && !hasLiveSpeed
+    visible ? launcherDimensions.menu : launcherCompactSize(),
+    !visible
   );
 }
 

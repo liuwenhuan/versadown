@@ -5,7 +5,6 @@ import mintWhiteIcon from '../assets/launcher/mint_white_128.png';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 
 interface FloatingLauncherProps {
-  liveSpeed?: { label: string; value: string };
   onParse(input: string): void | Promise<void>;
   onOpenTaskList?(): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
@@ -15,7 +14,7 @@ interface FloatingLauncherProps {
 
 const dragThreshold = 5;
 
-export function FloatingLauncher({ liveSpeed, onParse, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ onParse, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
   const [expanded, setExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
@@ -66,7 +65,6 @@ export function FloatingLauncher({ liveSpeed, onParse, onOpenTaskList, onExpande
         <button className="launcher-trigger" data-size="64" data-icon-variant={resolvedTheme} aria-label="打开下载输入">
           <img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" />
         </button>
-        {!expanded && liveSpeed && <span className="launcher-live-indicator" data-icon-variant={resolvedTheme} aria-label={liveSpeed.label}>{liveSpeed.value}<small>/s</small></span>}
       </div>
       {expanded && <NewDownloadDialog open onParse={onParse} onClose={() => setLauncherExpanded(false)} onOpenTaskList={() => { void onOpenTaskList?.(); setLauncherExpanded(false); }} />}
     </>
