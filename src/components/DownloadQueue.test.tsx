@@ -115,6 +115,54 @@ it('does not expose expansion for a single-file torrent task', () => {
   expect(screen.queryByText('Downloads/movie.mkv')).not.toBeInTheDocument();
 });
 
+it('does not turn non-BT file metadata into a file-selection tree', () => {
+  const onFileSelection = vi.fn();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'cloud-fallback-files', name: '云盘目录', kind: 'cloud', status: 'downloading', progress: 20,
+      files: [
+        { index: 1, path: 'first.bin', length: 100, completed_length: 20, selected: true },
+        { index: 2, path: 'second.bin', length: 100, completed_length: 10, selected: true },
+      ],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    onFileSelection={onFileSelection}
+  />);
+
+  expect(screen.queryByRole('button', { name: '展开 云盘目录' })).not.toBeInTheDocument();
+  expect(screen.queryByText('first.bin')).not.toBeInTheDocument();
+  expect(onFileSelection).not.toHaveBeenCalled();
+});
+
+it('keeps completed BT file lists collapsed while completed cloud folders remain inspectable', async () => {
+  const user = userEvent.setup();
+  render(<DownloadQueue
+    tasks={[
+      {
+        id: 'completed-torrent-files', name: '完成的 BT 合集', kind: 'torrent', status: 'completed', progress: 100,
+        files: [
+          { index: 1, path: 'D:/Downloads/one.mkv', length: 100, completed_length: 100, selected: true },
+          { index: 2, path: 'D:/Downloads/two.mkv', length: 100, completed_length: 100, selected: true },
+        ],
+      },
+      {
+        id: 'completed-cloud-folder', name: '完成的云盘目录', kind: 'folder', status: 'completed', progress: 100,
+        children: [{ id: 'completed-cloud-file', name: 'archived.mkv', kind: 'cloud', status: 'completed', progress: 100 }],
+      },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.queryByRole('button', { name: '展开 完成的 BT 合集' })).not.toBeInTheDocument();
+  expect(screen.queryByText('one.mkv')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '展开 完成的云盘目录' }));
+  expect(screen.getByText('archived.mkv')).toBeVisible();
+});
+
 it('uses file operations instead of transfer status for expanded multi-file tasks and removes local path noise', async () => {
   const user = userEvent.setup();
   const onFileSelection = vi.fn();

@@ -354,7 +354,9 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
       {tasks.length === 0 ? <p className="queue-empty">还没有下载任务</p> : tasks.map((task) => {
         const isExpanded = expanded[task.id] ?? false;
         const isCompleted = task.status === 'completed';
-        const taskChildren = task.children?.length ? task.children : task.files?.map((file) => ({
+        const hasPersistentChildren = Boolean(task.children?.length);
+        const isBtFileTree = !hasPersistentChildren && (task.kind === 'magnet' || task.kind === 'torrent') && Boolean(task.files?.length);
+        const taskChildren = hasPersistentChildren ? task.children : isBtFileTree ? task.files!.map((file) => ({
           id: `${task.id}-file-${file.index}`,
           name: file.path,
           kind: 'file' as const,
@@ -363,10 +365,10 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
           size: file.length > 0 ? `${formatBytes(file.completed_length)} / ${formatBytes(file.length)}` : undefined,
           file_index: file.index,
           selected: file.selected,
-        }));
-        const isBtFileTree = !task.children?.length && Boolean(task.files?.length);
+        })) : undefined;
         const hasChildren = Boolean(taskChildren?.length)
-          && (task.kind === 'folder' || taskChildren!.length > 1);
+          && (task.kind === 'folder' || taskChildren!.length > 1)
+          && (!isCompleted || (task.kind === 'folder' && hasPersistentChildren));
         const childRoot = taskChildren ? sharedChildRoot(taskChildren) : undefined;
         const taskName = displayTaskName(task);
         const isPaused = task.status === 'paused';
