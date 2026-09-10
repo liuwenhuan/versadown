@@ -456,6 +456,21 @@ it('activates sort headers by keyboard without opening the selected folder', asy
   expect(client.listCloudDirectory).not.toHaveBeenCalledWith('quark', 'folder-1');
 });
 
+it('keeps file-list keyboard shortcuts available from selection checkboxes', async () => {
+  const client = createCloudFake();
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('报告.pdf');
+  const fileCheckbox = screen.getByRole('checkbox', { name: '选择 报告.pdf' });
+  fileCheckbox.focus();
+  fireEvent.keyDown(fileCheckbox, { key: 'a', ctrlKey: true });
+  expect(screen.getByRole('checkbox', { name: '选择 归档' })).toBeChecked();
+  expect(fileCheckbox).toBeChecked();
+
+  fireEvent.keyDown(fileCheckbox, { key: 'Delete' });
+  expect(screen.getByRole('alertdialog', { name: '确认移入回收站' })).toBeVisible();
+});
+
 it('opens folders by double click without rendering an enter button', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();

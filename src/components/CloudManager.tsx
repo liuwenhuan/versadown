@@ -776,7 +776,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function handleFileListKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
-    if (event.target !== event.currentTarget) return;
+    if ((event.target as HTMLElement).closest('.cloud-sort-button')) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
       event.preventDefault();
       setSelectedIds(selectableItems.map((item) => item.id));
