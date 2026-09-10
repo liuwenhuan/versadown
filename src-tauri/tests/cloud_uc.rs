@@ -1,8 +1,9 @@
 use alldownloader_lib::cloud::{
     uc::{parse_uc_web_session, UcClient, UcSession, UC_DESKTOP_USER_AGENT},
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, QuarkError,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
+    UploadHttpRequest, UploadHttpResponse,
 };
-use std::{collections::VecDeque, sync::Mutex};
+use std::{collections::VecDeque, io::Write, sync::Mutex};
 
 struct RecordingHttp {
     responses: Mutex<VecDeque<CloudHttpResponse>>,
@@ -94,7 +95,9 @@ fn uc_server_session_cookie_alone_can_read_the_root_directory() {
     ]);
     let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
 
-    assert!(client.directory("0").unwrap().items.is_empty());
+    let root = client.directory("0").unwrap();
+    assert_eq!(root.items.len(), 1);
+    assert_eq!(root.items[0].id, "__all_downloader_uc_recycle_bin__");
     assert_eq!(http.requests()[0].headers["Cookie"], "__puus=session");
 }
 
@@ -257,4 +260,141 @@ fn uc_file_mutations_keep_the_uc_endpoint_and_payload_contract() {
         serde_json::from_str::<serde_json::Value>(requests[4].body.as_deref().unwrap()).unwrap(),
         serde_json::json!({"action_type":2,"filelist":["file-1","folder-1"],"exclude_fids":[]})
     );
+}
+
+struct RecordingUpload {
+    responses: Mutex<VecDeque<UploadHttpResponse>>,
+    requests: Mutex<Vec<UploadHttpRequest>>,
+}
+
+impl RecordingUpload {
+    fn new(responses: impl IntoIterator<Item = UploadHttpResponse>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<UploadHttpRequest> {
+        std::mem::take(&mut *self.requests.lock().unwrap())
+    }
+}
+
+impl CloudUploadTransport for RecordingUpload {
+    fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        self.requests.lock().unwrap().push(request);
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(QuarkError::InvalidResponse)
+    }
+}
+
+fn upload_fixture() -> tempfile::NamedTempFile {
+    let mut fixture = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    fixture.write_all(b"cloud upload fixture").unwrap();
+    fixture
+}
+
+#[test]
+fn uc_upload_preserves_uc_headers_and_completes_cloud_drive_task() {
+    // Break caught: reusing Quark's authenticated request profile for UC
+    // silently changes the account/session that owns the CloudDrive task.
+    let http = RecordingHttp::sequence([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"https://pds.quark.cn","callback":"callback"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-put"}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-complete"}}"#,
+        r#"{"code":0,"data":{"fid":"uploaded-1","file_name":"upload.txt","size":20}}"#,
+    ]);
+    let upload = RecordingUpload::new([
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "\"part-1\"".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "<CompleteMultipartUploadResult/>".into(),
+        },
+    ]);
+    let fixture = upload_fixture();
+    let client = UcClient::new(UcSession::cookie("__pus=identity; __puus=session"), &http);
+
+    let uploaded = client.upload_file("0", fixture.path(), &upload).unwrap();
+
+    assert_eq!(uploaded.name, "upload.txt");
+    let api_requests = http.requests();
+    assert_eq!(api_requests.len(), 5);
+    assert!(api_requests.iter().all(|request| {
+        request
+            .url
+            .starts_with("https://pc-api.uc.cn/1/clouddrive/file/")
+            && request.url.contains("pr=UCBrowser")
+            && request.headers["User-Agent"].contains("uc-cloud-drive/")
+            && request.headers["Origin"] == "https://drive.uc.cn"
+            && request.headers["Referer"] == "https://drive.uc.cn/"
+            && request.headers["Cookie"] == "__pus=identity; __puus=session"
+    }));
+    assert!(upload
+        .requests()
+        .iter()
+        .all(|request| request.url.starts_with("https://ul-zb.pds.quark.cn/")));
+}
+
+#[test]
+fn uc_recycle_list_restore_and_delete_use_uc_session_headers() {
+    // Break caught: using a file ID rather than its recycle record, or omitting
+    // UC's browser session headers, can mutate a different account's records.
+    let http = RecordingHttp::sequence([
+        r#"{"code":0,"data":{"list":[{"record_id":"recycle-1","fid":"live-file-1","file_name":"old.txt","dir":false,"size":12}]},"metadata":{"_total":1}}"#,
+        r#"{"code":0,"data":{}}"#,
+        r#"{"code":0,"data":{}}"#,
+    ]);
+    let client = UcClient::new(UcSession::cookie("__pus=identity; __puus=session"), &http);
+
+    let entries = client.list_recycle_bin().unwrap();
+    client
+        .restore_recycle_entries(&[entries.items[0].id.clone()])
+        .unwrap();
+    client
+        .delete_recycle_entries(&[entries.items[0].id.clone()])
+        .unwrap();
+
+    assert_eq!(entries.items[0].id, "recycle-1");
+    let requests = http.requests();
+    assert!(requests[0].url.contains("file/recycle/list"));
+    assert!(requests[1].url.contains("file/recycle/restore"));
+    assert!(requests[2].url.contains("file/recycle/remove"));
+    for request in &requests {
+        assert_eq!(request.headers["Cookie"], "__pus=identity; __puus=session");
+        assert_eq!(request.headers["Origin"], "https://drive.uc.cn");
+        assert_eq!(request.headers["Referer"], "https://drive.uc.cn/");
+        assert_eq!(request.headers["User-Agent"], UC_DESKTOP_USER_AGENT);
+    }
+    for request in &requests[1..] {
+        let body: serde_json::Value =
+            serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["record_list"], serde_json::json!(["recycle-1"]));
+    }
+}
+
+#[test]
+fn uc_root_directory_exposes_the_synthetic_recycle_bin() {
+    // Break caught: treating the recycle bin as a normal server folder makes
+    // later writes and downloads act on an ID the provider never issued.
+    let http = RecordingHttp::sequence([
+        r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+    ]);
+    let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+    let root = client.directory("0").unwrap();
+
+    assert!(root.items.iter().any(|file| {
+        file.id == "__all_downloader_uc_recycle_bin__"
+            && file.name == "回收站"
+            && file.kind == "folder"
+    }));
 }

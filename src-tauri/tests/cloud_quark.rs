@@ -1,8 +1,9 @@
 use alldownloader_lib::cloud::{
     parse_quark_download_url, parse_quark_files, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CredentialStore, MemoryCredentialStore, QuarkClient, QuarkError,
+    CloudHttpTransport, CloudUploadTransport, CredentialStore, MemoryCredentialStore, QuarkClient,
+    QuarkError, UploadHttpRequest, UploadHttpResponse,
 };
-use std::sync::Mutex;
+use std::{collections::VecDeque, io::Write, sync::Mutex};
 
 struct RecordingHttp(Mutex<Vec<CloudHttpRequest>>);
 impl RecordingHttp {
@@ -110,4 +111,219 @@ fn authenticated_account_uses_the_uid_cookie_when_account_info_omits_an_id() {
         .unwrap();
     assert_eq!(account.id, "user-42");
     assert_eq!(account.display_name, "alice");
+}
+
+struct SequencedHttp {
+    responses: Mutex<VecDeque<CloudHttpResponse>>,
+    requests: Mutex<Vec<CloudHttpRequest>>,
+}
+
+impl SequencedHttp {
+    fn new(bodies: impl IntoIterator<Item = &'static str>) -> Self {
+        Self {
+            responses: Mutex::new(
+                bodies
+                    .into_iter()
+                    .map(|body| CloudHttpResponse {
+                        status: 200,
+                        body: body.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<CloudHttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl CloudHttpTransport for SequencedHttp {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        self.requests.lock().unwrap().push(request);
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(QuarkError::InvalidResponse)
+    }
+}
+
+struct RecordingUpload {
+    responses: Mutex<VecDeque<UploadHttpResponse>>,
+    requests: Mutex<Vec<UploadHttpRequest>>,
+}
+
+impl RecordingUpload {
+    fn new(responses: impl IntoIterator<Item = UploadHttpResponse>) -> Self {
+        Self {
+            responses: Mutex::new(responses.into_iter().collect()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<UploadHttpRequest> {
+        std::mem::take(&mut *self.requests.lock().unwrap())
+    }
+}
+
+impl CloudUploadTransport for RecordingUpload {
+    fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        self.requests.lock().unwrap().push(request);
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(QuarkError::InvalidResponse)
+    }
+}
+
+fn upload_fixture() -> tempfile::NamedTempFile {
+    let mut fixture = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    fixture.write_all(b"cloud upload fixture").unwrap();
+    fixture
+}
+
+#[test]
+fn quark_upload_runs_pre_hash_authorize_multipart_and_finish() {
+    // Break caught: skipping a CloudDrive stage can leave an uploaded object
+    // unreachable, while copying a temporary authorization into durable state
+    // would leak credentials outside this request.
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"https://pds.quark.cn","callback":"callback"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-put"}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-complete"}}"#,
+        r#"{"code":0,"data":{"fid":"uploaded-1","file_name":"upload.txt","size":20}}"#,
+    ]);
+    let upload = RecordingUpload::new([
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "\"part-1\"".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "<CompleteMultipartUploadResult/>".into(),
+        },
+    ]);
+    let fixture = upload_fixture();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    let uploaded = client.upload_file("0", fixture.path(), &upload).unwrap();
+
+    assert_eq!(uploaded.name, "upload.txt");
+    assert_eq!(uploaded.id, "uploaded-1");
+    let requests = http.requests();
+    assert!(requests
+        .iter()
+        .any(|request| request.url.contains("file/upload/pre")));
+    assert!(requests
+        .iter()
+        .any(|request| request.url.contains("file/update/hash")));
+    assert!(requests
+        .iter()
+        .any(|request| request.url.contains("file/upload/auth")));
+    assert!(requests
+        .iter()
+        .any(|request| request.url.contains("file/upload/finish")));
+    assert!(requests
+        .iter()
+        .all(|request| request.headers["Cookie"] == "sid=local-session"));
+    assert!(upload
+        .requests()
+        .iter()
+        .all(|request| request.url.starts_with("https://ul-zb.pds.quark.cn/")));
+}
+
+#[test]
+fn quark_upload_returns_hash_completed_file_without_object_transfer() {
+    // Break caught: treating a hash-complete response as an incomplete upload
+    // unnecessarily sends file bytes with a temporary object-store credential.
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb"}}"#,
+        r#"{"code":0,"data":{"finish":true,"fid":"instant-1","file_name":"upload.txt","size":20}}"#,
+    ]);
+    let upload = RecordingUpload::new([]);
+    let fixture = upload_fixture();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    let uploaded = client.upload_file("0", fixture.path(), &upload).unwrap();
+
+    assert_eq!(uploaded.id, "instant-1");
+    assert!(upload.requests().is_empty());
+    assert_eq!(http.requests().len(), 2);
+}
+
+#[test]
+fn quark_recycle_records_restore_and_permanent_delete_use_recycle_record_id() {
+    // Break caught: using the live file id instead of the recycle record id
+    // restores or permanently deletes a different item after the file changed.
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"list":[{"record_id":"recycle-1","fid":"live-file-1","file_name":"old.txt","dir":false,"size":12}]},"metadata":{"_total":1}}"#,
+        r#"{"code":0,"data":{}}"#,
+        r#"{"code":0,"data":{}}"#,
+    ]);
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    let directory = client.list_recycle_bin().unwrap();
+    client
+        .restore_recycle_entries(&[directory.items[0].id.clone()])
+        .unwrap();
+    client
+        .delete_recycle_entries(&[directory.items[0].id.clone()])
+        .unwrap();
+
+    assert_eq!(directory.items[0].id, "recycle-1");
+    assert_eq!(
+        directory.items[0].parent_id,
+        "__all_downloader_quark_recycle_bin__"
+    );
+    let requests = http.requests();
+    assert!(requests[0].url.contains("file/recycle/list"));
+    assert!(requests[1].url.contains("file/recycle/restore"));
+    assert!(requests[2].url.contains("file/recycle/remove"));
+    for request in &requests[1..] {
+        let body: serde_json::Value =
+            serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["record_list"], serde_json::json!(["recycle-1"]));
+    }
+}
+
+#[test]
+fn quark_root_directory_exposes_the_synthetic_recycle_bin() {
+    // Break caught: exposing the provider's recycle API as a real folder ID
+    // would let normal file operations target a synthetic directory.
+    let http = SequencedHttp::new([r#"{"code":0,"data":{"list":[]},"metadata":{"_total":0}}"#]);
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    let root = client.directory("0").unwrap();
+
+    assert!(root.items.iter().any(|file| {
+        file.id == "__all_downloader_quark_recycle_bin__"
+            && file.name == "回收站"
+            && file.kind == "folder"
+    }));
+}
+
+#[test]
+fn quark_upload_rejects_an_invalid_object_store_endpoint_before_sending_bytes() {
+    // Break caught: an unvalidated server-supplied bucket can direct local
+    // bytes and a short-lived authorization to an arbitrary network origin.
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"bad.example/evil","upload_url":"https://pds.quark.cn"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+    ]);
+    let upload = RecordingUpload::new([]);
+    let fixture = upload_fixture();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    assert!(matches!(
+        client.upload_file("0", fixture.path(), &upload),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert!(upload.requests().is_empty());
 }
