@@ -120,13 +120,13 @@ mod tests {
         assert_eq!(direct.url, "https://cdn.example/original");
         assert!(direct
             .headers
-            .contains(&("Authorization".into(), "Bearer current-access".into())));
+            .contains(&("User-Agent".into(), "official-browser-ua".into())));
         assert!(direct
             .headers
-            .contains(&("X-Captcha-Token".into(), "share-captcha".into())));
-        assert!(direct
-            .headers
-            .contains(&("X-Device-Id".into(), "actual-device".into())));
+            .contains(&("Referer".into(), "https://pan.xunlei.com/".into())));
+        assert!(!direct.headers.iter().any(|(key, _)| {
+            matches!(key.as_str(), "Authorization" | "X-Captcha-Token" | "X-Device-Id")
+        }));
         let requests = http.requests.lock().unwrap();
         let body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
         assert_eq!(body["captcha_token"], "");
@@ -141,6 +141,7 @@ mod tests {
             cap(),
             json!({
                 "id": "personal-id",
+                "name": "file.txt",
                 "web_content_link": "https://cdn.example/personal"
             }),
         ]);
@@ -158,6 +159,76 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(requests[1].url.ends_with("/files/personal-id"));
         assert!(!requests.iter().any(|request| request.url.contains("share/restore")));
+    }
+    #[test]
+    fn xunlei_recorded_transfer_waits_for_a_personal_download_link_without_leaking_api_headers() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            cap(),
+            json!({
+                "id": "personal-id",
+                "name": "file.txt",
+                "phase": "PHASE_TYPE_COMPLETE",
+                "web_content_link": ""
+            }),
+            json!({
+                "id": "personal-id",
+                "name": "file.txt",
+                "phase": "PHASE_TYPE_COMPLETE",
+                "download_url": "https://cdn.example/personal"
+            }),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+
+        let refreshed = adapter
+            .refresh_recorded_transfer(&selected(), "personal-id")
+            .unwrap();
+
+        let Ok(RecordedTransferDownload::Available(download)) = refreshed.result else {
+            panic!("a delayed personal direct link is required")
+        };
+        assert_eq!(download.url, "https://cdn.example/personal");
+        assert!(download
+            .headers
+            .contains(&("User-Agent".into(), "official-browser-ua".into())));
+        assert!(download
+            .headers
+            .contains(&("Referer".into(), "https://pan.xunlei.com/".into())));
+        assert!(!download.headers.iter().any(|(key, _)| {
+            matches!(key.as_str(), "Authorization" | "X-Captcha-Token" | "X-Device-Id")
+        }));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let captcha: Value = serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(captcha["action"], "GET:/drive/v1/files/personal-id");
+        assert!(requests[1].url.ends_with("/files/personal-id"));
+        assert!(requests[2].url.ends_with("/files/personal-id"));
+        assert!(!requests.iter().any(|request| request.url.contains("share/restore")));
+    }
+    #[test]
+    fn xunlei_recorded_transfer_persists_the_refreshed_personal_download_session() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            cap(),
+            json!({
+                "id": "personal-id",
+                "name": "file.txt",
+                "phase": "PHASE_TYPE_COMPLETE",
+                "web_content_link": "https://cdn.example/personal"
+            }),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+
+        adapter
+            .refresh_recorded_transfer(&selected(), "personal-id")
+            .unwrap();
+
+        let persisted: XunleiSession = serde_json::from_slice(
+            &credentials.load("xunlei").unwrap().expect("saved Xunlei session"),
+        )
+        .unwrap();
+        assert_eq!(persisted.web_security.captcha_token, "share-captcha");
+        assert!(persisted.web_security.expires_at > now());
     }
     #[test]
     fn xunlei_transfer_owner_uses_user_id_not_rotating_access_token() {
@@ -250,10 +321,7 @@ mod tests {
         let entry = selected();
         store.upsert(&entry.plan).unwrap();
         let source = entry.plan.source_for("f1");
-        assert!(matches!(
-            resolve_current_share_download(&store, adapter.as_ref(), &source),
-            Err(QuarkError::AuthorizationExpired)
-        ));
+        assert!(resolve_current_share_download(&store, adapter.as_ref(), &source).is_err());
         assert_eq!(
             store.resolve_entry(&source).unwrap().plan.transfers[0].created_file_id,
             "personal-id"
@@ -262,8 +330,58 @@ mod tests {
         assert!(requests[5].url.ends_with("/share/restore"));
         let body: Value = serde_json::from_str(requests[5].body.as_ref().unwrap()).unwrap();
         assert_eq!(body["file_ids"], json!(["f1"]));
-        assert!(requests[7].url.contains("/files/personal-id"));
+        let captcha: Value = serde_json::from_str(requests[7].body.as_deref().unwrap()).unwrap();
+        assert_eq!(captcha["action"], "GET:/drive/v1/files/personal-id");
         assert!(!source.contains("share123"));
+    }
+    #[test]
+    fn xunlei_share_transfer_waits_for_a_personal_download_link_after_restore() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":""}}),
+            cap(),
+            pass(),
+            json!({"task_id":"task1"}),
+            json!({"phase":"PHASE_TYPE_COMPLETE","params":{"trace_file_ids":"[\"personal-id\"]"}}),
+            cap(),
+            json!({
+                "id": "personal-id",
+                "name": "file.txt",
+                "phase": "PHASE_TYPE_COMPLETE",
+                "web_content_link": ""
+            }),
+            json!({
+                "id": "personal-id",
+                "name": "file.txt",
+                "phase": "PHASE_TYPE_COMPLETE",
+                "web_content_link": "https://cdn.example/personal"
+            }),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        let entry = selected();
+        store.upsert(&entry.plan).unwrap();
+        let source = entry.plan.source_for("f1");
+
+        let download = resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
+
+        assert_eq!(download.url, "https://cdn.example/personal");
+        assert!(!download.headers.iter().any(|(key, _)| {
+            matches!(key.as_str(), "Authorization" | "X-Captcha-Token" | "X-Device-Id")
+        }));
+        assert_eq!(
+            store.resolve_entry(&source).unwrap().plan.transfers[0].created_file_id,
+            "personal-id"
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 10);
+        let captcha: Value = serde_json::from_str(requests[7].body.as_deref().unwrap()).unwrap();
+        assert_eq!(captcha["action"], "GET:/drive/v1/files/personal-id");
+        assert!(requests[8].url.ends_with("/files/personal-id"));
+        assert!(requests[9].url.ends_with("/files/personal-id"));
     }
     #[test]
     fn xunlei_share_transfer_rechecks_login_after_successful_no_direct() {
@@ -355,6 +473,24 @@ pub struct XunleiShareAdapter<'a> {
 struct XunleiShareSession<'a> {
     http: &'a dyn CloudHttpTransport,
     headers: BTreeMap<String, String>,
+    user_agent: String,
+}
+
+struct XunleiShareTransport<'a>(&'a dyn CloudHttpTransport);
+
+impl CloudHttpTransport for XunleiShareTransport<'_> {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        self.0.send(request)
+    }
+}
+
+fn xunlei_cdn_headers(user_agent: &str) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if !user_agent.is_empty() {
+        headers.push(("User-Agent".into(), user_agent.into()));
+    }
+    headers.push(("Referer".into(), "https://pan.xunlei.com/".into()));
+    headers
 }
 impl XunleiShareAdapter<'_> {
     fn session(&self) -> Result<XunleiShareSession<'_>, QuarkError> {
@@ -398,6 +534,7 @@ impl XunleiShareAdapter<'_> {
                 ("Origin".into(), "https://pan.xunlei.com".into()),
                 ("Referer".into(), "https://pan.xunlei.com/".into()),
             ]),
+            user_agent: session.profile.user_agent.clone(),
         };
         // A fresh share action context never reuses or persists personal CAPTCHA state.
         let value=client.request("POST",format!("{AUTH}/v1/shield/captcha/init"),Some(json!({"client_id":session.profile.client_id,"device_id":session.profile.device_id,"captcha_token":"","action":"GET:/drive/v1/share","meta":{"package_name":session.profile.package_name,"client_version":session.profile.client_version,"captcha_sign":signature,"timestamp":timestamp,"user_id":session.user_id}})))?;
@@ -405,6 +542,30 @@ impl XunleiShareAdapter<'_> {
             .headers
             .insert("X-Captcha-Token".into(), required(&value, "captcha_token")?);
         Ok(client)
+    }
+
+    fn personal_download(
+        &self,
+        file_id: &str,
+        name: String,
+    ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
+        let bytes = self
+            .credentials
+            .load("xunlei")?
+            .ok_or(QuarkError::NotAuthorized)?;
+        let session: XunleiSession =
+            serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
+        let transport = XunleiShareTransport(self.http);
+        let client = XunleiClient::new(session, &transport);
+        let result = client.download(file_id);
+        let refreshed = serde_json::to_vec(&client.session()).map_err(|_| QuarkError::Storage)?;
+        self.credentials.save("xunlei", &refreshed)?;
+        let (url, _) = result?;
+        Ok(super::commands::ResolvedCloudDownload {
+            url,
+            name,
+            headers: xunlei_cdn_headers(&client.session().profile.user_agent),
+        })
     }
 }
 impl XunleiShareSession<'_> {
@@ -503,6 +664,18 @@ fn xunlei_share_pass_token(value: &Value, code: Option<&str>) -> Result<String, 
     }
     Ok(token.into())
 }
+
+fn xunlei_content_link(file: &Value) -> Result<Option<&str>, QuarkError> {
+    for key in ["web_content_link", "download_url"] {
+        match file.get(key) {
+            Some(Value::String(link)) if !link.is_empty() => return Ok(Some(link)),
+            None | Some(Value::Null | Value::String(_)) => {}
+            Some(_) => return Err(QuarkError::InvalidResponse),
+        }
+    }
+    Ok(None)
+}
+
 impl CloudShareAdapter for XunleiShareAdapter<'_> {
     fn inspect(
         &self,
@@ -614,24 +787,9 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
         {
             return Err(QuarkError::InvalidResponse);
         }
-        let session = self.session()?;
-        let file = session.request(
-            "GET",
-            format!("{DRIVE}/drive/v1/files/{}", encoded(created_file_id)),
-            None,
-        )?;
-        if file["id"].as_str() != Some(created_file_id) {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let url = required(&file, "web_content_link")?;
-        super::share::validate_direct_url(&url)?;
         Ok(ShareOperationResult {
             result: Ok(RecordedTransferDownload::Available(
-                super::commands::ResolvedCloudDownload {
-                    url,
-                    name: entry.entry.name.clone(),
-                    headers: session.headers.into_iter().collect(),
-                },
+                self.personal_download(created_file_id, entry.entry.name.clone())?,
             )),
             updated_context: None,
         })
@@ -682,21 +840,7 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
                     } else {
                         store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
                     }
-                    let file = session.request(
-                        "GET",
-                        format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
-                        None,
-                    )?;
-                    if file["id"].as_str() != Some(id) {
-                        return Err(QuarkError::InvalidResponse);
-                    }
-                    let url = required(&file, "web_content_link")?;
-                    super::share::validate_direct_url(&url)?;
-                    return Ok(super::commands::ResolvedCloudDownload {
-                        url,
-                        name: entry.entry.name.clone(),
-                        headers: session.headers.into_iter().collect(),
-                    });
+                    return self.personal_download(id, entry.entry.name.clone());
                 }
                 Some("PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING") => {
                     std::thread::sleep(std::time::Duration::from_millis(250))
@@ -736,11 +880,7 @@ pub fn resolve_xunlei_share(
     if file["id"].as_str() != Some(entry.entry.entry_id.as_str()) || file["kind"] != "drive#file" {
         return Err(QuarkError::InvalidResponse);
     }
-    let url = file
-        .get("web_content_link")
-        .map(|v| v.as_str().ok_or(QuarkError::InvalidResponse))
-        .transpose()?
-        .unwrap_or("");
+    let url = xunlei_content_link(file)?.unwrap_or("");
     if url.is_empty() {
         return Ok(ShareResolution::TransferRequired(TransferRequest {
             source: entry.plan.source_for(&entry.entry.entry_id),
@@ -751,7 +891,7 @@ pub fn resolve_xunlei_share(
         super::commands::ResolvedCloudDownload {
             url: url.into(),
             name: entry.entry.name.clone(),
-            headers: session.headers.into_iter().collect(),
+            headers: xunlei_cdn_headers(&session.user_agent),
         },
     ))
 }
@@ -1730,18 +1870,14 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             )?;
             let file = value.get("data").unwrap_or(&value);
             let name = required(file, "name")?;
-            let link = file
-                .get("web_content_link")
-                .or_else(|| file.get("download_url"));
-            match link {
-                Some(Value::String(link)) if !link.is_empty() => {
+            match xunlei_content_link(file)? {
+                Some(link) => {
                     if !link.starts_with("https://") {
                         return Err(QuarkError::InvalidResponse);
                     }
-                    return Ok((link.clone(), name));
+                    return Ok((link.to_owned(), name));
                 }
-                None | Some(Value::Null | Value::String(_)) => {}
-                _ => return Err(QuarkError::InvalidResponse),
+                None => {}
             }
             // Modern web metadata can report COMPLETE before (or between)
             // requests with a generated link. Only this known empty-link
