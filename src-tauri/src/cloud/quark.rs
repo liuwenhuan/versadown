@@ -203,6 +203,63 @@ mod tests {
             assert_eq!(http.requests.lock().unwrap().len(), 3);
         }
     }
+    #[test]
+    fn quark_share_conflicting_error_codes_never_trigger_save() {
+        for error in [
+            json!({"error_code":0,"code":401,"data":[]}),
+            json!({"error_code":0,"code":500,"data":[]}),
+            json!({"error_code":"invalid","code":0,"data":[]}),
+            json!({"error_code":0,"code":"invalid","data":[]}),
+        ] {
+            let credentials = MemoryCredentialStore::default();
+            credentials.save("quark", b"sid=current").unwrap();
+            let mut replies = listing();
+            replies.push(error);
+            let http = Http::new(replies);
+            let adapter =
+                provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+            let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+                panic!()
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let store =
+                CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+            store.upsert(&plan).unwrap();
+            let source = plan.source_for("11");
+            assert!(matches!(
+                resolve_current_share_download(&store, adapter.as_ref(), &source),
+                Err(QuarkError::InvalidResponse | QuarkError::Provider(_))
+            ));
+            assert!(store
+                .resolve_entry(&source)
+                .unwrap()
+                .plan
+                .transfers
+                .is_empty());
+            assert_eq!(http.requests.lock().unwrap().len(), 3);
+        }
+    }
+    #[test]
+    fn quark_share_direct_accepts_valid_http_url() {
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("quark", b"sid=current").unwrap();
+        let mut replies = listing();
+        replies.push(json!({"code":0,"data":[{"fid":"11","download_url":"http://download.quark.cn/movie?sign=secret"}]}));
+        let http = Http::new(replies);
+        let adapter = provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+        let entry = CloudShareResolvedEntry {
+            provider: plan.provider,
+            entry: plan.entries[0].clone(),
+            plan,
+        };
+        let ShareResolution::Direct(download) = adapter.resolve(&entry).unwrap() else {
+            panic!()
+        };
+        assert_eq!(download.url, "http://download.quark.cn/movie?sign=secret");
+    }
 }
 
 pub const QUARK_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch";
@@ -457,9 +514,7 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         let response = self.share_raw(method, path, body)?;
         let value: Value =
             serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        if value["code"].as_i64().is_none() {
-            return Err(QuarkError::InvalidResponse);
-        }
+        validate_share_codes(&value)?;
         response_json(&response).map_err(|error| match error {
             QuarkError::Provider(_) => {
                 QuarkError::Provider("夸克分享请求失败，请检查访问码及分享有效期".into())
@@ -473,7 +528,13 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         response: &CloudHttpResponse,
         name: &str,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-        let url = parse_quark_download_url(&response.body)?;
+        let value: Value =
+            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        let url = value
+            .pointer("/data/0/download_url")
+            .and_then(Value::as_str)
+            .ok_or(QuarkError::InvalidResponse)?
+            .to_owned();
         super::share::validate_direct_url(&url)?;
         Ok(super::commands::ResolvedCloudDownload {
             url,
@@ -488,6 +549,18 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
     }
 }
 
+fn validate_share_codes(value: &Value) -> Result<i64, QuarkError> {
+    let code = value["code"].as_i64().ok_or(QuarkError::InvalidResponse)?;
+    // The generic decoder gives error_code precedence. Sharing must reject
+    // malformed or contradictory codes before that precedence can hide errors.
+    if let Some(other) = value.get("error_code") {
+        if other.as_i64() != Some(code) {
+            return Err(QuarkError::InvalidResponse);
+        }
+    }
+    Ok(code)
+}
+
 impl CloudShareAdapter for QuarkShareAdapter<'_> {
     fn inspect(
         &self,
@@ -498,7 +571,7 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
         let response = client.share_raw("POST", "share/sharepage/token", Some(json!({"pwd_id":id,"passcode":candidate.access_code.as_deref().unwrap_or(""),"support_visit_limit_private_share":true})))?;
         let raw: Value =
             serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        let code = raw["code"].as_i64().ok_or(QuarkError::InvalidResponse)?;
+        let code = validate_share_codes(&raw)?;
         if response.status == 200
             && code != 0
             && matches!(

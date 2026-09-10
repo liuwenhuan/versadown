@@ -235,6 +235,39 @@ mod tests {
         assert!(requests[5].url.contains("fsids=%5B99%5D"));
     }
     #[test]
+    fn baidu_share_transfer_accepts_verify_filename_and_http_download() {
+        let credentials = credentials();
+        let mut listing = listing();
+        listing["data"]["list"][0]["server_filename"] = json!("verify.mp4");
+        listing["data"]["list"][0]["path"] = json!("/verify.mp4");
+        let http = Http::new(vec![
+            listing,
+            json!({"errno":0,"data":{"sign":"sign","timestamp":123}}),
+            json!({"errno":0,"list":[]}),
+            json!({"errno":0,"result":{"bdstoken":"write-token"}}),
+            json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/verify.mp4","to":"/verify.mp4"}]}}),
+            json!({"errno":0,"list":[{"fs_id":99,"server_filename":"verify.mp4","dlink":"http://d.pcs.baidu.com/file?sign=personal"}]}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(
+            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+        );
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("11");
+        let download = resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
+        assert_eq!(download.name, "verify.mp4");
+        assert_eq!(download.url, "http://d.pcs.baidu.com/file?sign=personal");
+        let transfers = store.resolve_entry(&source).unwrap().plan.transfers;
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].created_file_id, "99");
+        assert_eq!(transfers[0].cleanup_state, CloudShareCleanupState::Pending);
+        assert_eq!(http.requests.lock().unwrap().len(), 6);
+    }
+    #[test]
     fn baidu_share_errors_never_become_transfer_requests() {
         for error in [
             json!({"errno":-20}),
@@ -1333,15 +1366,37 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
         }
         let id = numeric_field(file, "to_fs_id")?;
         store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), &id)?;
-        let reference = encode_reference(BaiduFileReference {
-            fsid: id,
-            path: required(file, "to")?,
-        })?;
-        let download = client.download(&reference)?;
+        validate_path(&required(file, "to")?)?;
+        // Share fallback must not pass the personal file metadata through
+        // baidu_json's legacy body-wide challenge scan: filenames are data.
+        let response = client.share_http(
+            "GET",
+            &format!(
+                "/rest/2.0/xpan/multimedia?method=filemetas&web=1&dlink=1&fsids={}",
+                encoded(&format!("[{id}]"))
+            ),
+            None,
+            "",
+        )?;
+        let value = share_json(&response)?;
+        let files = value["list"]
+            .as_array()
+            .filter(|files| files.len() == 1)
+            .ok_or(QuarkError::InvalidResponse)?;
+        if numeric_field(&files[0], "fs_id")? != id {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let url = required(&files[0], "dlink")?;
+        super::share::validate_direct_url(&url)?;
         Ok(super::commands::ResolvedCloudDownload {
-            url: download.url,
+            url,
             name: entry.entry.name.clone(),
-            headers: download.headers.into_iter().collect(),
+            headers: super::share::download_headers(
+                &client.session.cookie,
+                &response.set_cookies,
+                BAIDU_PAN_USER_AGENT,
+                None,
+            ),
         })
     }
 }
