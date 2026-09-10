@@ -43,7 +43,7 @@ pub trait CloudShareAdapter: Send + Sync {
         entry: &CloudShareResolvedEntry,
     ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
         Ok(ShareOperationResult {
-            result: self.resolve(entry)?,
+            result: self.resolve(entry),
             updated_context: None,
         })
     }
@@ -63,7 +63,7 @@ pub trait CloudShareAdapter: Send + Sync {
         store: &CloudSharePlanStore,
     ) -> Result<ShareOperationResult<super::commands::ResolvedCloudDownload>, QuarkError> {
         Ok(ShareOperationResult {
-            result: self.transfer(entry, store)?,
+            result: self.transfer(entry, store),
             updated_context: None,
         })
     }
@@ -71,7 +71,9 @@ pub trait CloudShareAdapter: Send + Sync {
 
 /// Never serialize this result into IPC or task records: context is DPAPI-only.
 pub struct ShareOperationResult<T> {
-    pub result: T,
+    /// A successful response may revoke context even when the operation fails.
+    /// Persist updated_context before propagating this error.
+    pub result: Result<T, QuarkError>,
     pub updated_context: Option<serde_json::Value>,
 }
 
@@ -302,7 +304,7 @@ pub fn resolve_current_share_download(
         store.update_provider_context(source, &context)?;
         entry.plan.provider_context = context;
     }
-    let mut download = match resolved.result {
+    let mut download = match resolved.result? {
         ShareResolution::Direct(download) => download,
         ShareResolution::TransferRequired(request) => {
             if request.source != source {
@@ -312,7 +314,7 @@ pub fn resolve_current_share_download(
             if let Some(context) = transferred.updated_context {
                 store.update_provider_context(source, &context)?;
             }
-            transferred.result
+            transferred.result?
         }
     };
     validate_direct_url(&download.url)?;
@@ -1001,6 +1003,7 @@ mod tests {
         struct UpdatingAdapter {
             fail: Arc<AtomicBool>,
             at_transfer: bool,
+            operation_error: bool,
         }
         impl CloudShareAdapter for UpdatingAdapter {
             fn inspect(
@@ -1020,15 +1023,19 @@ mod tests {
                     self.fail.store(true, Ordering::SeqCst);
                 }
                 Ok(ShareOperationResult {
-                    result: if self.at_transfer {
-                        ShareResolution::TransferRequired(TransferRequest {
-                            source: entry.plan.source_for(&entry.entry.entry_id),
-                        })
+                    result: if self.operation_error && !self.at_transfer {
+                        Err(QuarkError::WebAuthorizationRequired)
                     } else {
-                        ShareResolution::Direct(super::super::commands::ResolvedCloudDownload {
-                            url: "https://cdn.example/file".into(),
-                            name: "file".into(),
-                            headers: vec![],
+                        Ok(if self.at_transfer {
+                            ShareResolution::TransferRequired(TransferRequest {
+                                source: entry.plan.source_for(&entry.entry.entry_id),
+                            })
+                        } else {
+                            ShareResolution::Direct(super::super::commands::ResolvedCloudDownload {
+                                url: "https://cdn.example/file".into(),
+                                name: "file".into(),
+                                headers: vec![],
+                            })
                         })
                     },
                     updated_context: Some(serde_json::json!({"token":"rotated-before-transfer"})),
@@ -1054,16 +1061,22 @@ mod tests {
                 );
                 self.fail.store(true, Ordering::SeqCst);
                 Ok(ShareOperationResult {
-                    result: super::super::commands::ResolvedCloudDownload {
-                        url: "https://cdn.example/personal".into(),
-                        name: "file".into(),
-                        headers: vec![],
+                    result: if self.operation_error {
+                        Err(QuarkError::WebAuthorizationRequired)
+                    } else {
+                        Ok(super::super::commands::ResolvedCloudDownload {
+                            url: "https://cdn.example/personal".into(),
+                            name: "file".into(),
+                            headers: vec![],
+                        })
                     },
                     updated_context: Some(serde_json::json!({"token":"rotated-after-transfer"})),
                 })
             }
         }
-        for at_transfer in [false, true] {
+        for (at_transfer, operation_error) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let fail = Arc::new(AtomicBool::new(false));
             let credentials = Arc::new(FailingStore {
                 inner: MemoryCredentialStore::default(),
@@ -1076,7 +1089,11 @@ mod tests {
             };
             let plan = fixture("private-share");
             store.upsert(&plan).unwrap();
-            let adapter = UpdatingAdapter { fail, at_transfer };
+            let adapter = UpdatingAdapter {
+                fail,
+                at_transfer,
+                operation_error,
+            };
             assert!(matches!(
                 resolve_current_share_download(&store, &adapter, &plan.source_for("f1")),
                 Err(QuarkError::Storage)

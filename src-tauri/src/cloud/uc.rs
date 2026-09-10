@@ -493,6 +493,7 @@ struct UcShareSession<'a> {
     http: &'a dyn CloudHttpTransport,
     headers: BTreeMap<String, String>,
     account_cookie_hash: String,
+    context_changed: bool,
 }
 impl UcShareAdapter<'_> {
     fn session(&self, context: Option<&Value>) -> Result<UcShareSession<'_>, QuarkError> {
@@ -556,6 +557,7 @@ impl UcShareAdapter<'_> {
             http: self.http,
             headers,
             account_cookie_hash,
+            context_changed: false,
         })
     }
 }
@@ -566,10 +568,18 @@ impl UcShareSession<'_> {
         context["account_cookie_hash"] = self.account_cookie_hash.clone().into();
         Ok(context)
     }
-    fn updated<T>(&self, result: T, context: Value) -> Result<ShareOperationResult<T>, QuarkError> {
+    fn updated<T>(
+        &self,
+        result: Result<T, QuarkError>,
+        context: Value,
+    ) -> Result<ShareOperationResult<T>, QuarkError> {
         Ok(ShareOperationResult {
             result,
-            updated_context: Some(self.context(context)?),
+            updated_context: if self.context_changed {
+                Some(self.context(context)?)
+            } else {
+                None
+            },
         })
     }
     fn request(
@@ -634,6 +644,7 @@ impl UcShareSession<'_> {
         {
             return Err(QuarkError::Provider("UC 分享请求失败".into()));
         }
+        self.context_changed = true;
         self.merge_response_cookies(&response.set_cookies);
         // A newly returned JSON token wins over Set-Cookie, including deletion.
         if let Some(csrf) = value.pointer("/data/csrf_token") {
@@ -810,7 +821,7 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
         entry: &CloudShareResolvedEntry,
         store: &CloudSharePlanStore,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-        Ok(self.transfer_with_context(entry, store)?.result)
+        self.transfer_with_context(entry, store)?.result
     }
     fn transfer_with_context(
         &self,
@@ -821,42 +832,45 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
             return Err(QuarkError::InvalidResponse);
         }
         let mut session = self.session(Some(&entry.plan.provider_context))?;
-        let token = session.token(&entry.plan.canonical_share_id, entry.access_code())?;
-        session.require_csrf()?;
         let mut context = entry.plan.provider_context.clone();
-        context["stoken"] = token.clone().into();
-        let file = &entry.plan.provider_context["files"][&entry.entry.entry_id];
-        let value=session.request("POST","share/sharepage/save",Some(json!({"fid_list":[entry.entry.entry_id],"fid_token_list":[required(file,"token")?],"to_pdir_fid":"0","pwd_id":entry.plan.canonical_share_id,"stoken":token,"pdir_fid":required(file,"parent")?,"scene":"link","pdir_save_all":false,"exclude_fids":[]})))?;
-        let task = required(&value["data"], "task_id")?;
-        for retry in 0..20 {
-            let value = session.request(
-                "GET",
-                &format!("task?task_id={}&retry_index={retry}", encoded(&task)),
-                None,
-            )?;
-            match value["data"]["status"].as_i64() {
-                Some(2) => {
-                    let ids = value
-                        .pointer("/data/save_as/save_as_top_fids")
-                        .and_then(Value::as_array)
-                        .filter(|v| v.len() == 1)
-                        .ok_or(QuarkError::InvalidResponse)?;
-                    let id = ids[0]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .ok_or(QuarkError::InvalidResponse)?;
-                    store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
-                    let headers = session.headers.clone();
-                    let value =
-                        session.request("POST", "file/download", Some(json!({"fids":[id]})))?;
-                    let download = uc_share_download(&value, id, &entry.entry.name, headers)?;
-                    return session.updated(download, context);
+        let result = (|| {
+            let token = session.token(&entry.plan.canonical_share_id, entry.access_code())?;
+            context["stoken"] = token.clone().into();
+            session.require_csrf()?;
+            let file = &entry.plan.provider_context["files"][&entry.entry.entry_id];
+            let value=session.request("POST","share/sharepage/save",Some(json!({"fid_list":[entry.entry.entry_id],"fid_token_list":[required(file,"token")?],"to_pdir_fid":"0","pwd_id":entry.plan.canonical_share_id,"stoken":token,"pdir_fid":required(file,"parent")?,"scene":"link","pdir_save_all":false,"exclude_fids":[]})))?;
+            let task = required(&value["data"], "task_id")?;
+            for retry in 0..20 {
+                let value = session.request(
+                    "GET",
+                    &format!("task?task_id={}&retry_index={retry}", encoded(&task)),
+                    None,
+                )?;
+                match value["data"]["status"].as_i64() {
+                    Some(2) => {
+                        let ids = value
+                            .pointer("/data/save_as/save_as_top_fids")
+                            .and_then(Value::as_array)
+                            .filter(|v| v.len() == 1)
+                            .ok_or(QuarkError::InvalidResponse)?;
+                        let id = ids[0]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .ok_or(QuarkError::InvalidResponse)?;
+                        store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                        let headers = session.headers.clone();
+                        let value =
+                            session.request("POST", "file/download", Some(json!({"fids":[id]})))?;
+                        let download = uc_share_download(&value, id, &entry.entry.name, headers)?;
+                        return Ok(download);
+                    }
+                    Some(0 | 1) => std::thread::sleep(std::time::Duration::from_millis(250)),
+                    _ => return Err(QuarkError::Provider("UC 分享转存失败".into())),
                 }
-                Some(0 | 1) => std::thread::sleep(std::time::Duration::from_millis(250)),
-                _ => return Err(QuarkError::Provider("UC 分享转存失败".into())),
             }
-        }
-        Err(QuarkError::Provider("UC 分享转存尚未完成".into()))
+            Err(QuarkError::Provider("UC 分享转存尚未完成".into()))
+        })();
+        session.updated(result, context)
     }
 }
 fn uc_share_download(
@@ -886,7 +900,7 @@ pub fn resolve_uc_share(
     http: &dyn CloudHttpTransport,
     entry: &CloudShareResolvedEntry,
 ) -> Result<ShareResolution, QuarkError> {
-    Ok(resolve_uc_share_with_context(credentials, http, entry)?.result)
+    resolve_uc_share_with_context(credentials, http, entry)?.result
 }
 fn resolve_uc_share_with_context(
     credentials: &dyn super::CredentialStore,
@@ -898,29 +912,26 @@ fn resolve_uc_share_with_context(
     }
     let adapter = UcShareAdapter { credentials, http };
     let mut session = adapter.session(Some(&entry.plan.provider_context))?;
-    let token = session.token(&entry.plan.canonical_share_id, entry.access_code())?;
-    session.require_csrf()?;
     let mut context = entry.plan.provider_context.clone();
-    context["stoken"] = token.clone().into();
-    let headers = session.headers.clone();
-    let value=session.request("POST","share/sharepage/download",Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":token,"fids":[entry.entry.entry_id],"fids_token":[required(&entry.plan.provider_context["files"][&entry.entry.entry_id],"token")?]})))?;
-    if value["data"].as_array().is_some_and(|v| v.is_empty()) {
-        return session.updated(
-            ShareResolution::TransferRequired(TransferRequest {
+    let result = (|| {
+        let token = session.token(&entry.plan.canonical_share_id, entry.access_code())?;
+        context["stoken"] = token.clone().into();
+        session.require_csrf()?;
+        let headers = session.headers.clone();
+        let value=session.request("POST","share/sharepage/download",Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":token,"fids":[entry.entry.entry_id],"fids_token":[required(&entry.plan.provider_context["files"][&entry.entry.entry_id],"token")?]})))?;
+        if value["data"].as_array().is_some_and(|v| v.is_empty()) {
+            return Ok(ShareResolution::TransferRequired(TransferRequest {
                 source: entry.plan.source_for(&entry.entry.entry_id),
-            }),
-            context,
-        );
-    }
-    session.updated(
-        ShareResolution::Direct(uc_share_download(
+            }));
+        }
+        Ok(ShareResolution::Direct(uc_share_download(
             &value,
             &entry.entry.entry_id,
             &entry.entry.name,
             headers,
-        )?),
-        context,
-    )
+        )?))
+    })();
+    session.updated(result, context)
 }
 
 #[cfg(test)]
@@ -1120,6 +1131,67 @@ mod tests {
                 assert!(matches!(result, Err(QuarkError::WebAuthorizationRequired)));
                 assert_eq!(http.requests.lock().unwrap().len(), 1);
             }
+        }
+    }
+    #[test]
+    fn uc_share_revoked_csrf_is_persisted_on_error_and_never_resurrected() {
+        let credentials = share_credentials();
+        for during_transfer in [false, true] {
+            let token = json!({"code":0,"data":{"stoken":"fresh"}});
+            let mut replies = vec![];
+            if during_transfer {
+                replies.extend([
+                    (token.clone(), vec![]),
+                    (json!({"code":0,"data":[]}), vec![]),
+                ]);
+            }
+            replies.push((token.clone(), vec!["csrf_token=; Max-Age=0; Path=/"]));
+            let http = ShareReplies::new(replies);
+            let directory = tempfile::tempdir().unwrap();
+            let store = CloudSharePlanStore::new(
+                crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            );
+            let mut selected = share_entry();
+            selected.plan.provider_context["headers"] = json!({"Cookie":"__pus=identity; __puus=session; csrf_token=csrf-secret","x-csrf-token":"csrf-secret"});
+            store.upsert(&selected.plan).unwrap();
+            let source = selected.plan.source_for("f1");
+            let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+            assert!(matches!(
+                resolve_current_share_download(&store, adapter.as_ref(), &source),
+                Err(QuarkError::WebAuthorizationRequired)
+            ));
+            let updated = store.resolve_entry(&source).unwrap();
+            assert!(updated.plan.provider_context["headers"]
+                .get("x-csrf-token")
+                .is_none());
+            assert!(!updated.plan.provider_context["headers"]["Cookie"]
+                .as_str()
+                .unwrap()
+                .contains("csrf_token="));
+            assert!(!http
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.url.contains("share/sharepage/save")));
+            assert_eq!(
+                http.requests.lock().unwrap().len(),
+                if during_transfer { 3 } else { 1 }
+            );
+            drop(store);
+            let reopened = CloudSharePlanStore::new(
+                crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            );
+            let second = ShareReplies::new(vec![(token, vec![])]);
+            let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &second).unwrap();
+            assert!(matches!(
+                resolve_current_share_download(&reopened, adapter.as_ref(), &source),
+                Err(QuarkError::WebAuthorizationRequired)
+            ));
+            let requests = second.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(!requests[0].headers.contains_key("x-csrf-token"));
+            assert!(!requests[0].headers["Cookie"].contains("csrf_token="));
         }
     }
     #[test]
