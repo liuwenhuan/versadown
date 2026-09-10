@@ -7,6 +7,16 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+const CLOUD_SHARE_RECOVERY_ERROR: &str = "网盘分享下载恢复失败，请重试或重新解析分享链接";
+
+fn recovery_failure_message(task: &DownloadTask, ordinary: impl FnOnce() -> String) -> String {
+    if task.source.starts_with("cloud-share://") {
+        CLOUD_SHARE_RECOVERY_ERROR.into()
+    } else {
+        ordinary()
+    }
+}
+
 #[derive(Default, Debug, Serialize)]
 pub struct ShutdownReport {
     pub session_saved: bool,
@@ -57,11 +67,12 @@ impl DownloadService {
         gid: &str,
         error: impl std::fmt::Display,
     ) {
+        let message = recovery_failure_message(&task, || format!("任务恢复失败（{gid}）：{error}"));
         task.status = TaskStatus::Paused;
         task.download_speed = 0;
         task.upload_speed = 0;
         task.eta_seconds = None;
-        task.error = Some(format!("任务恢复失败（{gid}）：{error}"));
+        task.error = Some(message);
         if let Ok(task) = store.apply_transfer_snapshot(task) {
             let _ = self.publish_task(&task);
         }
@@ -75,9 +86,15 @@ impl DownloadService {
         gid: &str,
         error: impl std::fmt::Display,
     ) {
-        let recovery_error = error.to_string();
+        let recovery_error =
+            (!task.source.starts_with("cloud-share://")).then(|| error.to_string());
         match api.pause(gid).await {
-            Ok(_) => self.record_recovery_failure(store, task, gid, recovery_error),
+            Ok(_) => self.record_recovery_failure(
+                store,
+                task,
+                gid,
+                recovery_error.as_deref().unwrap_or_default(),
+            ),
             Err(pause_error) => {
                 // The replacement may still be transferring. Do not claim it is paused
                 // until aria2 acknowledges the pause; polling can reconcile it later.
@@ -85,9 +102,12 @@ impl DownloadService {
                 task.download_speed = 0;
                 task.upload_speed = 0;
                 task.eta_seconds = None;
-                task.error = Some(format!(
-                    "任务恢复失败（{gid}）：{recovery_error}；状态读取与暂停均失败，可能仍在运行：{pause_error}"
-                ));
+                task.error = Some(recovery_failure_message(&task, || {
+                    format!(
+                        "任务恢复失败（{gid}）：{}；状态读取与暂停均失败，可能仍在运行：{pause_error}",
+                        recovery_error.as_deref().unwrap_or_default()
+                    )
+                }));
                 if let Ok(task) = store.apply_transfer_snapshot(task) {
                     let _ = self.publish_task(&task);
                 }
@@ -102,11 +122,13 @@ impl DownloadService {
         gid: &str,
         error: impl std::fmt::Display,
     ) {
+        let message =
+            recovery_failure_message(&task, || format!("终态任务恢复失败（{gid}）：{error}"));
         task.status = TaskStatus::Failed;
         task.download_speed = 0;
         task.upload_speed = 0;
         task.eta_seconds = None;
-        task.error = Some(format!("终态任务恢复失败（{gid}）：{error}"));
+        task.error = Some(message);
         if let Ok(task) = store.apply_transfer_snapshot(task) {
             let _ = self.publish_task(&task);
         }
@@ -386,9 +408,11 @@ impl DownloadService {
                                             bind_error,
                                         ),
                                         Err((remove_error, force_error)) => {
-                                            let message = format!(
-                                                "任务恢复失败且无法清理 aria2 GID {gid}：{bind_error}；remove: {remove_error}；forceRemove: {force_error}"
-                                            );
+                                            let message = recovery_failure_message(&task, || {
+                                                format!(
+                                                    "任务恢复失败且无法清理 aria2 GID {gid}：{bind_error}；remove: {remove_error}；forceRemove: {force_error}"
+                                                )
+                                            });
                                             match store.bind_gid_and_fail(task.id, &gid, &message) {
                                                 Ok(tracked) => {
                                                     let _ = self.publish_task(&tracked);
@@ -459,7 +483,9 @@ impl DownloadService {
                     task.download_speed = 0;
                     task.upload_speed = 0;
                     task.eta_seconds = None;
-                    task.error = Some(format!("任务恢复失败：{error}"));
+                    task.error = Some(recovery_failure_message(&task, || {
+                        format!("任务恢复失败：{error}")
+                    }));
                     if let Ok(task) = store.apply_transfer_snapshot(task) {
                         let _ = self.publish_task(&task);
                     }
