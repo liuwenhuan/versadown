@@ -93,6 +93,20 @@ it.each(['aliyun', 'xunlei', 'uc'] as const)('opens official account-password lo
   expect(screen.queryByLabelText(/密码$/)).not.toBeInTheDocument();
 });
 
+it.each([
+  ['aliyun', '阿里'],
+  ['xunlei', '迅雷'],
+  ['uc', 'UC']
+] as const)('keeps the account and offers official WebView recovery for %s', async (provider, label) => {
+  const client = createCloudFake({ listCloudDirectory: vi.fn().mockRejectedValue({ code: 'web_auth_required', message: 'verification required' }) });
+  render(<CloudManager provider={provider} client={client} initialAccounts={[
+    { id: `${provider}-account`, displayName: 'alice', provider, authMethod: 'web' }
+  ]} restoreOnMount={false} />);
+
+  expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
+  expect(screen.getByRole('tab', { name: `alice · ${label}` })).toBeVisible();
+});
+
 it('clears direct credentials before switching to official WebView login', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
