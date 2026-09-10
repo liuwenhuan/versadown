@@ -137,7 +137,6 @@ it('keeps a protected share open for an access code before completing its normal
 });
 
 it('queues normal share results and presents duplicate results in FIFO order', async () => {
-  const user = userEvent.setup();
   state.parse.mockResolvedValueOnce({
     confirmation: {
       taskId: 'cloud-share://baidu/plan', title: '分享目录', requiresConfirmation: true,
@@ -162,7 +161,9 @@ it('queues normal share results and presents duplicate results in FIFO order', a
   expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('second.bin')).toBeVisible();
   expect(firstDuplicateDialog).not.toHaveTextContent('second-existing.bin');
 
-  await user.click(screen.getByRole('button', { name: '取消' }));
+  const cancel = screen.getByRole('button', { name: '取消' });
+  fireEvent.click(cancel);
+  fireEvent.click(cancel);
   await waitFor(() => expect(screen.getByRole('dialog', { name: '检测到重复下载' })).toHaveTextContent('second-existing.bin'));
 });
 
@@ -187,6 +188,44 @@ it('keeps share confirmation open after one rejected submission and ignores conc
   await act(async () => { submission.reject(new Error('服务器拒绝下载')); });
   expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
   expect(await screen.findByRole('status')).toHaveTextContent('服务器拒绝下载');
+});
+
+it('binds in-flight share confirmation to its plan without blocking or clearing a newer plan', async () => {
+  const firstSubmission = deferred<never[]>();
+  const secondSubmission = deferred<never[]>();
+  state.parse
+    .mockResolvedValueOnce({
+      confirmation: {
+        taskId: 'cloud-share://uc/plan-a', title: '分享 A', requiresConfirmation: true,
+        resources: [{ id: 'a1', name: 'first.jpg', size: '1 B', selected: true }], processing: []
+      }
+    })
+    .mockResolvedValueOnce({
+      confirmation: {
+        taskId: 'cloud-share://uc/plan-b', title: '分享 B', requiresConfirmation: true,
+        resources: [{ id: 'b1', name: 'second.jpg', size: '1 B', selected: true }], processing: []
+      }
+    });
+  state.confirmCloud
+    .mockReturnValueOnce(firstSubmission.promise)
+    .mockReturnValueOnce(secondSubmission.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/plan-a' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭确认窗口' }));
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/plan-b' }); });
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
+
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  expect(state.confirmCloud).toHaveBeenCalledTimes(2);
+
+  await act(async () => { firstSubmission.resolve([]); });
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
+
+  await act(async () => { secondSubmission.reject(new Error('B 下载失败')); });
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
 });
 
 it('ignores concurrent duplicate resolutions and advances to the next duplicate after success', async () => {
