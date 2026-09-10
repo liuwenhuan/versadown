@@ -42,6 +42,8 @@ impl CloudDownloadSourceGate {
 
 pub struct CloudState {
     pub store: DpapiCredentialStore,
+    pub share_plans: share::CloudSharePlanStore,
+    pub share_refresh_budget: share::CloudShareRefreshBudget,
     http: ReqwestTransport,
     quark_operation: Mutex<()>,
     pikpak_operation: Mutex<()>,
@@ -104,6 +106,8 @@ impl CloudState {
     }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         Ok(Self {
+            share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
+            share_refresh_budget: Default::default(),
             store: DpapiCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,
             quark_operation: Mutex::new(()),
@@ -1529,6 +1533,75 @@ pub async fn resolve_stable_cloud_download(
         resolve_download(provider, &file_id, &state.store, http)
     })
     .await
+}
+
+pub async fn inspect_cloud_share(
+    app: AppHandle,
+    candidate: crate::parser::CloudShareCandidate,
+) -> Result<share::ShareConfirmationOutcome, QuarkError> {
+    // Share challenges must not trigger the generic account/password recovery.
+    run(app, candidate.provider, move |state, http| {
+        let adapter = share::provider_share_adapter(candidate.provider, &state.store, http)?;
+        share::inspect_share_with_adapter(&state.share_plans, adapter.as_ref(), &candidate)
+    })
+    .await
+}
+
+pub async fn resolve_stable_cloud_share_download(
+    app: AppHandle,
+    source: &str,
+) -> Result<ResolvedCloudDownload, QuarkError> {
+    let (provider, _, _) = share::parse_stable_cloud_share_source(source)?;
+    let source = source.to_owned();
+    run(app, provider, move |state, http| {
+        let adapter = share::provider_share_adapter(provider, &state.store, http)?;
+        share::resolve_current_share_download(&state.share_plans, adapter.as_ref(), &source)
+    })
+    .await
+}
+
+pub async fn submit_cloud_share_file(
+    app: AppHandle,
+    state: &AppState,
+    source: String,
+    mut configured: UriSubmissionOptions,
+) -> Result<TaskActionOutcome, QuarkError> {
+    share::parse_stable_cloud_share_source(&source)?;
+    let _source_submission = state.cloud_download_sources.acquire(&source).await?;
+    if let Some(existing) = state
+        .store
+        .find_by_source(&source)
+        .map_err(|_| QuarkError::Storage)?
+        .filter(|task| task.status != TaskStatus::Recycled)
+    {
+        let duplicate =
+            duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
+        return task_action_outcome(&state.store, existing, Some(duplicate))
+            .map_err(QuarkError::Transport);
+    }
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let entry = cloud.share_plans.resolve_entry(&source)?;
+    if let Some(directory) = configured.directory.as_ref() {
+        configured.directory = Some(directory_download_output_directory(
+            directory,
+            &entry.entry.relative_directory,
+        )?);
+    } else if !entry.entry.relative_directory.is_empty() {
+        return Err(QuarkError::InvalidInput(
+            "分享目录下载需要设置绝对下载目录".into(),
+        ));
+    }
+    let resolved = resolve_stable_cloud_share_download(app.clone(), &source).await?;
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?;
+    let task =
+        share::submit_current_share_download(&service, &source, resolved, configured).await?;
+    task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)
 }
 
 #[derive(Clone, Serialize)]

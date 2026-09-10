@@ -19,8 +19,6 @@ use crate::{
     ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
 
-// Share branches are deliberately declared before Task 4 wires its resolver.
-#[allow(dead_code)]
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParseDownloadOutcome {
@@ -147,9 +145,31 @@ pub(crate) fn download_submission_options(state: &AppState) -> Result<UriSubmiss
 
 #[tauri::command]
 pub async fn parse_download(
+    app: AppHandle,
     input: String,
+    access_code: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ParseDownloadOutcome, String> {
+    if let Some(candidate) =
+        crate::parser::extract_cloud_share_candidate(&input, access_code.as_deref())
+            .map_err(|error| error.to_string())?
+    {
+        let provider = candidate.provider;
+        return match crate::cloud::commands::inspect_cloud_share(app, candidate)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            crate::cloud::share::ShareConfirmationOutcome::Confirmation(plan) => {
+                Ok(ParseDownloadOutcome::ShareConfirmation(plan))
+            }
+            crate::cloud::share::ShareConfirmationOutcome::AccessCodeRequired => {
+                Ok(ParseDownloadOutcome::AccessCodeRequired {
+                    provider,
+                    message: "此分享需要访问码，请输入后重新解析",
+                })
+            }
+        };
+    }
     let service = state
         .runtime
         .service()
@@ -234,6 +254,38 @@ pub async fn parse_download(
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     }
     Ok(ParseDownloadOutcome::Task(outcome))
+}
+
+#[tauri::command]
+pub async fn confirm_cloud_share_download(
+    app: AppHandle,
+    plan_source: String,
+    selected_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<TaskActionOutcome>, crate::cloud::QuarkError> {
+    let cloud = app
+        .try_state::<Arc<crate::cloud::commands::CloudState>>()
+        .ok_or(crate::cloud::QuarkError::Storage)?;
+    let sources = crate::cloud::share::selected_share_sources(
+        &cloud.share_plans,
+        &plan_source,
+        &selected_ids,
+    )?;
+    let configured =
+        download_submission_options(&state).map_err(crate::cloud::QuarkError::InvalidInput)?;
+    let mut outcomes = Vec::new();
+    for source in sources {
+        outcomes.push(
+            crate::cloud::commands::submit_cloud_share_file(
+                app.clone(),
+                &state,
+                source,
+                configured.clone(),
+            )
+            .await?,
+        );
+    }
+    Ok(outcomes)
 }
 
 fn parse_resources(store: &TaskStore, task_id: Uuid) -> Result<Vec<ParseResource>, String> {
@@ -417,10 +469,21 @@ async fn resubmit_task(
     if options.proxy.is_none() {
         options.proxy = configured.proxy;
     }
-    if task.source.starts_with("cloud://") {
-        let resolved = crate::cloud::commands::resolve_stable_cloud_download(app, &task.source)
+    if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
+        let share = task.source.starts_with("cloud-share://");
+        let resolved = if share {
+            crate::cloud::commands::resolve_stable_cloud_share_download(app, &task.source).await
+        } else {
+            crate::cloud::commands::resolve_stable_cloud_download(app, &task.source).await
+        }
+        .map_err(|error| format!("无法重新获取网盘下载地址：{error}"))?;
+        if share {
+            return crate::cloud::share::resubmit_current_share_download(
+                &service, task.id, resolved, options,
+            )
             .await
-            .map_err(|error| format!("无法重新获取网盘下载地址：{error}"))?;
+            .map_err(|error| error.to_string());
+        }
         let signed_url = resolved.url.clone();
         let mut cloud_options = resolved.into_uri_submission_options();
         cloud_options.directory = options.directory.clone();
@@ -478,6 +541,72 @@ fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::
         })
         .find(|directory| directory.is_dir())
         .ok_or_else(|| "下载文件已不存在，无法打开所在目录".to_string())
+}
+
+/// Called after event publication; the task worker never blocks the aria2
+/// synchronization callback. The source gate is released on every return path.
+pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) {
+    if task.status != TaskStatus::Failed || !task.source.starts_with("cloud-share://") {
+        return;
+    }
+    let Some(cloud) = app.try_state::<Arc<crate::cloud::commands::CloudState>>() else {
+        return;
+    };
+    if !cloud
+        .share_refresh_budget
+        .claim(&task.source, task.aria_error_code.as_deref())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let failed = task.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let Ok(_guard) = state.cloud_download_sources.acquire(&failed.source).await else {
+            return;
+        };
+        let Ok(current) = state.store.find(failed.id) else {
+            return;
+        };
+        // A user retry, cancellation, or recycle while waiting wins.
+        if current.status != TaskStatus::Failed || current.aria_gid != failed.aria_gid {
+            return;
+        }
+        if !matches!(retry_duplicate_state(&state.store, &current), Ok(None)) {
+            return;
+        }
+        // One attempt only. Challenge/unsupported errors preserve the failed task.
+        let Ok(resolved) = crate::cloud::commands::resolve_stable_cloud_share_download(
+            app.clone(),
+            &current.source,
+        )
+        .await
+        else {
+            return;
+        };
+        // Network resolution may outlive a user cancellation or manual retry.
+        let Ok(latest) = state.store.find(failed.id) else {
+            return;
+        };
+        if latest.status != TaskStatus::Failed || latest.aria_gid != failed.aria_gid {
+            return;
+        }
+        if !matches!(retry_duplicate_state(&state.store, &latest), Ok(None)) {
+            return;
+        }
+        let Ok(options) = download_submission_options(&state) else {
+            return;
+        };
+        let Ok(service) = state.runtime.service().await else {
+            return;
+        };
+        let _ = crate::cloud::share::resubmit_current_share_download(
+            &service, latest.id, resolved, options,
+        )
+        .await;
+    });
 }
 
 const VIDEO_EXTENSIONS: &[&str] = &[

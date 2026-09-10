@@ -907,7 +907,13 @@ impl DownloadService {
         task.connections = snapshot.connections;
         task.eta_seconds = snapshot.eta_seconds;
         task.aria_error_code = snapshot.error_code;
-        task.error = snapshot.error_message;
+        task.error = if task.source.starts_with("cloud-share://") {
+            snapshot
+                .error_message
+                .map(|_| "网盘分享下载失败，请重试或重新解析分享链接".into())
+        } else {
+            snapshot.error_message
+        };
         let files = (!preserve_paused_progress)
             .then(|| {
                 snapshot

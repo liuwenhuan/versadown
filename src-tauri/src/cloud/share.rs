@@ -27,6 +27,248 @@ pub struct CloudShareConfirmationResource {
     pub size: String,
     pub selected: bool,
 }
+
+/// Adapters own provider protocol details. Neither inspection nor resolution
+/// performs implicit session recovery: challenges must return to the caller.
+pub trait CloudShareAdapter: Send + Sync {
+    fn inspect(
+        &self,
+        candidate: &crate::parser::CloudShareCandidate,
+    ) -> Result<ShareInspection, QuarkError>;
+    fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError>;
+}
+
+pub enum ShareInspection {
+    Plan(CloudSharePlan),
+    AccessCodeRequired,
+}
+
+pub enum ShareConfirmationOutcome {
+    Confirmation(CloudShareConfirmation),
+    AccessCodeRequired,
+}
+
+/// A transfer request carries only a durable reference. Transfer execution and
+/// cleanup are deliberately separate from the direct-download dispatcher.
+pub struct TransferRequest {
+    pub source: String,
+}
+
+pub enum ShareResolution {
+    Direct(super::commands::ResolvedCloudDownload),
+    TransferRequired(TransferRequest),
+}
+
+/// Tasks 5–7 register audited provider adapters here. Failing closed is vital:
+/// a recognized share page must never fall back to ordinary URI downloading.
+pub fn provider_share_adapter<'a>(
+    _provider: CloudProvider,
+    _credentials: &'a dyn CredentialStore,
+    _http: &'a dyn super::CloudHttpTransport,
+) -> Result<Box<dyn CloudShareAdapter + 'a>, QuarkError> {
+    Err(QuarkError::ProviderUnsupported)
+}
+
+pub fn inspect_share_with_adapter(
+    store: &CloudSharePlanStore,
+    adapter: &dyn CloudShareAdapter,
+    candidate: &crate::parser::CloudShareCandidate,
+) -> Result<ShareConfirmationOutcome, QuarkError> {
+    let plan = match adapter.inspect(candidate)? {
+        ShareInspection::AccessCodeRequired => {
+            return Ok(ShareConfirmationOutcome::AccessCodeRequired)
+        }
+        ShareInspection::Plan(plan) => plan,
+    };
+    if plan.provider != candidate.provider || plan.entries.is_empty() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let confirmation = CloudShareConfirmation {
+        plan_source: plan.source_for(&plan.entries[0].entry_id),
+        title: "网盘分享文件".into(),
+        resources: plan
+            .entries
+            .iter()
+            .map(|entry| CloudShareConfirmationResource {
+                id: entry.entry_fingerprint.clone(),
+                name: entry
+                    .relative_directory
+                    .iter()
+                    .chain(std::iter::once(&entry.name))
+                    .map(|name| super::commands::safe_filename(name))
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                size: entry.size.map(|size| size.to_string()).unwrap_or_default(),
+                selected: true,
+            })
+            .collect(),
+    };
+    store.upsert(&plan)?;
+    Ok(ShareConfirmationOutcome::Confirmation(confirmation))
+}
+
+pub fn selected_share_sources(
+    store: &CloudSharePlanStore,
+    plan_source: &str,
+    selected_ids: &[String],
+) -> Result<Vec<String>, QuarkError> {
+    if selected_ids.is_empty() {
+        return Err(QuarkError::InvalidInput("请至少选择一个分享文件".into()));
+    }
+    let plan = store.resolve_entry(plan_source)?.plan;
+    let mut selected = BTreeSet::new();
+    selected_ids
+        .iter()
+        .map(|id| {
+            let entry = plan
+                .entries
+                .iter()
+                .find(|entry| &entry.entry_fingerprint == id)
+                .filter(|_| selected.insert(id))
+                .ok_or_else(missing_plan)?;
+            Ok(plan.source_for(&entry.entry_id))
+        })
+        .collect()
+}
+
+fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
+    let parsed = url::Url::parse(url).map_err(|_| QuarkError::InvalidResponse)?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !matches!(
+            crate::parser::extract_cloud_share_candidate(url, None),
+            Ok(None)
+        )
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(())
+}
+
+pub fn resolve_current_share_download(
+    store: &CloudSharePlanStore,
+    adapter: &dyn CloudShareAdapter,
+    source: &str,
+) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
+    let entry = store.resolve_entry(source)?;
+    match adapter.resolve(&entry)? {
+        ShareResolution::Direct(mut download) => {
+            validate_direct_url(&download.url)?;
+            // The inspected filename remains stable across expiring URL renewals.
+            download.name = entry.entry.name;
+            Ok(download)
+        }
+        ShareResolution::TransferRequired(_) => Err(QuarkError::ProviderUnsupported),
+    }
+}
+
+/// This consumed budget is separate from the source's RAII submission lock.
+/// Dropping that lock on failure must not re-arm automatic retries.
+#[derive(Default)]
+pub struct CloudShareRefreshBudget(Mutex<BTreeSet<String>>);
+
+impl CloudShareRefreshBudget {
+    pub fn claim(&self, source: &str, aria_error_code: Option<&str>) -> Result<bool, QuarkError> {
+        if !source.starts_with("cloud-share://") || aria_error_code != Some("22") {
+            return Ok(false);
+        }
+        parse_stable_cloud_share_source(source)?;
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .insert(source.into()))
+    }
+}
+
+/// URL and headers go directly to aria2, while only the opaque source and safe
+/// filename enter SQLite. Callers hold the source gate for duplicate detection.
+pub async fn submit_current_share_download(
+    service: &crate::DownloadService,
+    source: &str,
+    resolved: super::commands::ResolvedCloudDownload,
+    configured: crate::UriSubmissionOptions,
+) -> Result<crate::DownloadTask, QuarkError> {
+    parse_stable_cloud_share_source(source)?;
+    let (signed_url, options) = share_submission_options(resolved, configured)?;
+    let task = service
+        .store()
+        .create(crate::NewTask {
+            source: source.into(),
+            name: options
+                .output_name
+                .clone()
+                .ok_or(QuarkError::InvalidResponse)?,
+            kind: "cloud".into(),
+        })
+        .map_err(|_| QuarkError::Storage)?;
+    match service
+        .submit_uri_with_options(task.id, vec![signed_url], options)
+        .await
+    {
+        Ok(task) => Ok(task),
+        Err(_) => {
+            // RPC failures may contain signed URIs. Never persist or expose them.
+            let message = "aria2 未能接受网盘分享下载任务";
+            let _ = service.store().fail(task.id, message);
+            Err(QuarkError::Transport(message.into()))
+        }
+    }
+}
+
+pub async fn resubmit_current_share_download(
+    service: &crate::DownloadService,
+    task_id: uuid::Uuid,
+    resolved: super::commands::ResolvedCloudDownload,
+    mut configured: crate::UriSubmissionOptions,
+) -> Result<crate::DownloadTask, QuarkError> {
+    let task = service
+        .store()
+        .find(task_id)
+        .map_err(|_| QuarkError::Storage)?;
+    parse_stable_cloud_share_source(&task.source)?;
+    if let Some(file) = service
+        .store()
+        .files(task_id)
+        .map_err(|_| QuarkError::Storage)?
+        .first()
+    {
+        let path = std::path::Path::new(&file.path);
+        if path.is_absolute() {
+            configured.directory = path.parent().map(std::path::Path::to_path_buf);
+            configured.output_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+        }
+    }
+    let (signed_url, options) = share_submission_options(resolved, configured)?;
+    service
+        .resubmit_uri_with_options(task_id, vec![signed_url], options)
+        .await
+        .map_err(|_| QuarkError::Transport("aria2 未能接受网盘分享下载任务".into()))
+}
+
+fn share_submission_options(
+    resolved: super::commands::ResolvedCloudDownload,
+    configured: crate::UriSubmissionOptions,
+) -> Result<(String, crate::UriSubmissionOptions), QuarkError> {
+    validate_direct_url(&resolved.url)?;
+    let signed_url = resolved.url.clone();
+    let mut options = resolved.into_uri_submission_options();
+    options.directory = configured.directory;
+    options.output_name = configured.output_name.or(options.output_name);
+    options.proxy = configured.proxy;
+    options.allow_overwrite = configured.allow_overwrite;
+    options.continue_download = configured.continue_download;
+    options
+        .clone()
+        .into_aria2_options()
+        .map_err(|_| QuarkError::InvalidResponse)?;
+    Ok((signed_url, options))
+}
 use zeroize::Zeroizing;
 
 pub const SHARE_PLAN_SECRET: &str = "cloud-share-plans-v1";
@@ -485,6 +727,178 @@ mod tests {
     use super::*;
     use crate::cloud::MemoryCredentialStore;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct DirectAdapter(AtomicU64);
+    impl CloudShareAdapter for DirectAdapter {
+        fn inspect(
+            &self,
+            _: &crate::parser::CloudShareCandidate,
+        ) -> Result<ShareInspection, QuarkError> {
+            Ok(ShareInspection::Plan(fixture("private-share")))
+        }
+        fn resolve(&self, _: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+            let revision = self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ShareResolution::Direct(
+                super::super::commands::ResolvedCloudDownload {
+                    url: format!("https://cdn.example/file?signature={revision}"),
+                    name: "file.txt".into(),
+                    headers: vec![("x-share-token".into(), format!("token-{revision}"))],
+                },
+            ))
+        }
+    }
+
+    #[test]
+    fn expired_share_url_refreshes_once_with_new_headers_without_persisting_url() {
+        let (store, credentials, _) = memory_store();
+        let plan = fixture("private-share");
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("f1");
+        let adapter = DirectAdapter(AtomicU64::new(0));
+        let first = resolve_current_share_download(&store, &adapter, &source).unwrap();
+        let refresh = CloudShareRefreshBudget::default();
+        assert!(refresh.claim(&source, Some("22")).unwrap());
+        let second = resolve_current_share_download(&store, &adapter, &source).unwrap();
+        assert_eq!(first.url, "https://cdn.example/file?signature=0");
+        assert_eq!(second.url, "https://cdn.example/file?signature=1");
+        assert_eq!(
+            second.headers,
+            vec![("x-share-token".into(), "token-1".into())]
+        );
+        assert!(!refresh.claim(&source, Some("22")).unwrap());
+        let saved =
+            String::from_utf8(credentials.load(SHARE_PLAN_SECRET).unwrap().unwrap()).unwrap();
+        assert!(!saved.contains("cdn.example") && !saved.contains("token-1"));
+        assert!(!source.contains("signature") && !source.contains("private-share"));
+    }
+
+    #[test]
+    fn refresh_budget_ignores_non_share_and_non_http_failures() {
+        let budget = CloudShareRefreshBudget::default();
+        assert!(!budget.claim("cloud://baidu/file", Some("22")).unwrap());
+        let source = fixture("share").source_for("f1");
+        for code in [None, Some("3"), Some("24"), Some("403")] {
+            assert!(!budget.claim(&source, code).unwrap());
+        }
+        assert!(budget.claim(&source, Some("22")).unwrap());
+        assert!(!budget.claim(&source, Some("22")).unwrap());
+    }
+
+    #[test]
+    fn inspection_projects_only_opaque_file_ids_and_validates_confirmation_selection() {
+        let (store, _, _) = memory_store();
+        let adapter = DirectAdapter(AtomicU64::new(0));
+        let candidate = crate::parser::extract_cloud_share_candidate(
+            "https://pan.baidu.com/s/private-share",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let ShareConfirmationOutcome::Confirmation(confirmation) =
+            inspect_share_with_adapter(&store, &adapter, &candidate).unwrap()
+        else {
+            panic!("expected plan")
+        };
+        let json = serde_json::to_string(&confirmation).unwrap();
+        for secret in ["private-share", "secret-code", "secret-token", "https://"] {
+            assert!(!json.contains(secret));
+        }
+        let sources = selected_share_sources(
+            &store,
+            &confirmation.plan_source,
+            &[confirmation.resources[0].id.clone()],
+        )
+        .unwrap();
+        assert_eq!(sources, vec![confirmation.plan_source.clone()]);
+        assert!(selected_share_sources(
+            &store,
+            &confirmation.plan_source,
+            &["forged-file-id".into()]
+        )
+        .is_err());
+        assert!(selected_share_sources(&store, &confirmation.plan_source, &[]).is_err());
+    }
+
+    struct FixedAdapter(fn() -> Result<ShareResolution, QuarkError>);
+    impl CloudShareAdapter for FixedAdapter {
+        fn inspect(
+            &self,
+            _: &crate::parser::CloudShareCandidate,
+        ) -> Result<ShareInspection, QuarkError> {
+            Ok(ShareInspection::AccessCodeRequired)
+        }
+        fn resolve(&self, _: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+            (self.0)()
+        }
+    }
+
+    #[test]
+    fn share_pages_and_transfer_requirements_never_become_direct_downloads() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("private-share");
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("f1");
+        let page = FixedAdapter(|| {
+            Ok(ShareResolution::Direct(
+                super::super::commands::ResolvedCloudDownload {
+                    url: "https://pan.baidu.com/s/private-share?pwd=secret".into(),
+                    name: "file.txt".into(),
+                    headers: vec![],
+                },
+            ))
+        });
+        assert!(matches!(
+            resolve_current_share_download(&store, &page, &source),
+            Err(QuarkError::InvalidResponse)
+        ));
+        let transfer = FixedAdapter(|| {
+            Ok(ShareResolution::TransferRequired(TransferRequest {
+                source: fixture("private-share").source_for("f1"),
+            }))
+        });
+        assert!(matches!(
+            resolve_current_share_download(&store, &transfer, &source),
+            Err(QuarkError::ProviderUnsupported)
+        ));
+    }
+
+    #[test]
+    fn challenge_errors_are_returned_without_an_automatic_adapter_retry() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("private-share");
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("f1");
+        for error in [
+            QuarkError::CaptchaRequired,
+            QuarkError::WebAuthorizationRequired,
+            QuarkError::PikpakRegionalMembershipRestricted,
+            QuarkError::InvalidInput("访问码错误".into()),
+            QuarkError::Provider("forbidden".into()),
+        ] {
+            struct OnceAdapter(Mutex<Option<QuarkError>>);
+            impl CloudShareAdapter for OnceAdapter {
+                fn inspect(
+                    &self,
+                    _: &crate::parser::CloudShareCandidate,
+                ) -> Result<ShareInspection, QuarkError> {
+                    unreachable!()
+                }
+                fn resolve(
+                    &self,
+                    _: &CloudShareResolvedEntry,
+                ) -> Result<ShareResolution, QuarkError> {
+                    Err(self
+                        .0
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("must not retry challenge"))
+                }
+            }
+            let adapter = OnceAdapter(Mutex::new(Some(error)));
+            assert!(resolve_current_share_download(&store, &adapter, &source).is_err());
+        }
+    }
 
     fn fixture(id: &str) -> CloudSharePlan {
         CloudSharePlan::new(

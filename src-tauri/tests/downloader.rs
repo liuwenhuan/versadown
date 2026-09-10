@@ -14,9 +14,11 @@ use serde_json::Value;
 #[derive(Default)]
 struct RecordingAria2 {
     calls: Mutex<Vec<String>>,
+    uris: Mutex<Vec<Vec<String>>>,
     options: Mutex<Vec<Aria2Options>>,
     add_error: bool,
     pause_error: bool,
+    status_error_message: Option<String>,
 }
 
 impl RecordingAria2 {
@@ -53,10 +55,11 @@ impl RecordingAria2 {
 impl Aria2Api for RecordingAria2 {
     async fn add_uri(
         &self,
-        _uris: Vec<String>,
+        uris: Vec<String>,
         options: Aria2Options,
     ) -> Result<String, Aria2Error> {
         self.record("aria2.addUri");
+        self.uris.lock().unwrap().push(uris);
         self.options.lock().unwrap().push(options);
         if self.add_error {
             Err(Aria2Error::Transport)
@@ -66,7 +69,13 @@ impl Aria2Api for RecordingAria2 {
     }
     async fn tell_status(&self, gid: &str) -> Result<Aria2Status, Aria2Error> {
         self.record("aria2.tellStatus");
-        Ok(Self::active(gid))
+        let mut status = Self::active(gid);
+        if let Some(message) = &self.status_error_message {
+            status.status = "error".into();
+            status.error_code = Some("22".into());
+            status.error_message = Some(message.clone());
+        }
+        Ok(status)
     }
     async fn pause(&self, _gid: &str) -> Result<String, Aria2Error> {
         self.record("aria2.pause");
@@ -127,6 +136,175 @@ impl Aria2Api for RecordingAria2 {
     async fn shutdown(&self) -> Result<String, Aria2Error> {
         unimplemented!()
     }
+}
+
+#[tokio::test]
+async fn cloud_share_submission_keeps_signed_url_and_headers_out_of_task_store() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{stable_share_source, submit_current_share_download},
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "private-share", "private-file");
+    let task = submit_current_share_download(
+        &service,
+        &source,
+        ResolvedCloudDownload {
+            url: "https://cdn.example/video?signature=private-signature".into(),
+            name: "video.mp4".into(),
+            headers: vec![("x-share-token".into(), "private-header".into())],
+        },
+        UriSubmissionOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        api.uris.lock().unwrap()[0],
+        vec!["https://cdn.example/video?signature=private-signature"]
+    );
+    assert_eq!(
+        api.added_options()[0]["header"],
+        "x-share-token: private-header"
+    );
+    assert_eq!(task.source, source);
+    let saved = serde_json::to_string(&store.find(task.id).unwrap()).unwrap();
+    for secret in [
+        "private-share",
+        "private-file",
+        "private-signature",
+        "private-header",
+        "cdn.example",
+    ] {
+        assert!(!saved.contains(secret));
+    }
+}
+
+#[tokio::test]
+async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{stable_share_source, submit_current_share_download},
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let result = submit_current_share_download(
+        &service,
+        &source,
+        ResolvedCloudDownload {
+            url: "https://www.aliyundrive.com/s/share".into(),
+            name: "file".into(),
+            headers: vec![],
+        },
+        UriSubmissionOptions::default(),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(api.calls().is_empty());
+    assert!(store.find_by_source(&source).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn cloud_share_aria_failure_redacts_signed_urls_but_retains_http_error_code() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{stable_share_source, submit_current_share_download},
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = Arc::new(RecordingAria2 {
+        status_error_message: Some(
+            "HTTP failure https://cdn.example/file?signature=secret-token".into(),
+        ),
+        ..Default::default()
+    });
+    let service = DownloadService::new(api, store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let task = submit_current_share_download(
+        &service,
+        &source,
+        ResolvedCloudDownload {
+            url: "https://cdn.example/file?signature=secret-token".into(),
+            name: "file".into(),
+            headers: vec![],
+        },
+        UriSubmissionOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(task.aria_error_code.as_deref(), Some("22"));
+    assert!(!task.error.as_ref().unwrap().contains("secret-token"));
+    assert!(!serde_json::to_string(&store.find(task.id).unwrap())
+        .unwrap()
+        .contains("cdn.example"));
+}
+
+#[tokio::test]
+async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{
+            resubmit_current_share_download, stable_share_source, submit_current_share_download,
+            CloudShareRefreshBudget,
+        },
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = Arc::new(RecordingAria2 {
+        status_error_message: Some("HTTP error".into()),
+        ..Default::default()
+    });
+    let service = DownloadService::new(api.clone(), store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let resolved = |revision| ResolvedCloudDownload {
+        url: format!("https://cdn.example/file?signature={revision}"),
+        name: "file".into(),
+        headers: vec![("x-share-token".into(), format!("token-{revision}"))],
+    };
+    let task = submit_current_share_download(&service, &source, resolved(0), Default::default())
+        .await
+        .unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(
+                1,
+                "D:/Downloads/nested/original.bin".into(),
+                1000,
+                250,
+                true,
+            )],
+        )
+        .unwrap();
+    let budget = CloudShareRefreshBudget::default();
+    assert!(budget
+        .claim(&task.source, task.aria_error_code.as_deref())
+        .unwrap());
+    let updated =
+        resubmit_current_share_download(&service, task.id, resolved(1), Default::default())
+            .await
+            .unwrap();
+    assert_eq!(updated.id, task.id);
+    assert_eq!(updated.source, source);
+    assert_eq!(
+        api.uris.lock().unwrap()[1],
+        vec!["https://cdn.example/file?signature=1"]
+    );
+    assert_eq!(api.added_options()[1]["header"], "x-share-token: token-1");
+    assert_eq!(api.added_options()[1]["dir"], "D:/Downloads/nested");
+    assert_eq!(api.added_options()[1]["out"], "original.bin");
+    assert!(!budget
+        .claim(&updated.source, updated.aria_error_code.as_deref())
+        .unwrap());
+    assert!(!serde_json::to_string(&store.find(task.id).unwrap())
+        .unwrap()
+        .contains("signature"));
 }
 
 #[tokio::test]

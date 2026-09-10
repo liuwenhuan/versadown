@@ -81,7 +81,9 @@ fn cloud_provider_for_url(url: &Url) -> Option<CloudProvider> {
         }
         ("pan.baidu.com", path) if path.starts_with("/s/") => Some(CloudProvider::Baidu),
         ("cloud.189.cn", path) if path.starts_with("/t/") => Some(CloudProvider::Tianyi),
-        ("alipan.com" | "www.alipan.com", path) if path.starts_with("/s/") => {
+        ("alipan.com" | "www.alipan.com" | "aliyundrive.com" | "www.aliyundrive.com", path)
+            if path.starts_with("/s/") =>
+        {
             Some(CloudProvider::Aliyun)
         }
         ("pan.xunlei.com", path) if path.starts_with("/s/") => Some(CloudProvider::Xunlei),
