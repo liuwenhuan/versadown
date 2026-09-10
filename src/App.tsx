@@ -122,6 +122,11 @@ export function App() {
     setConfirmation(next);
   }
 
+  function dismissConfirmation() {
+    confirmationGeneration.current += 1;
+    setConfirmation(null);
+  }
+
   function dismissDuplicate(taskId: string) {
     if (duplicateActionInFlight.current || duplicateCloseInFlight.current) return;
     duplicateCloseInFlight.current = true;
@@ -388,7 +393,9 @@ export function App() {
         setDuplicateQueue((current) => [...current, ...duplicates]);
         setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? null : current);
       } catch (error) {
-        setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+        if (confirmationGeneration.current === requestGeneration) {
+          setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+        }
       } finally {
         shareConfirmationsInFlight.current.delete(requestGeneration);
       }
@@ -590,7 +597,7 @@ export function App() {
       {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
-      } : current)} onClose={() => setConfirmation(null)} />}
+      } : current)} onClose={dismissConfirmation} />}
       {duplicate && <DuplicateDownloadDialog
         task={duplicate.task}
         state={duplicate.state}

@@ -228,6 +228,57 @@ it('binds in-flight share confirmation to its plan without blocking or clearing 
   expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
 });
 
+it('does not show a rejected response from a closed share generation over a newer confirmation', async () => {
+  const firstSubmission = deferred<never[]>();
+  state.parse
+    .mockResolvedValueOnce({
+      confirmation: {
+        taskId: 'cloud-share://uc/plan-a', title: '分享 A', requiresConfirmation: true,
+        resources: [{ id: 'a1', name: 'first.jpg', size: '1 B', selected: true }], processing: []
+      }
+    })
+    .mockResolvedValueOnce({
+      confirmation: {
+        taskId: 'cloud-share://uc/plan-b', title: '分享 B', requiresConfirmation: true,
+        resources: [{ id: 'b1', name: 'second.jpg', size: '1 B', selected: true }], processing: []
+      }
+    });
+  state.confirmCloud.mockReturnValueOnce(firstSubmission.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/plan-a' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭确认窗口' }));
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/plan-b' }); });
+
+  await act(async () => { firstSubmission.reject(new Error('A 已过期错误')); });
+
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
+  expect(screen.queryByText('A 已过期错误')).not.toBeInTheDocument();
+});
+
+it('does not show a rejected response after its share confirmation is closed', async () => {
+  const submission = deferred<never[]>();
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'cloud-share://uc/closed-plan', title: '已关闭分享', requiresConfirmation: true,
+      resources: [{ id: 'f1', name: 'closed.jpg', size: '1 B', selected: true }], processing: []
+    }
+  });
+  state.confirmCloud.mockReturnValueOnce(submission.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/closed-plan' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  fireEvent.click(screen.getByRole('button', { name: '关闭确认窗口' }));
+  await act(async () => { submission.reject(new Error('关闭后过期错误')); });
+
+  expect(screen.queryByRole('dialog', { name: '确认下载内容' })).not.toBeInTheDocument();
+  expect(screen.queryByText('关闭后过期错误')).not.toBeInTheDocument();
+});
+
 it('does not let an old response clear a reparsed confirmation for the same share plan', async () => {
   const firstSubmission = deferred<never[]>();
   const secondSubmission = deferred<never[]>();
