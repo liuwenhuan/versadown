@@ -608,6 +608,11 @@ fn virtual_cloud_directory_item_payload(
     item: &CloudDirectoryGroupItem,
     error: Option<String>,
 ) -> QueueTaskPayload {
+    let status = if error.is_some() {
+        TaskStatus::Failed
+    } else {
+        TaskStatus::Queued
+    };
     QueueTaskPayload {
         id: item.id.to_string(),
         source: format!(
@@ -617,7 +622,7 @@ fn virtual_cloud_directory_item_payload(
         ),
         name: item.output_name.clone(),
         kind: "file".to_string(),
-        status: TaskStatus::Failed,
+        status,
         progress: 0,
         error,
         aria_gid: None,
@@ -847,14 +852,19 @@ pub(crate) fn project_cloud_directory_groups(
         root.id = group.id.to_string();
         root.name = group.relative_directory.clone();
         for item in items {
-            let leaf = match item.task_id.and_then(|id| task_by_id.remove(&id)) {
-                Some(task) => queue_task_payload_from_task(store, task)?,
+            let leaf = match item.task_id {
+                Some(task_id) => match task_by_id.remove(&task_id) {
+                    Some(task) => queue_task_payload_from_task(store, task)?,
+                    None => virtual_cloud_directory_item_payload(
+                        &group,
+                        &item,
+                        Some("关联的下载任务不存在，需重新提交网盘文件".to_string()),
+                    ),
+                },
                 None => virtual_cloud_directory_item_payload(
                     &group,
                     &item,
-                    item.failure_message
-                        .clone()
-                        .or_else(|| Some("关联的下载任务不存在，需重新提交网盘文件".to_string())),
+                    item.failure_message.clone(),
                 ),
             };
             // Planned paths include the selected directory itself because that

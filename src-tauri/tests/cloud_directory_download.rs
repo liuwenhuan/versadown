@@ -1,12 +1,15 @@
 use alldownloader_lib::cloud::{
     commands::{
         plan_cloud_directory_download, retry_cloud_directory_group_item_with,
-        retry_cloud_directory_group_with, submit_cloud_directory_plan, CloudDownloadSourceGate,
+        retry_cloud_directory_group_with, submit_cloud_directory_plan,
+        submit_cloud_directory_plan_with_group_event, CloudDownloadSourceGate,
         DirectoryLeafSubmission,
     },
     CloudDirectory, CloudFile, CloudProvider, QuarkError,
 };
-use alldownloader_lib::{list_queue_tasks_for_scope, NewTask, TaskStore, UriSubmissionOptions};
+use alldownloader_lib::{
+    list_queue_tasks_for_scope, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
+};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -185,6 +188,57 @@ fn rejects_a_file_that_is_a_windows_normalized_ancestor_of_another_target() {
     assert!(
         matches!(result, Err(QuarkError::InvalidInput(message)) if message.contains("输出路径冲突"))
     );
+}
+
+#[tokio::test]
+async fn publishes_the_directory_root_before_any_leaf_is_created_or_published() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let plan =
+        plan_cloud_directory_download(CloudProvider::Quark, "root", "夸克精选壁纸", |id| {
+            Ok(directory(id, vec![file("wallpaper", id, "壁纸_1.jpg")]))
+        })
+        .unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let root_order = Arc::clone(&order);
+    let leaf_order = Arc::clone(&order);
+
+    submit_cloud_directory_plan_with_group_event(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        plan,
+        UriSubmissionOptions {
+            directory: Some(destination.path().to_path_buf()),
+            ..Default::default()
+        },
+        move |root| {
+            assert_eq!(root.kind, "folder");
+            assert_eq!(root.name, "夸克精选壁纸");
+            assert_eq!(root.status, TaskStatus::Queued);
+            assert_eq!(root.children.len(), 1);
+            root_order.lock().unwrap().push("root");
+        },
+        |_, _, _, context| {
+            assert_eq!(order.lock().unwrap().as_slice(), ["root"]);
+            let task = store
+                .create(NewTask::direct("cloud://quark/wallpaper"))
+                .unwrap();
+            store
+                .link_cloud_directory_group_item_task(context.group_id, context.item_id, task.id)
+                .unwrap();
+            assert!(store
+                .cloud_directory_group_for_task(task.id)
+                .unwrap()
+                .is_some());
+            leaf_order.lock().unwrap().push("leaf");
+            std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(order.lock().unwrap().as_slice(), ["root", "leaf"]);
 }
 
 #[tokio::test]
@@ -387,11 +441,18 @@ async fn resubmitting_a_persisted_failed_leaf_does_not_touch_linked_siblings() {
             directory: Some(destination.path().to_path_buf()),
             ..Default::default()
         },
-        |_, file_id, _| {
+        |_, file_id, _, context| {
             submitted_for_callback.lock().unwrap().push(file_id.clone());
             let task = store
                 .create(NewTask::direct("cloud://quark/retry-me"))
                 .unwrap();
+            store
+                .link_cloud_directory_group_item_task(context.group_id, context.item_id, task.id)
+                .unwrap();
+            assert_eq!(
+                store.cloud_directory_group_for_task(task.id).unwrap(),
+                Some(group.clone())
+            );
             async move { Ok(DirectoryLeafSubmission::Queued(task.id)) }
         },
     )
@@ -428,7 +489,7 @@ async fn resubmitting_a_persisted_failed_leaf_does_not_touch_linked_siblings() {
             directory: Some(destination.path().to_path_buf()),
             ..Default::default()
         },
-        |_, _, _| async { panic!("linked items must be rejected before submission") },
+        |_, _, _, _| async { panic!("linked items must be rejected before submission") },
     )
     .await;
     assert!(
@@ -487,11 +548,15 @@ async fn group_retry_submits_each_unlinked_leaf_once_and_returns_the_group_root(
             directory: Some(destination.path().to_path_buf()),
             ..Default::default()
         },
-        |_, file_id, _| {
+        |_, file_id, _, context| {
             submitted_for_callback.lock().unwrap().push(file_id.clone());
             let task = store
                 .create(NewTask::direct(format!("cloud://quark/{file_id}")))
                 .unwrap();
+            store
+                .link_cloud_directory_group_item_task(context.group_id, context.item_id, task.id)
+                .unwrap();
+            assert_eq!(context.group_id, group_id);
             std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
         },
     )

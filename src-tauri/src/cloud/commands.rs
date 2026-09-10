@@ -1,5 +1,7 @@
 use super::{http::response_json, types::required, *};
-use crate::models::{CloudDirectoryGroup, NewCloudDirectoryGroup, NewCloudDirectoryGroupItem};
+use crate::models::{
+    CloudDirectoryGroup, NewCloudDirectoryGroup, NewCloudDirectoryGroupItem, QueueTaskPayload,
+};
 use crate::{
     commands::{
         cloud_directory_group_queue_task, task_action_outcome, AppState, TaskActionOutcome,
@@ -2092,6 +2094,12 @@ pub enum DirectoryLeafSubmission {
     Duplicate,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct DirectoryLeafContext {
+    pub group_id: uuid::Uuid,
+    pub item_id: uuid::Uuid,
+}
+
 /// Persists the complete safe directory plan before any leaf receives a
 /// signed URL. The journal contains only stable provider IDs and local output
 /// components, never a URL or session material.
@@ -2144,6 +2152,7 @@ async fn submit_cloud_file(
     provider: CloudProvider,
     file_id: String,
     configured: UriSubmissionOptions,
+    directory_context: Option<DirectoryLeafContext>,
 ) -> Result<CloudFileSubmission, QuarkError> {
     let stable_source = format!(
         "cloud://{}/{}",
@@ -2167,6 +2176,12 @@ async fn submit_cloud_file(
 
     let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
+    if let Some(context) = directory_context {
+        state
+            .store
+            .link_cloud_directory_group_item_task(context.group_id, context.item_id, task.id)
+            .map_err(|_| QuarkError::Storage)?;
+    }
     let signed_url = resolved.url.clone();
     let mut options = resolved.into_uri_submission_options();
     options.directory = configured.directory;
@@ -2339,6 +2354,35 @@ where
     F: FnMut(CloudProvider, String, UriSubmissionOptions) -> Fut,
     Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
 {
+    submit_cloud_directory_plan_with_group_event(
+        store,
+        provider,
+        directory_id,
+        plan,
+        configured,
+        |_| {},
+        move |provider, file_id, options, _| submit(provider, file_id, options),
+    )
+    .await
+}
+
+/// Publishes the durable directory root before starting any leaf submission.
+/// The leaf context lets the real downloader bind each local task to that root
+/// before aria2 can publish its first status event.
+pub async fn submit_cloud_directory_plan_with_group_event<F, Fut, G>(
+    store: &TaskStore,
+    provider: CloudProvider,
+    directory_id: &str,
+    plan: CloudDirectoryDownloadPlan,
+    configured: UriSubmissionOptions,
+    mut group_created: G,
+    mut submit: F,
+) -> Result<CloudDirectoryDownloadOutcome, QuarkError>
+where
+    F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
+    Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
+    G: FnMut(QueueTaskPayload),
+{
     let base_directory = configured
         .directory
         .clone()
@@ -2350,6 +2394,9 @@ where
         &plan,
         &base_directory,
     )?;
+    group_created(
+        cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
+    );
     let items = store
         .cloud_directory_group_items(group.id)
         .map_err(|_| QuarkError::Storage)?;
@@ -2378,7 +2425,11 @@ where
         let mut options = configured.clone();
         options.directory = Some(output_directory);
         options.output_name = Some(file.output_name.clone());
-        match submit(provider, file.file_id.clone(), options).await {
+        let context = DirectoryLeafContext {
+            group_id: group.id,
+            item_id: item.id,
+        };
+        match submit(provider, file.file_id.clone(), options, context).await {
             Ok(DirectoryLeafSubmission::Queued(task_id)) => {
                 store
                     .link_cloud_directory_group_item_task(group.id, item.id, task_id)
@@ -2439,7 +2490,7 @@ pub async fn cloud_download_url(
     let state = app_handle.state::<AppState>();
     let configured =
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
-    match submit_cloud_file(app, &state, provider, file_id, configured).await? {
+    match submit_cloud_file(app, &state, provider, file_id, configured, None).await? {
         CloudFileSubmission::Queued(outcome) | CloudFileSubmission::Duplicate(outcome) => {
             Ok(outcome)
         }
@@ -2474,17 +2525,31 @@ pub async fn cloud_download_directory(
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
-    submit_cloud_directory_plan(
+    let root_event_app = app.clone();
+    submit_cloud_directory_plan_with_group_event(
         &store,
         provider,
         &directory_id,
         plan,
         configured,
-        move |provider, file_id, options| {
+        move |root| {
+            use tauri::Emitter;
+            let _ = root_event_app.emit("download-task-updated", root);
+        },
+        move |provider, file_id, options, context| {
             let app = submit_app.clone();
             async move {
                 let state = app.state::<AppState>();
-                match submit_cloud_file(app.clone(), &state, provider, file_id, options).await? {
+                match submit_cloud_file(
+                    app.clone(),
+                    &state,
+                    provider,
+                    file_id,
+                    options,
+                    Some(context),
+                )
+                .await?
+                {
                     CloudFileSubmission::Queued(outcome) => {
                         Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
                     }
@@ -2509,16 +2574,26 @@ pub async fn retry_cloud_directory_group_item(
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
+    let directory_context = DirectoryLeafContext { group_id, item_id };
     retry_cloud_directory_group_item_with(
         &store,
         group_id,
         item_id,
         configured,
-        move |provider, file_id, options| {
+        move |provider, file_id, options, _| {
             let app = submit_app.clone();
             async move {
                 let state = app.state::<AppState>();
-                match submit_cloud_file(app.clone(), &state, provider, file_id, options).await? {
+                match submit_cloud_file(
+                    app.clone(),
+                    &state,
+                    provider,
+                    file_id,
+                    options,
+                    Some(directory_context),
+                )
+                .await?
+                {
                     CloudFileSubmission::Queued(outcome) => {
                         Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
                     }
@@ -2540,7 +2615,7 @@ pub async fn retry_cloud_directory_group_with<F, Fut>(
     mut submit: F,
 ) -> Result<TaskActionOutcome, QuarkError>
 where
-    F: FnMut(CloudProvider, String, UriSubmissionOptions) -> Fut,
+    F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
     Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
 {
     let group = store
@@ -2567,7 +2642,7 @@ where
             group.id,
             item.id,
             configured.clone(),
-            |provider, file_id, options| submit(provider, file_id, options),
+            |provider, file_id, options, context| submit(provider, file_id, options, context),
         )
         .await;
     }
@@ -2587,11 +2662,20 @@ pub async fn retry_cloud_directory_group(
         &store,
         group_id,
         configured,
-        move |provider, file_id, options| {
+        move |provider, file_id, options, context| {
             let app = submit_app.clone();
             async move {
                 let state = app.state::<AppState>();
-                match submit_cloud_file(app.clone(), &state, provider, file_id, options).await? {
+                match submit_cloud_file(
+                    app.clone(),
+                    &state,
+                    provider,
+                    file_id,
+                    options,
+                    Some(context),
+                )
+                .await?
+                {
                     CloudFileSubmission::Queued(outcome) => {
                         Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
                     }
@@ -2611,7 +2695,7 @@ pub async fn retry_cloud_directory_group_item_with<F, Fut>(
     mut submit: F,
 ) -> Result<TaskActionOutcome, QuarkError>
 where
-    F: FnMut(CloudProvider, String, UriSubmissionOptions) -> Fut,
+    F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
     Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
 {
     let group = store
@@ -2634,7 +2718,18 @@ where
     let mut options = configured;
     options.directory = Some(output_directory);
     options.output_name = Some(item.output_name.clone());
-    match submit(group.provider, item.remote_file_id.clone(), options).await {
+    let context = DirectoryLeafContext {
+        group_id: group.id,
+        item_id: item.id,
+    };
+    match submit(
+        group.provider,
+        item.remote_file_id.clone(),
+        options,
+        context,
+    )
+    .await
+    {
         Ok(DirectoryLeafSubmission::Queued(task_id)) => {
             store
                 .link_cloud_directory_group_item_task(group.id, item.id, task_id)
