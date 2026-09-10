@@ -105,6 +105,33 @@ it('upserts a parsed task that already arrived through a live event', async () =
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
 });
 
+it('keeps a protected share open for an access code before completing its normal parse result', async () => {
+  const user = userEvent.setup();
+  const shareLink = 'https://pan.baidu.com/s/protected-share';
+  state.parse
+    .mockResolvedValueOnce({ shareAccessCodeRequired: { provider: 'baidu', message: '请输入提取码' } })
+    .mockResolvedValueOnce({ task: liveTask });
+  render(<App />);
+
+  await user.click(await screen.findByRole('button', { name: '新建下载' }));
+  const downloadInput = screen.getByLabelText('下载内容');
+  await user.type(downloadInput, shareLink);
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  const accessCode = await screen.findByLabelText('访问码');
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+  expect(downloadInput).toHaveValue(shareLink);
+  expect(accessCode).toHaveFocus();
+  expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined);
+
+  await user.type(accessCode, '1234');
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234'));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
+  expect(screen.getByText('archive.iso')).toBeVisible();
+});
+
 it('retrieves a compatible service model and persists the selected AI configuration', async () => {
   const user = userEvent.setup();
   state.listAiModels.mockResolvedValue(['gpt-4.1-mini', 'gpt-5-mini']);

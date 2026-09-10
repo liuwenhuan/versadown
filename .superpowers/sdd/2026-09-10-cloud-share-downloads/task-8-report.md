@@ -17,3 +17,11 @@
 ## Scope
 
 No release build, real cloud-account action, or Task 9 transfer-cleanup lifecycle code was run or added. Existing unrelated worktree changes were not staged.
+
+## Review follow-up
+
+- Root cause: `App` performed the parse side effects but discarded `ParseDownloadResult`, so the new-download dialog received `undefined` and treated an access-code-required share as complete.
+- `App.parse` and the `NewDownloadDialog` callback now return the exact tagged result after preserving the existing downloads/active-tab updates.
+- Added an App-level integration test that verifies a protected share keeps the dialog open with the access-code input focused, then accepts the normal task result and closes the dialog after resubmission.
+- RED: `pnpm exec vitest run --exclude '.worktrees/**' src/App.live.test.tsx` failed with the access-code input absent (17/18 passed).
+- GREEN: `pnpm exec vitest run --exclude '.worktrees/**' src/App.live.test.tsx src/components/NewDownloadDialog.test.tsx` passed `24/24`; `pnpm exec tsc -b` passed. No build or Task 9 changes were run or added for this follow-up.

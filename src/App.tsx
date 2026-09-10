@@ -314,6 +314,7 @@ export function App() {
       setSelectedTaskId(result.duplicate.task.id);
       setDuplicate(result.duplicate);
     }
+    return result;
   }
 
   async function resolveDuplicate(action: 'resume' | 'restart_missing' | 'overwrite') {
@@ -561,9 +562,10 @@ export function App() {
         onClose={() => setDuplicate(null)}
       />}
       <NewDownloadDialog open={newDownloadOpen} placement="modal" onParse={async (input, accessCode) => {
-        await parse(input, accessCode);
+        const result = await parse(input, accessCode);
         setView('downloads');
         setDownloadTab('active');
+        return result;
       }} onClose={() => setNewDownloadOpen(false)} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
