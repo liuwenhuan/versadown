@@ -2535,7 +2535,7 @@ mod tests {
         assert_eq!(outcome.payload.task.source, source);
         assert_eq!(
             outcome.payload.task.error.as_deref(),
-            Some("网盘分享下载地址获取失败，请检查登录状态后重试")
+            Some("网盘会话已过期，请重新登录授权")
         );
         assert_eq!(tasks.find(outcome.payload.task.id).unwrap().status, crate::TaskStatus::Failed);
         assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
@@ -2590,7 +2590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_store_recovery_still_returns_the_prepared_task_in_memory() {
+    async fn failed_store_recovery_does_not_fabricate_a_failed_task_in_memory() {
         let (plans, _, _) = memory_store();
         let plan = fixture("failed-store-recovery");
         let source = plan.source_for("f1");
@@ -2620,11 +2620,8 @@ mod tests {
         .expect("a durable-create result must not be reported as no task when recovery fails");
 
         assert_eq!(outcome.payload.task.source, source);
-        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
-        assert_eq!(
-            outcome.payload.task.error.as_deref(),
-            Some("网盘分享下载地址获取失败，请检查登录状态后重试")
-        );
+        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Parsing);
+        assert_eq!(outcome.payload.task.error, None);
         assert!(outcome.payload.files.is_empty());
     }
 
@@ -2662,8 +2659,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(failed.payload.task.status, crate::TaskStatus::Failed);
-        assert_eq!(tasks.find(failed.payload.task.id).unwrap().status, crate::TaskStatus::Parsing);
+        let durable = tasks.find(failed.payload.task.id).unwrap();
+        assert_eq!(failed.payload.task.id, durable.id);
+        assert_eq!(failed.payload.task.status, durable.status);
+        assert_eq!(failed.payload.task.error, durable.error);
         administration
             .execute_batch("DROP TRIGGER reject_failed_status")
             .unwrap();

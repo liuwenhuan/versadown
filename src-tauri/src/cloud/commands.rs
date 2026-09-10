@@ -17,6 +17,30 @@ use tauri_plugin_dialog::DialogExt;
 
 const CLOUD_SHARE_PREPARE_FAILURE: &str = "网盘分享下载准备失败，请重试";
 
+pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static str {
+    match error {
+        QuarkError::NotAuthorized => "尚未授权此网盘，请登录后使用",
+        QuarkError::AuthorizationExpired => "网盘会话已过期，请重新登录授权",
+        QuarkError::SessionRenewedRetryOperation => "登录已自动恢复，请重新执行本次操作",
+        QuarkError::WebAuthorizationRequired => {
+            "此登录方式需要网页验证，请点击网页授权完成登录"
+        }
+        QuarkError::CaptchaRequired => "网盘要求更新操作验证，请重新网页授权",
+        QuarkError::PikpakRegionalMembershipRestricted => {
+            "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
+        }
+        QuarkError::AuthorizationPending => "正在等待网页登录，请在授权窗口完成登录",
+        QuarkError::InvalidResponse => "网盘返回的下载信息无效，请刷新后重试",
+        QuarkError::Storage => "安全凭据存储不可用",
+        QuarkError::Transport(_) => "网盘分享下载地址网络请求失败，请检查网络后重试",
+        QuarkError::Provider(_) => "网盘分享下载地址请求失败，请稍后重试",
+        QuarkError::InvalidInput(_) => "网盘分享下载请求无效，请重新解析分享链接",
+        QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
+            "当前网盘分享下载暂不支持"
+        }
+    }
+}
+
 /// Personal files lock their exact source. Share files lock the stable plan,
 /// so new siblings, overwrite, refresh and cleanup cannot bypass each other
 /// while the plan's entry set changes. The guard covers resolution through
@@ -1686,11 +1710,11 @@ where
 
     let resolved = match resolve().await {
         Ok(resolved) => resolved,
-        Err(_) => {
+        Err(error) => {
             return Ok(cloud_share_failure_outcome(
                 &tasks,
                 prepared,
-                "网盘分享下载地址获取失败，请检查登录状态后重试",
+                share_resolution_failure_message(&error),
             ))
         }
     };
@@ -1714,12 +1738,10 @@ fn cloud_share_failure_outcome(
     prepared: DownloadTask,
     message: &'static str,
 ) -> TaskActionOutcome {
-    let mut task = tasks
+    let task = tasks
         .fail(prepared.id, message)
         .or_else(|_| tasks.find(prepared.id))
         .unwrap_or(prepared);
-    task.status = TaskStatus::Failed;
-    task.error = Some(message.into());
     cloud_share_task_outcome(tasks, task)
 }
 
@@ -2311,6 +2333,48 @@ mod tests {
         QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
+
+    #[test]
+    fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secrets() {
+        let typed = [
+            (QuarkError::NotAuthorized, "尚未授权此网盘，请登录后使用"),
+            (QuarkError::AuthorizationExpired, "网盘会话已过期，请重新登录授权"),
+            (
+                QuarkError::SessionRenewedRetryOperation,
+                "登录已自动恢复，请重新执行本次操作",
+            ),
+            (
+                QuarkError::WebAuthorizationRequired,
+                "此登录方式需要网页验证，请点击网页授权完成登录",
+            ),
+            (
+                QuarkError::CaptchaRequired,
+                "网盘要求更新操作验证，请重新网页授权",
+            ),
+            (
+                QuarkError::AuthorizationPending,
+                "正在等待网页登录，请在授权窗口完成登录",
+            ),
+            (
+                QuarkError::PikpakRegionalMembershipRestricted,
+                "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员",
+            ),
+        ];
+        for (error, expected) in typed {
+            assert_eq!(super::share_resolution_failure_message(&error), expected);
+        }
+
+        let secret = "https://secret.example/file?token=do-not-leak";
+        for error in [
+            QuarkError::Transport(secret.into()),
+            QuarkError::Provider(secret.into()),
+            QuarkError::InvalidInput(secret.into()),
+        ] {
+            let message = super::share_resolution_failure_message(&error);
+            assert!(!message.contains(secret));
+            assert!(!message.contains("token="));
+        }
+    }
 
     fn windows_device_name_variants() -> Vec<String> {
         [

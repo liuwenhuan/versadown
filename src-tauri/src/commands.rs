@@ -533,12 +533,21 @@ async fn resubmit_task(
     // Match the cleanup worker's source gate for both retry and overwrite.
     let _share_submission = if task.source.starts_with("cloud-share://") {
         Some(
-            state.cloud_download_sources.acquire(&task.source)
-                .await.map_err(|error| error.to_string())?,
+            state
+                .cloud_download_sources
+                .acquire(&task.source)
+                .await
+                .map_err(|error| error.to_string())?,
         )
     } else {
         None
     };
+    if task.source.starts_with("cloud-share://") {
+        let cloud = app
+            .try_state::<Arc<crate::cloud::commands::CloudState>>()
+            .ok_or_else(|| "网盘分享下载状态不可用，请重新解析分享链接".to_string())?;
+        reserve_cloud_share_resubmission(&cloud.share_plans, &task)?;
+    }
     let service = state
         .runtime
         .service()
@@ -558,7 +567,9 @@ async fn resubmit_task(
         } else {
             crate::cloud::commands::resolve_stable_cloud_download(app, &task.source).await
         }
-        .map_err(|error| format!("无法重新获取网盘下载地址：{error}"))?;
+        .map_err(|error| {
+            crate::cloud::commands::share_resolution_failure_message(&error).to_string()
+        })?;
         if share {
             return crate::cloud::share::resubmit_current_share_download(
                 &service, &task, resolved, options,
@@ -610,6 +621,15 @@ async fn resubmit_task(
         .resubmit_uri_with_options(task.id, vec![task.source], options)
         .await
         .map_err(|error| error.to_string())
+}
+
+fn reserve_cloud_share_resubmission(
+    plans: &crate::cloud::share::CloudSharePlanStore,
+    task: &DownloadTask,
+) -> Result<(), String> {
+    plans
+        .reserve_local_task(&task.source, task.id)
+        .map_err(|_| "无法准备网盘分享重试，请重新解析分享链接".to_string())
 }
 
 fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::PathBuf, String> {
@@ -1232,6 +1252,68 @@ mod tests {
         );
         assert!(!parsed.requires_confirmation);
         assert!(parsed.resources.is_empty());
+    }
+
+    #[test]
+    fn cloud_share_resubmission_reserves_the_original_task_before_engine_or_provider_work() {
+        let production = include_str!("commands.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source precedes tests");
+        let body = production
+            .split_once("async fn resubmit_task(")
+            .expect("resubmit task exists")
+            .1
+            .split_once("fn task_output_directory")
+            .expect("resubmit task has a stable end")
+            .0;
+        let reserve = body
+            .find("reserve_cloud_share_resubmission")
+            .expect("cloud-share retry must reserve its original task");
+        let engine = body
+            .find("runtime\n        .service()")
+            .expect("resubmit obtains the engine");
+        let provider = body
+            .find("resolve_stable_cloud_share_download")
+            .expect("resubmit resolves the provider URL");
+        assert!(reserve < engine);
+        assert!(reserve < provider);
+        assert!(body.contains("share_resolution_failure_message"));
+        assert!(!body.contains("无法重新获取网盘下载地址：{error}"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cloud_share_resubmission_reservation_is_idempotent_for_the_original_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "retry-reservation".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "retry-reservation",
+                "entry".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            serde_json::json!({}),
+        );
+        let source = plan.source_for("entry");
+        plans.upsert(&plan).unwrap();
+        let tasks = TaskStore::open_in_memory().unwrap();
+        let task = tasks.create(NewTask::direct(&source)).unwrap();
+
+        reserve_cloud_share_resubmission(&plans, &task).unwrap();
+        reserve_cloud_share_resubmission(&plans, &task).unwrap();
+
+        let current = plans.resolve_entry(&source).unwrap().plan;
+        let linked = current.linked_local_tasks.values().next().unwrap();
+        assert_eq!(linked.len(), 1);
+        assert!(linked.contains(&task.id));
     }
 
     #[cfg(windows)]
