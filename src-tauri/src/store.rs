@@ -7,7 +7,13 @@ use rusqlite::{params, Connection, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::models::{may_transition, DownloadTask, NewTask, TaskStatus};
+use crate::{
+    cloud::CloudProvider,
+    models::{
+        may_transition, CloudDirectoryGroup, CloudDirectoryGroupItem, DownloadTask,
+        NewCloudDirectoryGroup, NewCloudDirectoryGroupItem, NewTask, TaskStatus,
+    },
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -23,6 +29,8 @@ pub enum StoreError {
     InvalidTransition { from: TaskStatus, to: TaskStatus },
     #[error("value for {field} is outside SQLite's signed 64-bit range")]
     IntegerOutOfRange { field: &'static str },
+    #[error("invalid cloud directory group data: {0}")]
+    InvalidCloudDirectoryGroupData(&'static str),
 }
 
 pub struct TaskStore {
@@ -84,6 +92,186 @@ impl TaskStore {
         connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.created_at, task.updated_at])?;
         Ok(task)
+    }
+
+    pub fn create_cloud_directory_group(
+        &self,
+        new_group: NewCloudDirectoryGroup,
+        new_items: &[NewCloudDirectoryGroupItem],
+    ) -> Result<CloudDirectoryGroup, StoreError> {
+        validate_new_cloud_directory_group(&new_group)?;
+        for item in new_items {
+            validate_new_cloud_directory_group_item(item)?;
+        }
+
+        let timestamp = current_timestamp();
+        let group = CloudDirectoryGroup {
+            id: Uuid::new_v4(),
+            provider: new_group.provider,
+            remote_directory_id: new_group.remote_directory_id,
+            relative_directory: new_group.relative_directory,
+            output_directory: new_group.output_directory,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO cloud_directory_groups (id, provider, remote_directory_id, relative_directory, output_directory, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                group.id.to_string(),
+                group.provider.key(),
+                group.remote_directory_id,
+                group.relative_directory,
+                group.output_directory.to_string_lossy(),
+                group.created_at,
+                group.updated_at,
+            ],
+        )?;
+        for (item_index, new_item) in new_items.iter().enumerate() {
+            let item_index = u32::try_from(item_index)
+                .map_err(|_| StoreError::InvalidCloudDirectoryGroupData("too many group items"))?;
+            transaction.execute(
+                "INSERT INTO cloud_directory_group_items (id, group_id, item_index, remote_file_id, relative_directory, output_name, size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    group.id.to_string(),
+                    item_index,
+                    new_item.remote_file_id,
+                    serde_json::to_string(&new_item.relative_directory)
+                        .map_err(|_| StoreError::InvalidCloudDirectoryGroupData("relative directory"))?,
+                    new_item.output_name,
+                    new_item.size.map(|value| sqlite_i64("size", value)).transpose()?,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(group)
+    }
+
+    pub fn cloud_directory_group(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<CloudDirectoryGroup>, StoreError> {
+        validate_uuid(id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection
+            .query_row(
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, created_at, updated_at
+                 FROM cloud_directory_groups WHERE id = ?1",
+                [id.to_string()],
+                cloud_directory_group_from_row,
+            )
+            .map(Some)
+            .or_else(no_rows_to_none)
+    }
+
+    pub fn cloud_directory_groups(&self) -> Result<Vec<CloudDirectoryGroup>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, created_at, updated_at
+             FROM cloud_directory_groups ORDER BY created_at, id",
+        )?;
+        let groups = statement
+            .query_map([], cloud_directory_group_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(groups)
+    }
+
+    pub fn cloud_directory_group_items(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<CloudDirectoryGroupItem>, StoreError> {
+        validate_uuid(group_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT id, group_id, item_index, remote_file_id, relative_directory, output_name, size, task_id, failure_code, failure_message
+             FROM cloud_directory_group_items WHERE group_id = ?1 ORDER BY item_index",
+        )?;
+        let items = statement
+            .query_map([group_id.to_string()], cloud_directory_group_item_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(items)
+    }
+
+    pub fn link_cloud_directory_group_item_task(
+        &self,
+        group_id: Uuid,
+        item_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<(), StoreError> {
+        validate_uuid(group_id)?;
+        validate_uuid(item_id)?;
+        validate_uuid(task_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE cloud_directory_group_items
+             SET task_id = ?1, failure_code = NULL, failure_message = NULL
+             WHERE id = ?2 AND group_id = ?3",
+            params![task_id.to_string(), item_id.to_string(), group_id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(item_id));
+        }
+        transaction.execute(
+            "UPDATE cloud_directory_groups SET updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp(), group_id.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_cloud_directory_group_item(
+        &self,
+        group_id: Uuid,
+        item_id: Uuid,
+        failure_code: impl AsRef<str>,
+        failure_message: impl AsRef<str>,
+    ) -> Result<(), StoreError> {
+        validate_uuid(group_id)?;
+        validate_uuid(item_id)?;
+        validate_plain_text(failure_code.as_ref(), "failure code")?;
+        validate_plain_text(failure_message.as_ref(), "failure message")?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE cloud_directory_group_items
+             SET task_id = NULL, failure_code = ?1, failure_message = ?2
+             WHERE id = ?3 AND group_id = ?4",
+            params![failure_code.as_ref(), failure_message.as_ref(), item_id.to_string(), group_id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(item_id));
+        }
+        transaction.execute(
+            "UPDATE cloud_directory_groups SET updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp(), group_id.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn cloud_directory_group_for_task(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<CloudDirectoryGroup>, StoreError> {
+        validate_uuid(task_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection
+            .query_row(
+                "SELECT groups.id, groups.provider, groups.remote_directory_id, groups.relative_directory,
+                        groups.output_directory, groups.created_at, groups.updated_at
+                 FROM cloud_directory_groups AS groups
+                 INNER JOIN cloud_directory_group_items AS items ON items.group_id = groups.id
+                 WHERE items.task_id = ?1",
+                [task_id.to_string()],
+                cloud_directory_group_from_row,
+            )
+            .map(Some)
+            .or_else(no_rows_to_none)
     }
 
     pub fn transition(&self, id: Uuid, next: TaskStatus) -> Result<DownloadTask, StoreError> {
@@ -450,7 +638,7 @@ const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, erro
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 4 {
+    if version >= 5 {
         return Ok(());
     }
 
@@ -489,8 +677,33 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             PRIMARY KEY(task_id, file_index),
             FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
          );
+         CREATE TABLE IF NOT EXISTS cloud_directory_groups (
+            id TEXT PRIMARY KEY NOT NULL,
+            provider TEXT NOT NULL,
+            remote_directory_id TEXT NOT NULL,
+            relative_directory TEXT NOT NULL,
+            output_directory TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS cloud_directory_group_items (
+            id TEXT PRIMARY KEY NOT NULL,
+            group_id TEXT NOT NULL,
+            item_index INTEGER NOT NULL,
+            remote_file_id TEXT NOT NULL,
+            relative_directory TEXT NOT NULL,
+            output_name TEXT NOT NULL,
+            size INTEGER,
+            task_id TEXT,
+            failure_code TEXT,
+            failure_message TEXT,
+            FOREIGN KEY(group_id) REFERENCES cloud_directory_groups(id) ON DELETE CASCADE,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+            UNIQUE(group_id, item_index)
+         );
+         CREATE INDEX IF NOT EXISTS cloud_directory_group_items_task_id ON cloud_directory_group_items(task_id) WHERE task_id IS NOT NULL;
          UPDATE tasks SET created_at = updated_at WHERE created_at = 0;
-         PRAGMA user_version = 4;",
+         PRAGMA user_version = 5;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -604,4 +817,221 @@ fn optional_u64(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
 
 fn required_u64(row: &Row<'_>, index: usize) -> rusqlite::Result<u64> {
     u64::try_from(row.get::<_, i64>(index)?).map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
+fn cloud_directory_group_from_row(row: &Row<'_>) -> rusqlite::Result<CloudDirectoryGroup> {
+    let id: String = row.get(0)?;
+    let provider: String = row.get(1)?;
+    Ok(CloudDirectoryGroup {
+        id: parse_cloud_directory_uuid(&id)?,
+        provider: cloud_provider_from_db(&provider)?,
+        remote_directory_id: row.get(2)?,
+        relative_directory: row.get(3)?,
+        output_directory: std::path::PathBuf::from(row.get::<_, String>(4)?),
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+fn cloud_directory_group_item_from_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<CloudDirectoryGroupItem> {
+    let id: String = row.get(0)?;
+    let group_id: String = row.get(1)?;
+    let relative_directory: String = row.get(4)?;
+    let task_id: Option<String> = row.get(7)?;
+    Ok(CloudDirectoryGroupItem {
+        id: parse_cloud_directory_uuid(&id)?,
+        group_id: parse_cloud_directory_uuid(&group_id)?,
+        item_index: row.get(2)?,
+        remote_file_id: row.get(3)?,
+        relative_directory: serde_json::from_str(&relative_directory)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        output_name: row.get(5)?,
+        size: optional_u64(row, 6)?,
+        task_id: task_id
+            .as_deref()
+            .map(parse_cloud_directory_uuid)
+            .transpose()?,
+        failure_code: row.get(8)?,
+        failure_message: row.get(9)?,
+    })
+}
+
+fn parse_cloud_directory_uuid(value: &str) -> rusqlite::Result<Uuid> {
+    let id = Uuid::parse_str(value).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if id.is_nil() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(id)
+}
+
+fn cloud_provider_from_db(value: &str) -> rusqlite::Result<CloudProvider> {
+    match value {
+        "quark" => Ok(CloudProvider::Quark),
+        "pikpak" => Ok(CloudProvider::Pikpak),
+        "baidu" => Ok(CloudProvider::Baidu),
+        "tianyi" => Ok(CloudProvider::Tianyi),
+        "aliyun" => Ok(CloudProvider::Aliyun),
+        "xunlei" => Ok(CloudProvider::Xunlei),
+        "uc" => Ok(CloudProvider::Uc),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn no_rows_to_none<T>(error: rusqlite::Error) -> Result<Option<T>, StoreError> {
+    if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+        Ok(None)
+    } else {
+        Err(StoreError::Database(error))
+    }
+}
+
+fn validate_uuid(id: Uuid) -> Result<(), StoreError> {
+    if id.is_nil() {
+        return Err(StoreError::InvalidCloudDirectoryGroupData("nil UUID"));
+    }
+    Ok(())
+}
+
+fn validate_new_cloud_directory_group(group: &NewCloudDirectoryGroup) -> Result<(), StoreError> {
+    validate_plain_text(&group.remote_directory_id, "remote directory ID")?;
+    validate_path_component(&group.relative_directory)?;
+    if group.output_directory.as_os_str().is_empty() {
+        return Err(StoreError::InvalidCloudDirectoryGroupData("output directory"));
+    }
+    Ok(())
+}
+
+fn validate_new_cloud_directory_group_item(
+    item: &NewCloudDirectoryGroupItem,
+) -> Result<(), StoreError> {
+    validate_plain_text(&item.remote_file_id, "remote file ID")?;
+    validate_path_component(&item.output_name)?;
+    for component in &item.relative_directory {
+        validate_path_component(component)?;
+    }
+    Ok(())
+}
+
+fn validate_plain_text(value: &str, field: &'static str) -> Result<(), StoreError> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(StoreError::InvalidCloudDirectoryGroupData(field));
+    }
+    Ok(())
+}
+
+fn validate_path_component(component: &str) -> Result<(), StoreError> {
+    validate_plain_text(component, "path component")?;
+    if matches!(component, "." | "..") || component.contains(['/', '\\']) {
+        return Err(StoreError::InvalidCloudDirectoryGroupData("path component"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        cloud::CloudProvider,
+        models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
+    };
+
+    #[test]
+    fn cloud_directory_group_persists_items_across_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let base = directory.path().join("downloads");
+
+        let (group_id, item_id) = {
+            let store = TaskStore::open_path(&database).unwrap();
+            let group = store
+                .create_cloud_directory_group(
+                    NewCloudDirectoryGroup::new(
+                        CloudProvider::Quark,
+                        "root-id",
+                        "Season 1",
+                        &base,
+                    ),
+                    &[NewCloudDirectoryGroupItem::new(
+                        "remote-1",
+                        &["Season 1", "Extras"],
+                        "behind.mkv",
+                        None,
+                    )],
+                )
+                .unwrap();
+            let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
+            assert_eq!(item.relative_directory, vec!["Season 1", "Extras"]);
+            (group.id, item.id)
+        };
+
+        let store = TaskStore::open_path(&database).unwrap();
+        let group = store.cloud_directory_group(group_id).unwrap().unwrap();
+        let item = store.cloud_directory_group_items(group_id).unwrap().remove(0);
+        assert_eq!(group.id, group_id);
+        assert_eq!(group.provider, CloudProvider::Quark);
+        assert_eq!(group.remote_directory_id, "root-id");
+        assert_eq!(group.relative_directory, "Season 1");
+        assert_eq!(group.output_directory, base);
+        assert_eq!(item.id, item_id);
+        assert_eq!(item.remote_file_id, "remote-1");
+        assert_eq!(item.relative_directory, vec!["Season 1", "Extras"]);
+        assert_eq!(item.output_name, "behind.mkv");
+    }
+
+    #[test]
+    fn cloud_directory_group_returns_only_linked_tasks_and_keeps_failed_item_virtual() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let base = std::path::PathBuf::from("C:/downloads");
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "root-id",
+                    "Season 1",
+                    &base,
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new(
+                        "remote-episode",
+                        &["Season 1"],
+                        "episode.mkv",
+                        None,
+                    ),
+                    NewCloudDirectoryGroupItem::new(
+                        "remote-failed",
+                        &["Season 1", "Extras"],
+                        "behind.mkv",
+                        None,
+                    ),
+                ],
+            )
+            .unwrap();
+        let items = store.cloud_directory_group_items(group.id).unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/episode.mkv"))
+            .unwrap();
+
+        store
+            .link_cloud_directory_group_item_task(group.id, items[0].id, task.id)
+            .unwrap();
+        store
+            .fail_cloud_directory_group_item(
+                group.id,
+                items[1].id,
+                "provider_error",
+                "link generation failed",
+            )
+            .unwrap();
+
+        assert_eq!(store.cloud_directory_group_for_task(task.id).unwrap(), Some(group.clone()));
+        assert_eq!(store.cloud_directory_group_items(group.id).unwrap()[1].task_id, None);
+        assert_eq!(
+            store.cloud_directory_group_items(group.id).unwrap()[1]
+                .failure_code
+                .as_deref(),
+            Some("provider_error")
+        );
+    }
 }

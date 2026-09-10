@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+use crate::cloud::CloudProvider;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -317,6 +320,84 @@ impl NewTask {
             source,
             name,
             kind: "file".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDirectoryGroup {
+    pub id: Uuid,
+    pub provider: CloudProvider,
+    pub remote_directory_id: String,
+    pub relative_directory: String,
+    pub output_directory: PathBuf,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewCloudDirectoryGroup {
+    pub provider: CloudProvider,
+    pub remote_directory_id: String,
+    pub relative_directory: String,
+    pub output_directory: PathBuf,
+}
+
+impl NewCloudDirectoryGroup {
+    pub fn new(
+        provider: CloudProvider,
+        remote_directory_id: impl Into<String>,
+        relative_directory: impl Into<String>,
+        output_directory: impl AsRef<Path>,
+    ) -> Self {
+        Self {
+            provider,
+            remote_directory_id: remote_directory_id.into(),
+            relative_directory: relative_directory.into(),
+            output_directory: output_directory.as_ref().to_path_buf(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDirectoryGroupItem {
+    pub id: Uuid,
+    pub group_id: Uuid,
+    pub item_index: u32,
+    pub remote_file_id: String,
+    pub relative_directory: Vec<String>,
+    pub output_name: String,
+    pub size: Option<u64>,
+    pub task_id: Option<Uuid>,
+    pub failure_code: Option<String>,
+    pub failure_message: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewCloudDirectoryGroupItem {
+    pub remote_file_id: String,
+    pub relative_directory: Vec<String>,
+    pub output_name: String,
+    pub size: Option<u64>,
+}
+
+impl NewCloudDirectoryGroupItem {
+    pub fn new(
+        remote_file_id: impl Into<String>,
+        relative_directory: &[impl AsRef<str>],
+        output_name: impl Into<String>,
+        size: Option<u64>,
+    ) -> Self {
+        Self {
+            remote_file_id: remote_file_id.into(),
+            relative_directory: relative_directory
+                .iter()
+                .map(|component| component.as_ref().to_string())
+                .collect(),
+            output_name: output_name.into(),
+            size,
         }
     }
 }
