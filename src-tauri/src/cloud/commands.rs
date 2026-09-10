@@ -6,7 +6,7 @@ use crate::{
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tauri::{
@@ -1824,17 +1824,38 @@ fn directory_download_output_directory(
     }
     let mut target = base.to_path_buf();
     for component in components {
-        if component.is_empty()
-            || matches!(component.as_str(), "." | "..")
-            || component.contains(['/', '\\'])
-        {
-            return Err(QuarkError::InvalidResponse);
-        }
-        target.push(component);
+        target.push(provider_directory_component(component)?);
+    }
+    // Check lexical containment before touching the filesystem, even if the
+    // component normalization above changes in the future.
+    if !target.strip_prefix(base).is_ok_and(|relative| {
+        relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    }) {
+        return Err(QuarkError::InvalidResponse);
     }
     std::fs::create_dir_all(&target)
         .map_err(|_| QuarkError::Transport("无法创建目录下载目标文件夹".into()))?;
     Ok(target)
+}
+
+fn provider_directory_component(component: &str) -> Result<String, QuarkError> {
+    let mut path_components = Path::new(component).components();
+    // Reject Windows drive prefixes on every host, including drive-relative
+    // paths such as C:outside, before safe_filename could hide the bad input.
+    let windows_drive_prefix =
+        component.as_bytes().get(1) == Some(&b':') && component.as_bytes()[0].is_ascii_alphabetic();
+    if windows_drive_prefix
+        || component.contains(['/', '\\'])
+        || component.chars().any(char::is_control)
+        || !matches!(path_components.next(), Some(Component::Normal(_)))
+        || path_components.next().is_some()
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    // Confirmation renders these names with the same filename normalization.
+    Ok(safe_filename(component))
 }
 
 fn directory_download_failure(
@@ -2140,6 +2161,49 @@ mod tests {
         QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
+
+    #[test]
+    fn directory_output_rejects_provider_path_components_before_creating_directories() {
+        let root = tempfile::tempdir().expect("temporary selected download root");
+        for component in [
+            "C:",
+            "C:outside",
+            r"C:\outside",
+            r"\\server\share",
+            r"\outside",
+            "/outside",
+            ".",
+            "..",
+            "",
+            "nested/file",
+            r"nested\file",
+            "line\nbreak",
+            "control\u{7f}",
+        ] {
+            let result = super::directory_download_output_directory(
+                root.path(),
+                &["must-not-be-created".into(), component.into()],
+            );
+            assert!(
+                matches!(result, Err(QuarkError::InvalidResponse)),
+                "provider component {component:?} must be rejected, got {result:?}"
+            );
+            assert!(!root.path().join("must-not-be-created").exists());
+        }
+    }
+
+    #[test]
+    fn directory_output_uses_the_confirmed_names_inside_the_selected_root() {
+        let root = tempfile::tempdir().expect("temporary selected download root");
+        let output = super::directory_download_output_directory(
+            root.path(),
+            &["课程资料".into(), "2026?笔记. ".into()],
+        )
+        .expect("valid provider names should download below the selected root");
+        assert_eq!(output, root.path().join("课程资料").join("2026_笔记"));
+        assert!(output.is_dir());
+        assert!(output.starts_with(root.path()));
+    }
 
     #[test]
     fn cloud_authorization_window_repositions_each_loaded_page_to_the_top_right() {
