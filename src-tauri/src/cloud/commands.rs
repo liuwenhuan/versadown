@@ -2780,7 +2780,7 @@ mod tests {
         super::save_provider_session(CloudProvider::Xunlei, &store, &modern_xunlei_fixture())
             .unwrap();
         let transport = SequenceTransport(Mutex::new(VecDeque::from([
-            r#"{"name":"fixture.txt","web_content_link":"https://cdn.example.test/fixture"}"#,
+            r#"{"id":"fixture-id","name":"fixture.txt","web_content_link":"https://cdn.example.test/fixture"}"#,
         ])));
         let download =
             resolve_download(CloudProvider::Xunlei, "fixture-id", &store, &transport).unwrap();

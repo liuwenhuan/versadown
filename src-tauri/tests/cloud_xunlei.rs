@@ -880,7 +880,7 @@ fn modern_xunlei_download_does_not_retry_invalid_metadata_or_links() {
 #[test]
 fn modern_xunlei_download_ready_link_uses_one_request_and_stops_on_http_errors() {
     let ready = RecordingHttp::sequence(&[
-        r#"{"name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":"https://cdn.example/ready"}"#,
+        r#"{"id":"f1","name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":"https://cdn.example/ready"}"#,
     ]);
     assert!(XunleiClient::new(modern_session(), &ready)
         .download("f1")
@@ -888,7 +888,7 @@ fn modern_xunlei_download_ready_link_uses_one_request_and_stops_on_http_errors()
     assert_eq!(ready.requests().len(), 1);
 
     let http = RecordingHttp::sequence(&[
-        r#"{"name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":""}"#,
+        r#"{"id":"f1","name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":""}"#,
         "{}",
     ]);
     http.responses.lock().unwrap()[0].status = 500;

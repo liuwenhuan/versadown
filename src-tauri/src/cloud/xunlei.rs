@@ -231,6 +231,28 @@ mod tests {
         assert!(persisted.web_security.expires_at > now());
     }
     #[test]
+    fn xunlei_personal_download_rejects_a_response_for_another_file() {
+        let credentials = credentials();
+        let session: XunleiSession = serde_json::from_slice(
+            &credentials.load("xunlei").unwrap().expect("saved Xunlei session"),
+        )
+        .unwrap();
+        let http = Http::new(vec![
+            cap(),
+            json!({
+                "id": "other-file",
+                "name": "file.txt",
+                "phase": "PHASE_TYPE_COMPLETE",
+                "web_content_link": "https://cdn.example/other"
+            }),
+        ]);
+
+        assert!(matches!(
+            XunleiClient::new(session, &http).download("personal-id"),
+            Err(QuarkError::InvalidResponse)
+        ));
+    }
+    #[test]
     fn xunlei_transfer_owner_uses_user_id_not_rotating_access_token() {
         let credentials = credentials();
         let http = Http::new(vec![]);
@@ -1869,6 +1891,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 None,
             )?;
             let file = value.get("data").unwrap_or(&value);
+            if file.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) != Some(id) {
+                return Err(QuarkError::InvalidResponse);
+            }
             let name = required(file, "name")?;
             match xunlei_content_link(file)? {
                 Some(link) => {
