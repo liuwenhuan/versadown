@@ -76,7 +76,7 @@ export function App() {
   const [tasks, setTasks] = useState<QueueTask[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ParseResult | null>(null);
-  const [duplicate, setDuplicate] = useState<DuplicateDownload | null>(null);
+  const [duplicateQueue, setDuplicateQueue] = useState<DuplicateDownload[]>([]);
   const [view, setView] = useState<ManagerView>('downloads');
   const [downloadTab, setDownloadTab] = useState<DownloadTab>('active');
   const [searchInput, setSearchInput] = useState('');
@@ -106,7 +106,19 @@ export function App() {
   const taskEventVersions = useRef(new Map<string, number>());
   const engineEventEpoch = useRef(0);
   const tasksRef = useRef<QueueTask[]>(tasks);
+  const shareConfirmationInFlight = useRef(false);
+  const duplicateActionInFlight = useRef(false);
   tasksRef.current = tasks;
+  const duplicate = duplicateQueue[0] ?? null;
+
+  function enqueueDuplicate(next: DuplicateDownload) {
+    setDuplicateQueue((current) => [...current, next]);
+  }
+
+  function dismissDuplicate() {
+    if (duplicateActionInFlight.current) return;
+    setDuplicateQueue((current) => current.slice(1));
+  }
 
   function recordTaskEvent(task: QueueTask) {
     taskEventEpoch.current += 1;
@@ -312,47 +324,62 @@ export function App() {
       recordTaskEvent(result.duplicate.task);
       setTasks((current) => upsertTask(current, result.duplicate!.task));
       setSelectedTaskId(result.duplicate.task.id);
-      setDuplicate(result.duplicate);
+      enqueueDuplicate(result.duplicate);
     }
     return result;
   }
 
   async function resolveDuplicate(action: 'resume' | 'restart_missing' | 'overwrite') {
-    if (!duplicate) return;
+    if (!duplicate || duplicateActionInFlight.current) return;
+    duplicateActionInFlight.current = true;
+    const taskId = duplicate.task.id;
     try {
-      const updated = await resolveDuplicateDownload(duplicate.task.id, action);
+      const updated = await resolveDuplicateDownload(taskId, action);
       if (updated) {
         recordTaskEvent(updated);
         setTasks((current) => upsertTask(current, updated));
         setSelectedTaskId(updated.id);
       }
-      setDuplicate(null);
+      setDuplicateQueue((current) => current[0]?.task.id === taskId ? current.slice(1) : current);
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      duplicateActionInFlight.current = false;
     }
   }
 
   async function openDuplicateDirectory() {
-    if (!duplicate) return;
+    if (!duplicate || duplicateActionInFlight.current) return;
+    duplicateActionInFlight.current = true;
+    const taskId = duplicate.task.id;
     try {
-      await openTaskDirectory(duplicate.task.id);
-      setDuplicate(null);
+      await openTaskDirectory(taskId);
+      setDuplicateQueue((current) => current[0]?.task.id === taskId ? current.slice(1) : current);
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      duplicateActionInFlight.current = false;
     }
   }
 
   async function confirm(selectedIds: string[], destinationDirectory?: string) {
     if (!confirmation) return;
     if (confirmation.taskId.startsWith('cloud-share://')) {
+      if (shareConfirmationInFlight.current) return;
+      shareConfirmationInFlight.current = true;
       try {
-        const cloudTasks = await confirmCloudShareDownload(confirmation.taskId, selectedIds, destinationDirectory);
+        const outcomes = await confirmCloudShareDownload(confirmation.taskId, selectedIds, destinationDirectory);
+        const cloudTasks = outcomes.flatMap((outcome) => outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
+        const duplicates = outcomes.flatMap((outcome) => outcome.duplicate ? [outcome.duplicate] : []);
         cloudTasks.forEach((cloudTask) => recordTaskEvent(cloudTask));
         setTasks((current) => cloudTasks.reduce((next, cloudTask) => upsertTask(next, cloudTask), current));
         setSelectedTaskId(cloudTasks.at(-1)?.id ?? null);
+        setDuplicateQueue((current) => [...current, ...duplicates]);
         setConfirmation(null);
       } catch (error) {
         setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+      } finally {
+        shareConfirmationInFlight.current = false;
       }
       return;
     }
@@ -423,7 +450,7 @@ export function App() {
         recordTaskEvent(result.duplicate.task);
         setTasks((current) => upsertTask(current, result.duplicate!.task));
         setSelectedTaskId(id);
-        setDuplicate(result.duplicate);
+        enqueueDuplicate(result.duplicate);
       } else if (result.task) {
         recordTaskEvent(result.task);
         setTasks((current) => upsertTask(current, result.task!));
@@ -473,7 +500,7 @@ export function App() {
       recordTaskEvent(outcome.duplicate.task);
       setTasks((current) => upsertTask(current, outcome.duplicate!.task));
       setSelectedTaskId(outcome.duplicate.task.id);
-      setDuplicate(outcome.duplicate);
+      enqueueDuplicate(outcome.duplicate);
       return;
     }
     const task = outcome?.task ?? value;
@@ -559,7 +586,7 @@ export function App() {
         onOpenDirectory={() => void openDuplicateDirectory()}
         onResolve={(action) => void resolveDuplicate(action)}
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
-        onClose={() => setDuplicate(null)}
+        onClose={dismissDuplicate}
       />}
       <NewDownloadDialog open={newDownloadOpen} placement="modal" onParse={async (input, accessCode) => {
         const result = await parse(input, accessCode);

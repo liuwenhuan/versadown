@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { QueueTask } from './lib/types';
@@ -7,17 +7,17 @@ const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
-  confirm: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
+  confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
-  confirmDownload: state.confirm, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles,
+  confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' } },
   getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' } }),
-  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: vi.fn(), removeTaskRecord: vi.fn(), resolveDuplicateDownload: vi.fn()
+  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -40,8 +40,9 @@ const liveTask: QueueTask = { ...oldTask, progress: 40, completed_length: 40 };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 beforeEach(() => {
@@ -49,6 +50,9 @@ beforeEach(() => {
   state.list.mockResolvedValue([]);
   state.parse.mockReset();
   state.confirm.mockReset();
+  state.confirmCloud.mockReset();
+  state.resolveDuplicate.mockReset();
+  state.openDirectory.mockReset();
   state.selectFiles.mockReset();
   state.getEngineState.mockReset();
   state.getEngineState.mockResolvedValue({ available: true, retrying: false });
@@ -130,6 +134,86 @@ it('keeps a protected share open for an access code before completing its normal
   await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234'));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
   expect(screen.getByText('archive.iso')).toBeVisible();
+});
+
+it('queues normal share results and presents duplicate results in FIFO order', async () => {
+  const user = userEvent.setup();
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'cloud-share://baidu/plan', title: '分享目录', requiresConfirmation: true,
+      resources: [{ id: 'f1', name: 'first.bin', size: '1 B', selected: true }], processing: []
+    }
+  });
+  state.confirmCloud.mockResolvedValueOnce([
+    { task: { id: 'queued-1', name: 'first.bin', kind: 'cloud', status: 'downloading', progress: 0 } },
+    { duplicate: { task: { id: 'duplicate-1', name: 'first-existing.bin', kind: 'cloud', status: 'completed', progress: 100 }, state: 'completed_files_present' } },
+    { task: { id: 'queued-2', name: 'second.bin', kind: 'cloud', status: 'downloading', progress: 0 } },
+    { duplicate: { task: { id: 'duplicate-2', name: 'second-existing.bin', kind: 'cloud', status: 'downloading', progress: 20 }, state: 'existing_active' } }
+  ]);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://pan.baidu.com/s/share' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+
+  const firstDuplicateDialog = await screen.findByRole('dialog', { name: '检测到重复下载' });
+  expect(firstDuplicateDialog).toHaveTextContent('first-existing.bin');
+  expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('first.bin')).toBeVisible();
+  expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('second.bin')).toBeVisible();
+  expect(firstDuplicateDialog).not.toHaveTextContent('second-existing.bin');
+
+  await user.click(screen.getByRole('button', { name: '取消' }));
+  await waitFor(() => expect(screen.getByRole('dialog', { name: '检测到重复下载' })).toHaveTextContent('second-existing.bin'));
+});
+
+it('keeps share confirmation open after one rejected submission and ignores concurrent clicks', async () => {
+  const submission = deferred<never>();
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'cloud-share://uc/plan', title: 'UC 分享', requiresConfirmation: true,
+      resources: [{ id: 'f1', name: 'photo.jpg', size: '1 B', selected: true }], processing: []
+    }
+  });
+  state.confirmCloud.mockReturnValueOnce(submission.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/share' }); });
+
+  const submit = screen.getByRole('button', { name: /立即下载 1/ });
+  fireEvent.click(submit);
+  fireEvent.click(submit);
+  expect(state.confirmCloud).toHaveBeenCalledTimes(1);
+
+  await act(async () => { submission.reject(new Error('服务器拒绝下载')); });
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
+  expect(await screen.findByRole('status')).toHaveTextContent('服务器拒绝下载');
+});
+
+it('ignores concurrent duplicate resolutions and advances to the next duplicate after success', async () => {
+  const resolution = deferred<QueueTask>();
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'cloud-share://baidu/plan', title: '分享目录', requiresConfirmation: true,
+      resources: [{ id: 'f1', name: 'first.bin', size: '1 B', selected: true }], processing: []
+    }
+  });
+  state.confirmCloud.mockResolvedValueOnce([
+    { duplicate: { task: { id: 'duplicate-1', name: 'first-existing.bin', kind: 'cloud', status: 'paused', progress: 40 }, state: 'resume_available' } },
+    { duplicate: { task: { id: 'duplicate-2', name: 'second-existing.bin', kind: 'cloud', status: 'downloading', progress: 20 }, state: 'existing_active' } }
+  ]);
+  state.resolveDuplicate.mockReturnValueOnce(resolution.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://pan.baidu.com/s/share' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+
+  const resume = await screen.findByRole('button', { name: '继续下载' });
+  fireEvent.click(resume);
+  fireEvent.click(resume);
+  expect(state.resolveDuplicate).toHaveBeenCalledTimes(1);
+
+  await act(async () => { resolution.resolve({ id: 'duplicate-1', name: 'first-existing.bin', kind: 'cloud', status: 'downloading', progress: 40 }); });
+  await waitFor(() => expect(screen.getByRole('dialog', { name: '检测到重复下载' })).toHaveTextContent('second-existing.bin'));
 });
 
 it('retrieves a compatible service model and persists the selected AI configuration', async () => {

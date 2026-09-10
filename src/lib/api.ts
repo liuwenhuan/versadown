@@ -53,9 +53,10 @@ type NativeAccessCodeRequiredOutcome = {
 type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome;
 
 function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
-  return result.duplicate
-    ? { duplicate: { task: result, state: result.duplicate } }
-    : { task: result };
+  const { duplicate, ...task } = result;
+  return duplicate
+    ? { duplicate: { task, state: duplicate } }
+    : { task };
 }
 
 export async function parseDownload(input: string, accessCode?: string): Promise<ParseDownloadResult> {
@@ -112,9 +113,10 @@ export async function openTaskDirectory(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_directory', { taskId });
 }
 
-export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<QueueTask[]> {
+export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<TaskActionResult[]> {
   if (!isTauriRuntime()) return [];
-  return invoke<QueueTask[]>('confirm_cloud_share_download', { planSource, selectedIds, destinationDirectory });
+  const outcomes = await invoke<NativeTaskOutcome[]>('confirm_cloud_share_download', { planSource, selectedIds, destinationDirectory });
+  return outcomes.map(duplicateResult);
 }
 
 export async function playTaskVideos(taskId: string): Promise<void> {

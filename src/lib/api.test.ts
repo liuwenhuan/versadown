@@ -70,6 +70,26 @@ it('sends opaque share plans to the cloud-share confirmation command', async () 
   });
 });
 
+it('preserves every native share task outcome and maps duplicate metadata in order', async () => {
+  native.invoke.mockResolvedValueOnce([
+    { id: 'queued-1', name: 'first.bin', kind: 'cloud', status: 'queued', progress: 0 },
+    { id: 'duplicate-1', name: 'existing.bin', kind: 'cloud', status: 'completed', progress: 100, duplicate: 'completed_files_present' },
+    { id: 'queued-2', name: 'second.bin', kind: 'cloud', status: 'queued', progress: 0 }
+  ]);
+  const { confirmCloudShareDownload } = await import('./api');
+
+  await expect(confirmCloudShareDownload('cloud-share://baidu/plan', ['f1', 'f2', 'f3'])).resolves.toEqual([
+    { task: { id: 'queued-1', name: 'first.bin', kind: 'cloud', status: 'queued', progress: 0 } },
+    {
+      duplicate: {
+        task: { id: 'duplicate-1', name: 'existing.bin', kind: 'cloud', status: 'completed', progress: 100 },
+        state: 'completed_files_present'
+      }
+    },
+    { task: { id: 'queued-2', name: 'second.bin', kind: 'cloud', status: 'queued', progress: 0 } }
+  ]);
+});
+
 it('maps the tagged native task outcome without changing direct downloads', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'task',
