@@ -55,6 +55,20 @@ fn form_field(body: &str, wanted: &str) -> String {
         .unwrap_or_default()
 }
 
+fn tianyi_recycle_page(first_id: u64) -> String {
+    serde_json::json!({
+        "res_code": 0,
+        "fileList": (first_id..first_id + 100)
+            .map(|id| serde_json::json!({
+                "id": id,
+                "name": format!("deleted-{id}.txt"),
+                "isFolder": false,
+            }))
+            .collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
 struct UploadRecordingHttp {
     replies: Mutex<Vec<UploadHttpResponse>>,
     requests: Mutex<Vec<UploadHttpRequest>>,
@@ -245,6 +259,73 @@ fn tianyi_recycle_list_collects_following_pages_and_stops_after_a_short_page() {
     for request in requests {
         assert_eq!(request.headers["Cookie"], "COOKIE_LOGIN_USER=paged-session");
     }
+}
+
+#[test]
+fn tianyi_recycle_list_stops_after_an_empty_following_page() {
+    let first = tianyi_recycle_page(1);
+    let http = RecordingHttp::sequence(&[&first, r#"{"res_code":0,"fileList":[]}"#]);
+    let client = TianyiClient::new(
+        TianyiSession::cookie("COOKIE_LOGIN_USER=empty-page"),
+        &http,
+    );
+
+    let directory = client.list_recycle_bin().unwrap();
+
+    assert_eq!(directory.items.len(), 100);
+    assert_eq!(directory.items[99].id, "100");
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2, "an empty page must end pagination");
+    assert!(requests[1].url.contains(
+        "/api/open/file/listRecycleBinFiles.action?pageNum=2&pageSize=100&iconOption=1&family=false"
+    ));
+    assert_eq!(
+        requests[1].headers["Cookie"],
+        "COOKIE_LOGIN_USER=empty-page"
+    );
+}
+
+#[test]
+fn tianyi_recycle_list_rejects_a_duplicate_record_on_a_following_page() {
+    let first = tianyi_recycle_page(1);
+    let http = RecordingHttp::sequence(&[
+        &first,
+        r#"{"res_code":0,"fileList":[{"id":100,"name":"deleted-100.txt","isFolder":false}]}"#,
+    ]);
+    let client = TianyiClient::new(
+        TianyiSession::cookie("COOKIE_LOGIN_USER=duplicate-page"),
+        &http,
+    );
+
+    assert!(matches!(
+        client.list_recycle_bin(),
+        Err(QuarkError::InvalidResponse)
+    ));
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].headers["Cookie"],
+        "COOKIE_LOGIN_USER=duplicate-page"
+    );
+}
+
+#[test]
+fn tianyi_recycle_list_rejects_ten_thousand_full_pages() {
+    let pages = (0..10_000)
+        .map(|page| tianyi_recycle_page(page * 100 + 1))
+        .collect::<Vec<_>>();
+    let replies = pages.iter().map(String::as_str).collect::<Vec<_>>();
+    let http = RecordingHttp::sequence(&replies);
+    let client = TianyiClient::new(
+        TianyiSession::cookie("COOKIE_LOGIN_USER=page-limit"),
+        &http,
+    );
+
+    assert!(matches!(
+        client.list_recycle_bin(),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert_eq!(http.requests().len(), 10_000);
 }
 
 #[test]
