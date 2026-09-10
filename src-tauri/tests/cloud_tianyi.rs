@@ -1,5 +1,5 @@
 use alldownloader_lib::cloud::{
-    tianyi::{parse_tianyi_web_session, TianyiClient, TianyiSession},
+    tianyi::{parse_tianyi_web_session, TianyiClient, TianyiSession, TIANYI_RECYCLE_BIN_ID},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
     UploadHttpRequest, UploadHttpResponse,
 };
@@ -47,6 +47,12 @@ impl CloudHttpTransport for RecordingHttp {
             .pop()
             .ok_or_else(|| QuarkError::Transport("unexpected request".into()))
     }
+}
+
+fn form_field(body: &str, wanted: &str) -> String {
+    url::form_urlencoded::parse(body.as_bytes())
+        .find_map(|(name, value)| (name == wanted).then(|| value.into_owned()))
+        .unwrap_or_default()
 }
 
 struct UploadRecordingHttp {
@@ -121,11 +127,13 @@ fn tianyi_maps_the_official_xml_directory_response() {
 
     let directory = client.directory("-11").unwrap();
 
-    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items.len(), 2);
     assert_eq!(directory.items[0].id, "f1");
     assert_eq!(directory.items[0].name, "photo.jpg");
     assert_eq!(directory.items[0].kind, "file");
     assert_eq!(directory.items[0].size, Some(9));
+    assert_eq!(directory.items[1].id, TIANYI_RECYCLE_BIN_ID);
+    assert_eq!(directory.items[1].kind, "folder");
 }
 
 #[test]
@@ -139,9 +147,10 @@ fn tianyi_maps_the_current_list_files_xml_root() {
 
     let directory = client.directory("-11").unwrap();
 
-    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items.len(), 2);
     assert_eq!(directory.items[0].id, "f2");
     assert_eq!(directory.items[0].size, Some(10));
+    assert_eq!(directory.items[1].id, TIANYI_RECYCLE_BIN_ID);
 }
 
 #[test]
@@ -153,7 +162,8 @@ fn tianyi_accepts_a_successful_empty_root_directory() {
 
     let directory = client.directory("-11").unwrap();
 
-    assert!(directory.items.is_empty());
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, TIANYI_RECYCLE_BIN_ID);
 }
 
 #[test]
@@ -178,7 +188,9 @@ fn tianyi_accepts_an_empty_xml_directory_listing() {
     let http = RecordingHttp::sequence(&[r#"<listFiles><fileList/></listFiles>"#]);
     let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
 
-    assert!(client.directory("-11").unwrap().items.is_empty());
+    let directory = client.directory("-11").unwrap();
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, TIANYI_RECYCLE_BIN_ID);
 }
 
 #[test]
@@ -190,9 +202,79 @@ fn tianyi_maps_xml_folder_entries_as_folders() {
 
     let directory = client.directory("-11").unwrap();
 
-    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items.len(), 2);
     assert_eq!(directory.items[0].id, "d1");
     assert_eq!(directory.items[0].kind, "folder");
+    assert_eq!(directory.items[1].id, TIANYI_RECYCLE_BIN_ID);
+}
+
+#[test]
+fn tianyi_recycle_operations_use_the_authenticated_web_session() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"res_code":0,"fileList":[{"id":"456","fileId":"live-file","name":"deleted.jpg","isFolder":false,"size":9,"lastOpTime":"2026-09-10"}]}"#,
+        r#"{"res_code":0,"taskId":"restore-task"}"#,
+        r#"{"res_code":0,"success":true}"#,
+    ]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    let directory = client.list_recycle_bin().unwrap();
+
+    assert_eq!(directory.id, TIANYI_RECYCLE_BIN_ID);
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, "456");
+    assert_eq!(directory.items[0].parent_id, TIANYI_RECYCLE_BIN_ID);
+    client
+        .restore_recycle_entries(&[directory.items[0].id.clone()])
+        .unwrap();
+    client
+        .delete_recycle_entries(&[directory.items[0].id.clone()])
+        .unwrap();
+
+    let requests = http.requests();
+    assert!(requests[0]
+        .url
+        .contains("/api/open/file/listRecycleBinFiles.action?pageNum=1&pageSize=100&iconOption=1&family=false"));
+    assert!(requests[1]
+        .url
+        .contains("/api/open/batch/createBatchTask.action"));
+    assert_eq!(
+        form_field(requests[1].body.as_deref().unwrap(), "type"),
+        "RESTORE"
+    );
+    assert_eq!(
+        form_field(requests[1].body.as_deref().unwrap(), "taskInfos"),
+        r#"[{"fileId":"456"}]"#
+    );
+    assert!(requests[2]
+        .url
+        .contains("/v2/deleteFile.action?fileIdList=456"));
+    for request in &requests {
+        assert_eq!(request.headers["Cookie"], "COOKIE_LOGIN_USER=local");
+        assert_eq!(request.headers["Origin"], "https://cloud.189.cn");
+        assert_eq!(request.headers["Referer"], "https://cloud.189.cn/");
+    }
+    assert_eq!(
+        requests[1].headers["Content-Type"],
+        "application/x-www-form-urlencoded; charset=UTF-8"
+    );
+}
+
+#[test]
+fn tianyi_recycle_mutations_reject_non_record_ids_before_transport() {
+    let http = RecordingHttp::sequence(&[]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    for malformed in ["", "live-file", "456,457", "456/457"] {
+        assert!(matches!(
+            client.restore_recycle_entries(&[malformed.into()]),
+            Err(QuarkError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            client.delete_recycle_entries(&[malformed.into()]),
+            Err(QuarkError::InvalidInput(_))
+        ));
+    }
+    assert!(http.requests().is_empty());
 }
 
 #[test]

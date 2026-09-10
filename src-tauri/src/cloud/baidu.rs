@@ -403,6 +403,8 @@ const BAIDU_WEB_USER_AGENT: &str =
 const BAIDU_PAN_USER_AGENT: &str =
     "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;";
 const REFERENCE_PREFIX: &str = "bdr_";
+pub const BAIDU_RECYCLE_BIN_ID: &str = "__all_downloader_baidu_recycle_bin__";
+const BAIDU_RECYCLE_BIN_NAME: &str = "回收站";
 const BAIDU_UPLOAD_HOST: &str = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2";
 const BAIDU_UPLOAD_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 
@@ -608,7 +610,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         } else {
             encode_reference(parent.clone())?
         };
-        let items = files
+        let mut items = files
             .iter()
             .map(|file| {
                 Ok(CloudFile {
@@ -642,10 +644,68 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 })
             })
             .collect::<Result<Vec<_>, QuarkError>>()?;
+        if parent.path == "/" {
+            items.push(CloudFile {
+                id: BAIDU_RECYCLE_BIN_ID.into(),
+                parent_id: directory_id.clone(),
+                name: BAIDU_RECYCLE_BIN_NAME.into(),
+                kind: "folder".into(),
+                size: None,
+                modified_at: None,
+            });
+        }
         Ok(CloudDirectory {
             id: directory_id,
             items,
         })
+    }
+
+    pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
+        let value = self.web_request(
+            "GET",
+            format!("{PAN}/api/recycle/list/?num=100&page=1&web=1"),
+            None,
+        )?;
+        let files = value
+            .get("list")
+            .and_then(Value::as_array)
+            .ok_or(QuarkError::InvalidResponse)?;
+        let items = files
+            .iter()
+            .map(|file| {
+                let id = file
+                    .get("fs_id")
+                    .or_else(|| file.get("fsid"))
+                    .and_then(string_or_number)
+                    .filter(|id| valid_baidu_recycle_record_id(id))
+                    .ok_or(QuarkError::InvalidResponse)?;
+                Ok(CloudFile {
+                    id,
+                    parent_id: BAIDU_RECYCLE_BIN_ID.into(),
+                    name: required(file, "server_filename").or_else(|_| required(file, "name"))?,
+                    kind: if file.get("isdir").and_then(Value::as_i64) == Some(1) {
+                        "folder"
+                    } else {
+                        "file"
+                    }
+                    .into(),
+                    size: file.get("size").and_then(Value::as_u64),
+                    modified_at: file.get("server_mtime").and_then(string_or_number),
+                })
+            })
+            .collect::<Result<Vec<_>, QuarkError>>()?;
+        Ok(CloudDirectory {
+            id: BAIDU_RECYCLE_BIN_ID.into(),
+            items,
+        })
+    }
+
+    pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        self.recycle_operation("restore", ids)
+    }
+
+    pub fn delete_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        self.recycle_operation("delete", ids)
     }
 
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
@@ -691,6 +751,17 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         }
         let token = self.web_token()?;
         self.web_file_manager("delete", &token, json!(paths))
+    }
+
+    fn recycle_operation(&self, action: &str, ids: &[String]) -> Result<(), QuarkError> {
+        let fidlist = baidu_recycle_fidlist(ids)?;
+        let token = self.web_token()?;
+        self.web_form(
+            &format!("/api/recycle/{action}"),
+            &format!("channel=chunlei&async=1&bdstoken={}", encoded(&token)),
+            form(&[("fidlist", fidlist)]),
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn trash_transferred_files(&self, ids: &[String]) -> Result<(), QuarkError> {
@@ -1169,6 +1240,31 @@ fn string_or_number(value: &Value) -> Option<String> {
         .as_str()
         .map(str::to_owned)
         .or_else(|| value.as_u64().map(|number| number.to_string()))
+}
+
+fn valid_baidu_recycle_record_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn baidu_recycle_fidlist(ids: &[String]) -> Result<String, QuarkError> {
+    if ids.is_empty()
+        || ids.iter().any(|id| !valid_baidu_recycle_record_id(id))
+        || ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| ids[..index].contains(id))
+    {
+        return Err(QuarkError::InvalidInput("回收站记录 ID 无效".into()));
+    }
+    let records = ids
+        .iter()
+        .map(|id| {
+            id.parse::<u64>()
+                .map(Value::from)
+                .map_err(|_| QuarkError::InvalidInput("回收站记录 ID 无效".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string(&records).map_err(|_| QuarkError::InvalidResponse)
 }
 
 fn encode_reference(reference: BaiduFileReference) -> Result<String, QuarkError> {

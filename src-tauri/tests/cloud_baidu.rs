@@ -1,5 +1,5 @@
 use alldownloader_lib::cloud::{
-    baidu::{parse_baidu_web_session, BaiduClient, BaiduSession},
+    baidu::{parse_baidu_web_session, BaiduClient, BaiduSession, BAIDU_RECYCLE_BIN_ID},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
     ReqwestTransport, UploadHttpRequest, UploadHttpResponse,
 };
@@ -385,6 +385,91 @@ fn baidu_rejects_malformed_references_before_transport() {
         http.requests().is_empty(),
         "malformed references must not reach the transport"
     );
+}
+
+#[test]
+fn baidu_root_includes_the_virtual_recycle_folder() {
+    let http = RecordingHttp::sequence(&[r#"{"errno":0,"list":[]}"#]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    let directory = client.directory("/").unwrap();
+
+    assert_eq!(directory.id, "/");
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, BAIDU_RECYCLE_BIN_ID);
+    assert_eq!(directory.items[0].parent_id, "/");
+    assert_eq!(directory.items[0].kind, "folder");
+}
+
+#[test]
+fn baidu_recycle_operations_use_the_recycle_record_not_a_live_path() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"list":[{"fs_id":987,"path":"/deleted.mkv","server_filename":"deleted.mkv","isdir":0,"size":12,"server_mtime":123}]}"#,
+        r#"{"errno":0,"result":{"bdstoken":"restore-token"}}"#,
+        r#"{"errno":0}"#,
+        r#"{"errno":0,"result":{"bdstoken":"delete-token"}}"#,
+        r#"{"errno":0}"#,
+    ]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    let directory = client.list_recycle_bin().unwrap();
+
+    assert_eq!(directory.id, BAIDU_RECYCLE_BIN_ID);
+    assert_eq!(directory.items.len(), 1);
+    assert_eq!(directory.items[0].id, "987");
+    assert_eq!(directory.items[0].parent_id, BAIDU_RECYCLE_BIN_ID);
+    client
+        .restore_recycle_entries(&[directory.items[0].id.clone()])
+        .unwrap();
+    client
+        .delete_recycle_entries(&[directory.items[0].id.clone()])
+        .unwrap();
+
+    let requests = http.requests();
+    assert!(requests[0]
+        .url
+        .contains("/api/recycle/list/?num=100&page=1&web=1"));
+    assert!(requests[2]
+        .url
+        .contains("/api/recycle/restore?channel=chunlei&async=1&bdstoken=restore-token"));
+    assert_eq!(
+        form_field(requests[2].body.as_deref().unwrap(), "fidlist"),
+        "[987]"
+    );
+    assert!(requests[4]
+        .url
+        .contains("/api/recycle/delete?channel=chunlei&async=1&bdstoken=delete-token"));
+    assert_eq!(
+        form_field(requests[4].body.as_deref().unwrap(), "fidlist"),
+        "[987]"
+    );
+    for request in [
+        &requests[0],
+        &requests[1],
+        &requests[2],
+        &requests[3],
+        &requests[4],
+    ] {
+        assert_eq!(request.headers["Cookie"], "BDUSS=local");
+    }
+}
+
+#[test]
+fn baidu_recycle_mutations_reject_non_record_ids_before_transport() {
+    let http = RecordingHttp::sequence(&[]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    for malformed in ["", "/deleted.mkv", "bdr_live-reference", "987,988"] {
+        assert!(matches!(
+            client.restore_recycle_entries(&[malformed.into()]),
+            Err(QuarkError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            client.delete_recycle_entries(&[malformed.into()]),
+            Err(QuarkError::InvalidInput(_))
+        ));
+    }
+    assert!(http.requests().is_empty());
 }
 
 #[test]
