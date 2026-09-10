@@ -1072,9 +1072,6 @@ impl CloudSharePlanStore {
                         CloudShareCleanupState::Attempted | CloudShareCleanupState::Failed
                     )
             });
-            if !pending {
-                continue;
-            }
             for (entry, ids) in &plan.linked_local_tasks {
                 let source = format!(
                     "cloud-share://{}/{}/{entry}",
@@ -1087,7 +1084,7 @@ impl CloudSharePlanStore {
                     };
                     if task.status == crate::TaskStatus::Completed && task.source == source {
                         tasks
-                            .set_completed_cleanup_message(*id, true)
+                            .set_completed_cleanup_message(*id, pending)
                             .map_err(|_| QuarkError::Storage)?;
                     }
                 }

@@ -890,6 +890,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cleanup_projection_converges_all_siblings_after_one_successful_retry() {
+        use crate::cloud::{share::SHARE_PLAN_SECRET, CredentialStore, DpapiCredentialStore};
+        let (root, plans, tasks, locals) = cleanup_fixture();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        let second = set_status(&tasks, locals[1].id, TaskStatus::Completed);
+        assert!(first.aria_gid.is_none() && second.aria_gid.is_none());
+        plans
+            .mark_local_completion(&first.source, false, |_, _| true)
+            .unwrap();
+        let pending =
+            crate::commands::list_tasks_with_cleanup_projection(&tasks, Some(&plans)).unwrap();
+        assert!(pending.iter().all(|task| task
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("cleanup_pending："))));
+
+        let mut network_calls = 0;
+        cleanup_completed_share(&plans, &tasks, &first, true, true, |_, ids| {
+            network_calls += 1;
+            assert_eq!(ids, &["created-id"]);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(network_calls, 1);
+        assert!(tasks.find(first.id).unwrap().error.is_none());
+        assert!(tasks.find(second.id).unwrap().error.is_some());
+        let credentials = DpapiCredentialStore::new(root.path().into()).unwrap();
+        let journal = credentials.load(SHARE_PLAN_SECRET).unwrap();
+        let listed =
+            crate::commands::list_tasks_with_cleanup_projection(&tasks, Some(&plans)).unwrap();
+        assert!(
+            listed
+                .iter()
+                .all(|task| task.status == TaskStatus::Completed && task.error.is_none()),
+            "a sibling retained cleanup_pending after the plan cleanup succeeded"
+        );
+        assert_eq!(network_calls, 1);
+        assert_eq!(credentials.load(SHARE_PLAN_SECRET).unwrap(), journal);
+
+        // Only the literal cleanup_pending prefix is owned by this projection.
+        // An underscore in SQL LIKE must not turn it into a wildcard match.
+        let mut other_error = tasks.find(first.id).unwrap();
+        other_error.error = Some("cleanupXpending：unrelated message".into());
+        tasks.apply_transfer_snapshot(other_error.clone()).unwrap();
+        let mut cancelled = tasks.find(second.id).unwrap();
+        cancelled.status = TaskStatus::Cancelled;
+        cancelled.error = Some("cleanup_pending：preserve cancelled task".into());
+        tasks.apply_transfer_snapshot(cancelled.clone()).unwrap();
+        let listed =
+            crate::commands::list_tasks_with_cleanup_projection(&tasks, Some(&plans)).unwrap();
+        for expected in [other_error, cancelled] {
+            let actual = listed.iter().find(|task| task.id == expected.id).unwrap();
+            assert_eq!(actual.status, expected.status);
+            assert_eq!(actual.error, expected.error);
+        }
+        assert_eq!(network_calls, 1);
+        assert_eq!(credentials.load(SHARE_PLAN_SECRET).unwrap(), journal);
+    }
+
     struct NoEngineEvents;
     impl EngineStateSink for NoEngineEvents {
         fn engine_state_updated(&self, _: &EngineAvailability) {}

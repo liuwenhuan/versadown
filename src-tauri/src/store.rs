@@ -177,7 +177,7 @@ impl TaskStore {
         let message =
             pending.then_some("cleanup_pending：下载已完成，网盘转存文件清理未完成，可重试清理");
         connection.execute(
-            "UPDATE tasks SET error = ?1 WHERE id = ?2 AND status = 'completed' AND (?1 IS NOT NULL OR error LIKE 'cleanup_pending：%')",
+            "UPDATE tasks SET error = ?1 WHERE id = ?2 AND status = 'completed' AND (?1 IS NOT NULL OR substr(error, 1, length('cleanup_pending：')) = 'cleanup_pending：')",
             params![message, id.to_string()],
         )?;
         find_with_connection(&connection, id)
