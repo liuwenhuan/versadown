@@ -31,8 +31,9 @@ pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
 pub use launcher::{
-    launcher_circle_region, launcher_menu_entries, should_apply_launcher_window_visibility,
-    LauncherInteractionState, LauncherRegion,
+    launcher_hexagon_points, launcher_hexagon_region, launcher_menu_entries,
+    should_apply_launcher_window_visibility, LauncherInteractionState, LauncherPoint,
+    LauncherRegion,
 };
 pub use models::{
     may_transition, AiSettings, AiSettingsInput, AppSettings, DownloadTask, DuplicateDownloadState,
@@ -69,6 +70,7 @@ impl EventSink for TauriDownloadEvents {
         if let Ok(payload) = commands::task_payload(&self.store, task.clone()) {
             let _ = self.app.emit("download-task-updated", payload);
         }
+        commands::schedule_cloud_share_refresh(self.app.clone(), task);
     }
 
     fn global_stat_updated(&self, stat: &Aria2GlobalStat) {
@@ -215,6 +217,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version_command,
             commands::parse_download,
+            commands::confirm_cloud_share_download,
             commands::confirm_download_command,
             commands::list_tasks,
             commands::task_action,

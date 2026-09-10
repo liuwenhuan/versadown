@@ -1,11 +1,12 @@
 use alldownloader_lib::{
-    launcher_circle_region, launcher_menu_entries, should_apply_launcher_window_visibility,
-    AppSettings, LauncherInteractionState, LauncherRegion, LauncherVisibility,
+    launcher_hexagon_points, launcher_hexagon_region, launcher_menu_entries,
+    should_apply_launcher_window_visibility, AppSettings, LauncherInteractionState, LauncherPoint,
+    LauncherRegion, LauncherVisibility,
 };
 
 #[test]
-fn compact_region_follows_the_ball_inside_a_larger_windows_webview() {
-    let region = launcher_circle_region((236, 98), (214, 86), 1.75);
+fn compact_region_follows_the_icon_inside_a_larger_windows_webview() {
+    let region = launcher_hexagon_region((236, 98), (214, 86), 1.75);
 
     assert_eq!(
         region,
@@ -15,6 +16,28 @@ fn compact_region_follows_the_ball_inside_a_larger_windows_webview() {
             width: 84,
             height: 84
         }
+    );
+}
+
+#[test]
+fn compact_region_matches_the_icon_hexagon_edge() {
+    let region = LauncherRegion {
+        x: 141,
+        y: 8,
+        width: 84,
+        height: 84,
+    };
+
+    assert_eq!(
+        launcher_hexagon_points(region),
+        [
+            LauncherPoint { x: 183, y: 16 },
+            LauncherPoint { x: 213, y: 34 },
+            LauncherPoint { x: 213, y: 66 },
+            LauncherPoint { x: 183, y: 84 },
+            LauncherPoint { x: 153, y: 66 },
+            LauncherPoint { x: 153, y: 34 },
+        ]
     );
 }
 

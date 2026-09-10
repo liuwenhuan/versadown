@@ -21,6 +21,13 @@ pub struct LauncherRegion {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LauncherPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LauncherInteractionSnapshot {
     pub drag_requests: usize,
     pub menu_requests: usize,
@@ -99,7 +106,7 @@ fn require_background_ui_test() -> Result<(), String> {
     }
 }
 
-pub fn launcher_circle_region(
+pub fn launcher_hexagon_region(
     outer: (u32, u32),
     inner: (u32, u32),
     scale_factor: f64,
@@ -113,6 +120,38 @@ pub fn launcher_circle_region(
         width: diameter,
         height: diameter,
     }
+}
+
+pub fn launcher_hexagon_points(region: LauncherRegion) -> [LauncherPoint; 6] {
+    const ICON_SIZE: i32 = 128;
+    let scale_x = |coordinate| region.x + (coordinate * region.width + ICON_SIZE / 2) / ICON_SIZE;
+    let scale_y = |coordinate| region.y + (coordinate * region.height + ICON_SIZE / 2) / ICON_SIZE;
+    [
+        LauncherPoint {
+            x: scale_x(64),
+            y: scale_y(12),
+        },
+        LauncherPoint {
+            x: scale_x(110),
+            y: scale_y(40),
+        },
+        LauncherPoint {
+            x: scale_x(110),
+            y: scale_y(88),
+        },
+        LauncherPoint {
+            x: scale_x(64),
+            y: scale_y(116),
+        },
+        LauncherPoint {
+            x: scale_x(18),
+            y: scale_y(88),
+        },
+        LauncherPoint {
+            x: scale_x(18),
+            y: scale_y(40),
+        },
+    ]
 }
 
 #[tauri::command]
@@ -138,7 +177,10 @@ fn apply_launcher_shape(
     compact: bool,
     redraw: bool,
 ) -> Result<Option<LauncherRegion>, String> {
-    use windows::Win32::Graphics::Gdi::{CreateEllipticRgn, DeleteObject, SetWindowRgn, HGDIOBJ};
+    use windows::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{CreatePolygonRgn, DeleteObject, SetWindowRgn, ALTERNATE, HGDIOBJ},
+    };
 
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
     if !compact {
@@ -153,27 +195,24 @@ fn apply_launcher_shape(
     let outer = window.outer_size().map_err(|error| error.to_string())?;
     let inner = window.inner_size().map_err(|error| error.to_string())?;
     let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let region = launcher_circle_region(
+    let region = launcher_hexagon_region(
         (outer.width, outer.height),
         (inner.width, inner.height),
         scale_factor,
     );
-    let native_region = unsafe {
-        CreateEllipticRgn(
-            region.x,
-            region.y,
-            region.x + region.width,
-            region.y + region.height,
-        )
-    };
+    let points = launcher_hexagon_points(region).map(|point| POINT {
+        x: point.x,
+        y: point.y,
+    });
+    let native_region = unsafe { CreatePolygonRgn(&points, ALTERNATE) };
     if native_region.0.is_null() {
-        return Err("无法创建悬浮球圆形区域".to_string());
+        return Err("无法创建悬浮球六边形区域".to_string());
     }
     if unsafe { SetWindowRgn(hwnd, Some(native_region), redraw) } == 0 {
         unsafe {
             let _ = DeleteObject(HGDIOBJ(native_region.0));
         }
-        return Err("无法应用悬浮球圆形区域".to_string());
+        return Err("无法应用悬浮球六边形区域".to_string());
     }
     Ok(Some(region))
 }
