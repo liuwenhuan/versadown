@@ -7,7 +7,7 @@ import '../styles.css';
 const unauthorized = () => Promise.reject({ code: 'not_authorized', message: '尚未授权' });
 const account = { provider: 'quark' as const, id: 'visual-account', displayName: '测试账号', authMethod: 'web' as const };
 const client = {
-  getCloudAuthorizationCapabilities: async (provider: CloudProvider) => ({ provider, web: true, password: false }),
+  getCloudAuthorizationCapabilities: async (provider: CloudProvider) => ({ provider, web: true, password: false, passwordLoginMode: 'none' as const }),
   beginCloudAuthorization: async (provider: CloudProvider) => ({ provider, windowLabel: '登录', instructions: '请在官方网页窗口完成登录。' }),
   completeCloudAuthorization: unauthorized,
   loginCloudWithPassword: unauthorized,

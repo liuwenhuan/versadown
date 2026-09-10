@@ -25,12 +25,21 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     trashCloudFiles: vi.fn().mockResolvedValue(undefined),
     deleteCloudFiles: vi.fn().mockResolvedValue(undefined),
     logoutCloud: vi.fn().mockResolvedValue(undefined),
-    getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' })),
+    getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({
+      provider,
+      web: true,
+      password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi',
+      passwordLoginMode: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi'
+        ? 'rustDirect'
+        : provider === 'aliyun' || provider === 'xunlei' || provider === 'uc'
+          ? 'officialWebView'
+          : 'none'
+    })),
     ...overrides
   };
 }
 
-it('keeps the unauthenticated provider card focused on the available sign-in action', () => {
+it('keeps the unauthenticated provider card focused on the available sign-in action', async () => {
   render(<CloudManager provider="quark" client={createCloudFake()} />);
 
   expect(screen.getByRole('region', { name: '夸克账号授权' })).toBeVisible();
@@ -39,22 +48,22 @@ it('keeps the unauthenticated provider card focused on the available sign-in act
   expect(screen.queryByText(/夸克未提供可用的账号密码开放登录接口/)).not.toBeInTheDocument();
   expect(screen.queryByLabelText('夸克账号')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '登录夸克账号' })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
+  expect(await screen.findByRole('button', { name: '使用网页授权' })).toBeVisible();
   expect(screen.queryByRole('status')).not.toBeInTheDocument();
   expect(screen.queryByRole('tree', { name: '夸克网盘文件' })).not.toBeInTheDocument();
   expect(screen.queryByText('下载示例.txt')).not.toBeInTheDocument();
 });
 
 it.each([
-  ['baidu', '百度', true],
-  ['tianyi', '天翼', true],
-  ['aliyun', '阿里', false],
-  ['xunlei', '迅雷', false]
-] as const)('shows only supported login controls for %s', async (provider, label, passwordSupported) => {
+  ['baidu', '百度', true, '使用网页授权'],
+  ['tianyi', '天翼', true, '使用网页授权'],
+  ['aliyun', '阿里', false, '在官方网页登录（可使用账号密码）'],
+  ['xunlei', '迅雷', false, '在官方网页登录（可使用账号密码）']
+] as const)('shows only supported login controls for %s', async (provider, label, passwordSupported, webLabel) => {
   render(<CloudManager provider={provider as never} client={createCloudFake()} authorizationOnly />);
 
   expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
-  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
+  expect(await screen.findByRole('button', { name: webLabel })).toBeVisible();
   if (passwordSupported) expect(await screen.findByRole('button', { name: `登录${label}账号` })).toBeVisible();
   else expect(screen.queryByRole('button', { name: `登录${label}账号` })).not.toBeInTheDocument();
 });
@@ -67,6 +76,34 @@ it('explains encrypted automatic recovery only for a password-capable provider',
 
   rerender(<CloudManager provider="xunlei" client={client} authorizationOnly />);
   await waitFor(() => expect(screen.queryByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).not.toBeInTheDocument());
+});
+
+it.each(['pikpak', 'baidu', 'tianyi'] as const)('shows encrypted local credentials for %s', async provider => {
+  render(<CloudManager provider={provider} client={createCloudFake()} authorizationOnly />);
+
+  expect(await screen.findByLabelText(/账号$/)).toBeVisible();
+  expect(screen.getByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).toBeVisible();
+});
+
+it.each(['aliyun', 'xunlei', 'uc'] as const)('opens official account-password login for %s without collecting a local password', async provider => {
+  render(<CloudManager provider={provider} client={createCloudFake()} authorizationOnly />);
+
+  expect(await screen.findByRole('button', { name: '在官方网页登录（可使用账号密码）' })).toBeVisible();
+  expect(screen.getByText('请在官方网页中使用账号密码登录；应用不会收集或保存密码。')).toBeVisible();
+  expect(screen.queryByLabelText(/密码$/)).not.toBeInTheDocument();
+});
+
+it.each([
+  ['is missing its provider', { web: true, password: false, passwordLoginMode: 'none' }],
+  ['uses an invalid password mode', { provider: 'quark', web: true, password: false, passwordLoginMode: 'unsupported' }],
+  ['belongs to another provider', { provider: 'pikpak', web: true, password: true, passwordLoginMode: 'rustDirect' }]
+])('fails closed with a retry control when the capability response %s', async (_reason, capabilities) => {
+  const client = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockResolvedValue(capabilities) });
+  render(<CloudManager provider="quark" client={client} authorizationOnly />);
+
+  expect(await screen.findByRole('button', { name: '重试' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText(/账号$/)).not.toBeInTheDocument();
 });
 
 it('clears a supported provider password after a failed native login', async () => {
@@ -123,7 +160,7 @@ it('rejects a web authorization account returned for another provider', async ()
   const client = createCloudFake({ completeCloudAuthorization: vi.fn().mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'web' }) });
   render(<CloudManager provider="quark" client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
 
   expect(await screen.findByRole('status')).toHaveTextContent('授权返回的服务商不匹配');
@@ -134,19 +171,19 @@ it('rejects a web authorization account returned for another provider', async ()
 it.each([
   ['capability request fails', vi.fn().mockRejectedValue(new Error('连接器不可用'))],
   ['capability response is for another provider', vi.fn().mockResolvedValue({ provider: 'pikpak', web: true, password: true })]
-])('does not expose password login when %s', async (_reason, getCloudAuthorizationCapabilities) => {
+])('fails closed when %s', async (_reason, getCloudAuthorizationCapabilities) => {
   const client = createCloudFake({ getCloudAuthorizationCapabilities });
   render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
 
   await waitFor(() => expect(screen.queryByRole('button', { name: '登录百度账号' })).not.toBeInTheDocument());
   expect(screen.queryByText(/百度未提供可用的账号密码登录接口/)).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '重试' })).toBeVisible();
 });
 
 it('fails closed while a provider change waits for its capability response', async () => {
   const pending = new Promise<never>(() => undefined);
   const getCloudAuthorizationCapabilities = vi.fn().mockImplementation((provider: CloudProvider) => provider === 'baidu'
-    ? Promise.resolve({ provider, web: true, password: true })
+    ? Promise.resolve({ provider, web: true, password: true, passwordLoginMode: 'rustDirect' })
     : pending);
   const client = createCloudFake({ getCloudAuthorizationCapabilities });
   const { rerender } = render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
@@ -215,7 +252,7 @@ it('automatically completes web authorization and loads the authorized account',
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   expect(await screen.findByRole('tab', { name: 'alice · 夸克' }, { timeout: 1500 })).toHaveAttribute('aria-selected', 'true');
   expect(client.completeCloudAuthorization).toHaveBeenCalledWith('quark');
   expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
@@ -229,6 +266,7 @@ it('keeps web authorization polling serial while a completion request is still p
     const client = createCloudFake({ completeCloudAuthorization: vi.fn().mockReturnValue(completion) });
     render(<CloudManager provider="quark" client={client} />);
 
+    await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(800); });
@@ -250,6 +288,7 @@ it('keeps polling after a transient pre-login response and completes when login 
       .mockResolvedValue({ id: 'account-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }) });
     render(<CloudManager provider="quark" client={client} />);
 
+    await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(800); });
@@ -269,16 +308,18 @@ it('reports a successful authorization to an authorization-center host without r
   const onAccountAuthorized = vi.fn();
   render(<CloudManager provider="quark" client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
 
   expect(onAccountAuthorized).toHaveBeenCalledWith({ id: 'account-1', displayName: 'alice', provider: 'quark', authMethod: 'web' });
   expect(screen.queryByRole('tree', { name: '夸克网盘文件' })).not.toBeInTheDocument();
 });
 
-it('renders an authorized account-management card without loading its directory', () => {
+it('renders an authorized account-management card without loading its directory', async () => {
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} authorizationOnly initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await act(async () => { await Promise.resolve(); });
 
   expect(screen.getByRole('heading', { name: '夸克网盘 · alice' })).toBeVisible();
   expect(document.querySelector('.cloud-account-summary')).not.toBeInTheDocument();
@@ -303,7 +344,7 @@ it('logs out only after confirmation and returns to the authorization boundary',
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
   await screen.findByRole('tree', { name: '夸克网盘文件' });
   await user.click(screen.getByRole('button', { name: '退出授权' }));
@@ -320,7 +361,7 @@ it('adds the authorized account tab and drives the injected directory operations
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
 
   expect(await screen.findByRole('tab', { name: 'alice · 夸克' })).toHaveAttribute('aria-selected', 'true');
@@ -564,13 +605,13 @@ it('renders an explicit credential-expired state instead of a file list', async 
   const client = createCloudFake({ listCloudDirectory: vi.fn().mockRejectedValue(Object.assign(new Error('会话失效'), { code: 'credentials_expired' })) });
   render(<CloudManager provider="pikpak" client={client} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
   expect(await screen.findByText('凭据已过期')).toBeVisible();
   expect(screen.getByRole('region', { name: 'PikPak账号授权' })).toBeVisible();
   expect(screen.getByRole('tab', { name: 'alice · PikPak' })).toBeVisible();
   expect(screen.queryByRole('tree', { name: 'PikPak网盘文件' })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
+  expect(await screen.findByRole('button', { name: '使用网页授权' })).toBeVisible();
 });
 
 it('requires a recycle-bin confirmation before deleting selected files', async () => {
@@ -578,7 +619,7 @@ it('requires a recycle-bin confirmation before deleting selected files', async (
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
   await screen.findByText('报告.pdf');
   await user.click(screen.getByText('报告.pdf'));
@@ -724,7 +765,7 @@ it('keeps the current file list visible when a cloud operation fails', async () 
   const client = createCloudFake({ downloadCloudFile: vi.fn().mockRejectedValue(new Error('网络断开')) });
   render(<CloudManager provider="quark" client={client} />);
 
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
   await screen.findByText('报告.pdf');
   await user.click(screen.getByText('报告.pdf'));
@@ -771,7 +812,8 @@ it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
       const onAccountAuthorized = vi.fn();
       render(<CloudManager provider="xunlei" client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
 
-      fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+      await act(async () => { await Promise.resolve(); });
+      fireEvent.click(screen.getByRole('button', { name: '在官方网页登录（可使用账号密码）' }));
       await act(async () => { await Promise.resolve(); });
       await act(async () => { await vi.advanceTimersByTimeAsync(800); });
       await act(async () => { await vi.advanceTimersByTimeAsync(5_400); });
@@ -780,7 +822,7 @@ it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
       expect(onAccountAuthorized).not.toHaveBeenCalled();
       expect(screen.getByRole('status')).toHaveTextContent('迅雷授权验证失败，请重新授权。');
       expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+      fireEvent.click(screen.getByRole('button', { name: '在官方网页登录（可使用账号密码）' }));
       await act(async () => { await Promise.resolve(); });
       await act(async () => { await vi.advanceTimersByTimeAsync(800); });
       expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(2);
@@ -950,7 +992,7 @@ it('automatically completes a renewed web authorization after credentials expire
   render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
 
   expect(await screen.findByText('凭据已过期')).toBeVisible();
-  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
 
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' }, { timeout: 2_000 })).toBeVisible();
   expect(client.completeCloudAuthorization).toHaveBeenCalledWith('quark');

@@ -13,7 +13,16 @@ function createClient(accounts: Record<string, TestAccount | undefined> = {}) {
     getCloudAccount: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => accounts[provider] ? Promise.resolve(accounts[provider]) : Promise.reject(Object.assign(new Error('未授权'), { code: 'unauthorized' }))),
     listCloudDirectory: vi.fn().mockImplementation((provider: string, parentId = '0') => Promise.resolve({ id: parentId, items: [{ id: `${provider}-file`, parentId, name: `${provider}-文件.txt`, kind: 'file', size: 10, modifiedAt: '刚刚' }] })),
     createCloudDirectory: vi.fn().mockResolvedValue(undefined), renameCloudFile: vi.fn().mockResolvedValue(undefined), moveCloudFiles: vi.fn().mockResolvedValue(undefined), copyCloudFiles: vi.fn().mockResolvedValue(undefined), trashCloudFiles: vi.fn().mockResolvedValue(undefined), deleteCloudFiles: vi.fn().mockResolvedValue(undefined), downloadCloudFile: vi.fn().mockResolvedValue({}), downloadCloudDirectory: vi.fn().mockResolvedValue({ queuedCount: 0, tasks: [], failures: [] }), logoutCloud: vi.fn().mockResolvedValue(undefined), pickAndUploadFiles: vi.fn().mockResolvedValue(undefined),
-    getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi' }))
+    getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({
+      provider,
+      web: true,
+      password: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi',
+      passwordLoginMode: provider === 'pikpak' || provider === 'baidu' || provider === 'tianyi'
+        ? 'rustDirect'
+        : provider === 'aliyun' || provider === 'xunlei' || provider === 'uc'
+          ? 'officialWebView'
+          : 'none'
+    }))
   };
 }
 
@@ -43,7 +52,7 @@ it('renders authorization cards for every newly supported cloud service', async 
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
-it('renders UC web authorization without password fallback', async () => {
+it('fails closed when UC capability lookup is unavailable', async () => {
   const client = createClient();
   client.getCloudAuthorizationCapabilities.mockImplementation((provider: string) => provider === 'uc'
     ? Promise.reject(new Error('能力查询暂不可用'))
@@ -51,7 +60,7 @@ it('renders UC web authorization without password fallback', async () => {
   render(<CloudWorkspace client={client as never} />);
 
   const ucAuthorization = await screen.findByRole('region', { name: 'UC账号授权' });
-  expect(within(ucAuthorization).getByRole('button', { name: '使用网页授权' })).toBeEnabled();
+  expect(within(ucAuthorization).getByRole('button', { name: '重试' })).toBeEnabled();
   expect(within(ucAuthorization).queryByLabelText('UC账号')).not.toBeInTheDocument();
 });
 
@@ -144,7 +153,7 @@ it('automatically adds the Aliyun workspace tab after web authorization complete
   render(<CloudWorkspace client={client as never} />);
 
   const aliyunAuthorization = await screen.findByRole('region', { name: '阿里账号授权' });
-  await user.click(within(aliyunAuthorization).getByRole('button', { name: '使用网页授权' }));
+  await user.click(within(aliyunAuthorization).getByRole('button', { name: '在官方网页登录（可使用账号密码）' }));
 
   expect(await screen.findByRole('tab', { name: '阿里网盘' }, { timeout: 1_500 })).toHaveAttribute('aria-selected', 'false');
   expect(client.completeCloudAuthorization).toHaveBeenCalledWith('aliyun');

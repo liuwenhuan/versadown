@@ -5,7 +5,7 @@ import { CloudWorkspace } from './CloudWorkspace';
 it('marks cloud workspace tabs for the shared top-level tab layout', async () => {
   const client = {
     getCloudAccount: vi.fn().mockRejectedValue({ code: 'unauthorized' }),
-    getCloudAuthorizationCapabilities: vi.fn().mockResolvedValue({ web: true, password: false })
+    getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: false, passwordLoginMode: 'none' }))
   };
 
   render(<CloudWorkspace client={client as never} />);
