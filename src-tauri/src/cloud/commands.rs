@@ -1,7 +1,9 @@
 use super::{http::response_json, types::required, *};
 use crate::models::{CloudDirectoryGroup, NewCloudDirectoryGroup, NewCloudDirectoryGroupItem};
 use crate::{
-    commands::{cloud_directory_group_queue_task, task_action_outcome, AppState, TaskActionOutcome},
+    commands::{
+        cloud_directory_group_queue_task, task_action_outcome, AppState, TaskActionOutcome,
+    },
     duplicate_state, DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -2358,16 +2360,21 @@ where
     let mut queued_count = 0;
     for (file, item) in plan.files.into_iter().zip(items) {
         let relative_path = planned_relative_path(&file);
-        let output_directory = match directory_download_output_directory(
-            &base_directory,
-            &file.relative_directory,
-        ) {
-            Ok(directory) => directory,
-            Err(error) => {
-                persist_directory_failure(store, group.id, item.id, &file, &error, &mut failures)?;
-                continue;
-            }
-        };
+        let output_directory =
+            match directory_download_output_directory(&base_directory, &file.relative_directory) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    persist_directory_failure(
+                        store,
+                        group.id,
+                        item.id,
+                        &file,
+                        &error,
+                        &mut failures,
+                    )?;
+                    continue;
+                }
+            };
         let mut options = configured.clone();
         options.directory = Some(output_directory);
         options.output_name = Some(file.output_name.clone());
@@ -2576,18 +2583,23 @@ pub async fn retry_cloud_directory_group(
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
-    retry_cloud_directory_group_with(&store, group_id, configured, move |provider, file_id, options| {
-        let app = submit_app.clone();
-        async move {
-            let state = app.state::<AppState>();
-            match submit_cloud_file(app.clone(), &state, provider, file_id, options).await? {
-                CloudFileSubmission::Queued(outcome) => {
-                    Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
+    retry_cloud_directory_group_with(
+        &store,
+        group_id,
+        configured,
+        move |provider, file_id, options| {
+            let app = submit_app.clone();
+            async move {
+                let state = app.state::<AppState>();
+                match submit_cloud_file(app.clone(), &state, provider, file_id, options).await? {
+                    CloudFileSubmission::Queued(outcome) => {
+                        Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
+                    }
+                    CloudFileSubmission::Duplicate(_) => Ok(DirectoryLeafSubmission::Duplicate),
                 }
-                CloudFileSubmission::Duplicate(_) => Ok(DirectoryLeafSubmission::Duplicate),
             }
-        }
-    })
+        },
+    )
     .await
 }
 
@@ -2634,8 +2646,7 @@ where
             )
             .map_err(QuarkError::Transport)?;
             outcome.queue_task = Some(
-                cloud_directory_group_queue_task(store, group.id)
-                    .map_err(QuarkError::Transport)?,
+                cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
             );
             Ok(outcome)
         }

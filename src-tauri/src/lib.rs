@@ -71,11 +71,9 @@ struct TauriDownloadEvents {
 
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
-        if let Ok(payload) = commands::task_update_payload(
-            &self.store,
-            Some(&self.cloud.share_plans),
-            task.clone(),
-        ) {
+        if let Ok(payload) =
+            commands::task_update_payload(&self.store, Some(&self.cloud.share_plans), task.clone())
+        {
             let _ = self.app.emit("download-task-updated", payload);
         }
         commands::schedule_cloud_share_refresh(self.app.clone(), task);

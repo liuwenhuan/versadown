@@ -284,6 +284,22 @@ impl TaskStore {
             .or_else(no_rows_to_none)
     }
 
+    /// Deletes a durable directory group and its virtual member records.
+    /// Callers must remove every linked local task first so an incomplete
+    /// lifecycle cannot silently detach a still-visible download.
+    pub fn remove_cloud_directory_group(&self, id: Uuid) -> Result<(), StoreError> {
+        validate_uuid(id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "DELETE FROM cloud_directory_groups WHERE id = ?1",
+            [id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        Ok(())
+    }
+
     pub fn transition(&self, id: Uuid, next: TaskStatus) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let current = find_with_connection(&connection, id)?;

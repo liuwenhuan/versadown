@@ -89,18 +89,17 @@ pub(crate) fn task_payload_with_cleanup(
     plans: Option<&crate::cloud::share::CloudSharePlanStore>,
     task: DownloadTask,
 ) -> Result<DownloadTaskPayload, String> {
-    let cleanup_pending = if task.status == TaskStatus::Completed
-        && task.source.starts_with("cloud-share://")
-    {
-        match plans {
-            Some(plans) => plans
-                .cleanup_pending_for_task(&task.source, task.id)
-                .map_err(|_| "无法读取网盘转存清理状态".to_string())?,
-            None => false,
-        }
-    } else {
-        false
-    };
+    let cleanup_pending =
+        if task.status == TaskStatus::Completed && task.source.starts_with("cloud-share://") {
+            match plans {
+                Some(plans) => plans
+                    .cleanup_pending_for_task(&task.source, task.id)
+                    .map_err(|_| "无法读取网盘转存清理状态".to_string())?,
+                None => false,
+            }
+        } else {
+            false
+        };
     let files = store.files(task.id).map_err(|error| error.to_string())?;
     Ok(DownloadTaskPayload {
         task,
@@ -398,9 +397,7 @@ fn cloud_share_failure_code(error: &crate::cloud::QuarkError) -> &'static str {
         QuarkError::AuthorizationExpired => "credentials_expired",
         QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
-        QuarkError::PikpakRegionalMembershipRestricted => {
-            "pikpak_regional_membership_restricted"
-        }
+        QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
@@ -481,7 +478,9 @@ pub fn list_tasks(
     // application-state dependency, so the durable directory grouping boundary
     // can be exercised outside a running Tauri webview.
     if let Some(cloud) = cloud.as_ref() {
-        let _ = cloud.share_plans.restore_cleanup_pending_messages(&state.store);
+        let _ = cloud
+            .share_plans
+            .restore_cleanup_pending_messages(&state.store);
     }
     let mut tasks = list_queue_tasks_for_scope(&state.store, scope.as_deref())?;
     if let Some(plans) = cloud.as_ref().map(|cloud| &cloud.share_plans) {
@@ -722,6 +721,17 @@ fn aggregate_cloud_directory_root(
     for child in &children {
         collect_leaves(child, &mut leaves);
     }
+    // A directory group is a virtual queue root.  Once every real download
+    // member has been recycled, it must move with those members even though a
+    // retained virtual failure can still be shown below it.
+    let linked_leaves = leaves
+        .iter()
+        .filter(|item| !item.source.starts_with("cloud-directory-item://"))
+        .collect::<Vec<_>>();
+    let all_linked_recycled = !linked_leaves.is_empty()
+        && linked_leaves
+            .iter()
+            .all(|item| item.status == TaskStatus::Recycled);
     let has_active = leaves.iter().any(|item| task_is_active(item.status));
     let has_failure = leaves.iter().any(|item| {
         matches!(
@@ -733,7 +743,9 @@ fn aggregate_cloud_directory_root(
         && leaves
             .iter()
             .all(|item| item.status == TaskStatus::Completed);
-    let status = if has_active {
+    let status = if all_linked_recycled {
+        TaskStatus::Recycled
+    } else if has_active {
         leaves
             .iter()
             .find(|item| task_is_active(item.status))
@@ -761,6 +773,12 @@ fn aggregate_cloud_directory_root(
     } else {
         ((completed_length.saturating_mul(100) / total_length).min(100)) as u8
     };
+    let updated_at = leaves
+        .iter()
+        .map(|item| item.updated_at)
+        .max()
+        .unwrap_or(group.updated_at)
+        .max(group.updated_at);
     QueueTaskPayload {
         id: group.id.to_string(),
         source: format!("cloud-directory://{}/{}", group.provider.key(), group.id),
@@ -782,9 +800,14 @@ fn aggregate_cloud_directory_root(
         eta_seconds: None,
         aria_error_code: None,
         created_at: group.created_at,
-        updated_at: group.updated_at,
-        completed_at: (status == TaskStatus::Completed)
-            .then(|| children.iter().filter_map(|child| child.completed_at).max().unwrap_or(group.updated_at)),
+        updated_at,
+        completed_at: (status == TaskStatus::Completed).then(|| {
+            leaves
+                .iter()
+                .filter_map(|leaf| leaf.completed_at)
+                .max()
+                .unwrap_or(updated_at)
+        }),
         files: Vec::new(),
         cleanup_pending: false,
         children,
@@ -969,17 +992,16 @@ async fn run_cloud_directory_group_action(
         .store
         .cloud_directory_group_items(group.id)
         .map_err(|error| error.to_string())?;
-    let mut directory_retry = if action == "retry"
-        && items.iter().any(|item| item.task_id.is_none())
-    {
-        Some(
-            crate::cloud::commands::retry_cloud_directory_group(app.clone(), group.id)
-                .await
-                .map_err(|error| error.to_string())?,
-        )
-    } else {
-        None
-    };
+    let mut directory_retry =
+        if action == "retry" && items.iter().any(|item| item.task_id.is_none()) {
+            Some(
+                crate::cloud::commands::retry_cloud_directory_group(app.clone(), group.id)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
     let mut first_outcome = None;
     for item in items {
         let Some(task_id) = item.task_id else {
@@ -1373,9 +1395,31 @@ fn video_playlist_path(task_id: Uuid, videos: &[PathBuf]) -> Result<PathBuf, Str
 #[tauri::command]
 pub fn open_task_directory(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    let directory = task_output_directory(&state.store, id)?;
+    let directory = match state
+        .store
+        .cloud_directory_group(id)
+        .map_err(|error| error.to_string())?
+    {
+        Some(group) => cloud_directory_group_output_root(&group)?,
+        None => task_output_directory(&state.store, id)?,
+    };
     tauri_plugin_opener::open_path(&directory, None::<&str>)
         .map_err(|error| format!("无法打开下载目录：{error}"))
+}
+
+fn cloud_directory_group_output_root(group: &CloudDirectoryGroup) -> Result<PathBuf, String> {
+    let relative = Path::new(&group.relative_directory);
+    if relative.is_absolute() || relative.components().count() != 1 {
+        return Err("目录下载任务的输出目录不安全，无法打开".to_string());
+    }
+    let Some(name) = relative.file_name().filter(|name| !name.is_empty()) else {
+        return Err("目录下载任务缺少输出目录名称".to_string());
+    };
+    let root = group.output_directory.join(name);
+    if !root.starts_with(&group.output_directory) {
+        return Err("目录下载任务的输出目录不安全，无法打开".to_string());
+    }
+    Ok(root)
 }
 
 #[tauri::command]
@@ -1441,8 +1485,16 @@ fn remove_task_record_and_unlink_share(
 pub fn recycle_task(
     task_id: String,
     state: State<'_, AppState>,
-) -> Result<DownloadTaskPayload, String> {
+) -> Result<QueueTaskPayload, String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    if state
+        .store
+        .cloud_directory_group(id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return recycle_cloud_directory_group(&state.store, id);
+    }
     let task = state.store.find(id).map_err(|error| error.to_string())?;
     if !matches!(
         task.status,
@@ -1454,7 +1506,48 @@ pub fn recycle_task(
         .store
         .transition(id, TaskStatus::Recycled)
         .map_err(|error| error.to_string())?;
-    task_payload(&state.store, recycled)
+    queue_task_payload_from_task(&state.store, recycled)
+}
+
+fn recycle_cloud_directory_group(
+    store: &TaskStore,
+    group_id: Uuid,
+) -> Result<QueueTaskPayload, String> {
+    let group = store
+        .cloud_directory_group(group_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "目录下载任务不存在".to_string())?;
+    let members = store
+        .cloud_directory_group_items(group.id)
+        .map_err(|error| error.to_string())?;
+    let mut tasks = Vec::new();
+    for member in members {
+        let Some(task_id) = member.task_id else {
+            continue;
+        };
+        let task = store.find(task_id).map_err(|error| error.to_string())?;
+        if !matches!(
+            task.status,
+            TaskStatus::Completed
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Recycled
+        ) {
+            return Err("请先取消目录中的活动下载任务，再移入回收站".to_string());
+        }
+        tasks.push(task);
+    }
+    if tasks.is_empty() {
+        return Err("目录下载任务中没有可移入回收站的文件".to_string());
+    }
+    for task in tasks {
+        if task.status != TaskStatus::Recycled {
+            store
+                .transition(task.id, TaskStatus::Recycled)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    cloud_directory_group_queue_task(store, group.id)
 }
 
 fn remove_recorded_download_file(path: &Path) -> Result<(), String> {
@@ -1491,13 +1584,69 @@ pub fn purge_recycled_tasks(
     cloud: State<'_, Arc<crate::cloud::commands::CloudState>>,
 ) -> Result<(), String> {
     let mut ids = Vec::with_capacity(task_ids.len());
+    let mut group_ids = Vec::new();
     for task_id in task_ids {
         let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-        if !ids.contains(&id) {
+        if state
+            .store
+            .cloud_directory_group(id)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            if !group_ids.contains(&id) {
+                group_ids.push(id);
+            }
+        } else if !ids.contains(&id) {
             ids.push(id);
         }
     }
-    purge_recycled_task_records(&state.store, &cloud.share_plans, &ids, delete_files)
+    purge_recycled_task_records(&state.store, &cloud.share_plans, &ids, delete_files)?;
+    for group_id in group_ids {
+        purge_cloud_directory_group(&state.store, &cloud.share_plans, group_id, delete_files)?;
+    }
+    Ok(())
+}
+
+fn cloud_directory_group_tasks_for_purge(
+    store: &TaskStore,
+    group_id: Uuid,
+) -> Result<(CloudDirectoryGroup, Vec<DownloadTask>), String> {
+    let group = store
+        .cloud_directory_group(group_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "目录下载任务不存在".to_string())?;
+    let mut tasks = Vec::new();
+    for item in store
+        .cloud_directory_group_items(group.id)
+        .map_err(|error| error.to_string())?
+    {
+        let Some(task_id) = item.task_id else {
+            continue;
+        };
+        let task = store.find(task_id).map_err(|error| error.to_string())?;
+        if !matches!(task.status, TaskStatus::Recycled | TaskStatus::Cancelled) {
+            return Err("只有回收站中的目录下载任务可以彻底删除".to_string());
+        }
+        tasks.push(task);
+    }
+    if tasks.is_empty() {
+        return Err("目录下载任务中没有可彻底删除的文件".to_string());
+    }
+    Ok((group, tasks))
+}
+
+fn purge_cloud_directory_group(
+    store: &TaskStore,
+    plans: &crate::cloud::share::CloudSharePlanStore,
+    group_id: Uuid,
+    delete_files: bool,
+) -> Result<(), String> {
+    let (group, tasks) = cloud_directory_group_tasks_for_purge(store, group_id)?;
+    let task_ids = tasks.iter().map(|task| task.id).collect::<Vec<_>>();
+    purge_recycled_task_records(store, plans, &task_ids, delete_files)?;
+    store
+        .remove_cloud_directory_group(group.id)
+        .map_err(|error| error.to_string())
 }
 
 fn purge_recycled_task_records(
@@ -1907,17 +2056,14 @@ mod tests {
                         "known.bin",
                         Some(100),
                     ),
-                    NewCloudDirectoryGroupItem::new(
-                        "unknown",
-                        &[] as &[&str],
-                        "unknown.bin",
-                        None,
-                    ),
+                    NewCloudDirectoryGroupItem::new("unknown", &[] as &[&str], "unknown.bin", None),
                 ],
             )
             .unwrap();
         let items = store.cloud_directory_group_items(group.id).unwrap();
-        let known = store.create(NewTask::direct("https://example.test/known")).unwrap();
+        let known = store
+            .create(NewTask::direct("https://example.test/known"))
+            .unwrap();
         let known = store
             .apply_transfer_snapshot(DownloadTask {
                 total_length: Some(100),
@@ -1946,8 +2092,8 @@ mod tests {
             .link_cloud_directory_group_item_task(group.id, items[1].id, unknown.id)
             .unwrap();
 
-        let projected = project_cloud_directory_groups(&store, store.list().unwrap(), Some("active"))
-            .unwrap();
+        let projected =
+            project_cloud_directory_groups(&store, store.list().unwrap(), Some("active")).unwrap();
 
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].total_length, Some(100));
@@ -1974,7 +2120,10 @@ mod tests {
                 )],
             )
             .unwrap();
-        let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
         let mut new_task = NewTask::direct("cloud://quark/remote-file");
         new_task.name = "讲义.pdf".into();
         let task = store.create(new_task).unwrap();
@@ -1991,8 +2140,7 @@ mod tests {
             .link_cloud_directory_group_item_task(group.id, item.id, task.id)
             .unwrap();
 
-        let TaskUpdatePayload::Queue(payload) =
-            task_update_payload(&store, None, task).unwrap()
+        let TaskUpdatePayload::Queue(payload) = task_update_payload(&store, None, task).unwrap()
         else {
             panic!("a cloud-directory member update must not emit a top-level leaf");
         };
@@ -2021,8 +2169,13 @@ mod tests {
                 )],
             )
             .unwrap();
-        let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
-        let task = store.create(NewTask::direct("cloud://quark/remote-file")).unwrap();
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
+        let task = store
+            .create(NewTask::direct("cloud://quark/remote-file"))
+            .unwrap();
         let task = store
             .apply_transfer_snapshot(DownloadTask {
                 status: TaskStatus::Paused,
@@ -2045,6 +2198,83 @@ mod tests {
         assert_eq!(root.children[0].name, "remote-file");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn cloud_directory_group_recycles_and_purges_its_real_and_virtual_members() {
+        let output = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote-directory",
+                    "Season 1",
+                    output.path(),
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new(
+                        "remote-complete",
+                        &[] as &[&str],
+                        "episode.mkv",
+                        Some(100),
+                    ),
+                    NewCloudDirectoryGroupItem::new(
+                        "remote-failed",
+                        &[] as &[&str],
+                        "missing.mkv",
+                        Some(100),
+                    ),
+                ],
+            )
+            .unwrap();
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
+        let task = store
+            .create(NewTask::direct("cloud://quark/remote-complete"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                total_length: Some(100),
+                completed_length: 100,
+                ..task
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+        let failed = store.cloud_directory_group_items(group.id).unwrap()[1].id;
+        store
+            .fail_cloud_directory_group_item(group.id, failed, "provider_error", "link failed")
+            .unwrap();
+
+        assert_eq!(
+            cloud_directory_group_output_root(&group).unwrap(),
+            output.path().join("Season 1")
+        );
+        let recycled = recycle_cloud_directory_group(&store, group.id).unwrap();
+        assert_eq!(recycled.status, TaskStatus::Recycled);
+        assert_eq!(
+            cloud_directory_group_queue_task(&store, group.id)
+                .unwrap()
+                .status,
+            TaskStatus::Recycled
+        );
+
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(output.path().to_path_buf()).unwrap(),
+        );
+        purge_cloud_directory_group(&store, &plans, group.id, false).unwrap();
+        assert!(store.cloud_directory_group(group.id).unwrap().is_none());
+        assert!(matches!(
+            store.find(task.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
+    }
+
     #[test]
     fn unsubmitted_active_task_can_be_force_cancelled_without_engine() {
         let store = TaskStore::open_in_memory().unwrap();
@@ -2059,7 +2289,10 @@ mod tests {
         assert_eq!(cancelled.status, TaskStatus::Cancelled);
         assert_eq!(cancelled.download_speed, 0);
         assert_eq!(cancelled.upload_speed, 0);
-        assert_eq!(store.find(cancelled.id).unwrap().status, TaskStatus::Cancelled);
+        assert_eq!(
+            store.find(cancelled.id).unwrap().status,
+            TaskStatus::Cancelled
+        );
     }
 
     #[cfg(windows)]
@@ -2264,13 +2497,17 @@ mod tests {
         let store = TaskStore::open_in_memory().unwrap();
         let first = task_action_outcome(
             &store,
-            store.create(NewTask::direct("https://example.test/first")).unwrap(),
+            store
+                .create(NewTask::direct("https://example.test/first"))
+                .unwrap(),
             None,
         )
         .unwrap();
         let last = task_action_outcome(
             &store,
-            store.create(NewTask::direct("https://example.test/last")).unwrap(),
+            store
+                .create(NewTask::direct("https://example.test/last"))
+                .unwrap(),
             None,
         )
         .unwrap();
@@ -2294,7 +2531,10 @@ mod tests {
         assert_eq!(batch.failures.len(), 1);
         assert_eq!(batch.failures[0].selected_id, "failed");
         assert_eq!(batch.failures[0].code, "web_auth_required");
-        assert_eq!(batch.failures[0].message, "此登录方式需要网页验证，请点击网页授权完成登录");
+        assert_eq!(
+            batch.failures[0].message,
+            "此登录方式需要网页验证，请点击网页授权完成登录"
+        );
     }
 
     #[cfg(windows)]
