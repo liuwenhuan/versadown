@@ -1,9 +1,33 @@
 use alldownloader_lib::cloud::{
     clear_password_credential_if_account_differs, load_password_credential,
     remove_password_credential, run_with_session_recovery, save_password_credential,
-    CloudPasswordCredential, CloudProvider, MemoryCredentialStore, QuarkError, SessionWorkKind,
+    CloudPasswordCredential, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
+    SessionWorkKind,
 };
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+#[derive(Default)]
+struct LoadRecordingStore {
+    load_calls: AtomicUsize,
+}
+
+impl CredentialStore for LoadRecordingStore {
+    fn save(&self, _: &str, _: &[u8]) -> Result<(), QuarkError> {
+        Ok(())
+    }
+
+    fn load(&self, _: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+        self.load_calls.fetch_add(1, Ordering::Relaxed);
+        Err(QuarkError::Storage)
+    }
+
+    fn remove(&self, _: &str) -> Result<(), QuarkError> {
+        Ok(())
+    }
+}
 
 #[test]
 fn expired_read_relogs_once_and_retries_once() {
@@ -75,6 +99,27 @@ fn expired_mutation_relogs_but_never_replays_work() {
     ));
     assert_eq!(work_calls.get(), 1);
     assert_eq!(relogin_calls.get(), 1);
+}
+
+#[test]
+fn official_webview_provider_does_not_load_password_or_relogin_on_expired_session() {
+    let store = LoadRecordingStore::default();
+    let relogin_calls = Cell::new(0);
+
+    let result: Result<(), QuarkError> = run_with_session_recovery(
+        CloudProvider::Aliyun,
+        &store,
+        SessionWorkKind::Read,
+        || Err(QuarkError::AuthorizationExpired),
+        |_| {
+            relogin_calls.set(relogin_calls.get() + 1);
+            Ok(())
+        },
+    );
+
+    assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
+    assert_eq!(store.load_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(relogin_calls.get(), 0);
 }
 
 #[test]
