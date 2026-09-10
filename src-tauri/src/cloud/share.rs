@@ -241,7 +241,10 @@ pub fn inspect_share_with_adapter(
                     .map(|name| super::commands::safe_filename(name))
                     .collect::<Vec<_>>()
                     .join("/"),
-                size: entry.size.map(|size| size.to_string()).unwrap_or_default(),
+                size: entry
+                    .size
+                    .map(format_confirmation_size)
+                    .unwrap_or_default(),
                 selected: true,
             })
             .collect(),
@@ -251,6 +254,20 @@ pub fn inspect_share_with_adapter(
         Some(source) => ShareConfirmationOutcome::AutoSubmit { source },
         None => ShareConfirmationOutcome::Confirmation(confirmation),
     })
+}
+
+fn format_confirmation_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
 }
 
 pub fn selected_share_sources(
@@ -1753,6 +1770,14 @@ mod tests {
         )
         .is_err());
         assert!(selected_share_sources(&store, &confirmation.plan_source, &[]).is_err());
+    }
+
+    #[test]
+    fn confirmation_size_uses_human_readable_binary_units() {
+        assert_eq!(format_confirmation_size(0), "0 B");
+        assert_eq!(format_confirmation_size(1023), "1023 B");
+        assert_eq!(format_confirmation_size(1024), "1.0 KB");
+        assert_eq!(format_confirmation_size(1_572_864), "1.5 MB");
     }
 
     #[test]
