@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { vi } from 'vitest';
 import { CloudManager } from './CloudManager';
-import { cloudRecycleBinDirectoryId, type CloudProvider } from '../lib/cloudTypes';
+import { cloudRecycleBinDirectoryId, cloudRootDirectoryId, type CloudProvider } from '../lib/cloudTypes';
 
 function createCloudFake(overrides: Record<string, unknown> = {}) {
   return {
@@ -678,6 +678,21 @@ it('requires a recycle-bin confirmation before deleting selected files', async (
   await user.click(screen.getByRole('button', { name: '移入回收站' }));
   expect(client.trashCloudFiles).toHaveBeenCalledWith('quark', ['file-1']);
   expect(await screen.findByRole('status')).toHaveTextContent('删除成功');
+});
+
+it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as const)('renders the %s virtual recycle bin with a trash-can icon', async (provider) => {
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockResolvedValue({ id: cloudRootDirectoryId[provider], items: [
+      { id: 'ordinary-folder', parentId: cloudRootDirectoryId[provider], name: '普通文件夹', kind: 'folder' },
+      { id: 'ordinary-file', parentId: cloudRootDirectoryId[provider], name: '普通文件.txt', kind: 'file' }
+    ] })
+  });
+  render(<CloudManager provider={provider} client={client} initialAccounts={[{ id: `${provider}-1`, displayName: 'alice', provider, authMethod: 'web' }]} restoreOnMount={false} />);
+
+  const recycleBinName = await screen.findByTitle('回收站');
+  expect(recycleBinName.previousElementSibling).toHaveClass('recycle-bin');
+  expect(screen.getByTitle('普通文件夹').previousElementSibling).toHaveClass('folder');
+  expect(screen.getByTitle('普通文件.txt').previousElementSibling).toHaveClass('file');
 });
 
 it.each(['quark', 'uc', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'pikpak'] as const)('shows a virtual recycle bin and recycle-only controls for %s', async (provider) => {
