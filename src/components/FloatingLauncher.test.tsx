@@ -1,6 +1,20 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
+
+const theme = vi.hoisted(() => ({
+  resolved: 'light' as 'light' | 'dark',
+  listeners: new Set<() => void>()
+}));
+
+vi.mock('../lib/theme', () => ({
+  getResolvedTheme: () => theme.resolved,
+  subscribeTheme: (listener: () => void) => {
+    theme.listeners.add(listener);
+    return () => theme.listeners.delete(listener);
+  }
+}));
+
 import { FloatingLauncher } from './FloatingLauncher';
 
 it('expands the 48px launcher and labels its action 开始解析下载', async () => {
@@ -68,4 +82,26 @@ it('opens the launcher context menu on right click without expanding', () => {
 
   expect(onContextMenu).toHaveBeenCalledOnce();
   expect(screen.queryByRole('button', { name: '开始解析下载' })).not.toBeInTheDocument();
+});
+
+it('uses the dark mint graphic in dark theme', () => {
+  theme.resolved = 'dark';
+  render(<FloatingLauncher onParse={vi.fn()} activeCount={0} />);
+
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
+  expect(trigger.querySelector('img')).toHaveAttribute('src', expect.stringContaining('dark_mint'));
+});
+
+it('switches the launcher graphic when the theme changes', () => {
+  theme.resolved = 'light';
+  render(<FloatingLauncher onParse={vi.fn()} activeCount={0} />);
+
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  expect(trigger).toHaveAttribute('data-icon-variant', 'light');
+  act(() => {
+    theme.resolved = 'dark';
+    theme.listeners.forEach((listener) => listener());
+  });
+  expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
 });

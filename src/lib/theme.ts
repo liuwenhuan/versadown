@@ -68,6 +68,10 @@ export function getThemeMode(): ThemeMode {
   return currentMode;
 }
 
+export function getResolvedTheme(): ResolvedTheme {
+  return resolvedTheme();
+}
+
 export function setThemeMode(mode: ThemeMode): void {
   currentMode = mode;
   try {

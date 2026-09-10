@@ -1,5 +1,8 @@
-import { MouseEvent, useRef, useState } from 'react';
+import { MouseEvent, useRef, useState, useSyncExternalStore } from 'react';
 import { NewDownloadDialog } from './NewDownloadDialog';
+import darkMintIcon from '../assets/launcher/dark_mint_128.png';
+import mintWhiteIcon from '../assets/launcher/mint_white_128.png';
+import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 
 interface FloatingLauncherProps {
   activeCount: number;
@@ -16,6 +19,7 @@ export function FloatingLauncher({ activeCount, liveSpeed, onParse, onExpandedCh
   const [expanded, setExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
+  const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
 
   function setLauncherExpanded(next: boolean) {
     setExpanded(next);
@@ -59,8 +63,9 @@ export function FloatingLauncher({ activeCount, liveSpeed, onParse, onExpandedCh
           onContextMenu?.();
         }}
       >
-        <button className="launcher-trigger" data-size="48" aria-label="打开下载输入">
-          <span aria-hidden="true">↓</span>{activeCount > 0 && <i>{activeCount}</i>}
+        <button className="launcher-trigger" data-size="48" data-icon-variant={resolvedTheme} aria-label="打开下载输入">
+          <img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" />
+          {activeCount > 0 && <i>{activeCount}</i>}
         </button>
         {liveSpeed && <span className="launcher-live-indicator" aria-label={liveSpeed.label}><span>↓</span>{liveSpeed.value}<small>/s</small></span>}
       </div>
