@@ -6,7 +6,10 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 use zeroize::Zeroizing;
 
 const CLOUD: &str = "https://cloud.189.cn";
@@ -435,26 +438,31 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
     }
 
     pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
-        let value = self.request(
-            "GET",
-            "/api/open/file/listRecycleBinFiles.action",
-            "pageNum=1&pageSize=100&iconOption=1&family=false",
-            None,
-        )?;
-        let files = value
-            .get("fileList")
-            .or_else(|| value.pointer("/data/fileList"))
-            .and_then(Value::as_array)
-            .ok_or(QuarkError::InvalidResponse)?;
-        let items = files
-            .iter()
-            .map(|file| {
+        let mut items = Vec::new();
+        let mut seen = BTreeSet::new();
+        for page in 1..=10_000 {
+            let value = self.request(
+                "GET",
+                "/api/open/file/listRecycleBinFiles.action",
+                &format!("pageNum={page}&pageSize=100&iconOption=1&family=false"),
+                None,
+            )?;
+            let files = value
+                .get("fileList")
+                .or_else(|| value.pointer("/data/fileList"))
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            let length = files.len();
+            for file in files {
                 let id = file
                     .get("id")
                     .and_then(string_or_number)
                     .filter(|id| valid_tianyi_recycle_record_id(id))
                     .ok_or(QuarkError::InvalidResponse)?;
-                Ok(CloudFile {
+                if !seen.insert(id.clone()) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                items.push(CloudFile {
                     id,
                     parent_id: TIANYI_RECYCLE_BIN_ID.into(),
                     name: required(file, "name").or_else(|_| required(file, "fileName"))?,
@@ -469,13 +477,16 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                         .get("lastOpTime")
                         .or_else(|| file.get("lastOpDate"))
                         .and_then(string_or_number),
-                })
-            })
-            .collect::<Result<Vec<_>, QuarkError>>()?;
-        Ok(CloudDirectory {
-            id: TIANYI_RECYCLE_BIN_ID.into(),
-            items,
-        })
+                });
+            }
+            if length < 100 {
+                return Ok(CloudDirectory {
+                    id: TIANYI_RECYCLE_BIN_ID.into(),
+                    items,
+                });
+            }
+        }
+        Err(QuarkError::InvalidResponse)
     }
 
     pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {

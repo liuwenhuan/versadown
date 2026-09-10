@@ -209,6 +209,45 @@ fn tianyi_maps_xml_folder_entries_as_folders() {
 }
 
 #[test]
+fn tianyi_recycle_list_collects_following_pages_and_stops_after_a_short_page() {
+    let first = serde_json::json!({
+        "res_code": 0,
+        "fileList": (1..=100)
+            .map(|id| serde_json::json!({
+                "id": id,
+                "name": format!("deleted-{id}.txt"),
+                "isFolder": false,
+                "size": id,
+                "lastOpTime": "2026-09-10",
+            }))
+            .collect::<Vec<_>>(),
+    })
+    .to_string();
+    let second = r#"{"res_code":0,"fileList":[{"id":201,"name":"deleted-201.txt","isFolder":false,"size":201,"lastOpTime":"2026-09-10"},{"id":202,"name":"deleted-202.txt","isFolder":false,"size":202,"lastOpTime":"2026-09-10"}]}"#;
+    let http = RecordingHttp::sequence(&[&first, second]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=paged-session"), &http);
+
+    let directory = client.list_recycle_bin().unwrap();
+
+    assert_eq!(directory.items.len(), 102);
+    assert_eq!(directory.items[0].id, "1");
+    assert_eq!(directory.items[99].id, "100");
+    assert_eq!(directory.items[100].id, "201");
+    assert_eq!(directory.items[101].id, "202");
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2, "a short page must end pagination");
+    assert!(requests[0].url.contains(
+        "/api/open/file/listRecycleBinFiles.action?pageNum=1&pageSize=100&iconOption=1&family=false"
+    ));
+    assert!(requests[1].url.contains(
+        "/api/open/file/listRecycleBinFiles.action?pageNum=2&pageSize=100&iconOption=1&family=false"
+    ));
+    for request in requests {
+        assert_eq!(request.headers["Cookie"], "COOKIE_LOGIN_USER=paged-session");
+    }
+}
+
+#[test]
 fn tianyi_recycle_operations_use_the_authenticated_web_session() {
     let http = RecordingHttp::sequence(&[
         r#"{"res_code":0,"fileList":[{"id":"456","fileId":"live-file","name":"deleted.jpg","isFolder":false,"size":9,"lastOpTime":"2026-09-10"}]}"#,

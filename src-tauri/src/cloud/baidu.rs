@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Seek, SeekFrom},
     path::Path,
 };
@@ -661,25 +661,30 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
-        let value = self.web_request(
-            "GET",
-            format!("{PAN}/api/recycle/list/?num=100&page=1&web=1"),
-            None,
-        )?;
-        let files = value
-            .get("list")
-            .and_then(Value::as_array)
-            .ok_or(QuarkError::InvalidResponse)?;
-        let items = files
-            .iter()
-            .map(|file| {
+        let mut items = Vec::new();
+        let mut seen = BTreeSet::new();
+        for page in 1..=10_000 {
+            let value = self.web_request(
+                "GET",
+                format!("{PAN}/api/recycle/list/?num=100&page={page}&web=1"),
+                None,
+            )?;
+            let files = value
+                .get("list")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            let length = files.len();
+            for file in files {
                 let id = file
                     .get("fs_id")
                     .or_else(|| file.get("fsid"))
                     .and_then(string_or_number)
                     .filter(|id| valid_baidu_recycle_record_id(id))
                     .ok_or(QuarkError::InvalidResponse)?;
-                Ok(CloudFile {
+                if !seen.insert(id.clone()) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                items.push(CloudFile {
                     id,
                     parent_id: BAIDU_RECYCLE_BIN_ID.into(),
                     name: required(file, "server_filename").or_else(|_| required(file, "name"))?,
@@ -691,13 +696,16 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                     .into(),
                     size: file.get("size").and_then(Value::as_u64),
                     modified_at: file.get("server_mtime").and_then(string_or_number),
-                })
-            })
-            .collect::<Result<Vec<_>, QuarkError>>()?;
-        Ok(CloudDirectory {
-            id: BAIDU_RECYCLE_BIN_ID.into(),
-            items,
-        })
+                });
+            }
+            if length < 100 {
+                return Ok(CloudDirectory {
+                    id: BAIDU_RECYCLE_BIN_ID.into(),
+                    items,
+                });
+            }
+        }
+        Err(QuarkError::InvalidResponse)
     }
 
     pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {

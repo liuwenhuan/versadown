@@ -402,6 +402,45 @@ fn baidu_root_includes_the_virtual_recycle_folder() {
 }
 
 #[test]
+fn baidu_recycle_list_collects_following_pages_and_stops_after_a_short_page() {
+    let first = serde_json::json!({
+        "errno": 0,
+        "list": (1..=100)
+            .map(|id| serde_json::json!({
+                "fs_id": id,
+                "server_filename": format!("deleted-{id}.txt"),
+                "isdir": 0,
+                "size": id,
+                "server_mtime": 123,
+            }))
+            .collect::<Vec<_>>(),
+    })
+    .to_string();
+    let second = r#"{"errno":0,"list":[{"fs_id":201,"server_filename":"deleted-201.txt","isdir":0,"size":201,"server_mtime":123},{"fs_id":202,"server_filename":"deleted-202.txt","isdir":0,"size":202,"server_mtime":123}]}"#;
+    let http = RecordingHttp::sequence(&[&first, second]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=paged-session"), &http);
+
+    let directory = client.list_recycle_bin().unwrap();
+
+    assert_eq!(directory.items.len(), 102);
+    assert_eq!(directory.items[0].id, "1");
+    assert_eq!(directory.items[99].id, "100");
+    assert_eq!(directory.items[100].id, "201");
+    assert_eq!(directory.items[101].id, "202");
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2, "a short page must end pagination");
+    assert!(requests[0]
+        .url
+        .contains("/api/recycle/list/?num=100&page=1&web=1"));
+    assert!(requests[1]
+        .url
+        .contains("/api/recycle/list/?num=100&page=2&web=1"));
+    for request in requests {
+        assert_eq!(request.headers["Cookie"], "BDUSS=paged-session");
+    }
+}
+
+#[test]
 fn baidu_recycle_operations_use_the_recycle_record_not_a_live_path() {
     let http = RecordingHttp::sequence(&[
         r#"{"errno":0,"list":[{"fs_id":987,"path":"/deleted.mkv","server_filename":"deleted.mkv","isdir":0,"size":12,"server_mtime":123}]}"#,
