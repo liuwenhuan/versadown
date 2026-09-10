@@ -128,6 +128,18 @@ function readableSize(size?: number) {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
+function formatCloudModifiedAt(value: unknown) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return value;
+
+  const numericValue = typeof value === 'number' ? value : typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+  const timestamp = Number.isFinite(numericValue)
+    ? Math.abs(numericValue) < 100_000_000_000 ? numericValue * 1_000 : numericValue
+    : typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? Date.parse(value) : NaN;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+}
+
 function CloudFileIcon({ kind }: { kind: CloudFile['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{kind === 'folder'
     ? <><path d="M3.5 7.5h6l1.8 2h10.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.1l1.8 2h6.7a2.2 2.2 0 0 1 2.2 2.2v1.8" /></>
@@ -289,7 +301,7 @@ function CloudFileDetails({ file, path, onClose }: { file: CloudFile; path: stri
   return createPortal(<div className="cloud-confirm-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section ref={dialogRef} className="cloud-file-details" role="dialog" aria-modal="true" aria-label="文件详情">
       <header><span className={`cloud-details-icon ${file.kind}`}><CloudFileIcon kind={file.kind} /></span><div><h3>{file.name}</h3><small>{file.kind === 'folder' ? '文件夹' : '文件'}</small></div><button ref={closeRef} className="cloud-details-close" aria-label="关闭文件详情" onClick={onClose}>×</button></header>
-      <dl><div><dt>位置</dt><dd>{path}</dd></div>{file.kind === 'file' && <div><dt>大小</dt><dd>{readableSize(file.size)}</dd></div>}<div><dt>修改时间</dt><dd>{file.modifiedAt ?? '—'}</dd></div></dl>
+      <dl><div><dt>位置</dt><dd>{path}</dd></div>{file.kind === 'file' && <div><dt>大小</dt><dd>{readableSize(file.size)}</dd></div>}<div><dt>修改时间</dt><dd>{formatCloudModifiedAt(file.modifiedAt)}</dd></div></dl>
     </section>
   </div>, document.body);
 }
@@ -815,7 +827,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
           <span className="cloud-check-cell"><input type="checkbox" aria-label={`选择 ${item.name}`} checked={isSelected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelection(item.id)} /></span>
           <span className="cloud-file-name"><i className={item.kind}><CloudFileIcon kind={item.kind} /></i><b title={item.name}>{item.name}</b></span>
           <span>{item.kind === 'folder' ? '—' : readableSize(item.size)}</span>
-          <span>{item.modifiedAt ?? '—'}</span>
+          <span>{formatCloudModifiedAt(item.modifiedAt)}</span>
         </div>;
       })}
     </div>}

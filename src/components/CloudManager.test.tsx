@@ -12,10 +12,10 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     loginCloudWithPassword: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'password' as const })),
     getCloudAccount: vi.fn().mockRejectedValue(Object.assign(new Error('未授权'), { code: 'unauthorized' })),
     listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === 'folder-1'
-      ? { id: 'folder-1', items: [{ id: 'child-1', parentId: 'folder-1', name: '说明.txt', kind: 'file', size: 1024, modifiedAt: '刚刚' }] }
+      ? { id: 'folder-1', items: [{ id: 'child-1', parentId: 'folder-1', name: '说明.txt', kind: 'file', size: 1024, modifiedAt: '2025-06-07 08:09:10' }] }
       : parentId === 'folder-2'
-        ? { id: 'folder-2', items: [{ id: 'nested-folder', parentId: 'folder-2', name: '深层目录', kind: 'folder', modifiedAt: '刚刚' }] }
-      : { id: '0', items: [{ id: 'folder-1', parentId: '0', name: '归档', kind: 'folder', modifiedAt: '今天' }, { id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file', size: 2_000_000, modifiedAt: '昨天' }] })),
+        ? { id: 'folder-2', items: [{ id: 'nested-folder', parentId: 'folder-2', name: '深层目录', kind: 'folder', modifiedAt: '2025-06-07 08:09:10' }] }
+      : { id: '0', items: [{ id: 'folder-1', parentId: '0', name: '归档', kind: 'folder', modifiedAt: '2025-06-07 08:09:10' }, { id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file', size: 2_000_000, modifiedAt: '2025-06-07 08:09:10' }] })),
     createCloudDirectory: vi.fn().mockResolvedValue(undefined),
     pickAndUploadFiles: vi.fn().mockResolvedValue(undefined),
     downloadCloudFile: vi.fn().mockResolvedValue('https://download.example/file'),
@@ -513,6 +513,37 @@ it('closes the destination picker and requires official web authorization when i
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
 });
 
+it('normalizes provider modified times in the list and preserves Tianyi canonical timestamps in details', async () => {
+  const user = userEvent.setup();
+  const timestamp = 1_735_787_045_000;
+  const date = new Date(timestamp);
+  const localTimestamp = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
+      { id: 'seconds', parentId: '0', name: 'seconds.txt', kind: 'file', modifiedAt: timestamp / 1_000 },
+      { id: 'milliseconds', parentId: '0', name: 'milliseconds.txt', kind: 'file', modifiedAt: timestamp },
+      { id: 'iso', parentId: '0', name: 'iso.txt', kind: 'file', modifiedAt: '2025-01-02T03:04:05.000Z' },
+      { id: 'tianyi', parentId: '0', name: 'tianyi.txt', kind: 'file', modifiedAt: '2025-06-07 08:09:10' },
+      { id: 'unknown', parentId: '0', name: 'unknown.txt', kind: 'file', modifiedAt: '昨天' },
+      { id: 'missing', parentId: '0', name: 'missing.txt', kind: 'file' }
+    ] })
+  });
+  render(<CloudManager provider="tianyi" client={client} initialAccounts={[{ id: 't-1', displayName: 'alice', provider: 'tianyi', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  const tree = await screen.findByRole('tree', { name: '天翼网盘文件' });
+  expect(within(tree).getByText('seconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
+  expect(within(tree).getByText('milliseconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
+  expect(within(tree).getByText('iso.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
+  expect(within(tree).getByText('tianyi.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 08:09:10');
+  expect(within(tree).getByText('unknown.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
+  expect(within(tree).getByText('missing.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
+
+  await user.click(within(tree).getByText('tianyi.txt'));
+  await user.click(screen.getByRole('button', { name: '更多文件操作' }));
+  await user.click(within(screen.getByRole('menu', { name: '更多文件操作' })).getByRole('menuitem', { name: '文件详情' }));
+  expect(screen.getByRole('dialog', { name: '文件详情' })).toHaveTextContent('2025-06-07 08:09:10');
+});
+
 it('shows concise file details in a separate dialog', async () => {
   const user = userEvent.setup();
   render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
@@ -527,7 +558,7 @@ it('shows concise file details in a separate dialog', async () => {
   const dialog = screen.getByRole('dialog', { name: '文件详情' });
   expect(dialog).toHaveTextContent('报告.pdf');
   expect(dialog).toHaveTextContent('1.9 MB');
-  expect(dialog).toHaveTextContent('昨天');
+  expect(dialog).toHaveTextContent('2025-06-07 08:09:10');
   expect(dialog).not.toHaveTextContent('file-1');
   expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
   await user.tab();
