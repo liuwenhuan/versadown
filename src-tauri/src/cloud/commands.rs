@@ -1842,12 +1842,10 @@ fn directory_download_output_directory(
 
 fn provider_directory_component(component: &str) -> Result<String, QuarkError> {
     let mut path_components = Path::new(component).components();
-    // Reject Windows drive prefixes on every host, including drive-relative
-    // paths such as C:outside, before safe_filename could hide the bad input.
-    let windows_drive_prefix =
-        component.as_bytes().get(1) == Some(&b':') && component.as_bytes()[0].is_ascii_alphabetic();
-    if windows_drive_prefix
-        || component.contains(['/', '\\'])
+    // Reject drive prefixes, ADS and device names before safe_filename could
+    // hide the unsafe provider input. Validate all components before mkdir.
+    if component.contains(['/', '\\', ':'])
+        || is_windows_device_name(component)
         || component.chars().any(char::is_control)
         || !matches!(path_components.next(), Some(Component::Normal(_)))
         || path_components.next().is_some()
@@ -2136,9 +2134,28 @@ pub(crate) fn safe_filename(name: &str) -> String {
     let result = result.trim_end_matches(['.', ' ']);
     if result.is_empty() {
         "download".into()
+    } else if is_windows_device_name(result) {
+        format!("_{result}")
     } else {
         result.into()
     }
+}
+
+fn is_windows_device_name(name: &str) -> bool {
+    // DOS device names stay reserved with extensions, trailing spaces, or the
+    // superscript digits recognized by Windows (COM¹, LPT², etc.).
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || matches!(
+            stem.strip_prefix("COM")
+                .or_else(|| stem.strip_prefix("LPT")),
+            Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+        )
 }
 
 #[cfg(test)]
@@ -2161,6 +2178,91 @@ mod tests {
         QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
+
+    fn windows_device_name_variants() -> Vec<String> {
+        [
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+            "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
+        ]
+        .into_iter()
+        .flat_map(|name| {
+            [
+                name.to_owned(),
+                name.to_ascii_lowercase(),
+                format!("{name}.txt"),
+                format!("{name}."),
+                format!("{name} "),
+                format!("{name} .txt. "),
+            ]
+        })
+        .collect()
+    }
+
+    #[test]
+    fn directory_output_rejects_all_device_names_before_any_filesystem_changes() {
+        for name in windows_device_name_variants() {
+            let root = tempfile::tempdir().expect("temporary selected download root");
+            let result = super::directory_download_output_directory(
+                root.path(),
+                &["first".into(), "second".into(), name.clone()],
+            );
+            assert!(
+                !root.path().join("first").exists(),
+                "device name {name:?} must be rejected before creating ancestor directories"
+            );
+            assert!(
+                matches!(result, Err(QuarkError::InvalidResponse)),
+                "device name {name:?} must fail closed, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directory_output_file_names_avoid_devices_in_confirmation_and_submission() {
+        for name in windows_device_name_variants() {
+            let expected = format!("_{}", name.trim_end_matches(['.', ' ']));
+            let confirmed = super::safe_filename(&name);
+            let submitted = super::ResolvedCloudDownload {
+                url: "https://download.example/file".into(),
+                name: name.clone(),
+                headers: vec![],
+            }
+            .into_uri_submission_options();
+            assert_eq!(confirmed, expected, "unsafe confirmation name for {name:?}");
+            assert_eq!(submitted.output_name.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    #[test]
+    fn directory_output_rejects_ads_and_preserves_normal_unicode_names() {
+        let root = tempfile::tempdir().expect("temporary selected download root");
+        for name in ["notes:stream", "NUL:data", "folder::$INDEX_ALLOCATION"] {
+            let result = super::directory_download_output_directory(
+                root.path(),
+                &["must-not-be-created".into(), name.into()],
+            );
+            assert!(
+                matches!(result, Err(QuarkError::InvalidResponse)),
+                "ADS component {name:?} must fail closed, got {result:?}"
+            );
+            assert!(!root.path().join("must-not-be-created").exists());
+        }
+        for name in [
+            "中文笔记",
+            "资料¹",
+            "COM10",
+            "LPT0",
+            "CONSOLE",
+            "辅助文件.txt",
+        ] {
+            let output = super::directory_download_output_directory(root.path(), &[name.into()])
+                .expect("ordinary Unicode and device-like names remain valid");
+            assert_eq!(output, root.path().join(name));
+            assert_eq!(super::safe_filename(name), name);
+        }
+        assert_eq!(super::safe_filename("notes:stream"), "notes_stream");
+    }
 
     #[test]
     fn directory_output_rejects_provider_path_components_before_creating_directories() {
