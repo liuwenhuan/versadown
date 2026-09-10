@@ -129,11 +129,10 @@ function readableSize(size?: number) {
 }
 
 function isValidDateTime(year: number, month: number, day: number, hour: number, minute: number, second: number) {
-  const date = new Date(0);
-  date.setFullYear(year, month - 1, day);
-  date.setHours(hour, minute, second, 0);
-  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
-    && date.getHours() === hour && date.getMinutes() === minute && date.getSeconds() === second;
+  if (year < 1 || year > 9_999 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return false;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= daysInMonth[month - 1];
 }
 
 function formatLocalCloudDate(value: string) {

@@ -526,6 +526,7 @@ it('normalizes provider modified times in the list and details while preserving 
       { id: 'date-only', parentId: '0', name: 'date-only.txt', kind: 'file', modifiedAt: '2025-06-07' },
       { id: 'minute', parentId: '0', name: 'minute.txt', kind: 'file', modifiedAt: '2025-06-07 08:09' },
       { id: 'tianyi', parentId: '0', name: 'tianyi.txt', kind: 'file', modifiedAt: '2025-06-07 08:09:10' },
+      { id: 'dst-canonical', parentId: '0', name: 'dst-canonical.txt', kind: 'file', modifiedAt: '2025-03-09 02:30:00' },
       { id: 'invalid-canonical', parentId: '0', name: 'invalid-canonical.txt', kind: 'file', modifiedAt: '2025-02-30 08:09:10' },
       { id: 'invalid-time', parentId: '0', name: 'invalid-time.txt', kind: 'file', modifiedAt: '2025-99-99 99:99:99' },
       { id: 'unknown', parentId: '0', name: 'unknown.txt', kind: 'file', modifiedAt: '昨天' },
@@ -541,6 +542,7 @@ it('normalizes provider modified times in the list and details while preserving 
   expect(within(tree).getByText('date-only.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 00:00:00');
   expect(within(tree).getByText('minute.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 08:09:00');
   expect(within(tree).getByText('tianyi.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-06-07 08:09:10');
+  expect(within(tree).getByText('dst-canonical.txt').closest('[role="treeitem"]')).toHaveTextContent('2025-03-09 02:30:00');
   expect(within(tree).getByText('invalid-canonical.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
   expect(within(tree).getByText('invalid-time.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
   expect(within(tree).getByText('unknown.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
@@ -555,11 +557,17 @@ it('normalizes provider modified times in the list and details while preserving 
 
   expect(await openDetails('seconds.txt')).toHaveTextContent(localTimestamp);
   await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  expect(await openDetails('milliseconds.txt')).toHaveTextContent(localTimestamp);
+  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  expect(await openDetails('date-only.txt')).toHaveTextContent('2025-06-07 00:00:00');
+  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
   expect(await openDetails('invalid-canonical.txt')).toHaveTextContent('—');
   await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
   expect(await openDetails('missing.txt')).toHaveTextContent('—');
   await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
   expect(await openDetails('tianyi.txt')).toHaveTextContent('2025-06-07 08:09:10');
+  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
+  expect(await openDetails('dst-canonical.txt')).toHaveTextContent('2025-03-09 02:30:00');
 });
 
 it('shows concise file details in a separate dialog', async () => {
