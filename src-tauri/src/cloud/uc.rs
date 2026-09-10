@@ -202,9 +202,9 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         })
     }
 
-    fn stable_account_id(&self) -> Result<String, QuarkError> {
+    fn stable_account_id(&self) -> Result<Option<String>, QuarkError> {
         if let Some(id) = cookie_value(self.cookie()?, "__uid").filter(|id| !id.is_empty()) {
-            return Ok(id);
+            return Ok(Some(id));
         }
         let value = self.request_json(
             "GET",
@@ -212,11 +212,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             "fetch_subscribe=true&_ch=home&fetch_identity=true",
             None,
         )?;
-        value["data"]
+        Ok(value["data"]
             .get("user_id")
             .and_then(string_or_number)
-            .filter(|id| !id.is_empty())
-            .ok_or(QuarkError::InvalidResponse)
+            .filter(|id| !id.is_empty()))
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
@@ -830,9 +829,11 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
-    ) -> Result<String, QuarkError> {
-        let account_id = UcClient::new(self.stored_session()?, self.http).stable_account_id()?;
-        super::share::stable_owner_fingerprint(CloudProvider::Uc, &account_id)
+    ) -> Result<Option<String>, QuarkError> {
+        UcClient::new(self.stored_session()?, self.http)
+            .stable_account_id()?
+            .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Uc, &id))
+            .transpose()
     }
     fn refresh_recorded_transfer(
         &self,
@@ -905,11 +906,15 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
                             .as_str()
                             .filter(|s| !s.is_empty())
                             .ok_or(QuarkError::InvalidResponse)?;
-                        store.record_transfer_with_owner(
-                            &entry.plan.source_for(&entry.entry.entry_id),
-                            id,
-                            &owner,
-                        )?;
+                        if let Some(owner) = &owner {
+                            store.record_transfer_with_owner(
+                                &entry.plan.source_for(&entry.entry.entry_id),
+                                id,
+                                owner,
+                            )?;
+                        } else {
+                            store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                        }
                         let headers = session.headers.clone();
                         let value =
                             session.request("POST", "file/download", Some(json!({"fids":[id]})))?;
@@ -1121,15 +1126,15 @@ mod tests {
         assert_eq!(before, after);
     }
     #[test]
-    fn uc_transfer_owner_without_uid_or_authenticated_account_id_fails_closed() {
+    fn uc_transfer_owner_without_uid_or_authenticated_account_id_is_unavailable() {
         let credentials = share_credentials_with_server_session_only();
         let http = Http::new(vec![json!({"code":0,"data":{}})]);
         let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
 
-        assert!(matches!(
-            adapter.transfer_owner_fingerprint(&share_entry()),
-            Err(QuarkError::InvalidResponse)
-        ));
+        assert_eq!(
+            adapter.transfer_owner_fingerprint(&share_entry()).unwrap(),
+            None
+        );
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].url.contains("/member?"));

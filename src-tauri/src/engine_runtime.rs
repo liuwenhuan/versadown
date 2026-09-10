@@ -29,15 +29,15 @@ pub(crate) fn cleanup_completed_share(
     cleanup_completed_share_with_owner(plans, tasks, task, enabled, retry, None, trash)
 }
 
-/// Production callers pass the current DPAPI credential fingerprint. This
-/// makes automatic cleanup fail closed after an account or session change.
+/// Production callers pass the current account-v2 owner fingerprint. Missing
+/// stable identity leaves the transfer pending and never invokes deletion.
 pub(crate) fn cleanup_completed_share_for_owner(
     plans: &crate::cloud::share::CloudSharePlanStore,
     tasks: &TaskStore,
     task: &crate::DownloadTask,
     enabled: bool,
     retry: bool,
-    owner_fingerprint: &str,
+    owner_fingerprint: Option<&str>,
     trash: impl FnOnce(crate::cloud::CloudProvider, &[String]) -> Result<(), crate::cloud::QuarkError>,
 ) -> Result<Option<crate::DownloadTask>, crate::cloud::QuarkError> {
     cleanup_completed_share_with_owner(
@@ -46,7 +46,7 @@ pub(crate) fn cleanup_completed_share_for_owner(
         task,
         enabled,
         retry,
-        Some(owner_fingerprint),
+        owner_fingerprint,
         trash,
     )
 }
@@ -71,6 +71,12 @@ fn cleanup_completed_share_with_owner(
     let current = tasks.find(task.id).map_err(|_| QuarkError::Storage)?;
     if current.status != TaskStatus::Completed || current.source != task.source {
         return Ok(None);
+    }
+    if owner_fingerprint.is_none() {
+        return tasks
+            .set_completed_cleanup_message(task.id, true)
+            .map(Some)
+            .map_err(|_| QuarkError::Storage);
     }
     let attempt = (|| {
         let ids = plans.mark_local_completion_for_owner(
@@ -596,7 +602,7 @@ mod tests {
             &first,
             true,
             false,
-            &"b".repeat(64),
+            Some(&"b".repeat(64)),
             |_, _| panic!("a different credential must not delete transferred files"),
         )
         .unwrap();
@@ -605,6 +611,35 @@ mod tests {
         assert!(transfers.iter().all(|transfer| {
             transfer.cleanup_state == crate::cloud::share::CloudShareCleanupState::Pending
         }));
+    }
+
+    #[test]
+    fn cleanup_without_a_stable_owner_keeps_the_legacy_transfer_pending() {
+        let (_root, plans, tasks, locals) = cleanup_fixture();
+        let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
+        set_status(&tasks, locals[1].id, TaskStatus::Completed);
+
+        let updated = cleanup_completed_share_for_owner(
+            &plans,
+            &tasks,
+            &first,
+            true,
+            false,
+            None,
+            |_, _| panic!("identity-unavailable cleanup must not call provider delete"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(updated
+            .error
+            .as_deref()
+            .is_some_and(|message| message.starts_with("cleanup_pending：")));
+        let transfers = plans.resolve_entry(&first.source).unwrap().plan.transfers;
+        assert_eq!(
+            transfers[0].cleanup_state,
+            crate::cloud::share::CloudShareCleanupState::Pending
+        );
     }
 
     #[test]
@@ -629,7 +664,7 @@ mod tests {
             &first,
             true,
             false,
-            &after,
+            Some(&after),
             |provider, ids| {
                 deleted.push((provider, ids.to_vec()));
                 Ok(())

@@ -561,16 +561,13 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
-        let value = self.request(
-            "GET",
-            format!("{PAN}/rest/2.0/xpan/nas?method=uinfo&web=1"),
-            None,
-        )?;
+        let value = self.account_value()?;
         let user = value.get("user").unwrap_or(&value);
         let id = user
             .get("uk")
             .or_else(|| user.get("user_id"))
             .and_then(string_or_number)
+            .filter(|id| !id.is_empty())
             .ok_or(QuarkError::InvalidResponse)?;
         Ok(CloudAccount {
             provider: CloudProvider::Baidu,
@@ -583,6 +580,24 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 .into(),
             auth_method: self.session.auth_method,
         })
+    }
+
+    fn stable_account_id(&self) -> Result<Option<String>, QuarkError> {
+        let value = self.account_value()?;
+        let user = value.get("user").unwrap_or(&value);
+        Ok(user
+            .get("uk")
+            .or_else(|| user.get("user_id"))
+            .and_then(string_or_number)
+            .filter(|id| !id.is_empty()))
+    }
+
+    fn account_value(&self) -> Result<Value, QuarkError> {
+        self.request(
+            "GET",
+            format!("{PAN}/rest/2.0/xpan/nas?method=uinfo&web=1"),
+            None,
+        )
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
@@ -1475,9 +1490,11 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
-    ) -> Result<String, QuarkError> {
-        let account = self.client()?.account()?;
-        super::share::stable_owner_fingerprint(CloudProvider::Baidu, &account.id)
+    ) -> Result<Option<String>, QuarkError> {
+        self.client()?
+            .stable_account_id()?
+            .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Baidu, &id))
+            .transpose()
     }
     fn refresh_recorded_transfer(
         &self,
@@ -1567,11 +1584,15 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
             return Err(QuarkError::InvalidResponse);
         }
         let id = numeric_field(file, "to_fs_id")?;
-        store.record_transfer_with_owner(
-            &entry.plan.source_for(&entry.entry.entry_id),
-            &id,
-            &owner,
-        )?;
+        if let Some(owner) = owner {
+            store.record_transfer_with_owner(
+                &entry.plan.source_for(&entry.entry.entry_id),
+                &id,
+                &owner,
+            )?;
+        } else {
+            store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), &id)?;
+        }
         validate_path(&required(file, "to")?)?;
         // Share fallback must not pass the personal file metadata through
         // baidu_json's legacy body-wide challenge scan: filenames are data.

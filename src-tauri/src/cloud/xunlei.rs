@@ -576,14 +576,19 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
-    ) -> Result<String, QuarkError> {
+    ) -> Result<Option<String>, QuarkError> {
         let bytes = self
             .credentials
             .load("xunlei")?
             .ok_or(QuarkError::NotAuthorized)?;
         let session: XunleiSession =
             serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
-        super::share::stable_owner_fingerprint(CloudProvider::Xunlei, &session.user_id)
+        if session.user_id.trim().is_empty() {
+            Ok(None)
+        } else {
+            super::share::stable_owner_fingerprint(CloudProvider::Xunlei, &session.user_id)
+                .map(Some)
+        }
     }
     fn refresh_recorded_transfer(
         &self,
@@ -655,11 +660,15 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
                     }
                     .filter(|s| !s.is_empty() && *s != entry.entry.entry_id)
                     .ok_or(QuarkError::InvalidResponse)?;
-                    store.record_transfer_with_owner(
-                        &entry.plan.source_for(&entry.entry.entry_id),
-                        id,
-                        &owner,
-                    )?;
+                    if let Some(owner) = &owner {
+                        store.record_transfer_with_owner(
+                            &entry.plan.source_for(&entry.entry.entry_id),
+                            id,
+                            owner,
+                        )?;
+                    } else {
+                        store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                    }
                     let file = session.request(
                         "GET",
                         format!("{DRIVE}/drive/v1/files/{}", encoded(id)),

@@ -72,7 +72,7 @@ pub trait CloudShareAdapter: Send + Sync {
     fn transfer_owner_fingerprint(
         &self,
         _entry: &CloudShareResolvedEntry,
-    ) -> Result<String, QuarkError> {
+    ) -> Result<Option<String>, QuarkError> {
         Err(QuarkError::ProviderUnsupported)
     }
     /// Refresh a direct link for one exact personal-drive file previously
@@ -357,17 +357,18 @@ pub fn resolve_current_share_download(
     // duplicate transfer. The second owner check makes this fail closed after
     // a credential/session rotation.
     if store.has_pending_transfer(source)? {
-        let owner = adapter.transfer_owner_fingerprint(&entry)?;
-        if let Some(record) = store.reusable_transfer(source, &owner)? {
-            let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
-            if let Some(context) = refreshed.updated_context {
-                store.update_provider_context(source, &context)?;
-                entry.plan.provider_context = context;
+        if let Some(owner) = adapter.transfer_owner_fingerprint(&entry)? {
+            if let Some(record) = store.reusable_transfer(source, &owner)? {
+                let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
+                if let Some(context) = refreshed.updated_context {
+                    store.update_provider_context(source, &context)?;
+                    entry.plan.provider_context = context;
+                }
+                let RecordedTransferDownload::Available(mut download) = refreshed.result?;
+                validate_direct_url(&download.url)?;
+                download.name = entry.entry.name;
+                return Ok(download);
             }
-            let RecordedTransferDownload::Available(mut download) = refreshed.result?;
-            validate_direct_url(&download.url)?;
-            download.name = entry.entry.name;
-            return Ok(download);
         }
     }
     let resolved = adapter.resolve_with_context(&entry)?;
@@ -383,15 +384,16 @@ pub fn resolve_current_share_download(
             }
             let mut reused = None;
             if store.has_pending_transfer(source)? {
-                let owner = adapter.transfer_owner_fingerprint(&entry)?;
-                if let Some(record) = store.reusable_transfer(source, &owner)? {
-                    let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
-                    if let Some(context) = refreshed.updated_context {
-                        store.update_provider_context(source, &context)?;
-                        entry.plan.provider_context = context;
+                if let Some(owner) = adapter.transfer_owner_fingerprint(&entry)? {
+                    if let Some(record) = store.reusable_transfer(source, &owner)? {
+                        let refreshed = adapter.refresh_recorded_transfer(&entry, &record.created_file_id)?;
+                        if let Some(context) = refreshed.updated_context {
+                            store.update_provider_context(source, &context)?;
+                            entry.plan.provider_context = context;
+                        }
+                        let RecordedTransferDownload::Available(download) = refreshed.result?;
+                        reused = Some(download);
                     }
-                    let RecordedTransferDownload::Available(download) = refreshed.result?;
-                    reused = Some(download);
                 }
             }
             if let Some(download) = reused {
@@ -620,7 +622,7 @@ pub(crate) fn stable_owner_fingerprint(
         return Err(QuarkError::InvalidResponse);
     }
     let mut hash = Sha256::new();
-    hash.update(b"cloud-share-owner/v1\0");
+    hash.update(b"cloud-share-owner/account-v2\0");
     hash.update(provider.key().as_bytes());
     hash.update([0]);
     hash.update(account_id.as_bytes());
@@ -722,15 +724,27 @@ pub enum CloudShareCleanupState {
     Succeeded,
 }
 
+/// Owner hashes are not interchangeable across derivation schemes. Missing
+/// data is deliberately legacy/unknown so historical session hashes can never
+/// authorize reuse or deletion by an account-derived hash.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudShareTransferOwnerScheme {
+    #[default]
+    LegacyUnknown,
+    AccountV2,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CloudShareTransfer {
     pub entry_fingerprint: String,
     pub created_file_id: String,
-    /// SHA-256 of the provider key and the authenticated session that created
-    /// this personal-drive object. Empty means a legacy record and is never
-    /// eligible for automatic reuse or cleanup.
+    /// SHA-256 of the provider key and stable personal account ID. Its meaning
+    /// is guarded by `owner_scheme`; old values without that field are legacy.
     #[serde(default)]
     pub owner_fingerprint: String,
+    #[serde(default)]
+    pub owner_scheme: CloudShareTransferOwnerScheme,
     pub cleanup_state: CloudShareCleanupState,
 }
 
@@ -807,6 +821,8 @@ impl CloudSharePlan {
             || self.transfers.iter().any(|transfer| {
                 transfer.created_file_id.is_empty()
                     || (!transfer.owner_fingerprint.is_empty()
+                        && !valid_owner_fingerprint(&transfer.owner_fingerprint))
+                    || (transfer.owner_scheme == CloudShareTransferOwnerScheme::AccountV2
                         && !valid_owner_fingerprint(&transfer.owner_fingerprint))
                     || !entries.contains(transfer.entry_fingerprint.as_str())
             })
@@ -1104,7 +1120,12 @@ impl CloudSharePlanStore {
     }
 
     pub fn record_transfer(&self, source: &str, created_file_id: &str) -> Result<(), QuarkError> {
-        self.record_transfer_with_owner(source, created_file_id, "")
+        self.record_transfer_with_scheme(
+            source,
+            created_file_id,
+            "",
+            CloudShareTransferOwnerScheme::LegacyUnknown,
+        )
     }
 
     pub fn record_transfer_with_owner(
@@ -1113,9 +1134,28 @@ impl CloudSharePlanStore {
         created_file_id: &str,
         owner_fingerprint: &str,
     ) -> Result<(), QuarkError> {
+        self.record_transfer_with_scheme(
+            source,
+            created_file_id,
+            owner_fingerprint,
+            CloudShareTransferOwnerScheme::AccountV2,
+        )
+    }
+
+    fn record_transfer_with_scheme(
+        &self,
+        source: &str,
+        created_file_id: &str,
+        owner_fingerprint: &str,
+        owner_scheme: CloudShareTransferOwnerScheme,
+    ) -> Result<(), QuarkError> {
         let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
         if created_file_id.trim().is_empty()
-            || (!owner_fingerprint.is_empty() && !valid_owner_fingerprint(owner_fingerprint))
+            || (owner_scheme == CloudShareTransferOwnerScheme::AccountV2
+                && !valid_owner_fingerprint(owner_fingerprint))
+            || (owner_scheme == CloudShareTransferOwnerScheme::LegacyUnknown
+                && !owner_fingerprint.is_empty()
+                && !valid_owner_fingerprint(owner_fingerprint))
         {
             return Err(QuarkError::InvalidResponse);
         }
@@ -1133,11 +1173,13 @@ impl CloudSharePlanStore {
                 transfer.entry_fingerprint == fingerprint
                     && transfer.created_file_id == created_file_id
                     && transfer.owner_fingerprint == owner_fingerprint
+                    && transfer.owner_scheme == owner_scheme
             }) {
                 plan.transfers.push(CloudShareTransfer {
                     entry_fingerprint: fingerprint,
                     created_file_id: created_file_id.into(),
                     owner_fingerprint: owner_fingerprint.into(),
+                    owner_scheme,
                     cleanup_state: CloudShareCleanupState::Pending,
                 });
             }
@@ -1176,6 +1218,7 @@ impl CloudSharePlanStore {
             .rev()
             .find(|transfer| {
                 transfer.entry_fingerprint == fingerprint
+                    && transfer.owner_scheme == CloudShareTransferOwnerScheme::AccountV2
                     && transfer.owner_fingerprint == owner_fingerprint
                     && transfer.cleanup_state == CloudShareCleanupState::Pending
             })
@@ -1352,7 +1395,10 @@ impl CloudSharePlanStore {
                     .linked_local_tasks
                     .contains_key(&transfer.entry_fingerprint)
                     && owner_fingerprint
-                        .map(|owner| transfer.owner_fingerprint == owner)
+                        .map(|owner| {
+                            transfer.owner_scheme == CloudShareTransferOwnerScheme::AccountV2
+                                && transfer.owner_fingerprint == owner
+                        })
                         .unwrap_or(true)
                     && (transfer.cleanup_state == CloudShareCleanupState::Pending
                         || (retry
@@ -1642,8 +1688,8 @@ mod tests {
         fn transfer_owner_fingerprint(
             &self,
             _: &CloudShareResolvedEntry,
-        ) -> Result<String, QuarkError> {
-            Ok(recorded_transfer_owner())
+        ) -> Result<Option<String>, QuarkError> {
+            Ok(Some(recorded_transfer_owner()))
         }
 
         fn transfer(
@@ -1781,6 +1827,48 @@ mod tests {
     }
 
     #[test]
+    fn legacy_session_owner_hash_never_matches_an_account_owner() {
+        let (store, credentials, _) = memory_store();
+        let plan = fixture("recorded-transfer-legacy-session-hash");
+        let source = plan.source_for("f1");
+        let owner = recorded_transfer_owner();
+        // Simulate a pre-account-v2 DPAPI record: it has a 64-character owner
+        // hash but no owner-scheme field at all.
+        store.upsert(&plan).unwrap();
+        store
+            .record_transfer_with_owner(&source, "legacy-personal-id", &owner)
+            .unwrap();
+        let mut persisted: serde_json::Value = serde_json::from_slice(
+            &credentials.load(SHARE_PLAN_SECRET).unwrap().unwrap(),
+        )
+        .unwrap();
+        persisted["plans"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap()["plan"]["transfers"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("owner_scheme");
+        credentials
+            .save(SHARE_PLAN_SECRET, &serde_json::to_vec(&persisted).unwrap())
+            .unwrap();
+        let adapter = RecordedTransferAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            refresh_calls: AtomicU64::new(0),
+        };
+
+        let resolved = resolve_current_share_download(&store, &adapter, &source).unwrap();
+
+        assert_eq!(resolved.url, "https://cdn.example/new-transfer");
+        assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.refresh_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn legacy_pending_transfer_without_an_owner_uses_the_normal_share_path() {
         let (store, _, _) = memory_store();
         let plan = fixture("recorded-transfer-legacy-owner");
@@ -1799,6 +1887,72 @@ mod tests {
         assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 1);
         assert_eq!(adapter.refresh_calls.load(Ordering::SeqCst), 0);
+    }
+
+    struct IdentityUnavailableTransferAdapter {
+        transfer_calls: AtomicU64,
+    }
+
+    impl CloudShareAdapter for IdentityUnavailableTransferAdapter {
+        fn inspect(
+            &self,
+            _: &crate::parser::CloudShareCandidate,
+        ) -> Result<ShareInspection, QuarkError> {
+            unreachable!()
+        }
+
+        fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+            Ok(ShareResolution::TransferRequired(TransferRequest {
+                source: entry.plan.source_for(&entry.entry.entry_id),
+            }))
+        }
+
+        fn transfer_owner_fingerprint(
+            &self,
+            _: &CloudShareResolvedEntry,
+        ) -> Result<Option<String>, QuarkError> {
+            Ok(None)
+        }
+
+        fn transfer(
+            &self,
+            entry: &CloudShareResolvedEntry,
+            store: &CloudSharePlanStore,
+        ) -> Result<super::super::commands::ResolvedCloudDownload, QuarkError> {
+            self.transfer_calls.fetch_add(1, Ordering::SeqCst);
+            store.record_transfer(
+                &entry.plan.source_for(&entry.entry.entry_id),
+                "identity-unavailable-id",
+            )?;
+            Ok(super::super::commands::ResolvedCloudDownload {
+                url: "https://cdn.example/identity-unavailable-transfer".into(),
+                name: entry.entry.name.clone(),
+                headers: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn identity_unavailable_still_performs_the_first_transfer_as_legacy() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("identity-unavailable-first-transfer");
+        let source = plan.source_for("f1");
+        store.upsert(&plan).unwrap();
+        let adapter = IdentityUnavailableTransferAdapter {
+            transfer_calls: AtomicU64::new(0),
+        };
+
+        let resolved = resolve_current_share_download(&store, &adapter, &source).unwrap();
+
+        assert_eq!(resolved.url, "https://cdn.example/identity-unavailable-transfer");
+        assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 1);
+        let transfers = store.resolve_entry(&source).unwrap().plan.transfers;
+        assert_eq!(transfers.len(), 1);
+        assert!(transfers[0].owner_fingerprint.is_empty());
+        assert_eq!(
+            transfers[0].owner_scheme,
+            CloudShareTransferOwnerScheme::LegacyUnknown
+        );
     }
 
     #[test]
@@ -2085,8 +2239,8 @@ mod tests {
             fn transfer_owner_fingerprint(
                 &self,
                 _: &CloudShareResolvedEntry,
-            ) -> Result<String, QuarkError> {
-                Ok("a".repeat(64))
+            ) -> Result<Option<String>, QuarkError> {
+                Ok(Some("a".repeat(64)))
             }
         }
         for (at_transfer, operation_error) in

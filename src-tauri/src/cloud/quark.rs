@@ -570,12 +570,12 @@ impl QuarkShareAdapter<'_> {
 }
 
 impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
-    fn stable_account_id(&self) -> Result<String, QuarkError> {
+    fn stable_account_id(&self) -> Result<Option<String>, QuarkError> {
         if let Some(id) = self.cookie.split(';').find_map(|part| {
             let (name, value) = part.trim().split_once('=')?;
             (name == "__uid" && !value.is_empty()).then(|| value.to_owned())
         }) {
-            return Ok(id);
+            return Ok(Some(id));
         }
         let response = self.request_url(
             "GET",
@@ -583,7 +583,7 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
             None,
         )?;
         let value = response_json(&response)?;
-        value["data"]
+        Ok(value["data"]
             .get("uid")
             .or_else(|| value["data"].get("user_id"))
             .and_then(|id| {
@@ -591,8 +591,7 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
                     .map(str::to_owned)
                     .or_else(|| id.as_u64().map(|id| id.to_string()))
             })
-            .filter(|id| !id.is_empty())
-            .ok_or(QuarkError::InvalidResponse)
+            .filter(|id| !id.is_empty()))
     }
     fn share_raw(
         &self,
@@ -756,9 +755,11 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
-    ) -> Result<String, QuarkError> {
-        let account_id = self.client()?.stable_account_id()?;
-        super::share::stable_owner_fingerprint(CloudProvider::Quark, &account_id)
+    ) -> Result<Option<String>, QuarkError> {
+        self.client()?
+            .stable_account_id()?
+            .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Quark, &id))
+            .transpose()
     }
     fn refresh_recorded_transfer(
         &self,
@@ -823,11 +824,15 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
                         .as_str()
                         .filter(|id| !id.is_empty())
                         .ok_or(QuarkError::InvalidResponse)?;
-                    store.record_transfer_with_owner(
-                        &entry.plan.source_for(&entry.entry.entry_id),
-                        id,
-                        &owner,
-                    )?;
+                    if let Some(owner) = &owner {
+                        store.record_transfer_with_owner(
+                            &entry.plan.source_for(&entry.entry.entry_id),
+                            id,
+                            owner,
+                        )?;
+                    } else {
+                        store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
+                    }
                     let response = client.share_request(
                         "POST",
                         "file/download",

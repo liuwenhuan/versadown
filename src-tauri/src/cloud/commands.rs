@@ -1861,7 +1861,7 @@ async fn cleanup_cloud_share_task_inner(
             &task,
             enabled,
             retry,
-            &owner,
+            owner.as_deref(),
             |provider, ids| {
                 if provider == CloudProvider::Baidu {
                     baidu::BaiduClient::new(load_provider_session(provider, &cloud.store)?, http)
