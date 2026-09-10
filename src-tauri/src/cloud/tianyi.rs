@@ -59,6 +59,7 @@ mod tests {
         else {
             panic!()
         };
+        assert!(matches!(plan.root_kind, CloudShareRootKind::Directory));
         assert_eq!(plan.entries.len(), 2);
         assert_eq!(plan.entries[1].relative_directory, vec!["folder"]);
         let ShareResolution::Direct(direct) = adapter.resolve(&entry(plan)).unwrap() else {
@@ -159,6 +160,10 @@ mod tests {
         let ShareInspection::Plan(plan) = adapter.inspect(&input).unwrap() else {
             panic!()
         };
+        assert!(matches!(
+            plan.root_kind,
+            CloudShareRootKind::File { ref entry_id } if entry_id == "single"
+        ));
         assert!(matches!(
             adapter.resolve(&entry(plan)),
             Ok(ShareResolution::Direct(_))
@@ -750,7 +755,7 @@ fn challenge(value: &Value) -> bool {
 use super::{
     share::{
         CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry,
-        ShareInspection, ShareResolution,
+        CloudShareRootKind, ShareInspection, ShareResolution,
     },
     CredentialStore,
 };
@@ -924,6 +929,13 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
         let context = json!({"share_id":id,"needs_code":needs_code,"share_mode":share_mode,"share_dir_file_id":root});
         let mut entries = vec![];
         let folder = tianyi_share_flag(&info["isFolder"])?;
+        let root_kind = if folder {
+            CloudShareRootKind::Directory
+        } else {
+            CloudShareRootKind::File {
+                entry_id: root.clone(),
+            }
+        };
         if !folder {
             entries.push(CloudShareEntry::new(
                 &code,
@@ -993,13 +1005,15 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
                 }
             }
         }
-        Ok(ShareInspection::Plan(CloudSharePlan::new(
+        let mut plan = CloudSharePlan::new(
             CloudProvider::Tianyi,
             code,
             candidate.access_code.clone(),
             entries,
             context,
-        )))
+        );
+        plan.root_kind = root_kind;
+        Ok(ShareInspection::Plan(plan))
     }
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_tianyi_share(self.credentials, self.http, entry)

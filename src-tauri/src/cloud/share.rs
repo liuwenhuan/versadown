@@ -84,6 +84,7 @@ pub enum ShareInspection {
 
 pub enum ShareConfirmationOutcome {
     Confirmation(CloudShareConfirmation),
+    AutoSubmit { source: String },
     AccessCodeRequired,
 }
 
@@ -217,6 +218,14 @@ pub fn inspect_share_with_adapter(
     if plan.provider != candidate.provider || plan.entries.is_empty() {
         return Err(QuarkError::InvalidResponse);
     }
+    let automatic_source = match &plan.root_kind {
+        CloudShareRootKind::File { entry_id }
+            if plan.entries.len() == 1 && plan.entries[0].entry_id == *entry_id =>
+        {
+            Some(plan.source_for(entry_id))
+        }
+        _ => None,
+    };
     let confirmation = CloudShareConfirmation {
         plan_source: plan.source_for(&plan.entries[0].entry_id),
         title: "网盘分享文件".into(),
@@ -238,7 +247,10 @@ pub fn inspect_share_with_adapter(
             .collect(),
     };
     store.upsert(&plan)?;
-    Ok(ShareConfirmationOutcome::Confirmation(confirmation))
+    Ok(match automatic_source {
+        Some(source) => ShareConfirmationOutcome::AutoSubmit { source },
+        None => ShareConfirmationOutcome::Confirmation(confirmation),
+    })
 }
 
 pub fn selected_share_sources(
@@ -571,6 +583,18 @@ pub struct CloudShareEntry {
     pub size: Option<u64>,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CloudShareRootKind {
+    #[default]
+    Unknown,
+    File {
+        entry_id: String,
+    },
+    Directory,
+    Collection,
+}
+
 impl CloudShareEntry {
     pub fn new(
         share_id: &str,
@@ -613,6 +637,8 @@ pub struct CloudSharePlan {
     pub canonical_share_id: String,
     pub access_code: Option<String>,
     pub entries: Vec<CloudShareEntry>,
+    #[serde(default)]
+    pub root_kind: CloudShareRootKind,
     /// Includes canonical URL and provider-specific share/session tokens.
     pub provider_context: serde_json::Value,
     pub created_at_ms: u64,
@@ -639,6 +665,7 @@ impl CloudSharePlan {
             canonical_share_id,
             access_code,
             entries,
+            root_kind: CloudShareRootKind::Unknown,
             provider_context,
             created_at_ms: 0,
             last_used_at_ms: 0,
@@ -653,6 +680,14 @@ impl CloudSharePlan {
 
     fn validate(&self) -> Result<(), QuarkError> {
         let mut entries = BTreeSet::new();
+        let valid_root = match &self.root_kind {
+            CloudShareRootKind::File { entry_id } => {
+                self.entries.iter().any(|entry| entry.entry_id == *entry_id)
+            }
+            CloudShareRootKind::Unknown
+            | CloudShareRootKind::Directory
+            | CloudShareRootKind::Collection => true,
+        };
         if self.version != VERSION
             || self.canonical_share_id.is_empty()
             || self.canonical_share_id.contains('\0')
@@ -672,6 +707,7 @@ impl CloudSharePlan {
                 .linked_local_tasks
                 .keys()
                 .any(|fingerprint| !entries.contains(fingerprint.as_str()))
+            || !valid_root
         {
             return Err(QuarkError::Storage);
         }
@@ -706,6 +742,7 @@ macro_rules! redacted_debug {
 redacted_debug!(
     CloudSharePlan,
     CloudShareEntry,
+    CloudShareRootKind,
     CloudShareTransfer,
     CloudShareResolvedEntry
 );
@@ -1438,6 +1475,100 @@ mod tests {
         )
         .is_err());
         assert!(selected_share_sources(&store, &confirmation.plan_source, &[]).is_err());
+    }
+
+    struct PlanAdapter(CloudSharePlan);
+    impl CloudShareAdapter for PlanAdapter {
+        fn inspect(
+            &self,
+            _: &crate::parser::CloudShareCandidate,
+        ) -> Result<ShareInspection, QuarkError> {
+            Ok(ShareInspection::Plan(self.0.clone()))
+        }
+
+        fn resolve(&self, _: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+            unreachable!("inspection does not resolve a download")
+        }
+    }
+
+    #[test]
+    fn only_an_explicit_exact_root_file_is_selected_for_automatic_submission() {
+        let candidate = crate::parser::extract_cloud_share_candidate(
+            "https://pan.baidu.com/s/private-share",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut file = fixture("private-share");
+        file.root_kind = CloudShareRootKind::File {
+            entry_id: "f1".into(),
+        };
+        let (store, _, _) = memory_store();
+        let expected = file.source_for("f1");
+        assert!(matches!(
+            inspect_share_with_adapter(&store, &PlanAdapter(file), &candidate).unwrap(),
+            ShareConfirmationOutcome::AutoSubmit { source } if source == expected
+        ));
+
+        for root_kind in [
+            CloudShareRootKind::Unknown,
+            CloudShareRootKind::Directory,
+            CloudShareRootKind::Collection,
+        ] {
+            let mut plan = fixture("private-share");
+            plan.root_kind = root_kind;
+            let (store, _, _) = memory_store();
+            assert!(matches!(
+                inspect_share_with_adapter(&store, &PlanAdapter(plan), &candidate).unwrap(),
+                ShareConfirmationOutcome::Confirmation(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_plan_without_root_kind_defaults_to_unknown_and_requires_confirmation() {
+        let candidate = crate::parser::extract_cloud_share_candidate(
+            "https://pan.baidu.com/s/private-share",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let mut value = serde_json::to_value(fixture("private-share")).unwrap();
+        value.as_object_mut().unwrap().remove("root_kind");
+        let legacy: CloudSharePlan = serde_json::from_value(value).unwrap();
+        assert!(matches!(legacy.root_kind, CloudShareRootKind::Unknown));
+        let (store, _, _) = memory_store();
+        assert!(matches!(
+            inspect_share_with_adapter(&store, &PlanAdapter(legacy), &candidate).unwrap(),
+            ShareConfirmationOutcome::Confirmation(_)
+        ));
+    }
+
+    #[test]
+    fn reinspection_of_a_root_file_keeps_older_linked_entries_loadable() {
+        let (store, _, _) = memory_store();
+        let mut previous = fixture("private-share");
+        previous.root_kind = CloudShareRootKind::Directory;
+        previous.entries.push(CloudShareEntry::new(
+            "private-share",
+            "old-file".into(),
+            "old.txt".into(),
+            vec![],
+            Some(3),
+        ));
+        store.upsert(&previous).unwrap();
+
+        let mut current = fixture("private-share");
+        current.root_kind = CloudShareRootKind::File {
+            entry_id: "f1".into(),
+        };
+        store.upsert(&current).unwrap();
+
+        assert!(store.resolve_entry(&current.source_for("f1")).is_ok());
+        assert!(store
+            .resolve_entry(&previous.source_for("old-file"))
+            .is_ok());
     }
 
     struct FixedAdapter(fn() -> Result<ShareResolution, QuarkError>);

@@ -74,6 +74,15 @@ pub(crate) fn task_action_outcome(
     })
 }
 
+fn share_action_parse_outcome(action: TaskActionOutcome) -> ParseDownloadOutcome {
+    ParseDownloadOutcome::Task(ParseOutcome {
+        task: action.payload.task,
+        requires_confirmation: false,
+        resources: Vec::new(),
+        duplicate: action.duplicate,
+    })
+}
+
 #[derive(Serialize)]
 pub struct Settings {
     pub debug_reports: bool,
@@ -155,12 +164,21 @@ pub async fn parse_download(
             .map_err(|error| error.to_string())?
     {
         let provider = candidate.provider;
-        return match crate::cloud::commands::inspect_cloud_share(app, candidate)
+        return match crate::cloud::commands::inspect_cloud_share(app.clone(), candidate)
             .await
             .map_err(|error| error.to_string())?
         {
             crate::cloud::share::ShareConfirmationOutcome::Confirmation(plan) => {
                 Ok(ParseDownloadOutcome::ShareConfirmation(plan))
+            }
+            crate::cloud::share::ShareConfirmationOutcome::AutoSubmit { source } => {
+                let configured = download_submission_options(&state)?;
+                let action = crate::cloud::commands::submit_cloud_share_file(
+                    app, &state, source, configured,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                Ok(share_action_parse_outcome(action))
             }
             crate::cloud::share::ShareConfirmationOutcome::AccessCodeRequired => {
                 Ok(ParseDownloadOutcome::AccessCodeRequired {
@@ -987,6 +1005,31 @@ mod tests {
     #[test]
     fn disabled_proxy_does_not_leak_process_proxy_settings_into_aria2() {
         assert_eq!(proxy_url(&ProxySettings::default()).unwrap(), None);
+    }
+
+    #[test]
+    fn automatic_share_submission_preserves_the_existing_duplicate_outcome() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud-share://baidu/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+            .unwrap();
+        let action = task_action_outcome(
+            &store,
+            task.clone(),
+            Some(DuplicateDownloadState::ExistingActive),
+        )
+        .unwrap();
+
+        let ParseDownloadOutcome::Task(parsed) = share_action_parse_outcome(action) else {
+            panic!("an automatic share must return the ordinary task parse branch")
+        };
+        assert_eq!(parsed.task.id, task.id);
+        assert_eq!(
+            parsed.duplicate,
+            Some(DuplicateDownloadState::ExistingActive)
+        );
+        assert!(!parsed.requires_confirmation);
+        assert!(parsed.resources.is_empty());
     }
 
     #[test]
