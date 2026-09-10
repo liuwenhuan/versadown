@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use crate::cloud::CloudProvider;
+use crate::{aria2::TransferFile, cloud::CloudProvider};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -334,6 +334,36 @@ pub struct CloudDirectoryGroup {
     pub output_directory: PathBuf,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A task as rendered in the queue. Cloud-directory roots and intermediate
+/// folders are synthetic entries; ordinary downloads remain flat entries.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueTaskPayload {
+    pub id: String,
+    pub source: String,
+    pub name: String,
+    pub kind: String,
+    pub status: TaskStatus,
+    pub progress: u8,
+    pub error: Option<String>,
+    pub aria_gid: Option<String>,
+    pub followed_by_gid: Option<String>,
+    pub metadata_gid: Option<String>,
+    pub total_length: Option<u64>,
+    pub completed_length: u64,
+    pub download_speed: u64,
+    pub upload_speed: u64,
+    pub connections: u32,
+    pub eta_seconds: Option<u64>,
+    pub aria_error_code: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub files: Vec<TransferFile>,
+    pub cleanup_pending: bool,
+    #[serde(default)]
+    pub children: Vec<QueueTaskPayload>,
 }
 
 #[derive(Clone, Debug)]

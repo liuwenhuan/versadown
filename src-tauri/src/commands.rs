@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     io::ErrorKind,
     path::Path,
@@ -11,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use crate::downloader::load_torrent_base64;
+use crate::models::{CloudDirectoryGroup, CloudDirectoryGroupItem, QueueTaskPayload};
 use crate::{
     cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, DpapiCredentialStore},
     confirm_download, duplicate_state, prepare_download, resolve_magnet_torrent,
@@ -462,22 +464,321 @@ pub fn list_tasks(
     state: State<'_, AppState>,
     app: AppHandle,
     scope: Option<String>,
-) -> Result<Vec<DownloadTaskPayload>, String> {
+) -> Result<Vec<QueueTaskPayload>, String> {
     let cloud = app.try_state::<Arc<crate::cloud::commands::CloudState>>();
-    list_tasks_with_cleanup_projection_for_scope(
+    let leaves = list_tasks_with_cleanup_projection_for_scope(
         &state.store,
         cloud.as_ref().map(|cloud| &cloud.share_plans),
-        scope.as_deref(),
-    )?
-    .into_iter()
-    .map(|task| {
-        task_payload_with_cleanup(
-            &state.store,
-            cloud.as_ref().map(|cloud| &cloud.share_plans),
-            task,
-        )
+        None,
+    )?;
+    let mut tasks = project_cloud_directory_groups(&state.store, leaves, scope.as_deref())?;
+    if let Some(plans) = cloud.as_ref().map(|cloud| &cloud.share_plans) {
+        apply_queue_cleanup_projection(&mut tasks, plans)?;
+    }
+    Ok(tasks)
+}
+
+fn apply_queue_cleanup_projection(
+    tasks: &mut [QueueTaskPayload],
+    plans: &crate::cloud::share::CloudSharePlanStore,
+) -> Result<(), String> {
+    for task in tasks {
+        if task.status == TaskStatus::Completed && task.source.starts_with("cloud-share://") {
+            task.cleanup_pending = plans
+                .cleanup_pending_for_task(
+                    &task.source,
+                    Uuid::parse_str(&task.id).map_err(|_| "任务 ID 无效".to_string())?,
+                )
+                .map_err(|_| "无法读取网盘转存清理状态".to_string())?;
+        }
+        apply_queue_cleanup_projection(&mut task.children, plans)?;
+    }
+    Ok(())
+}
+
+fn queue_task_payload_from_task(
+    store: &TaskStore,
+    task: DownloadTask,
+) -> Result<QueueTaskPayload, String> {
+    let files = store.files(task.id).map_err(|error| error.to_string())?;
+    Ok(QueueTaskPayload {
+        id: task.id.to_string(),
+        source: task.source,
+        name: task.name,
+        kind: task.kind,
+        status: task.status,
+        progress: task.progress,
+        error: task.error,
+        aria_gid: task.aria_gid,
+        followed_by_gid: task.followed_by_gid,
+        metadata_gid: task.metadata_gid,
+        total_length: task.total_length,
+        completed_length: task.completed_length,
+        download_speed: task.download_speed,
+        upload_speed: task.upload_speed,
+        connections: task.connections,
+        eta_seconds: task.eta_seconds,
+        aria_error_code: task.aria_error_code,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        files,
+        cleanup_pending: false,
+        children: Vec::new(),
     })
-    .collect()
+}
+
+fn task_is_active(status: TaskStatus) -> bool {
+    !matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Recycled
+    )
+}
+
+fn status_in_scope(status: TaskStatus, scope: Option<&str>) -> Result<bool, String> {
+    match scope {
+        None | Some("all") => Ok(true),
+        Some("active") => Ok(task_is_active(status)),
+        Some("terminal") => Ok(!task_is_active(status)),
+        Some(_) => Err("任务列表范围无效".to_string()),
+    }
+}
+
+fn virtual_cloud_directory_item_payload(
+    group: &CloudDirectoryGroup,
+    item: &CloudDirectoryGroupItem,
+    error: Option<String>,
+) -> QueueTaskPayload {
+    QueueTaskPayload {
+        id: item.id.to_string(),
+        source: format!(
+            "cloud-directory-item://{}/{}",
+            group.provider.key(),
+            item.id
+        ),
+        name: item.output_name.clone(),
+        kind: "file".to_string(),
+        status: TaskStatus::Failed,
+        progress: 0,
+        error,
+        aria_gid: None,
+        followed_by_gid: None,
+        metadata_gid: None,
+        total_length: item.size,
+        completed_length: 0,
+        download_speed: 0,
+        upload_speed: 0,
+        connections: 0,
+        eta_seconds: None,
+        aria_error_code: None,
+        created_at: group.created_at,
+        updated_at: group.updated_at,
+        files: Vec::new(),
+        cleanup_pending: false,
+        children: Vec::new(),
+    }
+}
+
+fn cloud_directory_folder_payload(
+    group: &CloudDirectoryGroup,
+    components: &[String],
+) -> QueueTaskPayload {
+    let encoded_path: String =
+        url::form_urlencoded::byte_serialize(components.join("/").as_bytes()).collect();
+    QueueTaskPayload {
+        id: format!("group:{}:dir:{encoded_path}", group.id),
+        source: format!("cloud-directory://{}/{}", group.provider.key(), group.id),
+        name: components
+            .last()
+            .cloned()
+            .unwrap_or_else(|| group.relative_directory.clone()),
+        kind: "folder".to_string(),
+        status: TaskStatus::Completed,
+        progress: 100,
+        error: None,
+        aria_gid: None,
+        followed_by_gid: None,
+        metadata_gid: None,
+        total_length: None,
+        completed_length: 0,
+        download_speed: 0,
+        upload_speed: 0,
+        connections: 0,
+        eta_seconds: None,
+        aria_error_code: None,
+        created_at: group.created_at,
+        updated_at: group.updated_at,
+        files: Vec::new(),
+        cleanup_pending: false,
+        children: Vec::new(),
+    }
+}
+
+fn insert_cloud_directory_leaf(
+    group: &CloudDirectoryGroup,
+    parent: &mut QueueTaskPayload,
+    components: &[String],
+    prefix: &mut Vec<String>,
+    leaf: QueueTaskPayload,
+) {
+    let Some((component, rest)) = components.split_first() else {
+        parent.children.push(leaf);
+        return;
+    };
+    prefix.push(component.clone());
+    let encoded: String =
+        url::form_urlencoded::byte_serialize(prefix.join("/").as_bytes()).collect();
+    let folder_id = format!("group:{}:dir:{encoded}", group.id);
+    let index = parent
+        .children
+        .iter()
+        .position(|child| child.id == folder_id)
+        .unwrap_or_else(|| {
+            parent
+                .children
+                .push(cloud_directory_folder_payload(group, prefix));
+            parent.children.len() - 1
+        });
+    insert_cloud_directory_leaf(group, &mut parent.children[index], rest, prefix, leaf);
+    prefix.pop();
+}
+
+fn aggregate_cloud_directory_root(
+    group: &CloudDirectoryGroup,
+    children: Vec<QueueTaskPayload>,
+) -> QueueTaskPayload {
+    fn collect_leaves<'a>(node: &'a QueueTaskPayload, leaves: &mut Vec<&'a QueueTaskPayload>) {
+        if node.children.is_empty() {
+            leaves.push(node);
+        } else {
+            for child in &node.children {
+                collect_leaves(child, leaves);
+            }
+        }
+    }
+    let mut leaves = Vec::new();
+    for child in &children {
+        collect_leaves(child, &mut leaves);
+    }
+    let has_active = leaves.iter().any(|item| task_is_active(item.status));
+    let has_failure = leaves.iter().any(|item| {
+        matches!(
+            item.status,
+            TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Recycled
+        )
+    });
+    let all_completed = !leaves.is_empty()
+        && leaves
+            .iter()
+            .all(|item| item.status == TaskStatus::Completed);
+    let status = if has_active {
+        leaves
+            .iter()
+            .find(|item| task_is_active(item.status))
+            .map(|item| item.status)
+            .unwrap_or(TaskStatus::Queued)
+    } else if all_completed {
+        TaskStatus::Completed
+    } else if has_failure {
+        TaskStatus::Failed
+    } else {
+        TaskStatus::Failed
+    };
+    let has_known_total = leaves.iter().any(|item| item.total_length.is_some());
+    let total_length = leaves
+        .iter()
+        .filter_map(|item| item.total_length)
+        .sum::<u64>();
+    let completed_length = leaves.iter().map(|item| item.completed_length).sum::<u64>();
+    let progress = if total_length == 0 {
+        u8::from(status == TaskStatus::Completed) * 100
+    } else {
+        ((completed_length.saturating_mul(100) / total_length).min(100)) as u8
+    };
+    QueueTaskPayload {
+        id: group.id.to_string(),
+        source: format!("cloud-directory://{}/{}", group.provider.key(), group.id),
+        name: group.relative_directory.clone(),
+        kind: "folder".to_string(),
+        status,
+        progress,
+        error: (status == TaskStatus::Failed)
+            .then(|| leaves.iter().find_map(|item| item.error.clone()))
+            .flatten(),
+        aria_gid: None,
+        followed_by_gid: None,
+        metadata_gid: None,
+        total_length: has_known_total.then_some(total_length),
+        completed_length,
+        download_speed: leaves.iter().map(|item| item.download_speed).sum(),
+        upload_speed: leaves.iter().map(|item| item.upload_speed).sum(),
+        connections: leaves.iter().map(|item| item.connections).sum(),
+        eta_seconds: None,
+        aria_error_code: None,
+        created_at: group.created_at,
+        updated_at: group.updated_at,
+        files: Vec::new(),
+        cleanup_pending: false,
+        children,
+    }
+}
+
+pub(crate) fn project_cloud_directory_groups(
+    store: &TaskStore,
+    leaves: Vec<DownloadTask>,
+    scope: Option<&str>,
+) -> Result<Vec<QueueTaskPayload>, String> {
+    let groups = store
+        .cloud_directory_groups()
+        .map_err(|error| error.to_string())?;
+    let mut group_items = Vec::with_capacity(groups.len());
+    let mut grouped_task_ids = HashSet::new();
+    for group in &groups {
+        let items = store
+            .cloud_directory_group_items(group.id)
+            .map_err(|error| error.to_string())?;
+        grouped_task_ids.extend(items.iter().filter_map(|item| item.task_id));
+        group_items.push(items);
+    }
+    let mut task_by_id = leaves
+        .iter()
+        .cloned()
+        .map(|task| (task.id, task))
+        .collect::<HashMap<_, _>>();
+    let mut projected = leaves
+        .into_iter()
+        .filter(|task| !grouped_task_ids.contains(&task.id))
+        .filter(|task| status_in_scope(task.status, scope).unwrap_or(false))
+        .map(|task| queue_task_payload_from_task(store, task))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (group, items) in groups.into_iter().zip(group_items) {
+        let mut root = cloud_directory_folder_payload(&group, &[]);
+        root.id = group.id.to_string();
+        root.name = group.relative_directory.clone();
+        for item in items {
+            let leaf = match item.task_id.and_then(|id| task_by_id.remove(&id)) {
+                Some(task) => queue_task_payload_from_task(store, task)?,
+                None => virtual_cloud_directory_item_payload(
+                    &group,
+                    &item,
+                    item.failure_message
+                        .clone()
+                        .or_else(|| Some("关联的下载任务不存在，需重新提交网盘文件".to_string())),
+                ),
+            };
+            insert_cloud_directory_leaf(
+                &group,
+                &mut root,
+                &item.relative_directory,
+                &mut Vec::new(),
+                leaf,
+            );
+        }
+        let root = aggregate_cloud_directory_root(&group, root.children);
+        if status_in_scope(root.status, scope)? {
+            projected.push(root);
+        }
+    }
+    Ok(projected)
 }
 
 fn list_tasks_with_cleanup_projection_for_scope(
@@ -535,6 +836,93 @@ fn force_cancel_unsubmitted_task(
 
 #[tauri::command]
 pub async fn task_action(
+    task_id: String,
+    action: String,
+    app: AppHandle,
+) -> Result<TaskActionOutcome, String> {
+    if task_id.starts_with("group:") {
+        return Err("目录节点仅用于展开，不能执行下载操作".to_string());
+    }
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let state = app.state::<AppState>();
+    if let Some(group) = state
+        .store
+        .cloud_directory_group(id)
+        .map_err(|error| error.to_string())?
+    {
+        return run_cloud_directory_group_action(app.clone(), &state, &group, &action).await;
+    }
+    for group in state
+        .store
+        .cloud_directory_groups()
+        .map_err(|error| error.to_string())?
+    {
+        if state
+            .store
+            .cloud_directory_group_items(group.id)
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|item| item.id == id && item.task_id.is_none())
+        {
+            return Err(match action.as_str() {
+                "retry" => "网盘目录文件尚未入队，正在等待重新提交支持".to_string(),
+                _ => "未入队的网盘目录文件不能执行此操作".to_string(),
+            });
+        }
+    }
+    run_local_task_action(task_id, action, app).await
+}
+
+async fn run_cloud_directory_group_action(
+    app: AppHandle,
+    state: &AppState,
+    group: &CloudDirectoryGroup,
+    action: &str,
+) -> Result<TaskActionOutcome, String> {
+    if !matches!(action, "pause" | "resume" | "cancel" | "retry") {
+        return Err("当前任务不能执行此操作".to_string());
+    }
+    let items = state
+        .store
+        .cloud_directory_group_items(group.id)
+        .map_err(|error| error.to_string())?;
+    let mut first_outcome = None;
+    let mut has_virtual_retry = false;
+    for item in items {
+        let Some(task_id) = item.task_id else {
+            has_virtual_retry |= action == "retry";
+            continue;
+        };
+        let current = state
+            .store
+            .find(task_id)
+            .map_err(|error| error.to_string())?;
+        let applicable = match action {
+            "pause" => matches!(
+                current.status,
+                TaskStatus::Queued | TaskStatus::Downloading | TaskStatus::Processing
+            ),
+            "resume" => current.status == TaskStatus::Paused,
+            "cancel" => task_is_active(current.status),
+            "retry" => matches!(current.status, TaskStatus::Failed | TaskStatus::Cancelled),
+            _ => false,
+        };
+        if applicable {
+            let outcome =
+                run_local_task_action(task_id.to_string(), action.to_string(), app.clone()).await?;
+            first_outcome.get_or_insert(outcome);
+        }
+    }
+    if let Some(outcome) = first_outcome {
+        return Ok(outcome);
+    }
+    if has_virtual_retry {
+        return Err("网盘目录文件尚未入队，正在等待重新提交支持".to_string());
+    }
+    Err("目录内没有可执行此操作的下载任务".to_string())
+}
+
+async fn run_local_task_action(
     task_id: String,
     action: String,
     app: AppHandle,
@@ -1291,8 +1679,120 @@ mod tests {
     use super::*;
     use crate::{
         cloud::{share::CloudShareEntry, share::CloudSharePlan, CloudProvider},
+        models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
         DuplicateDownloadState, NewTask,
     };
+
+    #[test]
+    fn cloud_directory_group_projection_nests_linked_and_virtual_leaves() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Baidu,
+                    "remote-season-1",
+                    "Season 1",
+                    "C:\\Downloads",
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new("active", &["Extras"], "active.mkv", Some(100)),
+                    NewCloudDirectoryGroupItem::new(
+                        "complete",
+                        &["Extras"],
+                        "complete.mkv",
+                        Some(200),
+                    ),
+                    NewCloudDirectoryGroupItem::new("failed", &["Extras"], "failed.mkv", Some(300)),
+                ],
+            )
+            .unwrap();
+        let items = store.cloud_directory_group_items(group.id).unwrap();
+
+        let active = store
+            .create(NewTask::direct("https://example.test/active"))
+            .unwrap();
+        let active = store
+            .apply_transfer_snapshot(DownloadTask {
+                name: "active.mkv".into(),
+                status: TaskStatus::Downloading,
+                progress: 25,
+                total_length: Some(100),
+                completed_length: 25,
+                download_speed: 10,
+                connections: 2,
+                ..active
+            })
+            .unwrap();
+        let complete = store
+            .create(NewTask::direct("https://example.test/complete"))
+            .unwrap();
+        let complete = store
+            .apply_transfer_snapshot(DownloadTask {
+                name: "complete.mkv".into(),
+                status: TaskStatus::Completed,
+                progress: 100,
+                total_length: Some(200),
+                completed_length: 200,
+                ..complete
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[0].id, active.id)
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[1].id, complete.id)
+            .unwrap();
+        store
+            .fail_cloud_directory_group_item(
+                group.id,
+                items[2].id,
+                "submit_failed",
+                "不能加入下载队列",
+            )
+            .unwrap();
+
+        let active_scope =
+            project_cloud_directory_groups(&store, store.list().unwrap(), Some("active")).unwrap();
+
+        assert_eq!(active_scope.len(), 1);
+        assert_eq!(active_scope[0].kind, "folder");
+        assert_eq!(active_scope[0].name, "Season 1");
+        assert_eq!(active_scope[0].status, TaskStatus::Downloading);
+        assert_eq!(active_scope[0].total_length, Some(600));
+        assert_eq!(active_scope[0].completed_length, 225);
+        assert_eq!(active_scope[0].download_speed, 10);
+        assert_eq!(active_scope[0].connections, 2);
+        assert_eq!(active_scope[0].progress, 37);
+        assert_eq!(active_scope[0].children[0].name, "Extras");
+        assert_eq!(active_scope[0].children[0].children.len(), 3);
+        assert!(active_scope[0].children[0]
+            .children
+            .iter()
+            .any(|child| child.status == TaskStatus::Failed));
+
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                total_length: Some(100),
+                completed_length: 100,
+                download_speed: 0,
+                connections: 0,
+                ..active
+            })
+            .unwrap();
+
+        assert!(
+            project_cloud_directory_groups(&store, store.list().unwrap(), Some("active"))
+                .unwrap()
+                .is_empty()
+        );
+        let terminal_scope =
+            project_cloud_directory_groups(&store, store.list().unwrap(), Some("terminal"))
+                .unwrap();
+        assert_eq!(terminal_scope.len(), 1);
+        assert_eq!(terminal_scope[0].status, TaskStatus::Failed);
+    }
 
     #[test]
     fn unsubmitted_active_task_can_be_force_cancelled_without_engine() {
