@@ -101,8 +101,10 @@ export async function confirmDownload(taskId: string, selectedIds: string[] = []
   return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, destinationDirectory });
 }
 
-export async function listPersistedTasks(): Promise<QueueTask[]> {
-  return isTauriRuntime() ? invoke<QueueTask[]>('list_tasks') : [];
+export type PersistedTaskScope = 'active' | 'terminal';
+
+export async function listPersistedTasks(scope?: PersistedTaskScope): Promise<QueueTask[]> {
+  return isTauriRuntime() ? invoke<QueueTask[]>('list_tasks', { scope: scope ?? null }) : [];
 }
 
 export async function runTaskAction(taskId: string, action: Extract<TaskCommand, 'pause' | 'resume' | 'cancel' | 'retry' | 'retry_cleanup'>): Promise<TaskActionResult> {
@@ -144,6 +146,10 @@ export async function selectDownloadFiles(taskId: string, indices: number[]): Pr
   return isTauriRuntime() ? invoke<QueueTask>('select_files', { taskId, indices }) : undefined;
 }
 
+export async function cancelDownloadFile(taskId: string, fileIndex: number): Promise<QueueTask | undefined> {
+  return isTauriRuntime() ? invoke<QueueTask>('cancel_download_file', { taskId, fileIndex }) : undefined;
+}
+
 export async function getDownloadEngineState(): Promise<DownloadEngineState> {
   return isTauriRuntime()
     ? invoke<DownloadEngineState>('get_download_engine_state')
@@ -169,6 +175,7 @@ export const defaultSettings: AppSettings = {
   proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 },
   deleteTransferredShareFilesAfterDownload: true
 };
 

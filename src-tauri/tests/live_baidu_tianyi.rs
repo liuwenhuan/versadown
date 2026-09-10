@@ -71,11 +71,11 @@ impl CloudHttpTransport for LiveTransport {
                 let parsed = serde_json::from_str::<serde_json::Value>(&response.body).ok();
                 let code = parsed.as_ref().and_then(|value| {
                     value
-                            .get("errno")
-                            .or_else(|| value.get("res_code"))
-                            .or_else(|| value.get("result"))
-                            .or_else(|| value.get("code"))
-                            .and_then(serde_json::Value::as_i64)
+                        .get("errno")
+                        .or_else(|| value.get("res_code"))
+                        .or_else(|| value.get("result"))
+                        .or_else(|| value.get("code"))
+                        .and_then(serde_json::Value::as_i64)
                 });
                 let markup_code = (!response.body.trim_start().starts_with('{'))
                     .then(|| {
@@ -95,18 +95,22 @@ impl CloudHttpTransport for LiveTransport {
                     Some(serde_json::Value::Array(_)) => "json-array".into(),
                     Some(_) => "json-scalar".into(),
                     None if response.body.trim_start().starts_with('<') => {
-                        let root = regex::Regex::new(r"<\??[A-Za-z0-9_.:-]+[^>]*>\s*<([A-Za-z][A-Za-z0-9_-]*)")
-                            .ok()
-                            .and_then(|pattern| pattern.captures(&response.body))
-                            .and_then(|capture| capture.get(1))
-                            .map(|value| value.as_str())
-                            .unwrap_or("unknown");
+                        let root = regex::Regex::new(
+                            r"<\??[A-Za-z0-9_.:-]+[^>]*>\s*<([A-Za-z][A-Za-z0-9_-]*)",
+                        )
+                        .ok()
+                        .and_then(|pattern| pattern.captures(&response.body))
+                        .and_then(|capture| capture.get(1))
+                        .map(|value| value.as_str())
+                        .unwrap_or("unknown");
                         let tags = regex::Regex::new(r"</?([A-Za-z][A-Za-z0-9_-]*)")
                             .ok()
                             .map(|pattern| {
                                 let mut tags = pattern
                                     .captures_iter(&response.body)
-                                    .filter_map(|capture| capture.get(1).map(|value| value.as_str()))
+                                    .filter_map(|capture| {
+                                        capture.get(1).map(|value| value.as_str())
+                                    })
                                     .collect::<Vec<_>>();
                                 tags.sort_unstable();
                                 tags.dedup();
@@ -155,6 +159,7 @@ fn provider_error_kind(error: &QuarkError) -> &'static str {
         QuarkError::CaptchaRequired => "captcha-required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak-regional-membership-restricted",
         QuarkError::AuthorizationPending => "authorization-pending",
+        QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         QuarkError::InvalidResponse => "invalid-response",
         QuarkError::Storage => "storage",
         QuarkError::Transport(_) => "transport",
@@ -170,7 +175,12 @@ fn provider_step<T>(
     operation: &str,
     action: impl FnOnce() -> Result<T, QuarkError>,
 ) -> LiveResult<T> {
-    action().map_err(|error| failure(format!("{provider} {operation}: {}", provider_error_kind(&error))))
+    action().map_err(|error| {
+        failure(format!(
+            "{provider} {operation}: {}",
+            provider_error_kind(&error)
+        ))
+    })
 }
 
 fn require_live_authorization() -> LiveResult<()> {
@@ -305,7 +315,10 @@ fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()
     )?;
     eprintln!(
         "Baidu live session: web_auth={}, cookie_present={}, cookie_names={}",
-        matches!(session.auth_method, alldownloader_lib::cloud::CloudAuthMethod::Web),
+        matches!(
+            session.auth_method,
+            alldownloader_lib::cloud::CloudAuthMethod::Web
+        ),
         !session.cookie.is_empty(),
         cookie_names(&session.cookie),
     );
@@ -332,22 +345,34 @@ fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()
         remove_local(&local_root);
         return Err(error);
     }
-    let base = find_named(&provider_step("Baidu", "list after mkdir", || client.directory("/"))?.items, &base_name, "folder")?;
+    let base = find_named(
+        &provider_step("Baidu", "list after mkdir", || client.directory("/"))?.items,
+        &base_name,
+        "folder",
+    )?;
     let result = (|| -> LiveResult<()> {
-        provider_step("Baidu", "mkdir move target", || client.mkdir(&base.id, &target_name))?;
+        provider_step("Baidu", "mkdir move target", || {
+            client.mkdir(&base.id, &target_name)
+        })?;
         let target = find_named(
             &provider_step("Baidu", "list move target", || client.directory(&base.id))?.items,
             &target_name,
             "folder",
         )?;
-        let uploaded = provider_step("Baidu", "upload", || client.upload_file(&base.id, &payload, &http))?;
-        provider_step("Baidu", "rename", || client.rename(&uploaded.id, &renamed_name))?;
+        let uploaded = provider_step("Baidu", "upload", || {
+            client.upload_file(&base.id, &payload, &http)
+        })?;
+        provider_step("Baidu", "rename", || {
+            client.rename(&uploaded.id, &renamed_name)
+        })?;
         let renamed = find_named(
             &provider_step("Baidu", "list after rename", || client.directory(&base.id))?.items,
             &renamed_name,
             "file",
         )?;
-        provider_step("Baidu", "move", || client.move_files(&[renamed.id.clone()], &target.id))?;
+        provider_step("Baidu", "move", || {
+            client.move_files(&[renamed.id.clone()], &target.id)
+        })?;
         let moved = find_named(
             &provider_step("Baidu", "list after move", || client.directory(&target.id))?.items,
             &renamed_name,
@@ -355,10 +380,14 @@ fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()
         )?;
         let download = provider_step("Baidu", "resolve download", || client.download(&moved.id))?;
         if download.name != renamed_name {
-            return Err(failure("Baidu download metadata did not preserve renamed file"));
+            return Err(failure(
+                "Baidu download metadata did not preserve renamed file",
+            ));
         }
         if download_bytes(&download.url, &download.headers)? != expected {
-            return Err(failure("Baidu downloaded bytes differ from uploaded test file"));
+            return Err(failure(
+                "Baidu downloaded bytes differ from uploaded test file",
+            ));
         }
         Ok(())
     })();
@@ -370,7 +399,12 @@ fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()
     http.report();
     match (result, cleanup) {
         (Ok(()), Ok(())) => {
-            if client.directory("/")?.items.iter().any(|item| item.id == base.id) {
+            if client
+                .directory("/")?
+                .items
+                .iter()
+                .any(|item| item.id == base.id)
+            {
                 Err(failure("Baidu test directory remained visible after trash"))
             } else {
                 Ok(())
@@ -400,7 +434,10 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
     )?;
     eprintln!(
         "Tianyi live session: web_auth={}, cookie_present={}, cookie_names={}",
-        matches!(session.auth_method, alldownloader_lib::cloud::CloudAuthMethod::Web),
+        matches!(
+            session.auth_method,
+            alldownloader_lib::cloud::CloudAuthMethod::Web
+        ),
         !session.cookie.is_empty(),
         cookie_names(&session.cookie),
     );
@@ -438,20 +475,28 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
         "folder",
     )?;
     let result = (|| -> LiveResult<()> {
-        provider_step("Tianyi", "mkdir move target", || client.mkdir(&base.id, &target_name))?;
+        provider_step("Tianyi", "mkdir move target", || {
+            client.mkdir(&base.id, &target_name)
+        })?;
         let target = find_named(
             &provider_step("Tianyi", "list move target", || client.directory(&base.id))?.items,
             &target_name,
             "folder",
         )?;
-        let uploaded = provider_step("Tianyi", "upload", || client.upload_file(&base.id, &payload, &http))?;
-        provider_step("Tianyi", "rename", || client.rename(&uploaded.id, &renamed_name))?;
+        let uploaded = provider_step("Tianyi", "upload", || {
+            client.upload_file(&base.id, &payload, &http)
+        })?;
+        provider_step("Tianyi", "rename", || {
+            client.rename(&uploaded.id, &renamed_name)
+        })?;
         let renamed = find_named(
             &provider_step("Tianyi", "list after rename", || client.directory(&base.id))?.items,
             &renamed_name,
             "file",
         )?;
-        provider_step("Tianyi", "move", || client.move_files(&[renamed.id.clone()], &target.id))?;
+        provider_step("Tianyi", "move", || {
+            client.move_files(&[renamed.id.clone()], &target.id)
+        })?;
         let moved = find_named(
             &provider_step("Tianyi", "list after move", || client.directory(&target.id))?.items,
             &renamed_name,
@@ -459,10 +504,14 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
         )?;
         let download = provider_step("Tianyi", "resolve download", || client.download(&moved.id))?;
         if download.name != renamed_name {
-            return Err(failure("Tianyi download metadata did not preserve renamed file"));
+            return Err(failure(
+                "Tianyi download metadata did not preserve renamed file",
+            ));
         }
         if download_bytes(&download.url, &download.headers)? != expected {
-            return Err(failure("Tianyi downloaded bytes differ from uploaded test file"));
+            return Err(failure(
+                "Tianyi downloaded bytes differ from uploaded test file",
+            ));
         }
         Ok(())
     })();
@@ -474,8 +523,15 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
     http.report();
     match (result, cleanup) {
         (Ok(()), Ok(())) => {
-            if client.directory("-11")?.items.iter().any(|item| item.id == base.id) {
-                Err(failure("Tianyi test directory remained visible after trash"))
+            if client
+                .directory("-11")?
+                .items
+                .iter()
+                .any(|item| item.id == base.id)
+            {
+                Err(failure(
+                    "Tianyi test directory remained visible after trash",
+                ))
             } else {
                 Ok(())
             }
@@ -538,7 +594,11 @@ fn live_tianyi_folder_rename_move_and_trash() -> LiveResult<()> {
         client.rename(&source.id, &renamed_name)?;
         let renamed = wait_for_named(|| client.directory(&base.id), &renamed_name, "folder")?;
         client.move_files(&[renamed.id.clone()], &destination.id)?;
-        wait_for_named(|| client.directory(&destination.id), &renamed_name, "folder")?;
+        wait_for_named(
+            || client.directory(&destination.id),
+            &renamed_name,
+            "folder",
+        )?;
         Ok(())
     })();
     let cleanup = client.trash(&[base.id.clone()]);
@@ -547,12 +607,19 @@ fn live_tianyi_folder_rename_move_and_trash() -> LiveResult<()> {
             // The batch delete operation is asynchronous.  A successful task
             // id may take a few seconds before the listing hides the folder.
             for _ in 0..10 {
-                if !client.directory("-11")?.items.iter().any(|item| item.id == base.id) {
+                if !client
+                    .directory("-11")?
+                    .items
+                    .iter()
+                    .any(|item| item.id == base.id)
+                {
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
-            Err(failure("Tianyi mutation test root remained visible after trash"))
+            Err(failure(
+                "Tianyi mutation test root remained visible after trash",
+            ))
         }
         (Err(test), Ok(())) => Err(test),
         (Ok(()), Err(cleanup)) => Err(Box::new(cleanup)),

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { QueueTask, TaskCommand, TaskStatus } from '../lib/types';
+import { QueueTask, TaskCommand } from '../lib/types';
 import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
 
 interface DownloadQueueProps {
@@ -8,13 +8,13 @@ interface DownloadQueueProps {
   selectedTaskId: string | null;
   onSelect(id: string): void;
   onCommand(id: string, command: TaskCommand): void;
+  onBatchCommand?(ids: readonly string[], command: BatchTaskCommand): void;
+  onFileSelection?(taskId: string, fileIndex: number, selected: boolean): void;
+  onFileCancel?(taskId: string, fileIndex: number): void;
   onConfirm?(task: QueueTask): void;
 }
 
-const statusText: Record<TaskStatus, string> = {
-  draft: '草稿', parsing: '解析中', awaiting_user: '等待确认', queued: '等待下载', downloading: '下载中',
-  processing: '处理中', completed: '已完成', failed: '失败', cancelled: '已取消', recycled: '已移入回收站', paused: '已暂停'
-};
+export type BatchTaskCommand = 'resume' | 'pause' | 'delete' | 'copy_link';
 
 function magnetName(value: string): string {
   try {
@@ -34,6 +34,24 @@ export function displayTaskName(task: QueueTask): string {
   const candidate = task.name?.trim();
   if (task.kind === 'magnet' && candidate.toLowerCase().startsWith('magnet:')) return magnetName(candidate);
   return candidate || '未命名下载任务';
+}
+
+function childPathParts(value: string): string[] {
+  const parts = value.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').split('/').filter(Boolean);
+  return /^[a-z]:$/i.test(parts[0] ?? '') ? parts.slice(1) : parts;
+}
+
+function sharedChildRoot(children: readonly QueueTask[]): string | undefined {
+  const paths = children.map((child) => childPathParts(child.name));
+  if (!paths.length || paths.some((parts) => parts.length < 2)) return undefined;
+  const root = paths[0][0];
+  return paths.every((parts) => parts[0] === root) ? root : undefined;
+}
+
+function displayChildName(child: QueueTask, root: string | undefined): string {
+  const parts = childPathParts(child.name);
+  const display = root && parts[0] === root ? parts.slice(1) : parts;
+  return display.join('/') || child.name;
 }
 
 const videoExtensions = new Set(['3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'ts', 'webm', 'wmv']);
@@ -86,17 +104,20 @@ function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 
-function ActionIcon({ action }: { action: 'pause' | 'resume' | 'retry' | 'play' | 'folder' | 'more' }) {
+function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'play' | 'folder' | 'more' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause'
     ? <><path d="M8 5v14" /><path d="M16 5v14" /></>
     : action === 'resume' ? <path d="m9 6 9 6-9 6z" />
-      : action === 'retry' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
-        : action === 'play' ? <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>
-          : action === 'folder' ? <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>
-            : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
+      : action === 'cancel' ? <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>
+        : action === 'retry' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
+          : action === 'play' ? <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>
+            : action === 'folder' ? <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>
+              : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
 }
 
-interface ContextMenuState { task: QueueTask; x: number; y: number }
+type TaskMenuCommand = TaskCommand | 'delete';
+
+interface ContextMenuState { tasks: readonly QueueTask[]; x: number; y: number }
 
 interface TaskContextMenuPositionInput {
   x: number;
@@ -130,8 +151,18 @@ function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: 
   return commands;
 }
 
-function MenuIcon({ command }: { command: TaskCommand }) {
-  const paths: Record<TaskCommand, React.ReactNode> = {
+function batchContextCommands(tasks: readonly QueueTask[]): Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> {
+  const commands: Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> = [];
+  if (tasks.some((task) => task.status === 'paused' || task.status === 'failed')) commands.push({ command: 'resume', label: '开始下载' });
+  if (tasks.some((task) => task.status === 'downloading')) commands.push({ command: 'pause', label: '暂停下载' });
+  if (tasks.some((task) => Boolean(task.source))) commands.push({ command: 'copy_link', label: '复制下载链接', separated: commands.length > 0 });
+  commands.push({ command: 'delete', label: '删除', danger: true, separated: true });
+  return commands;
+}
+
+function MenuIcon({ command }: { command: TaskMenuCommand }) {
+  const deletePath = <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /></>;
+  const paths: Record<TaskMenuCommand, React.ReactNode> = {
     pause: <><path d="M8 5v14" /><path d="M16 5v14" /></>, resume: <path d="m9 6 9 6-9 6z" />,
     cancel: <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>, retry: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     retry_cleanup: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
@@ -141,13 +172,16 @@ function MenuIcon({ command }: { command: TaskCommand }) {
     details: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5M12 8h.01" /></>,
     move_to_recycle: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="M18.5 4.5 20 6" /></>,
     remove_record: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="m7.5 7.5 9 9M16.5 7.5l-9 9" /></>,
+    delete: deletePath,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[command]}</svg>;
 }
 
-function TaskContextMenu({ state, onClose, onCommand }: { state: ContextMenuState; onClose(): void; onCommand(command: TaskCommand): void }) {
+function TaskContextMenu({ state, onClose, onCommand }: { state: ContextMenuState; onClose(): void; onCommand(command: TaskMenuCommand): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const commands = contextCommands(state.task);
+  const isBatch = state.tasks.length > 1;
+  const commands = isBatch ? batchContextCommands(state.tasks) : contextCommands(state.tasks[0]);
+  const menuTitle = isBatch ? `已选择 ${state.tasks.length} 个任务` : displayTaskName(state.tasks[0]);
   const [menuSize, setMenuSize] = useState({ width: 224, height: commands.length * 38 + 64 });
   const { left, top } = taskContextMenuPosition({
     x: state.x,
@@ -195,20 +229,66 @@ function TaskContextMenu({ state, onClose, onCommand }: { state: ContextMenuStat
     items[next].focus();
   }
 
-  return createPortal(<div ref={menuRef} className="task-context-menu" role="menu" aria-label={`${displayTaskName(state.task)} 任务菜单`} style={{ left, top }} onKeyDown={moveFocus}>
-    <header><b title={displayTaskName(state.task)}>{displayTaskName(state.task)}</b><small>{statusText[state.task.status]}</small></header>
+  return createPortal(<div ref={menuRef} className="task-context-menu" role="menu" aria-label={`${menuTitle} 任务菜单`} style={{ left, top }} onKeyDown={moveFocus}>
+    <header><b title={menuTitle}>{menuTitle}</b></header>
     {commands.map((item) => <div key={item.command} className={item.separated ? 'menu-separated' : undefined}><button role="menuitem" className={item.danger ? 'danger' : undefined} onClick={() => onCommand(item.command)}><MenuIcon command={item.command} /><span>{item.label}</span></button></div>)}
   </div>, document.body);
 }
 
-export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onConfirm }: DownloadQueueProps) {
+export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBatchCommand, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
+  const selectionAnchor = useRef<string | null>(selectedTaskId);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeContextMenu = () => setContextMenu(null);
-  function runCommand(taskId: string, command: TaskCommand) { closeContextMenu(); onCommand(taskId, command); }
+  useEffect(() => {
+    const visibleIds = new Set(tasks.map((task) => task.id));
+    setSelectedTaskIds((current) => {
+      const visibleSelection = current.filter((id) => visibleIds.has(id));
+      if (visibleSelection.length) return visibleSelection.length === current.length ? current : visibleSelection;
+      if (selectedTaskId && visibleIds.has(selectedTaskId)) return [selectedTaskId];
+      return current.length ? [] : current;
+    });
+  }, [selectedTaskId, tasks]);
+  function runCommand(command: TaskMenuCommand) {
+    const targets = contextMenu?.tasks ?? [];
+    closeContextMenu();
+    if (targets.length > 1) {
+      onBatchCommand?.(targets.map((task) => task.id), command as BatchTaskCommand);
+      return;
+    }
+    if (targets[0] && command !== 'delete') onCommand(targets[0].id, command);
+  }
+  function selectTask(event: React.MouseEvent<HTMLElement>, task: QueueTask) {
+    const currentIndex = tasks.findIndex((item) => item.id === task.id);
+    let next: string[];
+    if (event.shiftKey && selectionAnchor.current) {
+      const anchorIndex = tasks.findIndex((item) => item.id === selectionAnchor.current);
+      const start = Math.min(anchorIndex < 0 ? currentIndex : anchorIndex, currentIndex);
+      const end = Math.max(anchorIndex < 0 ? currentIndex : anchorIndex, currentIndex);
+      next = tasks.slice(start, end + 1).map((item) => item.id);
+    } else if (event.ctrlKey || event.metaKey) {
+      next = selectedTaskIds.includes(task.id)
+        ? selectedTaskIds.filter((id) => id !== task.id)
+        : [...selectedTaskIds, task.id];
+      if (!next.length) next = [task.id];
+      selectionAnchor.current = task.id;
+    } else {
+      next = [task.id];
+      selectionAnchor.current = task.id;
+    }
+    setSelectedTaskIds(next);
+    onSelect(next.at(-1) ?? task.id);
+  }
   function openContextMenu(task: QueueTask, x: number, y: number) {
-    onSelect(task.id);
-    setContextMenu({ task, x, y });
+    const keepsSelection = selectedTaskIds.includes(task.id);
+    const targets = keepsSelection ? tasks.filter((item) => selectedTaskIds.includes(item.id)) : [task];
+    if (!keepsSelection) {
+      setSelectedTaskIds([task.id]);
+      selectionAnchor.current = task.id;
+      onSelect(task.id);
+    }
+    setContextMenu({ tasks: targets, x, y });
   }
   return (
     <section className="download-queue" aria-label="下载队列" onContextMenu={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
@@ -222,11 +302,13 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
           kind: 'file' as const,
           status: task.status,
           progress: file.length > 0 ? Math.min(100, Math.floor(file.completed_length * 100 / file.length)) : 0,
-          size: file.length > 0 ? `${file.completed_length} B / ${file.length} B` : undefined,
+          size: file.length > 0 ? `${formatBytes(file.completed_length)} / ${formatBytes(file.length)}` : undefined,
           file_index: file.index,
           selected: file.selected,
         }));
-        const hasChildren = !isCompleted && Boolean(taskChildren?.length);
+        const hasChildren = !isCompleted && Boolean(taskChildren?.length)
+          && (task.kind === 'folder' || taskChildren!.length > 1);
+        const childRoot = taskChildren ? sharedChildRoot(taskChildren) : undefined;
         const taskName = displayTaskName(task);
         const isPaused = task.status === 'paused';
         const speed = !isPaused ? task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed) : undefined;
@@ -242,7 +324,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
         const completionTime = isCompleted ? completedAt(task.updated_at) : undefined;
         const completedHasVideo = isCompleted && taskHasVideo(task);
         return <div className="task-group" key={task.id}>
-          <article className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskId === task.id ? 'selected' : ''}`} onClick={() => onSelect(task.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
+          <article className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
@@ -257,14 +339,24 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
               <button className="task-more-button" aria-label={`更多操作 ${taskName}`} title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>
             </div>
           </article>
-          {hasChildren && isExpanded && <div className="children">{taskChildren!.map((child) => <article className="child-row" key={child.id}>
-            <span className="child-name"><i aria-hidden="true">↳</i><b title={child.name}>{child.name}</b></span>
-            <span className="child-progress"><i><b style={{ width: `${child.progress}%` }} /></i><small>{child.progress}%{child.size && ` · ${child.size}`}</small></span>
-            <em className={child.status}>{statusText[child.status]}</em>
-          </article>)}</div>}
+          {hasChildren && isExpanded && <div className="children">{taskChildren!.map((child) => {
+            const childName = displayChildName(child, childRoot);
+            const fileIsSelected = child.selected !== false;
+            const fileAction = task.status === 'paused' || !fileIsSelected ? 'resume' as const : 'pause' as const;
+            const fileActionLabel = fileAction === 'pause' ? '暂停' : '继续';
+            const canControlChild = ['downloading', 'paused', 'queued'].includes(task.status)
+              && (child.file_index === undefined || Boolean(onFileSelection));
+            return <article className="child-row" key={child.id}>
+              <span className="child-name"><i aria-hidden="true">↳</i><b title={childName}>{childName}</b></span>
+              <span className="child-progress" aria-hidden="true"><i><b style={{ width: `${child.progress}%` }} /></i></span>
+              <small className="child-progress-value">{child.progress}%</small>
+              <small className="child-transfer-size" title={child.size}>{child.size || '—'}</small>
+              {canControlChild && <span className="child-actions"><button aria-label={`${fileActionLabel} ${childName}`} title={`${fileActionLabel}此文件`} onClick={(event) => { event.stopPropagation(); if (child.file_index !== undefined) onFileSelection!(task.id, child.file_index, fileAction === 'resume'); else onCommand(child.id, fileAction); }}><ActionIcon action={fileAction} /></button>{fileIsSelected && (child.file_index !== undefined && onFileCancel ? <button className="child-cancel" aria-label={`取消 ${childName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onFileCancel(task.id, child.file_index!); }}><ActionIcon action="cancel" /></button> : child.file_index === undefined ? <button className="child-cancel" aria-label={`取消 ${childName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onCommand(child.id, 'cancel'); }}><ActionIcon action="cancel" /></button> : null)}</span>}
+            </article>;
+          })}</div>}
         </div>;
       })}
-      {contextMenu && <TaskContextMenu state={contextMenu} onClose={closeContextMenu} onCommand={(command) => runCommand(contextMenu.task.id, command)} />}
+      {contextMenu && <TaskContextMenu state={contextMenu} onClose={closeContextMenu} onCommand={runCommand} />}
     </section>
   );
 }

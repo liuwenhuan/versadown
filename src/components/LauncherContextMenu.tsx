@@ -67,7 +67,7 @@ export function LauncherContextMenu({ managerVisible, visibility, onAction, onVi
   return <div className="launcher-menu-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div ref={menuRef} className="task-context-menu launcher-context-menu" role="menu" aria-label={settingsOpen ? '悬浮球显示设置' : '悬浮球菜单'} onKeyDown={moveFocus}>
       {settingsOpen ? <>
-        <header><b>悬浮球显示</b><small>选择显示时机</small><button type="button" aria-label="返回悬浮球菜单" onClick={() => setSettingsOpen(false)}><LauncherMenuIcon action="back" /></button></header>
+        <header><b>悬浮球显示</b><button type="button" aria-label="返回悬浮球菜单" onClick={() => setSettingsOpen(false)}><LauncherMenuIcon action="back" /></button></header>
         {visibilityOptions.map((option) => <div key={option.value}><button role="menuitemradio" aria-checked={visibility === option.value} className={visibility === option.value ? 'selected' : undefined} onClick={() => { onVisibilityChange(option.value); onClose(); }}><LauncherMenuIcon action={option.icon} /><span>{option.label}</span>{visibility === option.value && <i aria-hidden="true">✓</i>}</button></div>)}
       </> : <>
         <div><button role="menuitem" onClick={() => runAction('hide_manager')}><LauncherMenuIcon action="hide_manager" /><span>{managerVisible ? '隐藏主界面' : '显示主界面'}</span></button></div>

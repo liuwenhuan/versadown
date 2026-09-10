@@ -48,6 +48,7 @@ fn error_kind(error: &QuarkError) -> &'static str {
         QuarkError::CaptchaRequired => "captcha-required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak-regional-membership-restricted",
         QuarkError::AuthorizationPending => "authorization-pending",
+        QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         QuarkError::InvalidResponse => "invalid-response",
         QuarkError::Storage => "storage",
         QuarkError::Transport(_) => "transport",
@@ -93,8 +94,10 @@ impl CloudHttpTransport for LiveTransport {
             (safe_host(&request.url) == "api-pan.xunlei.com").then_some(request.method);
         let xunlei_detail = request.method == "GET"
             && url::Url::parse(&request.url).is_ok_and(|url| {
-                matches!(url.host_str(), Some("api-pan.xunlei.com" | "x-api-pan.xunlei.com"))
-                    && url.path().starts_with("/drive/v1/files/")
+                matches!(
+                    url.host_str(),
+                    Some("api-pan.xunlei.com" | "x-api-pan.xunlei.com")
+                ) && url.path().starts_with("/drive/v1/files/")
             });
         let response = self.0.send(request)?;
         if xunlei_detail {
@@ -116,8 +119,11 @@ impl CloudHttpTransport for LiveTransport {
                     _ => "other",
                 },
             };
-            eprintln!("Xunlei detail: phase={phase}, web_link={}, download_link={}",
-                link_state("web_content_link"), link_state("download_url"));
+            eprintln!(
+                "Xunlei detail: phase={phase}, web_link={}, download_link={}",
+                link_state("web_content_link"),
+                link_state("download_url")
+            );
         }
         if let Some(method) = xunlei_method {
             let v: serde_json::Value = serde_json::from_str(&response.body).unwrap_or_default();
@@ -180,17 +186,11 @@ impl CloudUploadTransport for LiveTransport {
         let method = request.method;
         match self.0.send_upload(request) {
             Ok(response) => {
-                eprintln!(
-                    "live object transfer: {method} -> HTTP {}",
-                    response.status
-                );
+                eprintln!("live object transfer: {method} -> HTTP {}", response.status);
                 Ok(response)
             }
             Err(error) => {
-                eprintln!(
-                    "live object transfer: {method} -> {}",
-                    error_kind(&error)
-                );
+                eprintln!("live object transfer: {method} -> {}", error_kind(&error));
                 Err(error)
             }
         }
@@ -599,7 +599,9 @@ fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<(
             &renamed_name,
             "file",
         )?;
-        provider_step("Xunlei resolve immediate copied download", || client.download(&copied.id))?;
+        provider_step("Xunlei resolve immediate copied download", || {
+            client.download(&copied.id)
+        })?;
         let (url, download_name) =
             provider_step("Xunlei resolve download", || client.download(&moved.id))?;
         if download_name != renamed_name {
@@ -624,8 +626,12 @@ fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<(
             return Err(failure("Xunlei copy returned the source object"));
         }
         for _ in 0..2 {
-            provider_step("Xunlei resolve newly copied download", || client.download(&copied.id))?;
-            provider_step("Xunlei resolve moved download again", || client.download(&moved.id))?;
+            provider_step("Xunlei resolve newly copied download", || {
+                client.download(&copied.id)
+            })?;
+            provider_step("Xunlei resolve moved download again", || {
+                client.download(&moved.id)
+            })?;
         }
         provider_step("Xunlei trash copied fixture", || {
             client.trash(&[copied.id.clone()])

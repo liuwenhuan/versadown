@@ -34,12 +34,25 @@ mod tests {
     fn xunlei_share_http_challenge_without_json_preserves_authorization_error() {
         struct StatusHttp(u16);
         impl CloudHttpTransport for StatusHttp {
-            fn send(&self,_:CloudHttpRequest)->Result<CloudHttpResponse,QuarkError>{Ok(CloudHttpResponse{status:self.0,body:"<html>secret</html>".into(),..Default::default()})}
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                Ok(CloudHttpResponse {
+                    status: self.0,
+                    body: "<html>secret</html>".into(),
+                    ..Default::default()
+                })
+            }
         }
-        let credentials=credentials();
-        for status in [401,412] {
-            let http=StatusHttp(status);let result=provider_share_adapter(CloudProvider::Xunlei,&credentials,&http).unwrap().resolve(&selected());
-            assert!(if status==401 {matches!(result,Err(QuarkError::AuthorizationExpired))} else {matches!(result,Err(QuarkError::WebAuthorizationRequired))});
+        let credentials = credentials();
+        for status in [401, 412] {
+            let http = StatusHttp(status);
+            let result = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http)
+                .unwrap()
+                .resolve(&selected());
+            assert!(if status == 401 {
+                matches!(result, Err(QuarkError::AuthorizationExpired))
+            } else {
+                matches!(result, Err(QuarkError::WebAuthorizationRequired))
+            });
         }
     }
     fn credentials() -> MemoryCredentialStore {
@@ -1717,7 +1730,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             )?;
             let file = value.get("data").unwrap_or(&value);
             let name = required(file, "name")?;
-            let link = file.get("web_content_link").or_else(|| file.get("download_url"));
+            let link = file
+                .get("web_content_link")
+                .or_else(|| file.get("download_url"));
             match link {
                 Some(Value::String(link)) if !link.is_empty() => {
                     if !link.starts_with("https://") {
@@ -1732,9 +1747,10 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             // requests with a generated link. Only this known empty-link
             // state is transient; protocol, auth and transport errors escape.
             if !modern_web
-                || !matches!(file["phase"].as_str(), Some(
-                    "PHASE_TYPE_COMPLETE" | "PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING"
-                ))
+                || !matches!(
+                    file["phase"].as_str(),
+                    Some("PHASE_TYPE_COMPLETE" | "PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING")
+                )
             {
                 return Err(QuarkError::InvalidResponse);
             }
@@ -1760,11 +1776,19 @@ mod download_poll_tests {
 
     #[test]
     fn xunlei_download_poll_delay_rejects_deadline_and_caps_last_sleep() {
-        assert_eq!(download_poll_delay(Duration::ZERO).unwrap(), Duration::from_millis(250));
-        assert_eq!(download_poll_delay(Duration::from_millis(29_999)).unwrap(), Duration::from_millis(1));
+        assert_eq!(
+            download_poll_delay(Duration::ZERO).unwrap(),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            download_poll_delay(Duration::from_millis(29_999)).unwrap(),
+            Duration::from_millis(1)
+        );
         for elapsed in [Duration::from_secs(30), Duration::from_secs(31)] {
-            assert!(matches!(download_poll_delay(elapsed), Err(QuarkError::Provider(message))
-                if message == "文件可见但下载链接仍在生成，请稍后重试。"));
+            assert!(
+                matches!(download_poll_delay(elapsed), Err(QuarkError::Provider(message))
+                if message == "文件可见但下载链接仍在生成，请稍后重试。")
+            );
         }
     }
 }
@@ -1989,9 +2013,14 @@ impl AwsMultipart {
         path: &Path,
         size: u64,
     ) -> Result<(), QuarkError> {
-        upload_multipart(http, path, size, |method, raw_query, canonical_query, body| {
-            self.request(method, raw_query, canonical_query, body)
-        })
+        upload_multipart(
+            http,
+            path,
+            size,
+            |method, raw_query, canonical_query, body| {
+                self.request(method, raw_query, canonical_query, body)
+            },
+        )
     }
 }
 
@@ -2006,7 +2035,9 @@ fn object_storage_endpoint(upload: &XunleiResumableUpload) -> Result<url::Url, Q
                 && label.len() <= 63
                 && !label.starts_with('-')
                 && !label.ends_with('-')
-                && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         });
     let endpoint_value = if upload.provider == "PROVIDER_ALIYUN" && bare_dns {
         format!("https://{}", upload.endpoint)
@@ -2081,12 +2112,8 @@ fn upload_multipart(
         let response = http.send_upload(request("PUT", "", "", Vec::new())?)?;
         return aws_checked(response).map(|_| ());
     }
-    let started = aws_checked(http.send_upload(request(
-        "POST",
-        "uploads",
-        "uploads=",
-        Vec::new(),
-    )?)?)?;
+    let started =
+        aws_checked(http.send_upload(request("POST", "uploads", "uploads=", Vec::new())?)?)?;
     let upload_id = xml_tag(&started.body, "UploadId")?;
     let mut file = std::fs::File::open(path)
         .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
@@ -2121,12 +2148,7 @@ fn upload_multipart(
     complete.push_str("</CompleteMultipartUpload>");
     let encoded_upload = aws_percent(&upload_id);
     let query = format!("uploadId={encoded_upload}");
-    aws_checked(http.send_upload(request(
-        "POST",
-        &query,
-        &query,
-        complete.into_bytes(),
-    )?)?)?;
+    aws_checked(http.send_upload(request("POST", &query, &query, complete.into_bytes())?)?)?;
     Ok(())
 }
 

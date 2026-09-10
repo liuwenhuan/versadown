@@ -1,8 +1,7 @@
 use alldownloader_lib::cloud::{
-    clear_password_credential_if_account_differs, load_password_credential,
-    remove_password_credential, run_with_session_recovery, save_password_credential,
-    CloudPasswordCredential, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
-    SessionWorkKind,
+    load_password_credential, remove_password_credential, run_with_session_recovery,
+    save_password_credential, select_password_credential_account, CloudPasswordCredential,
+    CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError, SessionWorkKind,
 };
 use std::{
     cell::Cell,
@@ -123,7 +122,7 @@ fn official_webview_provider_does_not_load_password_or_relogin_on_expired_sessio
 }
 
 #[test]
-fn fallback_password_is_redacted_and_removed_on_logout_or_account_switch() {
+fn fallback_password_is_redacted_preserved_across_account_switches_and_removed_on_logout() {
     let store = MemoryCredentialStore::default();
     let credential = CloudPasswordCredential::new(
         CloudProvider::Pikpak,
@@ -136,17 +135,20 @@ fn fallback_password_is_redacted_and_removed_on_logout_or_account_switch() {
     assert!(!debug.contains("secret-value"));
     save_password_credential(&store, credential).unwrap();
 
-    clear_password_credential_if_account_differs(&store, CloudProvider::Pikpak, "account-1")
-        .unwrap();
+    select_password_credential_account(&store, CloudProvider::Pikpak, "account-1").unwrap();
     assert!(load_password_credential(&store, CloudProvider::Pikpak)
         .unwrap()
         .is_some());
 
-    clear_password_credential_if_account_differs(&store, CloudProvider::Pikpak, "account-2")
-        .unwrap();
+    select_password_credential_account(&store, CloudProvider::Pikpak, "account-2").unwrap();
     assert!(load_password_credential(&store, CloudProvider::Pikpak)
         .unwrap()
         .is_none());
+
+    select_password_credential_account(&store, CloudProvider::Pikpak, "account-1").unwrap();
+    assert!(load_password_credential(&store, CloudProvider::Pikpak)
+        .unwrap()
+        .is_some());
 
     save_password_credential(
         &store,

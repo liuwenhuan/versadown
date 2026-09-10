@@ -52,7 +52,7 @@ it('renders authorization cards for every newly supported cloud service', async 
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
-it('keeps the UC official login available when the legacy capability endpoint is unavailable', async () => {
+it('keeps the UC web authorization action available when the legacy capability endpoint is unavailable', async () => {
   const client = createClient();
   client.getCloudAuthorizationCapabilities.mockImplementation((provider: string) => provider === 'uc'
     ? Promise.reject(new Error('能力查询暂不可用'))
@@ -60,7 +60,7 @@ it('keeps the UC official login available when the legacy capability endpoint is
   render(<CloudWorkspace client={client as never} />);
 
   const ucAuthorization = await screen.findByRole('region', { name: 'UC账号授权' });
-  expect(within(ucAuthorization).getByRole('button', { name: '在官方网页登录（可使用账号密码）' })).toBeEnabled();
+  expect(within(ucAuthorization).getByRole('button', { name: '使用网页授权' })).toBeEnabled();
   expect(within(ucAuthorization).queryByLabelText('UC账号')).not.toBeInTheDocument();
   expect(client.getCloudAuthorizationCapabilities).not.toHaveBeenCalled();
 });
@@ -109,14 +109,15 @@ it('never renders logged-out controls before persisted account recovery finishes
   expect(screen.queryByRole('status', { name: '正在读取网盘账号状态' })).not.toBeInTheDocument();
 });
 
-it('adds a provider tab after password login but keeps account controls in management', async () => {
+it('adds a provider tab after priority password login and keeps account controls in management', async () => {
   const user = userEvent.setup();
   const client = createClient();
   render(<CloudWorkspace client={client} />);
 
-  await user.type(await screen.findByLabelText('PikPak账号'), 'alice');
-  await user.type(screen.getByLabelText('PikPak密码'), 'secret');
-  await user.click(screen.getByRole('button', { name: '登录PikPak账号' }));
+  const pikpakAuthorization = await screen.findByRole('region', { name: 'PikPak账号授权' });
+  await user.type(within(pikpakAuthorization).getByLabelText('账号'), 'alice');
+  await user.type(within(pikpakAuthorization).getByLabelText('密码'), 'secret');
+  await user.click(within(pikpakAuthorization).getByRole('button', { name: '登录' }));
 
   expect(await screen.findByRole('tab', { name: 'PikPak网盘' })).toHaveAttribute('aria-selected', 'false');
   expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
@@ -154,7 +155,7 @@ it('automatically adds the Aliyun workspace tab after web authorization complete
   render(<CloudWorkspace client={client as never} />);
 
   const aliyunAuthorization = await screen.findByRole('region', { name: '阿里账号授权' });
-  await user.click(within(aliyunAuthorization).getByRole('button', { name: '在官方网页登录（可使用账号密码）' }));
+  await user.click(within(aliyunAuthorization).getByRole('button', { name: '使用网页授权' }));
 
   expect(await screen.findByRole('tab', { name: '阿里网盘' }, { timeout: 1_500 })).toHaveAttribute('aria-selected', 'false');
   expect(client.completeCloudAuthorization).toHaveBeenCalledWith('aliyun');

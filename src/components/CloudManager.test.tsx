@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
 import { vi } from 'vitest';
 import { CloudManager } from './CloudManager';
 import type { CloudProvider } from '../lib/cloudTypes';
@@ -55,42 +56,27 @@ it('keeps the unauthenticated provider card focused on the available sign-in act
 });
 
 it.each([
-  ['baidu', '百度', true, '使用网页授权'],
-  ['tianyi', '天翼', true, '使用网页授权'],
-  ['aliyun', '阿里', false, '在官方网页登录（可使用账号密码）'],
-  ['xunlei', '迅雷', false, '在官方网页登录（可使用账号密码）']
-] as const)('shows only supported login controls for %s', async (provider, label, passwordSupported, webLabel) => {
-  render(<CloudManager provider={provider as never} client={createCloudFake()} authorizationOnly />);
+  ['quark', '夸克', false], ['pikpak', 'PikPak', true], ['baidu', '百度', true], ['tianyi', '天翼', true],
+  ['aliyun', '阿里', false], ['xunlei', '迅雷', false], ['uc', 'UC', false]
+] as const)('keeps the %s login card concise while prioritizing its supported login method', async (provider, label, supportsPasswordLogin) => {
+  const client = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockReturnValue(new Promise<never>(() => undefined)) });
+  render(<CloudManager provider={provider} client={client} authorizationOnly />);
 
-  expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
-  expect(await screen.findByRole('button', { name: webLabel })).toBeVisible();
-  if (passwordSupported) expect(await screen.findByRole('button', { name: `登录${label}账号` })).toBeVisible();
-  else expect(screen.queryByRole('button', { name: `登录${label}账号` })).not.toBeInTheDocument();
-});
-
-it('explains encrypted automatic recovery only for a password-capable provider', async () => {
-  const client = createCloudFake();
-  const { rerender } = render(<CloudManager provider="pikpak" client={client} authorizationOnly />);
-
-  expect(await screen.findByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).toBeVisible();
-
-  rerender(<CloudManager provider="xunlei" client={client} authorizationOnly />);
-  await waitFor(() => expect(screen.queryByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).not.toBeInTheDocument());
-});
-
-it.each(['pikpak', 'baidu', 'tianyi'] as const)('shows encrypted local credentials for %s', async provider => {
-  render(<CloudManager provider={provider} client={createCloudFake()} authorizationOnly />);
-
-  expect(await screen.findByLabelText(/账号$/)).toBeVisible();
-  expect(screen.getByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).toBeVisible();
-});
-
-it.each(['aliyun', 'xunlei', 'uc'] as const)('opens official account-password login for %s without collecting a local password', async provider => {
-  render(<CloudManager provider={provider} client={createCloudFake()} authorizationOnly />);
-
-  expect(await screen.findByRole('button', { name: '在官方网页登录（可使用账号密码）' })).toBeVisible();
-  expect(screen.getByText('请在官方网页中使用账号密码登录；应用不会收集或保存密码。')).toBeVisible();
-  expect(screen.queryByLabelText(/密码$/)).not.toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: '使用网页授权' })).toBeVisible();
+  expect(screen.queryByLabelText(`${label}账号`)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText(`${label}密码`)).not.toBeInTheDocument();
+  expect(screen.queryByText('账号和密码仅加密保存在本机，用于登录失效后的自动恢复。')).not.toBeInTheDocument();
+  expect(screen.queryByText('请在官方网页中使用账号密码登录；应用不会收集或保存密码。')).not.toBeInTheDocument();
+  if (supportsPasswordLogin) {
+    expect(screen.getByLabelText('账号')).toBeVisible();
+    expect(screen.getByLabelText('密码')).toBeVisible();
+    expect(screen.getByRole('button', { name: '登录' })).toHaveClass('primary');
+  } else {
+    expect(screen.queryByLabelText('账号')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('密码')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '登录' })).not.toBeInTheDocument();
+  }
+  expect(client.getCloudAuthorizationCapabilities).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -105,52 +91,6 @@ it.each([
 
   expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
   expect(screen.getByRole('tab', { name: `alice · ${label}` })).toBeVisible();
-});
-
-it('clears direct credentials before switching to official WebView login', async () => {
-  const user = userEvent.setup();
-  const client = createCloudFake();
-  const { rerender } = render(<CloudManager provider="baidu" client={client} authorizationOnly />);
-
-  await user.type(await screen.findByLabelText('百度账号'), 'alice');
-  await user.type(screen.getByLabelText('百度密码'), 'secret');
-  rerender(<CloudManager provider="aliyun" client={client} authorizationOnly />);
-
-  expect(await screen.findByRole('button', { name: '在官方网页登录（可使用账号密码）' })).toBeVisible();
-  expect(screen.queryByLabelText(/账号$/)).not.toBeInTheDocument();
-  expect(screen.queryByLabelText(/密码$/)).not.toBeInTheDocument();
-  expect(client.loginCloudWithPassword).not.toHaveBeenCalled();
-
-  rerender(<CloudManager provider="baidu" client={client} authorizationOnly />);
-  expect(await screen.findByLabelText('百度账号')).toHaveValue('');
-  expect(screen.getByLabelText('百度密码')).toHaveValue('');
-});
-
-it.each([
-  ['baidu', '登录百度账号'],
-  ['aliyun', '在官方网页登录（可使用账号密码）'],
-  ['xunlei', '在官方网页登录（可使用账号密码）'],
-  ['uc', '在官方网页登录（可使用账号密码）']
-] as const)('renders the fixed %s login mode without waiting for a capability request', (provider, action) => {
-  const client = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockReturnValue(new Promise<never>(() => undefined)) });
-  render(<CloudManager provider={provider} client={client} authorizationOnly />);
-
-  expect(screen.getByRole('button', { name: action })).toBeVisible();
-  expect(client.getCloudAuthorizationCapabilities).not.toHaveBeenCalled();
-});
-
-it('clears a supported provider password after a failed native login', async () => {
-  const user = userEvent.setup();
-  const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockRejectedValue({ code: 'invalid_input', message: '账号或密码不正确' }) });
-  render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly />);
-
-  await user.type(await screen.findByLabelText('百度账号'), 'alice');
-  await user.type(screen.getByLabelText('百度密码'), 'secret');
-  await user.click(screen.getByRole('button', { name: '登录百度账号' }));
-
-  expect(await screen.findByRole('status')).toHaveTextContent('账号或密码不正确');
-  expect(screen.getByLabelText('百度账号')).toHaveValue('');
-  expect(screen.getByLabelText('百度密码')).toHaveValue('');
 });
 
 it('asks to repeat a mutation after the session was automatically restored', async () => {
@@ -170,21 +110,6 @@ it('asks to repeat a mutation after the session was automatically restored', asy
 
   expect(await screen.findByRole('alert')).toHaveTextContent('已自动恢复登录，请重新执行本次操作');
   expect(screen.getByRole('alert')).not.toHaveTextContent('this provider response must not be shown');
-});
-
-it('rejects a password login account returned for another provider', async () => {
-  const user = userEvent.setup();
-  const onAccountAuthorized = vi.fn();
-  const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' }) });
-  render(<CloudManager provider={'baidu' as never} client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
-
-  await user.type(await screen.findByLabelText('百度账号'), 'alice');
-  await user.type(screen.getByLabelText('百度密码'), 'secret');
-  await user.click(screen.getByRole('button', { name: '登录百度账号' }));
-
-  expect(await screen.findByRole('status')).toHaveTextContent('授权返回的服务商不匹配');
-  expect(onAccountAuthorized).not.toHaveBeenCalled();
-  expect(screen.queryByRole('button', { name: '已经登录' })).not.toBeInTheDocument();
 });
 
 it('rejects a web authorization account returned for another provider', async () => {
@@ -469,6 +394,53 @@ it('shows normal file commands in the row context menu and opens a folder from i
 
   fireEvent.click(screen.getByRole('menuitem', { name: '打开' }));
   expect(await screen.findByText('说明.txt')).toBeVisible();
+});
+
+it('uses smaller cloud-card typography while preserving the signed-in account name size', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const client = createCloudFake();
+    render(<div className="cloud-provider-auths"><CloudManager provider="quark" client={client} authorizationOnly initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} /></div>);
+
+    await act(async () => { await Promise.resolve(); });
+    const heading = screen.getByRole('heading', { name: '夸克网盘 · alice' });
+    const accountName = heading.querySelector<HTMLElement>('.cloud-account-name')!;
+    const authorizationState = screen.getByRole('button', { name: '已经完成授权' });
+    const logout = screen.getByRole('button', { name: '退出授权' });
+
+    expect(getComputedStyle(heading).fontSize).toBe('18px');
+    expect(getComputedStyle(authorizationState).fontSize).toBe('13px');
+    expect(getComputedStyle(logout).fontSize).toBe('13px');
+    expect(getComputedStyle(accountName).fontSize).toBe('13px');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('repositions a bottom file context menu using its rendered height', async () => {
+  const innerWidth = vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(900);
+  const innerHeight = vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(500);
+  const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+    if (this.classList.contains('cloud-context-menu')) {
+      return { width: 210, height: 350, top: 0, right: 210, bottom: 350, left: 0, x: 0, y: 0, toJSON: () => ({}) };
+    }
+    return { width: 0, height: 0, top: 0, right: 0, bottom: 0, left: 0, x: 0, y: 0, toJSON: () => ({}) };
+  });
+
+  try {
+    render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+    await screen.findByText('报告.pdf');
+    fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 480 });
+
+    await waitFor(() => expect(screen.getByRole('menu', { name: '报告.pdf 文件菜单' })).toHaveStyle({ top: '142px' }));
+  } finally {
+    bounds.mockRestore();
+    innerHeight.mockRestore();
+    innerWidth.mockRestore();
+  }
 });
 
 it('copies selected files through a browsable destination picker', async () => {
@@ -827,7 +799,7 @@ it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
       render(<CloudManager provider="xunlei" client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
 
       await act(async () => { await Promise.resolve(); });
-      fireEvent.click(screen.getByRole('button', { name: '在官方网页登录（可使用账号密码）' }));
+      fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
       await act(async () => { await Promise.resolve(); });
       await act(async () => { await vi.advanceTimersByTimeAsync(800); });
       await act(async () => { await vi.advanceTimersByTimeAsync(5_400); });
@@ -836,7 +808,7 @@ it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
       expect(onAccountAuthorized).not.toHaveBeenCalled();
       expect(screen.getByRole('status')).toHaveTextContent('迅雷授权验证失败，请重新授权。');
       expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole('button', { name: '在官方网页登录（可使用账号密码）' }));
+      fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
       await act(async () => { await Promise.resolve(); });
       await act(async () => { await vi.advanceTimersByTimeAsync(800); });
       expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(2);
@@ -947,24 +919,14 @@ it.each(['web_auth_required', 'credentials_expired'])('keeps the Xunlei account 
   }
 });
 
-it('surfaces the message from a structured Tauri command error', async () => {
+it('surfaces the message when opening a web authorization window fails', async () => {
   const user = userEvent.setup();
-  const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockRejectedValue({ code: 'invalid_credentials', message: '账号或密码不正确' }) });
+  const client = createCloudFake({ beginCloudAuthorization: vi.fn().mockRejectedValue({ code: 'authorization_unavailable', message: '无法打开授权窗口' }) });
   render(<CloudManager provider="pikpak" client={client} />);
 
-  await user.type(await screen.findByLabelText('PikPak账号'), 'alice');
-  await user.type(screen.getByLabelText('PikPak密码'), 'wrong');
-  await user.click(screen.getByRole('button', { name: '登录PikPak账号' }));
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
 
-  expect(await screen.findByRole('status')).toHaveTextContent('账号或密码不正确');
-});
-
-it('keeps password login available for PikPak', async () => {
-  render(<CloudManager provider="pikpak" client={createCloudFake()} />);
-
-  expect(await screen.findByLabelText('PikPak账号')).toBeVisible();
-  expect(screen.getByLabelText('PikPak密码')).toBeVisible();
-  expect(screen.getByRole('button', { name: '登录PikPak账号' })).toBeVisible();
+  expect(await screen.findByRole('status')).toHaveTextContent('无法打开授权窗口');
 });
 
 it('prevents duplicate directory submissions while the first operation is pending', async () => {

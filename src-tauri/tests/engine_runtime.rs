@@ -1,7 +1,7 @@
 #![cfg(windows)]
 
 use alldownloader_lib::{
-    aria2::{Aria2GlobalStat, EventSink},
+    aria2::{Aria2GlobalStat, Aria2RpcClient, EventSink, RpcSecret},
     DownloadTask, EngineAvailability, EngineRuntime, EngineStateSink, NewTask, TaskStatus,
     TaskStore,
 };
@@ -28,12 +28,18 @@ impl EngineStateSink for Events {
 }
 
 fn launch_config(root: &std::path::Path, binary: PathBuf) -> alldownloader_lib::Aria2LaunchConfig {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut aria2 = alldownloader_lib::Aria2Settings::default();
+    aria2.rpc_port = listener.local_addr().unwrap().port();
+    aria2.rpc_token = format!("engine-runtime-test-{}", aria2.rpc_port);
+    drop(listener);
     alldownloader_lib::Aria2LaunchConfig {
         binary,
         data_dir: root.join("data"),
         download_dir: root.join("downloads"),
         parent_pid: std::process::id(),
         peer_discovery: false,
+        aria2,
     }
 }
 
@@ -113,6 +119,72 @@ async fn concurrent_manual_retries_start_one_engine_and_shutdown_cleanly() {
     let report = runtime.shutdown(Duration::from_secs(5)).await;
     assert!(report.child_stopped);
     assert!(!runtime.status().available);
+}
+
+#[tokio::test]
+async fn runtime_reconfigures_to_the_saved_rpc_port_and_token_immediately() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries/aria2c-x86_64-pc-windows-msvc.exe");
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let events = Arc::new(Events::default());
+    let runtime = EngineRuntime::new(
+        launch_config(root.path(), binary.clone()),
+        store,
+        events.clone(),
+        events,
+    );
+    assert!(runtime.initialize().await.available);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut updated = launch_config(root.path(), binary);
+    updated.aria2.rpc_port = port;
+    updated.aria2.rpc_token = "reconfigured-local-token".into();
+    updated.aria2.max_concurrent_downloads = 3;
+    updated.aria2.max_connections_per_server = 4;
+    updated.aria2.bt_seed_ratio = 1.5;
+
+    assert!(
+        runtime
+            .reconfigure(updated.clone())
+            .await
+            .unwrap()
+            .available
+    );
+    let client = Aria2RpcClient::new(
+        format!("http://127.0.0.1:{port}/jsonrpc"),
+        RpcSecret::from_token(updated.aria2.rpc_token).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(client.get_version().await.unwrap().version, "1.37.0");
+    assert!(runtime.shutdown(Duration::from_secs(5)).await.child_stopped);
+}
+
+#[tokio::test]
+async fn failed_reconfiguration_restores_the_previous_running_engine() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries/aria2c-x86_64-pc-windows-msvc.exe");
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let events = Arc::new(Events::default());
+    let runtime = EngineRuntime::new(
+        launch_config(root.path(), binary),
+        store,
+        events.clone(),
+        events,
+    );
+    assert!(runtime.initialize().await.available);
+
+    let mut invalid = launch_config(root.path(), root.path().join("missing-aria2c.exe"));
+    invalid.aria2.rpc_token = "invalid-reconfiguration-token".into();
+    let error = runtime.reconfigure(invalid).await.unwrap_err();
+
+    assert!(error.contains("下载引擎不可用"));
+    assert!(runtime.status().available);
+    assert_eq!(runtime.global_stat().await.unwrap().num_active, 0);
+    assert!(runtime.shutdown(Duration::from_secs(5)).await.child_stopped);
 }
 
 #[tokio::test]

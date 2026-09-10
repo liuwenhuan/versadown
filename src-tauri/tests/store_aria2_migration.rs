@@ -104,7 +104,54 @@ fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        3
+        4
+    );
+    drop(connection);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn version_three_database_backfills_creation_time_from_the_existing_timestamp() {
+    let path = temporary_database_path();
+    let id = Uuid::new_v4();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY NOT NULL, source TEXT NOT NULL, name TEXT NOT NULL,
+                kind TEXT NOT NULL, status TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0,
+                error TEXT, aria_gid TEXT, followed_by_gid TEXT, total_length INTEGER,
+                completed_length INTEGER NOT NULL DEFAULT 0, download_speed INTEGER NOT NULL DEFAULT 0,
+                upload_speed INTEGER NOT NULL DEFAULT 0, connections INTEGER NOT NULL DEFAULT 0,
+                eta_seconds INTEGER, aria_error_code TEXT, updated_at INTEGER NOT NULL DEFAULT 0,
+                selection_confirmed INTEGER NOT NULL DEFAULT 0, metadata_gid TEXT
+             );
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO tasks (id,source,name,kind,status,updated_at)
+             VALUES (?1,'https://example.test/old.zip','old.zip','file','completed',1725000000)",
+            [id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = TaskStore::open_path(&path).unwrap();
+    let task = store.find(id).unwrap();
+    assert_eq!(
+        serde_json::to_value(task).unwrap()["created_at"],
+        1_725_000_000
+    );
+    drop(store);
+
+    let connection = Connection::open(&path).unwrap();
+    assert_eq!(
+        connection
+            .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap(),
+        4
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -148,7 +195,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
         .apply_transfer_snapshot(DownloadTask {
             id: task.id,
             source: task.source,
-            name: task.name,
+            name: "服务器解析的种子标题".to_string(),
             kind: task.kind,
             status: TaskStatus::Downloading,
             progress: 25,
@@ -163,6 +210,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             connections: 3,
             eta_seconds: Some(15),
             aria_error_code: None,
+            created_at: task.created_at,
             updated_at: 1_725_000_000,
         })
         .expect("persist snapshot");
@@ -183,6 +231,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
         .expect("update one file");
 
     let stored = store.find(task.id).expect("read snapshot");
+    assert_eq!(stored.name, "服务器解析的种子标题");
     assert_eq!(stored.status, TaskStatus::Downloading);
     assert_eq!(stored.total_length, Some(1_000));
     assert_eq!(stored.completed_length, 250);

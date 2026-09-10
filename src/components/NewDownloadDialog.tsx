@@ -8,9 +8,10 @@ export interface NewDownloadDialogProps {
   placement?: NewDownloadDialogPlacement;
   onParse(input: string, accessCode?: string): void | Promise<ParseDownloadResult | void>;
   onClose(): void;
+  onOpenTaskList?(): void | Promise<void>;
 }
 
-export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClose }: NewDownloadDialogProps) {
+export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClose, onOpenTaskList }: NewDownloadDialogProps) {
   const [input, setInput] = useState('');
   const [accessCode, setAccessCode] = useState('');
   const [accessCodePrompt, setAccessCodePrompt] = useState<string | null>(null);
@@ -47,6 +48,12 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
       setAccessCodePrompt(null);
       onCloseRef.current();
     }
+  }
+
+  function openTaskList() {
+    if (isSubmitting) return;
+    void onOpenTaskList?.();
+    requestClose();
   }
 
   async function submit(event: FormEvent) {
@@ -97,15 +104,18 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
 
   const dialog = (
     <aside ref={dialogRef} className={placement === 'launcher' ? 'launcher-panel new-download-dialog' : 'new-download-dialog modal'} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapModalFocus}>
-      <div className="launcher-title"><strong>新建下载</strong><button aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={isSubmitting} onClick={requestClose}>×</button></div>
+      <div className="launcher-title"><span>新建下载</span><button aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={isSubmitting} onClick={requestClose}>×</button></div>
       <form onSubmit={submit} aria-busy={isSubmitting}>
-        <label htmlFor="download-input">下载内容</label>
-        <textarea ref={inputRef} id="download-input" value={input} disabled={isSubmitting} onChange={(event) => setInput(event.target.value)} placeholder="粘贴链接、分享地址、文本或网页地址" />
+        {placement === 'modal' && <label htmlFor="download-input">下载内容</label>}
+        <textarea ref={inputRef} id="download-input" aria-label="下载内容" value={input} disabled={isSubmitting} onChange={(event) => setInput(event.target.value)} placeholder="粘贴链接、分享地址、文本或网页地址" />
         {accessCodePrompt && <label htmlFor="share-access-code">访问码<input ref={accessCodeRef} id="share-access-code" type="password" autoComplete="off" value={accessCode} disabled={isSubmitting} onChange={(event) => setAccessCode(event.target.value)} /></label>}
-        <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>
+        {placement === 'modal' && <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>}
         {accessCodePrompt && <p role="status">{accessCodePrompt}</p>}
         {error && <p role="alert">{error}</p>}
-        <button className="primary" type="submit" disabled={isSubmitting}>{isSubmitting ? '正在解析…' : '开始解析下载'}</button>
+        <div className="new-download-actions">
+          {placement === 'launcher' && <button type="button" onClick={openTaskList} disabled={isSubmitting}>打开任务列表</button>}
+          <button className="primary" type="submit" disabled={isSubmitting || !input.trim()}>{isSubmitting ? '正在解析…' : '开始解析下载'}</button>
+        </div>
       </form>
     </aside>
   );

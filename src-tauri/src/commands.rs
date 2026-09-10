@@ -14,8 +14,8 @@ use crate::downloader::load_torrent_base64;
 use crate::{
     cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, DpapiCredentialStore},
     confirm_download, duplicate_state, prepare_download, resolve_magnet_torrent,
-    retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings,
-    DownloadAction, DownloadServiceError, DownloadTask, DuplicateDownloadState, ParseOutcome,
+    retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings, DownloadAction,
+    DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility, ParseOutcome,
     ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
 
@@ -188,7 +188,9 @@ pub(crate) fn download_submission_options_for_directory(
     })
 }
 
-pub(crate) fn download_submission_options(state: &AppState) -> Result<UriSubmissionOptions, String> {
+pub(crate) fn download_submission_options(
+    state: &AppState,
+) -> Result<UriSubmissionOptions, String> {
     download_submission_options_for_directory(state, None)
 }
 
@@ -281,13 +283,20 @@ pub async fn parse_download(
             .map_err(|_| "设置锁不可用".to_string())?
             .magnet_metadata
             .clone();
-        if let Ok(Some(torrent)) =
+        if let Ok(Some(resolved)) =
             resolve_magnet_torrent(&metadata_settings, &outcome.task.source).await
         {
+            if let Some(title) = resolved.title {
+                outcome.task.name = title;
+                outcome.task = state
+                    .store
+                    .apply_transfer_snapshot(outcome.task)
+                    .map_err(|error| error.to_string())?;
+            }
             outcome.task = service
                 .submit_torrent(
                     outcome.task.id,
-                    torrent,
+                    resolved.torrent,
                     vec![],
                     options
                         .into_aria2_options()
@@ -419,7 +428,8 @@ pub async fn confirm_download_command(
         .map_err(|error| error.to_string())?;
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
-    let options = download_submission_options_for_directory(&state, destination_directory.as_deref())?;
+    let options =
+        download_submission_options_for_directory(&state, destination_directory.as_deref())?;
     if current.aria_gid.is_some() {
         let indices = selected_ids
             .into_iter()
@@ -451,30 +461,49 @@ fn unbound_torrent_confirmation_error(task: &DownloadTask) -> Option<&'static st
 pub fn list_tasks(
     state: State<'_, AppState>,
     app: AppHandle,
+    scope: Option<String>,
 ) -> Result<Vec<DownloadTaskPayload>, String> {
     let cloud = app.try_state::<Arc<crate::cloud::commands::CloudState>>();
-    list_tasks_with_cleanup_projection(&state.store, cloud.as_ref().map(|cloud| &cloud.share_plans))?
-        .into_iter()
-        .map(|task| {
-            task_payload_with_cleanup(
-                &state.store,
-                cloud.as_ref().map(|cloud| &cloud.share_plans),
-                task,
-            )
-        })
-        .collect()
+    list_tasks_with_cleanup_projection_for_scope(
+        &state.store,
+        cloud.as_ref().map(|cloud| &cloud.share_plans),
+        scope.as_deref(),
+    )?
+    .into_iter()
+    .map(|task| {
+        task_payload_with_cleanup(
+            &state.store,
+            cloud.as_ref().map(|cloud| &cloud.share_plans),
+            task,
+        )
+    })
+    .collect()
 }
 
-pub(crate) fn list_tasks_with_cleanup_projection(
+fn list_tasks_with_cleanup_projection_for_scope(
     store: &TaskStore,
     plans: Option<&crate::cloud::share::CloudSharePlanStore>,
+    scope: Option<&str>,
 ) -> Result<Vec<DownloadTask>, String> {
     // Listing remains available if credentials are unavailable. The projection
     // only reads the journal; even an Attempted record never triggers deletion.
     if let Some(plans) = plans {
         let _ = plans.restore_cleanup_pending_messages(store);
     }
-    store.list().map_err(|error| error.to_string())
+    match scope {
+        None | Some("all") => store.list(),
+        Some("active") => store.list_active(),
+        Some("terminal") => store.list_terminal(),
+        Some(_) => return Err("任务列表范围无效".to_string()),
+    }
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn list_tasks_with_cleanup_projection(
+    store: &TaskStore,
+    plans: Option<&crate::cloud::share::CloudSharePlanStore>,
+) -> Result<Vec<DownloadTask>, String> {
+    list_tasks_with_cleanup_projection_for_scope(store, plans, None)
 }
 
 #[tauri::command]
@@ -670,12 +699,26 @@ async fn resubmit_task(
             .map_err(|_| "设置锁不可用".to_string())?
             .magnet_metadata
             .clone();
-        let torrent = resolve_magnet_torrent(&metadata_settings, &task.source)
+        let resolved = resolve_magnet_torrent(&metadata_settings, &task.source)
             .await
             .map_err(|error| format!("无法重新解析磁链：{error}"))?
             .ok_or_else(|| "磁链解析服务未返回种子文件，无法安全覆盖下载".to_string())?;
+        if let Some(title) = resolved.title {
+            let mut titled_task = task.clone();
+            titled_task.name = title;
+            state
+                .store
+                .apply_transfer_snapshot(titled_task)
+                .map_err(|error| error.to_string())?;
+        }
         return service
-            .resubmit_torrent_with_options(task.id, torrent, vec![], selected_indices, options)
+            .resubmit_torrent_with_options(
+                task.id,
+                resolved.torrent,
+                vec![],
+                selected_indices,
+                options,
+            )
             .await
             .map_err(|error| error.to_string());
     }
@@ -776,14 +819,16 @@ pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) 
 }
 
 const VIDEO_EXTENSIONS: &[&str] = &[
-    "3gp", "asf", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts",
-    "ts", "webm", "wmv",
+    "3gp", "asf", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts", "ts",
+    "webm", "wmv",
 ];
 
 fn is_video_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()))
+        .is_some_and(|extension| {
+            VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        })
 }
 
 fn task_video_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, String> {
@@ -989,6 +1034,34 @@ pub async fn select_files(
 }
 
 #[tauri::command]
+pub async fn cancel_download_file(
+    task_id: String,
+    file_index: u32,
+    state: State<'_, AppState>,
+) -> Result<DownloadTaskPayload, String> {
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| error.to_string())?;
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    if !state
+        .store
+        .files(id)
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|file| file.index == file_index)
+    {
+        return Err("文件索引无效".to_string());
+    }
+    let task = service
+        .set_file_selected(id, file_index, false)
+        .await
+        .map_err(|error| error.to_string())?;
+    task_payload(&state.store, task)
+}
+
+#[tauri::command]
 pub fn get_download_engine_state(state: State<'_, AppState>) -> crate::EngineAvailability {
     state.runtime.status()
 }
@@ -1028,8 +1101,29 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
 }
 
 fn persist_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
-    let json = serde_json::to_vec_pretty(settings).map_err(|error| format!("无法保存设置：{error}"))?;
+    let json =
+        serde_json::to_vec_pretty(settings).map_err(|error| format!("无法保存设置：{error}"))?;
     fs::write(path, json).map_err(|error| format!("无法保存设置：{error}"))
+}
+
+pub fn update_launcher_visibility_from_native_menu(
+    app: &AppHandle,
+    visibility: LauncherVisibility,
+) -> Result<(), String> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "应用设置尚未初始化".to_string())?;
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())?;
+    if settings.launcher_visibility == visibility {
+        return Ok(());
+    }
+    settings.launcher_visibility = visibility;
+    persist_settings(&state.settings_path, &settings)?;
+    let _ = app.emit_to("launcher", "launcher-visibility-updated", visibility);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1070,7 +1164,10 @@ pub fn update_ai_settings(
         model: settings.model,
         api_key_configured: configured,
     };
-    let mut app_settings = state.settings.lock().map_err(|_| "设置锁不可用".to_string())?;
+    let mut app_settings = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())?;
     app_settings.ai = saved.clone();
     persist_settings(&state.settings_path, &app_settings)?;
     Ok(saved)
@@ -1111,7 +1208,7 @@ pub fn update_debug_reports(enabled: bool, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
-pub fn update_settings(
+pub async fn update_settings(
     mut settings: AppSettings,
     state: State<'_, AppState>,
     app: AppHandle,
@@ -1126,12 +1223,30 @@ pub fn update_settings(
     settings.proxy.host = settings.proxy.host.trim().to_string();
     settings.proxy.username = settings.proxy.username.trim().to_string();
     proxy_url(&settings.proxy)?;
+    settings.aria2.rpc_token = settings.aria2.rpc_token.trim().to_string();
+    settings.aria2.validate()?;
 
-    let mut current = state.settings.lock().map_err(|_| "设置锁不可用".to_string())?;
-    settings.ai = current.ai.clone();
+    let previous = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())?
+        .clone();
+    settings.ai = previous.ai;
+    if settings.aria2 != previous.aria2 {
+        state
+            .runtime
+            .reconfigure_aria2_settings(settings.aria2.clone())
+            .await?;
+    }
     persist_settings(&state.settings_path, &settings)?;
-    *state.debug_reports.lock().map_err(|_| "设置锁不可用".to_string())? = settings.debug_reports;
-    *current = settings.clone();
+    *state
+        .debug_reports
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())? = settings.debug_reports;
+    *state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())? = settings.clone();
     let _ = app.emit_to(
         "launcher",
         "launcher-visibility-updated",

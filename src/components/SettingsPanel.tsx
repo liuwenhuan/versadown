@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState, useSyncExternalStore } from 'react';
-import { AiSettings, AiSettingsInput, AppSettings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
+import { AiSettings, AiSettingsInput, AppSettings, Aria2Settings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
 import { getThemeMode, setThemeMode, subscribeTheme, ThemeMode } from '../lib/theme';
 
 type SettingsTab = 'display' | 'network' | 'advanced';
@@ -12,7 +12,7 @@ const tabs: ReadonlyArray<{ id: SettingsTab; label: string }> = [
 
 interface SettingsPanelProps {
   initial: AppSettings;
-  onChange(settings: AppSettings): void;
+  onChange(settings: AppSettings): void | Promise<void>;
   browseDirectory?(currentDirectory: string): Promise<string | null>;
   saveAiSettings?(settings: AiSettingsInput): Promise<AiSettings>;
   loadAiModels?(settings: AiSettingsInput): Promise<string[]>;
@@ -20,6 +20,7 @@ interface SettingsPanelProps {
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
 const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
+const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 };
 const themeLabels: Record<ThemeMode, string> = { auto: '跟随系统', light: '浅色', dark: '深色' };
 
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels }: SettingsPanelProps) {
@@ -29,8 +30,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [proxy, setProxy] = useState(initial.proxy);
   const [ai, setAi] = useState<AiSettings>(initial.ai ?? disabledAiSettings);
   const [magnetMetadata, setMagnetMetadata] = useState<MagnetMetadataSettings>(initial.magnetMetadata ?? defaultMagnetMetadataSettings);
+  const [aria2, setAria2] = useState<Aria2Settings>(initial.aria2 ?? defaultAria2Settings);
   const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
   const [magnetMetadataSaved, setMagnetMetadataSaved] = useState(false);
+  const [aria2Status, setAria2Status] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
@@ -39,7 +42,15 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); }, [initial]);
+  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); }, [initial]);
+
+  function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
+    return { debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, deleteTransferredShareFilesAfterDownload, ...overrides };
+  }
+
+  function saveWithoutStatus(settings: AppSettings) {
+    void Promise.resolve(onChange(settings)).catch(() => undefined);
+  }
 
   const currentAiInput = (): AiSettingsInput => ({
     enabled: ai.enabled,
@@ -50,7 +61,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   function updateDebugReports(enabled: boolean) {
     setDebugReports(enabled);
-    onChange({ debugReports: enabled, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
+    saveWithoutStatus(currentSettings({ debugReports: enabled }));
   }
 
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
@@ -60,7 +71,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   function saveProxy(event: FormEvent) {
     event.preventDefault();
-    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() }, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
+    saveWithoutStatus(currentSettings({ proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() } }));
     setSaved(true);
   }
 
@@ -68,17 +79,12 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     event.preventDefault();
     const normalized = downloadDirectory.trim();
     setDownloadDirectory(normalized);
-    onChange({ debugReports, downloadDirectory: normalized, launcherVisibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
+    saveWithoutStatus(currentSettings({ downloadDirectory: normalized }));
   }
 
   function updateLauncherVisibility(visibility: LauncherVisibility) {
     setLauncherVisibility(visibility);
-    onChange({ debugReports, downloadDirectory, launcherVisibility: visibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload });
-  }
-
-  function updateTransferredShareCleanup(enabled: boolean) {
-    setDeleteTransferredShareFilesAfterDownload(enabled);
-    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, deleteTransferredShareFilesAfterDownload: enabled });
+    saveWithoutStatus(currentSettings({ launcherVisibility: visibility }));
   }
 
   function updateThemeMode(mode: ThemeMode) {
@@ -115,12 +121,35 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     }
   }
 
+  function updateTransferredShareCleanup(enabled: boolean) {
+    setDeleteTransferredShareFilesAfterDownload(enabled);
+    saveWithoutStatus(currentSettings({ deleteTransferredShareFilesAfterDownload: enabled }));
+  }
+
   function saveMagnetMetadata(event: FormEvent) {
     event.preventDefault();
     const savedMetadata = { ...magnetMetadata, baseUrl: magnetMetadata.baseUrl.trim() };
     setMagnetMetadata(savedMetadata);
-    onChange({ debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata: savedMetadata, deleteTransferredShareFilesAfterDownload });
+    saveWithoutStatus(currentSettings({ magnetMetadata: savedMetadata }));
     setMagnetMetadataSaved(true);
+  }
+
+  function updateAria2<Key extends keyof Aria2Settings>(key: Key, value: Aria2Settings[Key]) {
+    setAria2Status(null);
+    setAria2((current) => ({ ...current, [key]: value }));
+  }
+
+  async function saveAria2(event: FormEvent) {
+    event.preventDefault();
+    const savedAria2 = { ...aria2, rpcToken: aria2.rpcToken.trim() };
+    setAria2(savedAria2);
+    setAria2Status(null);
+    try {
+      await onChange(currentSettings({ aria2: savedAria2 }));
+      setAria2Status({ kind: 'success', message: '已保存并立即应用' });
+    } catch (error) {
+      setAria2Status({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async function browseForDownloadDirectory() {
@@ -143,7 +172,8 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         <label className="setting-row"><span><b>悬浮球显示</b><small>“关闭显示”后仍可在这里重新开启。</small></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
         <label className="setting-row"><span><b>下载完成后自动删除转存文件</b><small>仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。</small></span><input aria-label="下载完成后自动删除转存文件" type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
       </>}
-      {activeTab === 'network' && <form className="proxy-settings" onSubmit={saveProxy}>
+      {activeTab === 'network' && <>
+      <form className="proxy-settings" onSubmit={saveProxy}>
         <div className="setting-row"><span><b>下载代理服务器</b><small>启用后，后续新建任务将携带代理参数启动 aria2。</small></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
         <fieldset disabled={!proxy.enabled}>
           <label><span>协议</span><select aria-label="代理协议" value={proxy.protocol} onChange={(event) => updateProxy('protocol', event.target.value as ProxyProtocol)}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
@@ -153,7 +183,19 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           <label><span>密码（可选）</span><input aria-label="代理密码" type="password" value={proxy.password} autoComplete="new-password" onChange={(event) => updateProxy('password', event.target.value)} /></label>
         </fieldset>
         <div className="settings-actions"><button className="primary" type="submit">保存代理设置</button>{saved && <span role="status">已保存，后续新任务生效</span>}</div>
-      </form>}
+      </form>
+      <form className="proxy-settings aria2-settings" onSubmit={saveAria2}>
+        <div className="setting-row"><span><b>aria2 下载引擎</b><small>端口与 Token 保存后会立即重启本机 aria2 并恢复任务；并行和分享规则同时生效。</small></span></div>
+        <fieldset>
+          <label><span>RPC 端口</span><input aria-label="aria2 RPC 端口" required type="number" min="1024" max="65535" value={aria2.rpcPort} onChange={(event) => updateAria2('rpcPort', Number(event.target.value))} /></label>
+          <label className="aria2-token"><span>RPC Token</span><input aria-label="aria2 RPC Token" required type="password" autoComplete="new-password" value={aria2.rpcToken} onChange={(event) => updateAria2('rpcToken', event.target.value)} /></label>
+          <label><span>最大并行任务数</span><input aria-label="最大并行任务数" required type="number" min="1" max="64" value={aria2.maxConcurrentDownloads} onChange={(event) => updateAria2('maxConcurrentDownloads', Number(event.target.value))} /></label>
+          <label><span>单任务并发连接数</span><input aria-label="单任务并发连接数" required type="number" min="1" max="16" value={aria2.maxConnectionsPerServer} onChange={(event) => updateAria2('maxConnectionsPerServer', Number(event.target.value))} /></label>
+          <label><span>BT 分享率</span><input aria-label="BT 分享率" required type="number" min="0.1" max="1000" step="0.1" value={aria2.btSeedRatio} onChange={(event) => updateAria2('btSeedRatio', Number(event.target.value))} /></label>
+        </fieldset>
+        <div className="settings-actions"><button className="primary" type="submit">保存 aria2 设置</button>{aria2Status && <span role="status" className={aria2Status.kind}>{aria2Status.message}</span>}</div>
+      </form>
+      </>}
       {activeTab === 'advanced' && <>
         <form className="ai-settings" onSubmit={saveMagnetMetadata}>
           <label className="setting-row"><span><b>磁链元数据服务</b><small>磁链优先经此服务获取种子和文件清单；服务不可用时自动回退到本地 aria2 DHT。</small></span><input aria-label="启用磁链元数据服务" type="checkbox" checked={magnetMetadata.enabled} onChange={(event) => setMagnetMetadata((current) => ({ ...current, enabled: event.target.checked }))} /></label>

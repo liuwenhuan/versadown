@@ -20,7 +20,11 @@ pub fn normalize_base_url(value: &str) -> Result<String, String> {
     if !matches!(url.scheme(), "https" | "http") || url.host_str().is_none() {
         return Err("AI 服务地址必须是 HTTP 或 HTTPS 地址".into());
     }
-    if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
         return Err("AI 服务地址不能包含账号、查询参数或片段".into());
     }
     let path = url.path().trim_end_matches('/').to_string();
@@ -93,7 +97,10 @@ mod tests {
             Json, Router,
         };
         use serde_json::json;
-        use std::{future::IntoFuture, sync::{Arc, Mutex}};
+        use std::{
+            future::IntoFuture,
+            sync::{Arc, Mutex},
+        };
 
         async fn models(
             State(authorization): State<Arc<Mutex<Option<String>>>>,
@@ -103,7 +110,9 @@ mod tests {
                 .get("authorization")
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
-            Ok(Json(json!({"data":[{"id":"gpt-5-mini"},{"id":"gpt-4.1-mini"},{"id":"gpt-5-mini"}]})))
+            Ok(Json(
+                json!({"data":[{"id":"gpt-5-mini"},{"id":"gpt-4.1-mini"},{"id":"gpt-5-mini"}]}),
+            ))
         }
 
         let authorization = Arc::new(Mutex::new(None));
@@ -119,7 +128,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(models, vec!["gpt-4.1-mini", "gpt-5-mini"]);
-        assert_eq!(authorization.lock().unwrap().as_deref(), Some("Bearer local-test-key"));
+        assert_eq!(
+            authorization.lock().unwrap().as_deref(),
+            Some("Bearer local-test-key")
+        );
         server.abort();
     }
 }

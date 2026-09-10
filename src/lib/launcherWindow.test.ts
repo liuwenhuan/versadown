@@ -7,6 +7,9 @@ const native = vi.hoisted(() => {
     invoke: vi.fn(),
     emitTo: vi.fn(async () => { calls.push('emit'); }),
     getByLabel: vi.fn(),
+    currentMonitor: vi.fn(),
+    launcherPosition: vi.fn(),
+    launcherSize: vi.fn(),
     mainWindow: {
       unminimize: vi.fn(async () => { calls.push('unminimize'); }),
       show: vi.fn(async () => { calls.push('show'); }),
@@ -19,8 +22,8 @@ vi.mock('./api', () => ({ isTauriRuntime: () => true }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ emitTo: native.emitTo }));
 vi.mock('@tauri-apps/api/window', () => ({
-  currentMonitor: vi.fn(),
-  getCurrentWindow: vi.fn(() => ({ label: 'launcher' })),
+  currentMonitor: native.currentMonitor,
+  getCurrentWindow: vi.fn(() => ({ label: 'launcher', outerPosition: native.launcherPosition, outerSize: native.launcherSize })),
   LogicalSize: class LogicalSize {
     constructor(public width: number, public height: number) {}
   },
@@ -36,6 +39,9 @@ beforeEach(() => {
   native.calls.length = 0;
   vi.clearAllMocks();
   native.getByLabel.mockResolvedValue(native.mainWindow);
+  native.currentMonitor.mockReset();
+  native.launcherPosition.mockReset();
+  native.launcherSize.mockReset();
 });
 
 it('anchors the complete native window inside the monitor work area even when Windows enforces a wider size', () => {
@@ -64,9 +70,33 @@ it('resizes around the launcher bottom-right corner and clamps it to the work ar
   expect(resized).toEqual({ x: 414, y: 373 });
 });
 
-it('reserves transparent padding around a live speed indicator for its shadow', () => {
-  expect(launcherWindow.launcherCompactSize(false)).toEqual({ width: 48, height: 48 });
-  expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 236, height: 90 });
+it('uses the hexagon height as the complete live-speed viewport without a shadow margin', () => {
+  expect(launcherWindow.launcherCompactSize(false)).toEqual({ width: 64, height: 64 });
+  expect(launcherWindow.launcherCompactSize(true)).toEqual({ width: 146, height: 64 });
+});
+
+it('requests the clipped native live shape instead of a transparent rectangle', async () => {
+  native.launcherPosition.mockResolvedValueOnce({ x: 1000, y: 800 });
+  native.launcherSize.mockResolvedValueOnce({ width: 64, height: 64 });
+  native.currentMonitor.mockResolvedValueOnce({
+    scaleFactor: 1,
+    workArea: { position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } }
+  });
+
+  await launcherWindow.setLauncherLiveSpeedVisible(true);
+
+  expect(native.invoke).toHaveBeenCalledWith('set_launcher_bounds', {
+    x: 918,
+    y: 800,
+    width: 146,
+    height: 64,
+    compact: false,
+    live: true
+  });
+});
+
+it('reserves vertical space for the quick-add panel above the persistent launcher', () => {
+  expect(launcherWindow.launcherDimensions.expanded).toEqual({ width: 410, height: 364 });
 });
 
 it('reserves a shadow-safe viewport for the launcher context menu', () => {
@@ -77,6 +107,14 @@ it('uses the native visibility command so background smoke runs cannot surface a
   await launcherWindow.setLauncherWindowVisible(false);
 
   expect(native.invoke).toHaveBeenCalledWith('set_launcher_window_visible', { visible: false });
+});
+
+it('reveals the main task list without forwarding a parse request', async () => {
+  await launcherWindow.openLauncherManager();
+
+  expect(native.getByLabel).toHaveBeenCalledWith('main');
+  expect(native.calls).toEqual(['unminimize', 'show', 'focus']);
+  expect(native.emitTo).not.toHaveBeenCalled();
 });
 
 it('restores and reveals the main window before forwarding launcher input', async () => {

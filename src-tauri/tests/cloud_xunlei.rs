@@ -324,10 +324,8 @@ fn modern_web_supported_profile_replaces_stale_signature_for_a_new_action() {
     session.web_security.action = "GET:/drive/v1/files".into();
     session.web_security.timestamp = "1".into();
     session.web_security.captcha_sign = "stale-captured-signature".into();
-    let http = RecordingHttp::sequence(&[
-        r#"{"captcha_token":"write-token","expires_in":300}"#,
-        "{}",
-    ]);
+    let http =
+        RecordingHttp::sequence(&[r#"{"captcha_token":"write-token","expires_in":300}"#, "{}"]);
     let client = XunleiClient::new(session, &http);
     client.rename("file-1", "renamed").unwrap();
     let requests = http.requests();
@@ -826,19 +824,25 @@ fn modern_xunlei_download_waits_for_a_complete_files_empty_link() {
         r#"{"id":"f1","name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":"https://cdn.example/ready"}"#,
     ]);
     let result = XunleiClient::new(modern_session(), &http).download("f1");
-    assert_eq!(result.unwrap(), ("https://cdn.example/ready".into(), "archive.zip".into()));
+    assert_eq!(
+        result.unwrap(),
+        ("https://cdn.example/ready".into(), "archive.zip".into())
+    );
     assert_eq!(http.requests().len(), 2);
 }
 
 #[test]
 fn modern_xunlei_download_waits_only_for_known_processing_phases() {
     for phase in ["PHASE_TYPE_PENDING", "PHASE_TYPE_RUNNING"] {
-        let waiting = serde_json::json!({"id":"f1", "name":"archive.zip", "phase":phase}).to_string();
+        let waiting =
+            serde_json::json!({"id":"f1", "name":"archive.zip", "phase":phase}).to_string();
         let http = RecordingHttp::sequence(&[
             &waiting,
             r#"{"id":"f1","name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":"https://cdn.example/ready"}"#,
         ]);
-        assert!(XunleiClient::new(modern_session(), &http).download("f1").is_ok());
+        assert!(XunleiClient::new(modern_session(), &http)
+            .download("f1")
+            .is_ok());
         assert_eq!(http.requests().len(), 2);
     }
 }
@@ -853,13 +857,23 @@ fn modern_xunlei_download_does_not_retry_invalid_metadata_or_links() {
         r#"{"name":"archive.zip","phase":"unexpected","web_content_link":""}"#,
     ] {
         let http = RecordingHttp::sequence(&[response]);
-        assert!(matches!(XunleiClient::new(modern_session(), &http).download("f1"), Err(QuarkError::InvalidResponse)));
+        assert!(matches!(
+            XunleiClient::new(modern_session(), &http).download("f1"),
+            Err(QuarkError::InvalidResponse)
+        ));
         assert_eq!(http.requests().len(), 1);
     }
     let native = RecordingHttp::sequence(&[
         r#"{"name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":""}"#,
     ]);
-    assert!(matches!(XunleiClient::new(XunleiSession::with_access("access", "refresh", profile()), &native).download("f1"), Err(QuarkError::InvalidResponse)));
+    assert!(matches!(
+        XunleiClient::new(
+            XunleiSession::with_access("access", "refresh", profile()),
+            &native
+        )
+        .download("f1"),
+        Err(QuarkError::InvalidResponse)
+    ));
     assert_eq!(native.requests().len(), 1);
 }
 
@@ -868,7 +882,9 @@ fn modern_xunlei_download_ready_link_uses_one_request_and_stops_on_http_errors()
     let ready = RecordingHttp::sequence(&[
         r#"{"name":"archive.zip","phase":"PHASE_TYPE_COMPLETE","web_content_link":"https://cdn.example/ready"}"#,
     ]);
-    assert!(XunleiClient::new(modern_session(), &ready).download("f1").is_ok());
+    assert!(XunleiClient::new(modern_session(), &ready)
+        .download("f1")
+        .is_ok());
     assert_eq!(ready.requests().len(), 1);
 
     let http = RecordingHttp::sequence(&[
@@ -876,7 +892,10 @@ fn modern_xunlei_download_ready_link_uses_one_request_and_stops_on_http_errors()
         "{}",
     ]);
     http.responses.lock().unwrap()[0].status = 500;
-    assert!(matches!(XunleiClient::new(modern_session(), &http).download("f1"), Err(QuarkError::Provider(_))));
+    assert!(matches!(
+        XunleiClient::new(modern_session(), &http).download("f1"),
+        Err(QuarkError::Provider(_))
+    ));
     assert_eq!(http.requests().len(), 2);
 }
 

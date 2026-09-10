@@ -25,6 +25,62 @@ impl Default for ProxySettings {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Aria2Settings {
+    pub rpc_port: u16,
+    pub rpc_token: String,
+    pub max_concurrent_downloads: u16,
+    pub max_connections_per_server: u8,
+    pub bt_seed_ratio: f64,
+}
+
+impl Default for Aria2Settings {
+    fn default() -> Self {
+        Self {
+            rpc_port: 6800,
+            rpc_token: String::new(),
+            max_concurrent_downloads: 5,
+            max_connections_per_server: 8,
+            bt_seed_ratio: 1.5,
+        }
+    }
+}
+
+impl Aria2Settings {
+    pub fn ensure_rpc_token(&mut self) {
+        self.rpc_token = self.rpc_token.trim().to_string();
+        if self.rpc_token.is_empty() {
+            self.rpc_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1024..=65535).contains(&self.rpc_port) {
+            return Err("aria2 RPC 端口必须在 1024 到 65535 之间".into());
+        }
+        if self.rpc_token.is_empty()
+            || self.rpc_token.len() > 256
+            || self
+                .rpc_token
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err("aria2 RPC Token 不能为空，且不能包含空白或控制字符".into());
+        }
+        if !(1..=64).contains(&self.max_concurrent_downloads) {
+            return Err("最大并行任务数必须在 1 到 64 之间".into());
+        }
+        if !(1..=16).contains(&self.max_connections_per_server) {
+            return Err("单任务并发连接数必须在 1 到 16 之间".into());
+        }
+        if !self.bt_seed_ratio.is_finite() || !(0.1..=1000.0).contains(&self.bt_seed_ratio) {
+            return Err("BT 分享率必须在 0.1 到 1000 之间".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AiSettings {
@@ -75,6 +131,7 @@ pub struct AppSettings {
     pub download_directory: String,
     pub launcher_visibility: LauncherVisibility,
     pub proxy: ProxySettings,
+    pub aria2: Aria2Settings,
     pub ai: AiSettings,
     pub magnet_metadata: MagnetMetadataSettings,
     #[serde(default = "default_delete_transferred_share_files_after_download")]
@@ -92,6 +149,7 @@ impl Default for AppSettings {
             download_directory: String::new(),
             launcher_visibility: LauncherVisibility::default(),
             proxy: ProxySettings::default(),
+            aria2: Aria2Settings::default(),
             ai: AiSettings::default(),
             magnet_metadata: MagnetMetadataSettings::default(),
             delete_transferred_share_files_after_download: true,
@@ -233,6 +291,8 @@ pub struct DownloadTask {
     pub eta_seconds: Option<u64>,
     #[serde(default)]
     pub aria_error_code: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
 }

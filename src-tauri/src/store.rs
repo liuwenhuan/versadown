@@ -58,6 +58,7 @@ impl TaskStore {
     }
 
     pub fn create(&self, new_task: NewTask) -> Result<DownloadTask, StoreError> {
+        let created_at = current_timestamp();
         let task = DownloadTask {
             id: Uuid::new_v4(),
             source: new_task.source,
@@ -76,11 +77,12 @@ impl TaskStore {
             connections: 0,
             eta_seconds: None,
             aria_error_code: None,
-            updated_at: 0,
+            created_at,
+            updated_at: created_at,
         };
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.updated_at])?;
+        connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.created_at, task.updated_at])?;
         Ok(task)
     }
 
@@ -110,8 +112,23 @@ impl TaskStore {
     }
 
     pub fn list(&self) -> Result<Vec<DownloadTask>, StoreError> {
+        self.list_matching("")
+    }
+
+    pub fn list_active(&self) -> Result<Vec<DownloadTask>, StoreError> {
+        self.list_matching(
+            "WHERE status NOT IN ('completed', 'failed', 'cancelled', 'recycled')",
+        )
+    }
+
+    pub fn list_terminal(&self) -> Result<Vec<DownloadTask>, StoreError> {
+        self.list_matching("WHERE status IN ('completed', 'failed', 'cancelled', 'recycled')")
+    }
+
+    fn list_matching(&self, filter: &str) -> Result<Vec<DownloadTask>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let mut statement = connection.prepare(&format!("{TASK_SELECT} ORDER BY rowid DESC"))?;
+        let mut statement =
+            connection.prepare(&format!("{TASK_SELECT} {filter} ORDER BY rowid DESC"))?;
         let rows = statement.query_map([], task_from_row)?;
         let tasks = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(tasks)
@@ -345,11 +362,11 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         let changed = transaction.execute(
-            "UPDATE tasks SET status = ?1, progress = ?2, error = ?3, aria_gid = ?4, followed_by_gid = ?5,
-             total_length = ?6, completed_length = ?7, download_speed = ?8, upload_speed = ?9,
-             connections = ?10, eta_seconds = ?11, aria_error_code = ?12, updated_at = ?13 WHERE id = ?14",
+            "UPDATE tasks SET name = ?1, status = ?2, progress = ?3, error = ?4, aria_gid = ?5, followed_by_gid = ?6,
+             total_length = ?7, completed_length = ?8, download_speed = ?9, upload_speed = ?10,
+             connections = ?11, eta_seconds = ?12, aria_error_code = ?13, updated_at = ?14 WHERE id = ?15",
             params![
-                snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.aria_gid,
+                snapshot.name, snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.aria_gid,
                 snapshot.followed_by_gid, snapshot.total_length.map(|value| sqlite_i64("total_length", value)).transpose()?,
                 sqlite_i64("completed_length", snapshot.completed_length)?, sqlite_i64("download_speed", snapshot.download_speed)?,
                 sqlite_i64("upload_speed", snapshot.upload_speed)?, snapshot.connections,
@@ -429,11 +446,11 @@ impl TaskStore {
     }
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, metadata_gid FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, metadata_gid, created_at FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 3 {
+    if version >= 4 {
         return Ok(());
     }
 
@@ -451,6 +468,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
         ("selection_confirmed", "INTEGER NOT NULL DEFAULT 0"),
         ("metadata_gid", "TEXT"),
+        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !column_exists(&transaction, name)? {
             transaction.execute_batch(&format!(
@@ -471,7 +489,8 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             PRIMARY KEY(task_id, file_index),
             FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
          );
-         PRAGMA user_version = 3;",
+         UPDATE tasks SET created_at = updated_at WHERE created_at = 0;
+         PRAGMA user_version = 4;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -573,6 +592,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         aria_error_code: row.get(15)?,
         updated_at: row.get(16)?,
         metadata_gid: row.get(17)?,
+        created_at: row.get(18)?,
     })
 }
 

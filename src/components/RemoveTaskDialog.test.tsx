@@ -13,3 +13,27 @@ it('asks whether downloaded files should be deleted before permanent removal', a
   await user.click(screen.getByRole('button', { name: '彻底删除' }));
   expect(onConfirm).toHaveBeenCalledWith(true);
 });
+
+it('restores the last checked and unchecked delete-files preference', async () => {
+  localStorage.clear();
+  const user = userEvent.setup();
+  try {
+    const first = render(<RemoveTaskDialog taskNames={['first.iso']} onConfirm={() => {}} onClose={() => {}} />);
+    const firstCheckbox = screen.getByRole('checkbox', { name: '同时删除下载文件' });
+    expect(firstCheckbox).not.toBeChecked();
+    await user.click(firstCheckbox);
+    expect(firstCheckbox).toBeChecked();
+    first.unmount();
+
+    const second = render(<RemoveTaskDialog taskNames={['second.iso']} onConfirm={() => {}} onClose={() => {}} />);
+    const secondCheckbox = screen.getByRole('checkbox', { name: '同时删除下载文件' });
+    expect(secondCheckbox).toBeChecked();
+    await user.click(secondCheckbox);
+    second.unmount();
+
+    render(<RemoveTaskDialog taskNames={['third.iso']} onConfirm={() => {}} onClose={() => {}} />);
+    expect(screen.getByRole('checkbox', { name: '同时删除下载文件' })).not.toBeChecked();
+  } finally {
+    localStorage.clear();
+  }
+});

@@ -5,9 +5,9 @@ import mintWhiteIcon from '../assets/launcher/mint_white_128.png';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 
 interface FloatingLauncherProps {
-  activeCount: number;
   liveSpeed?: { label: string; value: string };
   onParse(input: string): void | Promise<void>;
+  onOpenTaskList?(): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
   onDragStart?(): void;
   onContextMenu?(): void;
@@ -15,7 +15,7 @@ interface FloatingLauncherProps {
 
 const dragThreshold = 5;
 
-export function FloatingLauncher({ activeCount, liveSpeed, onParse, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ liveSpeed, onParse, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
   const [expanded, setExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
@@ -46,11 +46,11 @@ export function FloatingLauncher({ activeCount, liveSpeed, onParse, onExpandedCh
       suppressClick.current = false;
       return;
     }
-    setLauncherExpanded(true);
+    setLauncherExpanded(!expanded);
   }
 
-  if (!expanded) {
-    return (
+  return (
+    <>
       <div
         className="launcher-interaction-target"
         onMouseDown={beginPointer}
@@ -63,14 +63,12 @@ export function FloatingLauncher({ activeCount, liveSpeed, onParse, onExpandedCh
           onContextMenu?.();
         }}
       >
-        <button className="launcher-trigger" data-size="48" data-icon-variant={resolvedTheme} aria-label="打开下载输入">
+        <button className="launcher-trigger" data-size="64" data-icon-variant={resolvedTheme} aria-label="打开下载输入">
           <img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" />
-          {activeCount > 0 && <i>{activeCount}</i>}
         </button>
-        {liveSpeed && <span className="launcher-live-indicator" aria-label={liveSpeed.label}><span>↓</span>{liveSpeed.value}<small>/s</small></span>}
+        {!expanded && liveSpeed && <span className="launcher-live-indicator" data-icon-variant={resolvedTheme} aria-label={liveSpeed.label}>{liveSpeed.value}<small>/s</small></span>}
       </div>
-    );
-  }
-
-  return <NewDownloadDialog open onParse={onParse} onClose={() => setLauncherExpanded(false)} />;
+      {expanded && <NewDownloadDialog open onParse={onParse} onClose={() => setLauncherExpanded(false)} onOpenTaskList={() => { void onOpenTaskList?.(); setLauncherExpanded(false); }} />}
+    </>
+  );
 }

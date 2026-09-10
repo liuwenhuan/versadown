@@ -27,6 +27,7 @@ export interface QueueTask {
   total_length?: number;
   completed_length?: number;
   aria_error_code?: string;
+  created_at?: number;
   updated_at?: number;
   files?: readonly DownloadFile[];
   file_index?: number;
@@ -150,6 +151,14 @@ export interface MagnetMetadataSettings {
   baseUrl: string;
 }
 
+export interface Aria2Settings {
+  rpcPort: number;
+  rpcToken: string;
+  maxConcurrentDownloads: number;
+  maxConnectionsPerServer: number;
+  btSeedRatio: number;
+}
+
 export interface AppSettings {
   debugReports: boolean;
   downloadDirectory: string;
@@ -157,5 +166,6 @@ export interface AppSettings {
   proxy: ProxySettings;
   ai: AiSettings;
   magnetMetadata: MagnetMetadataSettings;
+  aria2: Aria2Settings;
   deleteTransferredShareFilesAfterDownload: boolean;
 }

@@ -1,12 +1,52 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import { vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { DownloadQueue, taskContextMenuPosition } from './DownloadQueue';
 
 const folderTask = {
   id: 'folder-1', name: 'Season 1', kind: 'folder', status: 'downloading', progress: 42,
-  children: [{ id: 'file-1', name: 'episode-01.mkv', kind: 'file', status: 'downloading', progress: 50 }]
+  children: [{ id: 'file-1', name: 'episode-01.mkv', kind: 'file', status: 'downloading', progress: 50, size: '8 MB / 161.2 MB' }]
 } as const;
+
+it('places multi-file controls and child progress in stable aligned columns', async () => {
+  const user = userEvent.setup();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const { container } = render(<DownloadQueue tasks={[folderTask]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+    await user.click(screen.getByRole('button', { name: '展开 Season 1' }));
+
+    const expandSlot = container.querySelector('.expand-slot');
+    const childRow = container.querySelector('.child-row');
+    const childMarker = container.querySelector('.child-name i');
+    const childProgress = container.querySelector('.child-progress');
+    const childProgressValue = container.querySelector('.child-progress-value');
+    const childTransferSize = container.querySelector('.child-transfer-size');
+    const childAction = container.querySelector('.child-actions button');
+
+    expect(getComputedStyle(expandSlot!).gridArea).toBe('auto');
+    expect(getComputedStyle(expandSlot!).left).toBe('0px');
+    expect(getComputedStyle(expandSlot!).width).toBe('22px');
+    expect(getComputedStyle(childRow!).paddingLeft).toBe('21px');
+    expect(getComputedStyle(childRow!).paddingTop).toBe('6px');
+    expect(getComputedStyle(childRow!).paddingBottom).toBe('6px');
+    expect(getComputedStyle(childMarker!).width).toBe('48px');
+    expect(getComputedStyle(childRow!).gridTemplateColumns).toBe('minmax(0,1fr) minmax(140px,220px) 44px 120px 56px');
+    expect(getComputedStyle(childRow!).paddingRight).toBe('24px');
+    expect(getComputedStyle(childProgress!).justifySelf).toBe('end');
+    expect(childProgress!.querySelector('small')).toBeNull();
+    expect(childProgressValue).toHaveTextContent('50%');
+    expect(childTransferSize).toHaveTextContent('8 MB / 161.2 MB');
+    expect(getComputedStyle(childProgressValue!).textAlign).toBe('right');
+    expect(getComputedStyle(childTransferSize!).textAlign).toBe('right');
+    expect(getComputedStyle(childAction!).width).toBe('26px');
+    expect(getComputedStyle(childAction!).height).toBe('26px');
+  } finally {
+    stylesheet.remove();
+  }
+});
 
 it('positions a bottom task menu fully inside the viewport', () => {
   expect(taskContextMenuPosition({
@@ -21,10 +61,84 @@ it('positions a bottom task menu fully inside the viewport', () => {
 
 it('keeps a folder as one row until the user expands it', async () => {
   const user = userEvent.setup();
-  render(<DownloadQueue tasks={[folderTask]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  const onCommand = vi.fn();
+  render(<DownloadQueue tasks={[folderTask]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
   expect(screen.queryByText('episode-01.mkv')).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '展开 Season 1' }));
   expect(screen.getByText('episode-01.mkv')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '暂停 episode-01.mkv' }));
+  expect(onCommand).toHaveBeenCalledWith('file-1', 'pause');
+});
+
+it('does not expose expansion for a single-file torrent task', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'single-file-torrent', name: 'movie.mkv', kind: 'torrent', status: 'downloading', progress: 25,
+      files: [{ index: 1, path: 'D://Downloads/movie.mkv', length: 100, completed_length: 25, selected: true }],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.queryByRole('button', { name: '展开 movie.mkv' })).not.toBeInTheDocument();
+  expect(screen.queryByText('Downloads/movie.mkv')).not.toBeInTheDocument();
+});
+
+it('uses file operations instead of transfer status for expanded multi-file tasks and removes local path noise', async () => {
+  const user = userEvent.setup();
+  const onFileSelection = vi.fn();
+  const onFileCancel = vi.fn();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'torrent-files', name: '演示合集', kind: 'torrent', status: 'downloading', progress: 25,
+      files: [
+        { index: 1, path: 'D://演示合集/episode-01.mkv', length: 1024 * 1024 * 1024, completed_length: 1536 * 1024, selected: true },
+        { index: 2, path: 'D://演示合集/readme.txt', length: 10, completed_length: 0, selected: false },
+      ],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    onFileSelection={onFileSelection}
+    onFileCancel={onFileCancel}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '展开 演示合集' }));
+
+  expect(screen.getByText('episode-01.mkv')).toBeVisible();
+  expect(screen.getByText('readme.txt')).toBeVisible();
+  expect(screen.queryByText('D://演示合集/episode-01.mkv')).not.toBeInTheDocument();
+  expect(screen.queryByText('下载中')).not.toBeInTheDocument();
+  expect(screen.getByTitle('1.5 MB / 1 GB')).toBeVisible();
+  expect(screen.queryByText('1572864 B / 1073741824 B')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '暂停 episode-01.mkv' }));
+  expect(onFileSelection).toHaveBeenCalledWith('torrent-files', 1, false);
+  await user.click(screen.getByRole('button', { name: '取消 episode-01.mkv 下载' }));
+  expect(onFileCancel).toHaveBeenCalledWith('torrent-files', 1);
+  expect(screen.getByRole('button', { name: '继续 readme.txt' })).toBeVisible();
+});
+
+it('shows a continue operation for selected files when their parent task is paused', async () => {
+  const user = userEvent.setup();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'paused-torrent', name: '暂停合集', kind: 'torrent', status: 'paused', progress: 25,
+      files: [
+        { index: 1, path: 'D://暂停合集/episode.mkv', length: 100, completed_length: 25, selected: true },
+        { index: 2, path: 'D://暂停合集/readme.txt', length: 10, completed_length: 0, selected: true },
+      ],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    onFileSelection={() => {}}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '展开 暂停合集' }));
+  expect(screen.getByRole('button', { name: '继续 episode.mkv' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '暂停 episode.mkv' })).not.toBeInTheDocument();
 });
 
 it('keeps magnet metadata on the compact transfer-metrics row', () => {
@@ -218,6 +332,59 @@ it('offers real state-aware commands when an active task is right-clicked', asyn
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
 });
 
+it('keeps modifier-selected tasks together and exposes only batch-safe menu actions', async () => {
+  const onSelect = vi.fn();
+  const onBatchCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      { id: 'running-1', name: 'first.zip', source: 'https://example.com/first.zip', kind: 'file', status: 'downloading', progress: 25 },
+      { id: 'paused-2', name: 'second.zip', source: 'https://example.com/second.zip', kind: 'file', status: 'paused', progress: 50 },
+    ]}
+    selectedTaskId={null}
+    onSelect={onSelect}
+    onCommand={() => {}}
+    onBatchCommand={onBatchCommand}
+  />);
+
+  fireEvent.click(screen.getByText('first.zip'));
+  fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
+
+  const firstRow = screen.getByText('first.zip').closest('.task-row');
+  const secondRow = screen.getByText('second.zip').closest('.task-row');
+  expect(firstRow).toHaveAttribute('aria-selected', 'true');
+  expect(secondRow).toHaveAttribute('aria-selected', 'true');
+
+  fireEvent.contextMenu(screen.getByText('first.zip'), { clientX: 280, clientY: 180 });
+  expect(screen.getByRole('menu', { name: '已选择 2 个任务 任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '开始下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '暂停下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '复制下载链接' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '打开下载目录' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '查看任务详情' })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('menuitem', { name: '复制下载链接' }));
+  expect(onBatchCommand).toHaveBeenCalledWith(['running-1', 'paused-2'], 'copy_link');
+});
+
+it('selects a contiguous task range with Shift-click', () => {
+  render(<DownloadQueue
+    tasks={[
+      { id: 'range-1', name: 'one.zip', kind: 'file', status: 'queued', progress: 0 },
+      { id: 'range-2', name: 'two.zip', kind: 'file', status: 'queued', progress: 0 },
+      { id: 'range-3', name: 'three.zip', kind: 'file', status: 'queued', progress: 0 },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.click(screen.getByText('one.zip'));
+  fireEvent.click(screen.getByText('three.zip'), { shiftKey: true });
+
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
+});
+
 it('offers terminal-task cleanup without showing invalid transfer commands', () => {
   render(<DownloadQueue
     tasks={[{ id: 'done-1', name: 'finished.iso', source: 'https://example.com/finished.iso', kind: 'file', status: 'completed', progress: 100 }]}
@@ -232,6 +399,21 @@ it('offers terminal-task cleanup without showing invalid transfer commands', () 
   expect(screen.getByRole('menuitem', { name: '移入回收站' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '暂停下载' })).not.toBeInTheDocument();
   expect(screen.queryByRole('menuitem', { name: '取消任务' })).not.toBeInTheDocument();
+});
+
+it('omits terminal status text from the more-menu header', () => {
+  render(<DownloadQueue
+    tasks={[{ id: 'done-menu-1', name: 'wallpaper 4.jpg', kind: 'file', status: 'completed', progress: 100 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('wallpaper 4.jpg'));
+
+  const menu = screen.getByRole('menu', { name: 'wallpaper 4.jpg 任务菜单' });
+  expect(menu).toHaveTextContent('wallpaper 4.jpg');
+  expect(menu).not.toHaveTextContent('已完成');
 });
 
 it('dismisses the task menu with Escape', () => {

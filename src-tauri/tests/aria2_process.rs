@@ -1,10 +1,18 @@
-use alldownloader_lib::aria2::{process, rpc, types};
+use alldownloader_lib::{
+    aria2::{process, rpc, types},
+    Aria2Settings,
+};
 use process::{build_aria2_args, Aria2LaunchConfig, Aria2Process};
 use rpc::{Aria2Api, Aria2RpcClient};
 use std::{path::PathBuf, time::Duration};
 use types::{Aria2Error, RpcSecret};
 
 fn config(root: &std::path::Path) -> Aria2LaunchConfig {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut aria2 = Aria2Settings::default();
+    aria2.rpc_port = listener.local_addr().unwrap().port();
+    aria2.rpc_token = format!("aria2-process-test-{}", aria2.rpc_port);
+    drop(listener);
     Aria2LaunchConfig {
         binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
@@ -12,6 +20,7 @@ fn config(root: &std::path::Path) -> Aria2LaunchConfig {
         download_dir: root.join("downloads"),
         parent_pid: std::process::id(),
         peer_discovery: false,
+        aria2,
     }
 }
 
@@ -19,7 +28,7 @@ fn config(root: &std::path::Path) -> Aria2LaunchConfig {
 fn production_can_discover_peers_for_trackerless_magnets() {
     let mut config = config(std::path::Path::new("fixture"));
     config.peer_discovery = true;
-    let args = build_aria2_args(&config, 6811, &RpcSecret::from_bytes([0xab; 32]));
+    let args = build_aria2_args(&config, &RpcSecret::from_bytes([0xab; 32]));
     assert!(args.contains(&"--enable-dht=true".into()));
     assert!(args.contains(&"--bt-enable-lpd=true".into()));
 }
@@ -28,7 +37,6 @@ fn production_can_discover_peers_for_trackerless_magnets() {
 fn launch_arguments_disable_remote_rpc_and_enable_persistence() {
     let args = build_aria2_args(
         &config(std::path::Path::new("fixture")),
-        6811,
         &RpcSecret::from_bytes([0xab; 32]),
     );
     for expected in [
@@ -49,6 +57,29 @@ fn launch_arguments_disable_remote_rpc_and_enable_persistence() {
         .iter()
         .any(|arg| arg == &format!("--stop-with-process={}", std::process::id())));
     assert!(args.iter().any(|arg| arg.starts_with("--save-session=")));
+}
+
+#[test]
+fn launch_arguments_apply_user_configured_rpc_and_transfer_limits() {
+    let mut config = config(std::path::Path::new("fixture"));
+    config.aria2 = Aria2Settings {
+        rpc_port: 16800,
+        rpc_token: "local-token".into(),
+        max_concurrent_downloads: 3,
+        max_connections_per_server: 4,
+        bt_seed_ratio: 1.5,
+    };
+    let args = build_aria2_args(&config, &RpcSecret::from_token("local-token").unwrap());
+
+    for expected in [
+        "--rpc-listen-port=16800",
+        "--split=4",
+        "--max-connection-per-server=4",
+        "--max-concurrent-downloads=3",
+        "--seed-ratio=1.5",
+    ] {
+        assert!(args.iter().any(|arg| arg == expected));
+    }
 }
 
 #[tokio::test]

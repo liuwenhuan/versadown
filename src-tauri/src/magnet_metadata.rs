@@ -28,6 +28,14 @@ pub enum MagnetMetadataError {
 struct MetadataResponse {
     #[serde(default)]
     download_url: String,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMagnetTorrent {
+    pub torrent: String,
+    pub title: Option<String>,
 }
 
 /// Resolve a magnet through the configured metadata service. A successful metadata
@@ -36,7 +44,7 @@ struct MetadataResponse {
 pub async fn resolve_magnet_torrent(
     settings: &MagnetMetadataSettings,
     magnet: &str,
-) -> Result<Option<String>, MagnetMetadataError> {
+) -> Result<Option<ResolvedMagnetTorrent>, MagnetMetadataError> {
     if !settings.enabled {
         return Ok(None);
     }
@@ -71,7 +79,10 @@ pub async fn resolve_magnet_torrent(
         return Ok(None);
     }
     let torrent_url = resolve_download_url(&base_url, metadata.download_url.trim())?;
-    Ok(Some(load_torrent_base64(torrent_url.as_str()).await?))
+    Ok(Some(ResolvedMagnetTorrent {
+        torrent: load_torrent_base64(torrent_url.as_str()).await?,
+        title: (!metadata.name.trim().is_empty()).then(|| metadata.name.trim().to_string()),
+    }))
 }
 
 fn normalized_base_url(value: &str) -> Result<url::Url, MagnetMetadataError> {

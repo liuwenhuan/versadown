@@ -16,6 +16,52 @@ fn direct_task_can_move_from_parsing_to_downloading() {
 }
 
 #[test]
+fn newly_created_task_exposes_a_stable_creation_time() {
+    let store = TaskStore::open_in_memory().expect("memory store");
+    let task = store
+        .create(NewTask::direct("https://host/file.iso"))
+        .expect("task");
+    let created_at = serde_json::to_value(&task).unwrap()["created_at"]
+        .as_i64()
+        .expect("creation time");
+
+    assert!(created_at > 0);
+    store.bind_gid(task.id, "gid-created-at").unwrap();
+    let rebound = store.find(task.id).unwrap();
+    assert_eq!(
+        serde_json::to_value(rebound).unwrap()["created_at"],
+        created_at
+    );
+}
+
+#[test]
+fn task_store_lists_active_and_terminal_tasks_separately() {
+    let store = TaskStore::open_in_memory().expect("memory store");
+    let active = store
+        .create(NewTask::direct("https://host/active.iso"))
+        .expect("active task");
+    let completed = store
+        .create(NewTask::direct("https://host/completed.iso"))
+        .expect("completed task");
+    store.transition(completed.id, TaskStatus::Queued).unwrap();
+    store
+        .transition(completed.id, TaskStatus::Downloading)
+        .unwrap();
+    store
+        .transition(completed.id, TaskStatus::Processing)
+        .unwrap();
+    store
+        .transition(completed.id, TaskStatus::Completed)
+        .unwrap();
+
+    let active_tasks = store.list_active().unwrap();
+    let terminal_tasks = store.list_terminal().unwrap();
+
+    assert_eq!(active_tasks.iter().map(|task| task.id).collect::<Vec<_>>(), [active.id]);
+    assert_eq!(terminal_tasks.iter().map(|task| task.id).collect::<Vec<_>>(), [completed.id]);
+}
+
+#[test]
 fn rejects_illegal_transition_from_completed_task() {
     let store = TaskStore::open_in_memory().expect("memory store");
     let task = store

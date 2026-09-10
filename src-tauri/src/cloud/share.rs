@@ -1110,7 +1110,11 @@ impl CloudSharePlanStore {
         self.update(|document, now| {
             let key = plan_key(provider, &share);
             let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
-            if !plan.entries.iter().any(|entry| entry.entry_fingerprint == fingerprint) {
+            if !plan
+                .entries
+                .iter()
+                .any(|entry| entry.entry_fingerprint == fingerprint)
+            {
                 return Err(missing_plan());
             }
             plan.provider_context = context.clone();
@@ -2208,8 +2212,10 @@ mod tests {
                 &self,
                 entry: &CloudShareResolvedEntry,
                 store: &CloudSharePlanStore,
-            ) -> Result<ShareOperationResult<super::super::commands::ResolvedCloudDownload>, QuarkError>
-            {
+            ) -> Result<
+                ShareOperationResult<super::super::commands::ResolvedCloudDownload>,
+                QuarkError,
+            > {
                 assert_eq!(
                     entry.plan.provider_context["token"],
                     "rotated-before-transfer"

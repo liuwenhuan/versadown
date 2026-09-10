@@ -40,4 +40,7 @@ fn launcher_window_leaves_room_for_the_context_menu_and_its_shadow() {
 
     assert!(window["maxWidth"].as_u64().unwrap_or_default() >= 304);
     assert!(window["maxHeight"].as_u64().unwrap_or_default() >= 392);
+    assert_eq!(window["title"], "");
+    assert_eq!(window["decorations"], false);
+    assert_eq!(window["shadow"], false);
 }

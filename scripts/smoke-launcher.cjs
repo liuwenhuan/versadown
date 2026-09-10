@@ -251,13 +251,15 @@ async function run() {
 
     const compact = JSON.parse(await evaluate(launcher, `JSON.stringify((() => {
       const button = document.querySelector('.launcher-trigger');
+      const image = button.querySelector('img');
       const rect = button.getBoundingClientRect();
       const style = getComputedStyle(button);
-      return { width: innerWidth, height: innerHeight, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, display: style.display, visibility: style.visibility, opacity: style.opacity, background: style.background };
+      return { width: innerWidth, height: innerHeight, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, display: style.display, visibility: style.visibility, opacity: style.opacity, background: style.background, imageLoaded: Boolean(image?.complete && image?.naturalWidth > 0) };
     })())`));
     assert(compact.display !== 'none' && compact.visibility === 'visible' && compact.opacity === '1', 'Compact launcher button is not visible.');
     assert(compact.left >= 0 && compact.top >= 0 && compact.right <= compact.width + 0.5 && compact.bottom <= compact.height + 0.5, `Compact launcher is outside its viewport: ${JSON.stringify(compact)}`);
-    assert(compact.background.includes('linear-gradient'), 'Compact launcher lost its colored background.');
+    assert(compact.imageLoaded, 'Compact launcher icon image did not load.');
+    assert(!compact.background.includes('linear-gradient'), 'Compact launcher unexpectedly restored the removed rectangular gradient background.');
     assert(!await evaluate(launcher, 'Boolean(document.querySelector(".launcher-live-indicator"))'), 'Zero-speed launcher unexpectedly shows a traffic capsule.');
 
     const nativeCompact = JSON.parse(await evaluate(launcher, `(async () => JSON.stringify({
@@ -415,10 +417,10 @@ async function run() {
       'JSON.stringify({ width: innerWidth, height: innerHeight, panel: Boolean(document.querySelector(".launcher-panel")), action: document.querySelector(".launcher-panel .primary")?.textContent })',
       (value) => {
         const state = JSON.parse(value);
-        return state.panel && state.width >= 469 && state.height >= 299;
+        return state.panel && state.width >= 400 && state.height >= 299;
       }
     ));
-    assert(expanded.width >= 469 && expanded.height >= 299, `Launcher did not expand to the input panel: ${JSON.stringify(expanded)}`);
+    assert(expanded.width >= 400 && expanded.height >= 299, `Launcher did not expand to the input panel: ${JSON.stringify(expanded)}`);
     assert(expanded.action === '开始解析下载', 'Expanded launcher action label is incorrect.');
 
     await evaluate(launcher, 'document.querySelector("button[aria-label=\\"收起下载输入\\"]").click()');

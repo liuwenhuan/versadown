@@ -2,9 +2,7 @@ use super::{
     rpc::Aria2RpcClient,
     types::{Aria2Error, RpcSecret},
 };
-use rand::RngCore;
 use std::{
-    net::TcpListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::Duration,
@@ -19,10 +17,11 @@ pub struct Aria2LaunchConfig {
     pub parent_pid: u32,
     /// Enable BT peer discovery in production; loopback fixtures must explicitly disable it.
     pub peer_discovery: bool,
+    pub aria2: crate::Aria2Settings,
 }
 
 /// Contains the transient secret: pass directly to Command, never log these arguments.
-pub fn build_aria2_args(config: &Aria2LaunchConfig, port: u16, secret: &RpcSecret) -> Vec<String> {
+pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<String> {
     let session = config.data_dir.join("aria2.session");
     vec![
         "--no-conf=true".into(),
@@ -30,7 +29,7 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, port: u16, secret: &RpcSecre
         "--rpc-listen-all=false".into(),
         "--rpc-allow-origin-all=false".into(),
         "--disable-ipv6=true".into(),
-        format!("--rpc-listen-port={port}"),
+        format!("--rpc-listen-port={}", config.aria2.rpc_port),
         format!("--rpc-secret={}", secret.hex()),
         "--continue=true".into(),
         format!("--input-file={}", session.display()),
@@ -40,9 +39,16 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, port: u16, secret: &RpcSecre
         "--pause-metadata=true".into(),
         format!("--dir={}", config.download_dir.display()),
         format!("--stop-with-process={}", config.parent_pid),
-        "--split=8".into(),
-        "--max-connection-per-server=8".into(),
-        "--max-concurrent-downloads=5".into(),
+        format!("--split={}", config.aria2.max_connections_per_server),
+        format!(
+            "--max-connection-per-server={}",
+            config.aria2.max_connections_per_server
+        ),
+        format!(
+            "--max-concurrent-downloads={}",
+            config.aria2.max_concurrent_downloads
+        ),
+        format!("--seed-ratio={}", config.aria2.bt_seed_ratio),
         format!("--enable-dht={}", config.peer_discovery),
         "--enable-dht6=false".into(),
         format!("--bt-enable-lpd={}", config.peer_discovery),
@@ -58,7 +64,17 @@ pub struct Aria2Process {
 }
 
 impl Aria2Process {
-    pub async fn start(config: Aria2LaunchConfig) -> Result<(Self, Aria2RpcClient), Aria2Error> {
+    pub async fn start(
+        mut config: Aria2LaunchConfig,
+    ) -> Result<(Self, Aria2RpcClient), Aria2Error> {
+        config.aria2.ensure_rpc_token();
+        config
+            .aria2
+            .validate()
+            .map_err(|_| Aria2Error::InvalidField {
+                field: "aria2Settings",
+                value: "invalid".into(),
+            })?;
         std::fs::create_dir_all(&config.data_dir)?;
         std::fs::create_dir_all(&config.download_dir)?;
         std::fs::OpenOptions::new()
@@ -67,19 +83,15 @@ impl Aria2Process {
             .open(config.data_dir.join("aria2.session"))?;
         let mut last_error = Aria2Error::ReadinessTimeout;
         for _ in 0..3 {
-            let listener = TcpListener::bind("127.0.0.1:0")?;
-            let port = listener.local_addr()?.port();
-            let mut bytes = [0; 32];
-            rand::rngs::OsRng.fill_bytes(&mut bytes);
-            let secret = RpcSecret::from_bytes(bytes);
+            let secret = RpcSecret::from_token(&config.aria2.rpc_token)?;
             let client = Aria2RpcClient::with_timeout(
-                format!("http://127.0.0.1:{port}/jsonrpc"),
+                format!("http://127.0.0.1:{}/jsonrpc", config.aria2.rpc_port),
                 secret.clone(),
                 Duration::from_secs(2),
             )?;
             let mut command = Command::new(&config.binary);
             command
-                .args(build_aria2_args(&config, port, &secret))
+                .args(build_aria2_args(&config, &secret))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -88,7 +100,6 @@ impl Aria2Process {
                 use std::os::windows::process::CommandExt;
                 command.creation_flags(0x08000000); // CREATE_NO_WINDOW
             }
-            drop(listener);
             let child = command.spawn()?;
             let mut process = Self {
                 child,

@@ -1,8 +1,8 @@
-use tauri::{Emitter, Manager};
 use crate::cloud::CredentialStore;
+use tauri::{Emitter, Manager};
 
-pub mod aria2;
 mod ai;
+pub mod aria2;
 pub mod cloud;
 mod commands;
 mod connectors;
@@ -31,15 +31,17 @@ pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
 pub use launcher::{
-    launcher_hexagon_points, launcher_hexagon_region, launcher_menu_entries,
-    should_apply_launcher_window_visibility, LauncherInteractionState, LauncherPoint,
-    LauncherRegion,
+    launcher_hexagon_points, launcher_hexagon_region, launcher_live_regions, launcher_menu_entries,
+    launcher_native_chrome_policy, launcher_window_style_without_frame,
+    should_apply_launcher_window_visibility, tray_menu_entries, LauncherInteractionState,
+    LauncherLiveRegions, LauncherNativeChromePolicy, LauncherPoint, LauncherRegion,
 };
+pub use magnet_metadata::{resolve_magnet_torrent, MagnetMetadataError, ResolvedMagnetTorrent};
 pub use models::{
-    may_transition, AiSettings, AiSettingsInput, AppSettings, DownloadTask, DuplicateDownloadState,
-    LauncherVisibility, MagnetMetadataSettings, NewTask, ProxySettings, TaskStatus,
+    may_transition, AiSettings, AiSettingsInput, AppSettings, Aria2Settings, DownloadTask,
+    DuplicateDownloadState, LauncherVisibility, MagnetMetadataSettings, NewTask, ProxySettings,
+    TaskStatus,
 };
-pub use magnet_metadata::{resolve_magnet_torrent, MagnetMetadataError};
 pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
@@ -169,6 +171,9 @@ pub fn run() {
             if settings.download_directory.trim().is_empty() {
                 settings.download_directory = default_destination.to_string_lossy().into_owned();
             }
+            settings.aria2.ensure_rpc_token();
+            settings.aria2.validate().map_err(std::io::Error::other)?;
+            std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
             let debug_reports = settings.debug_reports;
             let launcher_visibility = settings.launcher_visibility;
             let destination = std::path::PathBuf::from(&settings.download_directory);
@@ -179,6 +184,7 @@ pub fn run() {
                 download_dir: destination,
                 parent_pid: std::process::id(),
                 peer_discovery: should_enable_peer_discovery(background_ui_test.as_deref()),
+                aria2: settings.aria2.clone(),
             };
             let events = std::sync::Arc::new(TauriDownloadEvents {
                 app: app.handle().clone(),
@@ -204,6 +210,7 @@ pub fn run() {
                 background_ui_test.as_deref() == Some("1"),
             ));
             if should_show_windows(background_ui_test.as_deref()) {
+                launcher::setup_manager_tray(app.handle()).map_err(std::io::Error::other)?;
                 if let Some(main) = app.get_webview_window("main") {
                     main.show()?;
                 }
@@ -235,6 +242,7 @@ pub fn run() {
             commands::recycle_task,
             commands::purge_recycled_tasks,
             commands::select_files,
+            commands::cancel_download_file,
             commands::get_download_engine_state,
             commands::retry_download_engine,
             commands::get_download_global_stat,

@@ -5,14 +5,13 @@ import { isTauriRuntime } from './api';
 
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
 export const launcherDimensions = {
-  compact: { width: 48, height: 48 },
-  live: { width: 236, height: 90 },
+  compact: { width: 64, height: 64 },
+  live: { width: 146, height: 64 },
   menu: { width: 304, height: 392 },
-  expanded: { width: 470, height: 300 }
+  expanded: { width: 410, height: 364 }
 } as const;
 
 const launcherMargin = 24;
-const liveShadowOffset = 18;
 let launcherResizeQueue: Promise<void> = Promise.resolve();
 
 type WorkArea = { x: number; y: number; width: number; height: number };
@@ -76,7 +75,8 @@ async function resizeLauncherNow(size: NativeWindowSize, useCompactShape: boolea
       y: nextPosition.y,
       width: nextSize.width,
       height: nextSize.height,
-      compact: useCompactShape
+      compact: useCompactShape,
+      live: !useCompactShape && size.width === launcherDimensions.live.width && size.height === launcherDimensions.live.height
     });
     return;
   }
@@ -94,13 +94,12 @@ function resizeLauncher(size: NativeWindowSize, useCompactShape: boolean, logica
 export async function setLauncherExpanded(expanded: boolean, hasLiveSpeed = false) {
   await resizeLauncher(
     expanded ? launcherDimensions.expanded : launcherCompactSize(hasLiveSpeed),
-    !expanded && !hasLiveSpeed,
-    hasLiveSpeed ? (expanded ? -liveShadowOffset : liveShadowOffset) : 0
+    !expanded && !hasLiveSpeed
   );
 }
 
 export async function setLauncherLiveSpeedVisible(visible: boolean) {
-  await resizeLauncher(launcherCompactSize(visible), !visible, visible ? liveShadowOffset : -liveShadowOffset);
+  await resizeLauncher(launcherCompactSize(visible), !visible);
 }
 
 export async function setLauncherContextMenuVisible(visible: boolean, hasLiveSpeed = false) {
@@ -129,12 +128,17 @@ export async function anchorLauncherToWorkArea() {
   await launcher.setPosition(new PhysicalPosition(corner.x, corner.y));
 }
 
-export async function sendLauncherInput(input: string) {
+export async function openLauncherManager() {
   if (!isTauriRuntime()) return;
   const mainWindow = await Window.getByLabel('main');
   await mainWindow?.unminimize();
   await mainWindow?.show();
   await mainWindow?.setFocus();
+}
+
+export async function sendLauncherInput(input: string) {
+  if (!isTauriRuntime()) return;
+  await openLauncherManager();
   await emitTo('main', 'launcher-parse', input);
 }
 

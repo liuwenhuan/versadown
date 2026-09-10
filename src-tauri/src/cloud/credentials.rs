@@ -61,7 +61,14 @@ impl DpapiCredentialStore {
     fn path(&self, key: &str) -> Result<PathBuf, QuarkError> {
         if !matches!(
             key,
-            "quark" | "pikpak" | "baidu" | "tianyi" | "aliyun" | "xunlei" | "uc" | "ai-api-key"
+            "quark"
+                | "pikpak"
+                | "baidu"
+                | "tianyi"
+                | "aliyun"
+                | "xunlei"
+                | "uc"
+                | "ai-api-key"
                 | "cloud-share-plans-v1"
         ) && !matches!(
             key,

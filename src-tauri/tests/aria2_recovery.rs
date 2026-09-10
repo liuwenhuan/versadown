@@ -7,6 +7,15 @@ use std::{
     time::Duration,
 };
 
+fn test_aria2_settings() -> alldownloader_lib::Aria2Settings {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut settings = alldownloader_lib::Aria2Settings::default();
+    settings.rpc_port = listener.local_addr().unwrap().port();
+    settings.rpc_token = format!("aria2-recovery-test-{}", settings.rpc_port);
+    drop(listener);
+    settings
+}
+
 async fn slow_server(
     delay: Duration,
 ) -> (
@@ -74,6 +83,7 @@ async fn shutdown_deadline_includes_busy_operation_lock_and_stops_owned_child() 
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),
         peer_discovery: false,
+        aria2: test_aria2_settings(),
     };
     let (child, _) = Aria2Process::start(config).await.unwrap();
     let (client, server, mut requests) = slow_server(Duration::from_secs(1)).await;
@@ -812,6 +822,7 @@ async fn owned_engine_restarts_once_and_shutdown_kills_only_after_deadline() {
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),
         peer_discovery: false,
+        aria2: test_aria2_settings(),
     };
     let (child, client) = Aria2Process::start(config.clone()).await.unwrap();
     let service = Arc::new(DownloadService::with_process(
@@ -1095,6 +1106,7 @@ async fn replacement_client_remains_available_when_recovery_persistence_fails() 
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),
         peer_discovery: false,
+        aria2: test_aria2_settings(),
     };
     let database = root.path().join("tasks.sqlite");
     let store = Arc::new(TaskStore::open_path(&database).unwrap());
@@ -1125,7 +1137,7 @@ async fn replacement_client_remains_available_when_recovery_persistence_fails() 
     let replacement = result.unwrap().unwrap();
     // The new client remains usable and a single persistence failure is reported
     // without turning the entire replacement engine unavailable.
-    assert_ne!(replacement.client.endpoint().as_str(), old_endpoint);
+    assert_eq!(replacement.client.endpoint().as_str(), old_endpoint);
     assert_eq!(replacement.recovery.unwrap().failed, 1);
     assert_eq!(
         replacement.client.get_version().await.unwrap().version,
@@ -1168,6 +1180,7 @@ async fn recovery_failure_still_switches_websocket_and_wakes_idle_sync() {
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),
         peer_discovery: false,
+        aria2: test_aria2_settings(),
     };
     let database = root.path().join("tasks.sqlite");
     let store = Arc::new(TaskStore::open_path(&database).unwrap());

@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { cloudRootDirectoryId, pikpakRecycleBinDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudDirectoryDownloadFailure, type CloudDirectoryDownloadOutcome, type CloudFile, type CloudProvider } from '../lib/cloudTypes';
 
@@ -159,10 +159,17 @@ function CloudContextMenu({ state, selectedCount, recycleBin, virtualRecycleBin,
       : recycleBin
       ? [{ action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '永久删除', danger: true, separated: true }]
       : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '删除', danger: true, separated: true }];
-  const width = 210;
-  const estimatedHeight = items.length * 38 + 24;
-  const left = Math.max(8, Math.min(state.x, window.innerWidth - width - 8));
-  const top = Math.max(8, Math.min(state.y, window.innerHeight - estimatedHeight - 8));
+  const [menuSize, setMenuSize] = useState({ width: 210, height: items.length * 38 + 24 });
+  const left = Math.max(8, Math.min(state.x, window.innerWidth - menuSize.width - 8));
+  const top = Math.max(8, Math.min(state.y, window.innerHeight - menuSize.height - 8));
+
+  useLayoutEffect(() => {
+    const rect = menuRef.current?.getBoundingClientRect();
+    if (!rect?.width || !rect.height) return;
+    setMenuSize((current) => current.width === rect.width && current.height === rect.height
+      ? current
+      : { width: rect.width, height: rect.height });
+  }, [state.x, state.y, items.length]);
 
   useEffect(() => {
     menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
@@ -475,11 +482,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   async function submitPasswordLogin(event: FormEvent) {
     event.preventDefault();
-    if (!supportsDirectPasswordLogin) {
-      setUsername('');
-      setPassword('');
-      return;
-    }
+    if (!supportsDirectPasswordLogin) return;
     if (!username.trim() || !password) {
       setAuthorizationStatus('请输入账号和密码后再登录。');
       return;
@@ -718,12 +721,12 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       <header className="cloud-heading"><h2>{label}网盘</h2></header>
       {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
-        {supportsDirectPasswordLogin && <><label>{label}账号<input aria-label={`${label}账号`} autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
-        <label>{label}密码<input aria-label={`${label}密码`} type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-        <p className="cloud-login-security-note">账号和密码仅加密保存在本机，用于登录失效后的自动恢复。</p>
-        <button className="primary" type="submit">登录{label}账号</button></>}
-        {effectiveAuthorizationCapabilities.passwordLoginMode === 'officialWebView' && <p className="cloud-login-security-note">请在官方网页中使用账号密码登录；应用不会收集或保存密码。</p>}
-        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>{effectiveAuthorizationCapabilities.passwordLoginMode === 'officialWebView' ? '在官方网页登录（可使用账号密码）' : '使用网页授权'}</button>}
+        {supportsDirectPasswordLogin && <>
+          <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
+          <input aria-label="密码" placeholder="密码" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          <button className="primary" type="submit">登录</button>
+        </>}
+        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
       </form>
       {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${expired ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}

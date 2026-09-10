@@ -1,7 +1,11 @@
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WebviewWindow,
+};
 
 pub const HIDE_MANAGER: &str = "launcher.hide_manager";
 pub const NEW_DOWNLOAD: &str = "launcher.new_download";
@@ -9,6 +13,17 @@ pub const START_ALL: &str = "launcher.start_all";
 pub const PAUSE_ALL: &str = "launcher.pause_all";
 pub const OPEN_SETTINGS: &str = "launcher.settings";
 pub const QUIT: &str = "launcher.quit";
+pub const TRAY_LAUNCHER_ALWAYS: &str = "tray.launcher.always";
+pub const TRAY_LAUNCHER_DOWNLOADING: &str = "tray.launcher.downloading";
+pub const TRAY_LAUNCHER_HIDDEN: &str = "tray.launcher.hidden";
+const TRAY_ID: &str = "manager-tray";
+const LAUNCHER_HEXAGON_SIZE: f64 = 64.0;
+const LAUNCHER_LIVE_SPEED_LEFT: f64 = 54.0;
+const LAUNCHER_LIVE_SPEED_TOP: f64 = 20.0;
+const LAUNCHER_LIVE_SPEED_HEIGHT: f64 = 25.0;
+// WS_OVERLAPPEDWINDOW: caption, system menu, thick frame and min/max boxes.
+// Leaving any of these bits on a transparent HWND lets Windows draw a caption or pale frame.
+const LAUNCHER_NATIVE_DECORATION_STYLE_BITS: i32 = 0x00CF_0000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,9 +36,37 @@ pub struct LauncherRegion {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LauncherLiveRegions {
+    pub hexagon: LauncherRegion,
+    pub speed: LauncherRegion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LauncherPoint {
     pub x: i32,
     pub y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LauncherNativeChromePolicy {
+    pub disable_non_client_rendering: bool,
+    pub disable_transitions: bool,
+    pub border_color: u32,
+    pub corner_preference: i32,
+}
+
+pub const fn launcher_native_chrome_policy() -> LauncherNativeChromePolicy {
+    LauncherNativeChromePolicy {
+        disable_non_client_rendering: true,
+        disable_transitions: true,
+        border_color: 0xffff_fffe,
+        corner_preference: 1,
+    }
+}
+
+pub fn launcher_window_style_without_frame(style: i32) -> i32 {
+    style & !LAUNCHER_NATIVE_DECORATION_STYLE_BITS
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -52,6 +95,10 @@ pub struct LauncherInteractionState {
     background_test: bool,
     drag_requests: AtomicUsize,
     menu_requests: AtomicUsize,
+}
+
+pub struct TrayMenuState {
+    manager_item: MenuItem<tauri::Wry>,
 }
 
 impl LauncherInteractionState {
@@ -94,6 +141,108 @@ pub fn launcher_menu_entries() -> [(&'static str, &'static str); 6] {
     ]
 }
 
+pub fn tray_menu_entries(manager_visible: bool) -> [(&'static str, &'static str); 8] {
+    [
+        (HIDE_MANAGER, tray_manager_item_label(manager_visible)),
+        (NEW_DOWNLOAD, "新建下载"),
+        (START_ALL, "开始全部任务"),
+        (PAUSE_ALL, "暂停全部任务"),
+        (TRAY_LAUNCHER_ALWAYS, "总是显示"),
+        (TRAY_LAUNCHER_DOWNLOADING, "仅下载时显示"),
+        (TRAY_LAUNCHER_HIDDEN, "关闭显示"),
+        (QUIT, "退出万能下载"),
+    ]
+}
+
+fn tray_manager_item_label(manager_visible: bool) -> &'static str {
+    if manager_visible {
+        "隐藏主界面"
+    } else {
+        "显示主界面"
+    }
+}
+
+pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
+    let manager_visible = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    let entries = tray_menu_entries(manager_visible);
+    let manager_item = MenuItem::with_id(app, entries[0].0, entries[0].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let new_download = MenuItem::with_id(app, entries[1].0, entries[1].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let start_all = MenuItem::with_id(app, entries[2].0, entries[2].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let pause_all = MenuItem::with_id(app, entries[3].0, entries[3].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let always = MenuItem::with_id(app, entries[4].0, entries[4].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let downloading = MenuItem::with_id(app, entries[5].0, entries[5].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let hidden = MenuItem::with_id(app, entries[6].0, entries[6].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let quit = MenuItem::with_id(app, entries[7].0, entries[7].1, true, None::<&str>)
+        .map_err(|error| error.to_string())?;
+    let first_separator = PredefinedMenuItem::separator(app).map_err(|error| error.to_string())?;
+    let second_separator = PredefinedMenuItem::separator(app).map_err(|error| error.to_string())?;
+    let visibility_menu = Submenu::with_id_and_items(
+        app,
+        "tray.launcher.visibility",
+        "悬浮球显示",
+        true,
+        &[&always, &downloading, &hidden],
+    )
+    .map_err(|error| error.to_string())?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &manager_item,
+            &new_download,
+            &start_all,
+            &pause_all,
+            &first_separator,
+            &visibility_menu,
+            &second_separator,
+            &quit,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| "应用图标不可用".to_string())?;
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon)
+        .tooltip("万能下载")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                reveal_manager(tray.app_handle(), None);
+            }
+        })
+        .build(app)
+        .map_err(|error| error.to_string())?;
+    app.manage(TrayMenuState { manager_item });
+    Ok(())
+}
+
+pub fn set_tray_manager_visibility(app: &AppHandle, manager_visible: bool) {
+    if let Some(state) = app.try_state::<TrayMenuState>() {
+        let _ = state
+            .manager_item
+            .set_text(tray_manager_item_label(manager_visible));
+    }
+}
+
 fn background_ui_test_enabled() -> bool {
     std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST").as_deref() == Ok("1")
 }
@@ -111,7 +260,7 @@ pub fn launcher_hexagon_region(
     inner: (u32, u32),
     scale_factor: f64,
 ) -> LauncherRegion {
-    let diameter = (48.0 * scale_factor).round() as i32;
+    let diameter = (LAUNCHER_HEXAGON_SIZE * scale_factor).round() as i32;
     let client_x = outer.0.saturating_sub(inner.0) as i32 / 2;
     let client_y = outer.1.saturating_sub(inner.1) as i32 / 2;
     LauncherRegion {
@@ -129,29 +278,76 @@ pub fn launcher_hexagon_points(region: LauncherRegion) -> [LauncherPoint; 6] {
     [
         LauncherPoint {
             x: scale_x(64),
-            y: scale_y(12),
+            y: scale_y(10),
         },
         LauncherPoint {
-            x: scale_x(110),
-            y: scale_y(40),
+            x: scale_x(112),
+            y: scale_y(39),
         },
         LauncherPoint {
-            x: scale_x(110),
-            y: scale_y(88),
+            x: scale_x(112),
+            y: scale_y(89),
         },
         LauncherPoint {
             x: scale_x(64),
-            y: scale_y(116),
+            y: scale_y(118),
         },
         LauncherPoint {
-            x: scale_x(18),
-            y: scale_y(88),
+            x: scale_x(16),
+            y: scale_y(89),
         },
         LauncherPoint {
-            x: scale_x(18),
-            y: scale_y(40),
+            x: scale_x(16),
+            y: scale_y(39),
         },
     ]
+}
+
+pub fn launcher_live_regions(
+    outer: (u32, u32),
+    inner: (u32, u32),
+    scale_factor: f64,
+) -> LauncherLiveRegions {
+    let diameter = (LAUNCHER_HEXAGON_SIZE * scale_factor).round() as i32;
+    let speed_left = (LAUNCHER_LIVE_SPEED_LEFT * scale_factor).round() as i32;
+    let speed_top = (LAUNCHER_LIVE_SPEED_TOP * scale_factor).round() as i32;
+    let speed_height = (LAUNCHER_LIVE_SPEED_HEIGHT * scale_factor).round() as i32;
+    let client_x = outer.0.saturating_sub(inner.0) as i32 / 2;
+    let client_y = outer.1.saturating_sub(inner.1) as i32 / 2;
+    LauncherLiveRegions {
+        hexagon: LauncherRegion {
+            x: client_x,
+            y: client_y,
+            width: diameter,
+            height: diameter,
+        },
+        speed: LauncherRegion {
+            x: client_x + speed_left,
+            y: client_y + speed_top,
+            width: inner.0 as i32 - speed_left,
+            height: speed_height,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_a_64px_compact_hexagon_region() {
+        let region = launcher_hexagon_region((64, 64), (64, 64), 1.0);
+
+        assert_eq!(
+            region,
+            LauncherRegion {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            }
+        );
+    }
 }
 
 #[tauri::command]
@@ -161,7 +357,7 @@ pub fn set_launcher_compact_shape(
 ) -> Result<Option<LauncherRegion>, String> {
     #[cfg(windows)]
     {
-        return apply_launcher_shape(&window, compact, true);
+        return apply_launcher_shape(&window, compact, false, true);
     }
 
     #[cfg(not(windows))]
@@ -172,18 +368,106 @@ pub fn set_launcher_compact_shape(
 }
 
 #[cfg(windows)]
+fn disable_launcher_dwm_chrome(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
+    use std::ffi::c_void;
+    use windows::{
+        core::BOOL,
+        Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY,
+            DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+            DWMWINDOWATTRIBUTE,
+        },
+    };
+
+    let policy = launcher_native_chrome_policy();
+    let non_client_policy = DWMNCRP_DISABLED;
+    let transitions_disabled = BOOL::from(policy.disable_transitions);
+    let border_color = policy.border_color;
+    let corner_preference = DWMWCP_DONOTROUND;
+    let set_attribute = |attribute: DWMWINDOWATTRIBUTE, value: *const c_void, size: usize| unsafe {
+        DwmSetWindowAttribute(hwnd, attribute, value, size as u32)
+    };
+
+    if policy.disable_non_client_rendering {
+        set_attribute(
+            DWMWA_NCRENDERING_POLICY,
+            std::ptr::from_ref(&non_client_policy).cast::<c_void>(),
+            std::mem::size_of_val(&non_client_policy),
+        )
+        .map_err(|error| format!("无法关闭悬浮窗非客户区绘制: {error}"))?;
+    }
+    set_attribute(
+        DWMWA_TRANSITIONS_FORCEDISABLED,
+        std::ptr::from_ref(&transitions_disabled).cast::<c_void>(),
+        std::mem::size_of_val(&transitions_disabled),
+    )
+    .map_err(|error| format!("无法关闭悬浮窗过渡动画: {error}"))?;
+    let _ = set_attribute(
+        DWMWA_BORDER_COLOR,
+        std::ptr::from_ref(&border_color).cast::<c_void>(),
+        std::mem::size_of_val(&border_color),
+    );
+    let _ = set_attribute(
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        std::ptr::from_ref(&corner_preference).cast::<c_void>(),
+        std::mem::size_of_val(&corner_preference),
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_launcher_native_frame(hwnd: windows::Win32::Foundation::HWND) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    };
+
+    disable_launcher_dwm_chrome(hwnd)?;
+    let current_style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
+    let frameless_style = launcher_window_style_without_frame(current_style);
+    if frameless_style == current_style {
+        return Ok(());
+    }
+
+    unsafe {
+        SetWindowLongW(hwnd, GWL_STYLE, frameless_style);
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED
+                | SWP_NOACTIVATE
+                | SWP_NOMOVE
+                | SWP_NOOWNERZORDER
+                | SWP_NOSIZE
+                | SWP_NOZORDER,
+        )
+    }
+    .map_err(|error| format!("无法移除悬浮窗原生边框: {error}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
 fn apply_launcher_shape(
     window: &WebviewWindow,
     compact: bool,
+    live: bool,
     redraw: bool,
 ) -> Result<Option<LauncherRegion>, String> {
     use windows::Win32::{
         Foundation::POINT,
-        Graphics::Gdi::{CreatePolygonRgn, DeleteObject, SetWindowRgn, ALTERNATE, HGDIOBJ},
+        Graphics::Gdi::{
+            CombineRgn, CreatePolygonRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn,
+            ALTERNATE, HGDIOBJ, RGN_ERROR, RGN_OR,
+        },
     };
 
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    if !compact {
+    remove_launcher_native_frame(hwnd)?;
+    if !compact && !live {
         let result = unsafe { SetWindowRgn(hwnd, None, redraw) };
         return if result == 0 {
             Err("无法恢复悬浮窗矩形区域".to_string())
@@ -195,11 +479,20 @@ fn apply_launcher_shape(
     let outer = window.outer_size().map_err(|error| error.to_string())?;
     let inner = window.inner_size().map_err(|error| error.to_string())?;
     let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let region = launcher_hexagon_region(
+    let live_regions = launcher_live_regions(
         (outer.width, outer.height),
         (inner.width, inner.height),
         scale_factor,
     );
+    let region = if live {
+        live_regions.hexagon
+    } else {
+        launcher_hexagon_region(
+            (outer.width, outer.height),
+            (inner.width, inner.height),
+            scale_factor,
+        )
+    };
     let points = launcher_hexagon_points(region).map(|point| POINT {
         x: point.x,
         y: point.y,
@@ -207,6 +500,42 @@ fn apply_launcher_shape(
     let native_region = unsafe { CreatePolygonRgn(&points, ALTERNATE) };
     if native_region.0.is_null() {
         return Err("无法创建悬浮球六边形区域".to_string());
+    }
+    if live {
+        let speed = live_regions.speed;
+        let speed_region = unsafe {
+            CreateRoundRectRgn(
+                speed.x,
+                speed.y,
+                speed.x + speed.width,
+                speed.y + speed.height,
+                speed.height,
+                speed.height,
+            )
+        };
+        if speed_region.0.is_null() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(native_region.0));
+            }
+            return Err("无法创建悬浮窗速度条区域".to_string());
+        }
+        let combine_result = unsafe {
+            CombineRgn(
+                Some(native_region),
+                Some(native_region),
+                Some(speed_region),
+                RGN_OR,
+            )
+        };
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(speed_region.0));
+        }
+        if combine_result == RGN_ERROR {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(native_region.0));
+            }
+            return Err("无法合并悬浮窗图形区域".to_string());
+        }
     }
     if unsafe { SetWindowRgn(hwnd, Some(native_region), redraw) } == 0 {
         unsafe {
@@ -225,6 +554,7 @@ pub fn set_launcher_bounds(
     width: u32,
     height: u32,
     compact: bool,
+    live: bool,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -232,7 +562,7 @@ pub fn set_launcher_bounds(
             SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER,
         };
 
-        apply_launcher_shape(&window, false, false)?;
+        apply_launcher_shape(&window, false, false, false)?;
         let hwnd = window.hwnd().map_err(|error| error.to_string())?;
         unsafe {
             SetWindowPos(
@@ -246,7 +576,7 @@ pub fn set_launcher_bounds(
             )
         }
         .map_err(|error| format!("无法原子更新悬浮窗位置和尺寸: {error}"))?;
-        apply_launcher_shape(&window, compact, true)?;
+        apply_launcher_shape(&window, compact, live, true)?;
         return Ok(());
     }
 
@@ -415,6 +745,24 @@ pub fn handle_launcher_menu_action(app: &AppHandle, id: &str) {
             let _ = app.emit_to("main", "launcher-command", "pause-all");
         }
         OPEN_SETTINGS => reveal_manager(app, Some("settings")),
+        TRAY_LAUNCHER_ALWAYS => {
+            let _ = crate::commands::update_launcher_visibility_from_native_menu(
+                app,
+                crate::LauncherVisibility::Always,
+            );
+        }
+        TRAY_LAUNCHER_DOWNLOADING => {
+            let _ = crate::commands::update_launcher_visibility_from_native_menu(
+                app,
+                crate::LauncherVisibility::Downloading,
+            );
+        }
+        TRAY_LAUNCHER_HIDDEN => {
+            let _ = crate::commands::update_launcher_visibility_from_native_menu(
+                app,
+                crate::LauncherVisibility::Hidden,
+            );
+        }
         QUIT => begin_application_exit(app),
         _ => {}
     }
@@ -426,6 +774,7 @@ fn toggle_manager_visibility(app: &AppHandle) {
     };
     if manager.is_visible().unwrap_or(false) {
         let _ = manager.hide();
+        set_tray_manager_visibility(app, false);
     } else {
         reveal_manager(app, None);
     }
@@ -445,6 +794,7 @@ fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
         let _ = manager.show();
         let _ = manager.set_focus();
     }
+    set_tray_manager_visibility(app, true);
 }
 
 fn begin_application_exit(app: &AppHandle) {

@@ -1,23 +1,27 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { QueueTask } from './lib/types';
+import { getThemeMode, setThemeMode } from './lib/theme';
 
 const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
-  confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
-  updateAiSettings: vi.fn(), listAiModels: vi.fn()
+  confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
+  moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
+  updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined)
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
-  confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles,
+  confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
-  defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' } },
-  getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' } }),
-  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
+  defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } },
+  getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } }),
+  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
+  moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -27,9 +31,11 @@ vi.mock('./lib/downloadEvents', async (importOriginal) => {
   }) };
 });
 vi.mock('@tauri-apps/api/event', () => ({ listen: state.listen }));
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
   onFocusChanged: vi.fn().mockImplementation((handler) => { state.onFocus = handler; return Promise.resolve(() => undefined); }),
-  onResized: vi.fn().mockResolvedValue(() => undefined)
+  onResized: vi.fn().mockResolvedValue(() => undefined),
+  startDragging: state.startDragging
 }) }));
 vi.mock('./lib/mainWindow', () => ({ mainWindowIsMaximized: vi.fn().mockResolvedValue(false), runMainWindowAction: vi.fn() }));
 
@@ -54,12 +60,18 @@ beforeEach(() => {
   state.resolveDuplicate.mockReset();
   state.openDirectory.mockReset();
   state.selectFiles.mockReset();
+  state.cancelFile.mockReset();
   state.getEngineState.mockReset();
   state.getEngineState.mockResolvedValue({ available: true, retrying: false });
   state.retryEngine.mockReset();
   state.taskAction.mockReset();
+  state.moveToRecycle.mockReset();
+  state.purgeTasks.mockReset();
+  state.clipboardWrite.mockReset();
   state.updateAiSettings.mockReset();
   state.listAiModels.mockReset();
+  state.startDragging.mockReset();
+  state.startDragging.mockResolvedValue(undefined);
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -68,6 +80,60 @@ beforeEach(() => {
     state.listeners.set(name, handler);
     return Promise.resolve(() => undefined);
   });
+});
+
+it('starts native dragging from the application icon and title', () => {
+  render(<App />);
+
+  fireEvent.mouseDown(document.querySelector('.brand')!, { button: 0 });
+
+  expect(state.startDragging).toHaveBeenCalledOnce();
+});
+
+it('starts native dragging from blank title-bar space without stealing interactive controls', () => {
+  render(<App />);
+  const header = document.querySelector('.app-header')!;
+
+  fireEvent.mouseDown(header, { button: 0 });
+  expect(state.startDragging).toHaveBeenCalledOnce();
+
+  fireEvent.mouseDown(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), { button: 0 });
+  fireEvent.mouseDown(screen.getByRole('button', { name: '新建下载' }), { button: 0 });
+  fireEvent.mouseDown(screen.getByRole('button', { name: '最小化' }), { button: 0 });
+
+  expect(state.startDragging).toHaveBeenCalledOnce();
+});
+
+it('uses regular font weight for task tabs and file titles', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    state.list.mockResolvedValueOnce([oldTask]);
+    render(<App />);
+
+    const taskTitle = await screen.findByText('archive.iso');
+    const downloadingTab = screen.getByRole('tab', { name: /下载中/ });
+
+    expect(getComputedStyle(taskTitle).fontWeight).toBe('400');
+    expect(getComputedStyle(downloadingTab).fontWeight).toBe('400');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('keeps the application title bold as the typography exception', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<App />);
+
+    const title = await screen.findByRole('heading', { name: '万能下载' });
+    expect(getComputedStyle(title).fontWeight).toBe('700');
+  } finally {
+    stylesheet.remove();
+  }
 });
 
 it('shows an unavailable engine and clears it after a successful manual retry', async () => {
@@ -96,6 +162,275 @@ it('keeps a live snapshot when the initial list returns an older copy', async ()
 
   expect(screen.getByRole('progressbar', { name: 'archive.iso 下载进度' })).toHaveAttribute('aria-valuenow', '40');
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
+});
+
+it('requests active tasks for the first paint before loading terminal tabs in the background', async () => {
+  const terminal = deferred<QueueTask[]>();
+  const activeTask: QueueTask = { ...oldTask, id: 'active-startup', name: 'active-startup.iso' };
+  const completedTask: QueueTask = { ...oldTask, id: 'completed-startup', name: 'completed-startup.iso', status: 'completed', progress: 100 };
+  state.list.mockImplementation((scope?: string) => {
+    if (scope === 'active') return Promise.resolve([activeTask]);
+    if (scope === 'terminal') return terminal.promise;
+    return Promise.resolve([activeTask, completedTask]);
+  });
+  const user = userEvent.setup();
+
+  render(<App />);
+
+  expect(await screen.findByText('active-startup.iso')).toBeVisible();
+  expect(state.list.mock.calls[0]).toEqual(['active']);
+  expect(screen.queryByText('completed-startup.iso')).not.toBeInTheDocument();
+
+  await act(async () => { terminal.resolve([completedTask]); });
+  await user.click(screen.getByRole('tab', { name: /已完成/ }));
+
+  expect(await screen.findByText('completed-startup.iso')).toBeVisible();
+  expect(state.list.mock.calls.map(([scope]) => scope)).toEqual(['active', 'terminal']);
+});
+
+it('parses each non-empty line from the first new-download tab and then opens downloading tasks', async () => {
+  const user = userEvent.setup();
+  const firstTask: QueueTask = { id: 'batch-1', name: 'first.zip', kind: 'file', status: 'downloading', progress: 0 };
+  const secondTask: QueueTask = { id: 'batch-2', name: 'second.mp4', kind: 'file', status: 'queued', progress: 0 };
+  state.parse
+    .mockResolvedValueOnce({ task: firstTask })
+    .mockResolvedValueOnce({ task: secondTask });
+
+  render(<App />);
+
+  const tabs = screen.getAllByRole('tab');
+  expect(tabs[0]).toHaveAccessibleName('新建下载');
+  await user.click(tabs[0]);
+  await user.type(screen.getByRole('textbox', { name: '下载链接' }), 'https://example.test/first.zip{enter}{enter}https://example.test/second.mp4');
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  await waitFor(() => expect(state.parse.mock.calls).toEqual([
+    ['https://example.test/first.zip', undefined],
+    ['https://example.test/second.mp4', undefined],
+  ]));
+  expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true');
+  expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('first.zip')).toBeVisible();
+  expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('second.mp4')).toBeVisible();
+});
+
+it('opens downloading tasks after confirming a download parsed from the new-download tab', async () => {
+  const user = userEvent.setup();
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'torrent-batch', title: 'collection', requiresConfirmation: true,
+      resources: [{ id: 'file-1', name: 'movie.mkv', size: '1 GB', selected: true }], processing: [],
+    },
+  });
+  state.confirm.mockResolvedValueOnce({ id: 'torrent-batch', name: 'collection', kind: 'torrent', status: 'downloading', progress: 0 });
+
+  render(<App />);
+  await user.click(screen.getByRole('tab', { name: '新建下载' }));
+  await user.type(screen.getByRole('textbox', { name: '下载链接' }), 'magnet:?xt=urn:btih:abc');
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  expect(await screen.findByRole('dialog', { name: '确认下载内容' })).toBeVisible();
+  expect(screen.getByRole('tab', { name: '新建下载' })).toHaveAttribute('aria-selected', 'true');
+  await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
+
+  await waitFor(() => expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true'));
+});
+
+it('uses the dark launcher graphic and vector icons in the primary navigation', async () => {
+  const previousTheme = getThemeMode();
+  setThemeMode('dark');
+  const app = render(<App />);
+
+  try {
+    await screen.findByRole('heading', { name: '万能下载' });
+    const brandMark = document.querySelector('.brand-mark');
+    expect(brandMark).toHaveAttribute('data-icon-variant', 'dark');
+    expect(brandMark?.querySelector('img')).toHaveAttribute('src', expect.stringContaining('dark_mint'));
+
+    const navigation = screen.getByRole('navigation', { name: '主导航' });
+    expect(navigation.querySelectorAll('.nav-icon svg')).toHaveLength(3);
+    expect(navigation).not.toHaveTextContent('↓');
+    expect(navigation).not.toHaveTextContent('☁');
+    expect(navigation).not.toHaveTextContent('⚙');
+  } finally {
+    app.unmount();
+    setThemeMode(previousTheme);
+  }
+});
+
+it('shows the tab-scoped action before total speed only for its active download tab', async () => {
+  state.list.mockResolvedValueOnce([
+    { id: 'active-task', name: 'active.zip', kind: 'file', status: 'downloading', progress: 25 },
+    { id: 'recycled-task', name: 'removed.zip', kind: 'file', status: 'recycled', progress: 100 }
+  ]);
+  const user = userEvent.setup();
+  render(<App />);
+
+  const speed = await screen.findByLabelText('当前总下载速度');
+  const activeAction = screen.getByRole('button', { name: /全部暂停/ });
+  expect(activeAction).toHaveClass('bulk-pause');
+  expect(activeAction.compareDocumentPosition(speed) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(screen.queryByRole('button', { name: '清空' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('tab', { name: /回收站/ }));
+
+  const recycleAction = screen.getByRole('button', { name: '清空' });
+  expect(recycleAction).toHaveClass('bulk-pause');
+  expect(recycleAction.compareDocumentPosition(speed) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(screen.queryByRole('button', { name: /全部暂停/ })).not.toBeInTheDocument();
+});
+
+it('sorts only the active task tab from the menu beside total speed', async () => {
+  state.list.mockResolvedValueOnce([
+    { id: 'active-old', name: 'alpha.zip', kind: 'file', status: 'downloading', progress: 80, total_length: 800, created_at: 100 },
+    { id: 'active-new', name: 'zeta.zip', kind: 'file', status: 'downloading', progress: 20, total_length: 200, created_at: 200 },
+    { id: 'done-old', name: 'beta.zip', kind: 'file', status: 'completed', progress: 100, total_length: 400, created_at: 100 },
+    { id: 'done-new', name: 'delta.zip', kind: 'file', status: 'completed', progress: 100, total_length: 300, created_at: 300 },
+  ]);
+  const user = userEvent.setup();
+  render(<App />);
+
+  const queue = await screen.findByRole('region', { name: '下载队列' });
+  const visibleNames = () => Array.from(queue.querySelectorAll<HTMLElement>('.task-copy b')).map((item) => item.textContent);
+  await waitFor(() => expect(visibleNames()).toEqual(['zeta.zip', 'alpha.zip']));
+
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  expect(screen.getByRole('menu', { name: '任务排序' })).toBeVisible();
+  await user.click(screen.getByRole('menuitemradio', { name: '按文件名称从 A 到 Z' }));
+  expect(visibleNames()).toEqual(['alpha.zip', 'zeta.zip']);
+
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '按当前进度从低到高' }));
+  expect(visibleNames()).toEqual(['zeta.zip', 'alpha.zip']);
+
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '按文件大小从大到小' }));
+  expect(visibleNames()).toEqual(['alpha.zip', 'zeta.zip']);
+
+  await user.click(screen.getByRole('tab', { name: /已完成/ }));
+  expect(visibleNames()).toEqual(['delta.zip', 'beta.zip']);
+});
+
+it('shows all start for paused tasks and resumes every paused task from the active tab', async () => {
+  const pausedTask: QueueTask = { ...oldTask, id: 'paused-task', status: 'paused' };
+  const downloadingTask: QueueTask = { ...oldTask, id: 'downloading-task', status: 'downloading' };
+  state.list.mockResolvedValueOnce([pausedTask, downloadingTask]);
+  state.taskAction.mockResolvedValueOnce({ task: { ...pausedTask, status: 'downloading' } });
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole('button', { name: /全部开始/ }));
+
+  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('paused-task', 'resume'));
+  expect(state.taskAction).not.toHaveBeenCalledWith('downloading-task', 'resume');
+});
+
+it('copies all selected task links to the clipboard on separate lines', async () => {
+  const first: QueueTask = { ...oldTask, id: 'copy-1', name: 'first.zip', source: 'https://example.com/first.zip' };
+  const second: QueueTask = { ...oldTask, id: 'copy-2', name: 'second.zip', source: 'magnet:?xt=urn:btih:SECOND' };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [first, second] : []));
+  state.clipboardWrite.mockResolvedValue(undefined);
+  render(<App />);
+
+  fireEvent.click(await screen.findByText('first.zip'));
+  fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('first.zip'));
+  fireEvent.click(screen.getByRole('menuitem', { name: '复制下载链接' }));
+
+  await waitFor(() => expect(state.clipboardWrite).toHaveBeenCalledOnce());
+  const copiedLines = String(state.clipboardWrite.mock.calls[0][0]).split('\n');
+  expect(copiedLines).toHaveLength(2);
+  expect(copiedLines).toEqual(expect.arrayContaining(['https://example.com/first.zip', 'magnet:?xt=urn:btih:SECOND']));
+});
+
+it('starts every selected paused task from the multi-selection menu', async () => {
+  const first: QueueTask = { ...oldTask, id: 'resume-1', name: 'first-paused.zip', status: 'paused' };
+  const second: QueueTask = { ...oldTask, id: 'resume-2', name: 'second-paused.zip', status: 'paused' };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [first, second] : []));
+  state.taskAction.mockImplementation((id: string) => Promise.resolve({ task: { ...(id === first.id ? first : second), status: 'downloading' } }));
+  render(<App />);
+
+  fireEvent.click(await screen.findByText('first-paused.zip'));
+  fireEvent.click(screen.getByText('second-paused.zip'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('first-paused.zip'));
+  fireEvent.click(screen.getByRole('menuitem', { name: '开始下载' }));
+
+  await waitFor(() => {
+    expect(state.taskAction).toHaveBeenCalledWith('resume-1', 'resume');
+    expect(state.taskAction).toHaveBeenCalledWith('resume-2', 'resume');
+  });
+});
+
+it('deletes every selected active task from the multi-selection menu', async () => {
+  const first: QueueTask = { ...oldTask, id: 'delete-1', name: 'first-delete.zip' };
+  const second: QueueTask = { ...oldTask, id: 'delete-2', name: 'second-delete.zip' };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [first, second] : []));
+  state.taskAction.mockImplementation((id: string) => Promise.resolve({ task: { ...(id === first.id ? first : second), status: 'cancelled' } }));
+  render(<App />);
+
+  fireEvent.click(await screen.findByText('first-delete.zip'));
+  fireEvent.click(screen.getByText('second-delete.zip'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('first-delete.zip'));
+  fireEvent.click(screen.getByRole('menuitem', { name: '删除' }));
+
+  await waitFor(() => {
+    expect(state.taskAction).toHaveBeenCalledWith('delete-1', 'cancel');
+    expect(state.taskAction).toHaveBeenCalledWith('delete-2', 'cancel');
+  });
+});
+
+it('pauses every selected running task from the multi-selection menu', async () => {
+  const first: QueueTask = { ...oldTask, id: 'pause-1', name: 'first-running.zip' };
+  const second: QueueTask = { ...oldTask, id: 'pause-2', name: 'second-running.zip' };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [first, second] : []));
+  state.taskAction.mockImplementation((id: string) => Promise.resolve({ task: { ...(id === first.id ? first : second), status: 'paused' } }));
+  render(<App />);
+
+  fireEvent.click(await screen.findByText('first-running.zip'));
+  fireEvent.click(screen.getByText('second-running.zip'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('first-running.zip'));
+  fireEvent.click(screen.getByRole('menuitem', { name: '暂停下载' }));
+
+  await waitFor(() => {
+    expect(state.taskAction).toHaveBeenCalledWith('pause-1', 'pause');
+    expect(state.taskAction).toHaveBeenCalledWith('pause-2', 'pause');
+  });
+});
+
+it('moves every selected completed task to the recycle bin', async () => {
+  const first: QueueTask = { ...oldTask, id: 'done-delete-1', name: 'first-done.zip', status: 'completed', progress: 100 };
+  const second: QueueTask = { ...oldTask, id: 'done-delete-2', name: 'second-done.zip', status: 'completed', progress: 100 };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? [first, second] : []));
+  state.moveToRecycle.mockImplementation((id: string) => Promise.resolve({ ...(id === first.id ? first : second), status: 'recycled' }));
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole('tab', { name: /已完成/ }));
+  fireEvent.click(await screen.findByText('first-done.zip'));
+  fireEvent.click(screen.getByText('second-done.zip'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('first-done.zip'));
+  fireEvent.click(screen.getByRole('menuitem', { name: '删除' }));
+
+  await waitFor(() => {
+    expect(state.moveToRecycle).toHaveBeenCalledWith('done-delete-1');
+    expect(state.moveToRecycle).toHaveBeenCalledWith('done-delete-2');
+  });
+});
+
+it('opens one permanent-delete confirmation for all selected recycled tasks', async () => {
+  const first: QueueTask = { ...oldTask, id: 'purge-1', name: 'first-old.zip', status: 'recycled', progress: 100 };
+  const second: QueueTask = { ...oldTask, id: 'purge-2', name: 'second-old.zip', status: 'cancelled', progress: 100 };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? [first, second] : []));
+  state.purgeTasks.mockResolvedValue(undefined);
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole('tab', { name: /回收站/ }));
+  fireEvent.click(await screen.findByText('first-old.zip'));
+  fireEvent.click(screen.getByText('second-old.zip'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('first-old.zip'));
+  fireEvent.click(screen.getByRole('menuitem', { name: '删除' }));
+
+  expect(screen.getByRole('dialog', { name: '彻底删除任务' })).toHaveTextContent('2 个任务');
+  fireEvent.click(screen.getByRole('button', { name: '彻底删除' }));
+  await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledWith(expect.arrayContaining(['purge-1', 'purge-2']), false));
 });
 
 it('clears cleanup retry only after the typed task action result reports success', async () => {
@@ -458,10 +793,40 @@ it('uses the existing native task action for floating-ball batch resume', async 
   await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('paused-task', 'resume'));
 });
 
+it('cancels one expanded torrent file without cancelling the parent task', async () => {
+  const user = userEvent.setup();
+  const task: QueueTask = {
+    id: 'torrent-files', name: '合集', kind: 'torrent', status: 'downloading', progress: 25,
+    files: [
+      { index: 1, path: 'D://合集/episode.mkv', length: 100, completed_length: 25, selected: true },
+      { index: 2, path: 'D://合集/readme.txt', length: 10, completed_length: 0, selected: true },
+    ],
+  };
+  state.list.mockResolvedValueOnce([task]);
+  state.cancelFile.mockResolvedValueOnce({
+    ...task,
+    files: [
+      { ...task.files![0], selected: false },
+      task.files![1],
+    ],
+  });
+  render(<App />);
+
+  await user.click(await screen.findByRole('button', { name: '展开 合集' }));
+  await user.click(screen.getByRole('button', { name: '取消 episode.mkv 下载' }));
+
+  await waitFor(() => expect(state.cancelFile).toHaveBeenCalledWith('torrent-files', 1));
+  expect(state.taskAction).not.toHaveBeenCalledWith('torrent-files', 'cancel');
+  expect(screen.getByRole('button', { name: '继续 episode.mkv' })).toBeVisible();
+});
+
 it('reconciles an existing task from a later focus snapshot without dropping a new event task', async () => {
-  state.list
-    .mockResolvedValueOnce([])
-    .mockResolvedValueOnce([{ ...liveTask, status: 'completed', progress: 100 }]);
+  let terminalRequests = 0;
+  state.list.mockImplementation((scope?: string) => {
+    if (scope !== 'terminal') return Promise.resolve([]);
+    terminalRequests += 1;
+    return Promise.resolve(terminalRequests === 1 ? [] : [{ ...liveTask, status: 'completed', progress: 100 }]);
+  });
   render(<App />);
   await waitFor(() => expect(state.onFocus).toBeDefined());
   act(() => {
@@ -476,11 +841,16 @@ it('reconciles an existing task from a later focus snapshot without dropping a n
 
 it('keeps a same-ID event update that arrives while a focus snapshot is pending', async () => {
   const focusSnapshot = deferred<QueueTask[]>();
-  state.list.mockResolvedValueOnce([]).mockReturnValueOnce(focusSnapshot.promise);
+  let activeRequests = 0;
+  state.list.mockImplementation((scope?: string) => {
+    if (scope !== 'active') return Promise.resolve([]);
+    activeRequests += 1;
+    return activeRequests === 1 ? Promise.resolve([]) : focusSnapshot.promise;
+  });
   render(<App />);
   await waitFor(() => expect(state.onFocus).toBeDefined());
   act(() => { state.onFocus?.({ payload: true }); });
-  await waitFor(() => expect(state.list).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(activeRequests).toBe(2));
   act(() => { state.onTask?.(liveTask); });
   await act(async () => { focusSnapshot.resolve([oldTask]); });
 

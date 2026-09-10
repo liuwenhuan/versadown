@@ -49,7 +49,9 @@ async fn resolves_metadata_service_result_to_a_torrent_for_local_aria2() {
     .await
     .unwrap();
 
-    assert_eq!(result.as_deref(), Some("dG9ycmVudC1ieXRlcw=="));
+    let resolved = result.expect("metadata service should return its cached torrent");
+    assert_eq!(resolved.torrent, "dG9ycmVudC1ieXRlcw==");
+    assert_eq!(resolved.title.as_deref(), Some("fixture"));
 }
 
 #[tokio::test]
@@ -153,5 +155,7 @@ async fn rewrites_a_service_default_localhost_download_url_to_the_configured_ser
     .await
     .unwrap();
 
-    assert_eq!(result.as_deref(), Some("dG9ycmVudC1ieXRlcw=="));
+    let resolved = result.expect("rewritten download URL should return its torrent");
+    assert_eq!(resolved.torrent, "dG9ycmVudC1ieXRlcw==");
+    assert_eq!(resolved.title.as_deref(), Some("fixture"));
 }

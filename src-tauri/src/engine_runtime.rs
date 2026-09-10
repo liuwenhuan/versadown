@@ -203,7 +203,7 @@ struct EngineSlot {
 }
 
 pub struct EngineRuntime {
-    launch_config: Aria2LaunchConfig,
+    launch_config: RwLock<Aria2LaunchConfig>,
     store: Arc<TaskStore>,
     download_events: Arc<dyn EventSink>,
     state_events: Arc<dyn EngineStateSink>,
@@ -222,7 +222,7 @@ impl EngineRuntime {
         state_events: Arc<dyn EngineStateSink>,
     ) -> Self {
         Self {
-            launch_config,
+            launch_config: RwLock::new(launch_config),
             store,
             download_events,
             state_events,
@@ -289,7 +289,12 @@ impl EngineRuntime {
         }
         slot.service.take();
         slot.client.take();
-        let (process, client) = match Aria2Process::start(self.launch_config.clone()).await {
+        let launch_config = self
+            .launch_config
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let (process, client) = match Aria2Process::start(launch_config).await {
             Ok(engine) => engine,
             Err(error) => {
                 self.mark_tasks_unavailable(&error.to_string());
@@ -355,6 +360,78 @@ impl EngineRuntime {
             .map_err(|error| EngineUnavailableError {
                 message: format!("下载引擎不可用：{error}"),
             })
+    }
+
+    /// Applies the complete aria2 configuration immediately. The RPC endpoint and
+    /// authentication token are startup-only options, so the owned local process
+    /// is restarted after its session has been saved. aria2 restores active work
+    /// from that session before this call resolves successfully.
+    pub async fn reconfigure(
+        &self,
+        launch_config: Aria2LaunchConfig,
+    ) -> Result<EngineAvailability, String> {
+        if self.exiting.load(Ordering::Acquire) {
+            return Err("应用正在退出，无法更新 aria2 设置".into());
+        }
+        let current_config = self
+            .launch_config
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if launch_config.aria2.rpc_port != current_config.aria2.rpc_port {
+            std::net::TcpListener::bind(("127.0.0.1", launch_config.aria2.rpc_port))
+                .map_err(|_| format!("aria2 RPC 端口 {} 已被占用", launch_config.aria2.rpc_port))?;
+        }
+
+        self.set_state(EngineAvailability::starting());
+        let mut slot = self.slot.lock().await;
+        if self.exiting.load(Ordering::Acquire) {
+            self.stop_slot_for_exit(&mut slot).await;
+            return Err("应用正在退出，无法更新 aria2 设置".into());
+        }
+        if let Some(cancel) = slot.sync_cancel.take() {
+            let _ = cancel.send(true);
+        }
+        slot.client.take();
+        if let Some(service) = slot.service.take() {
+            let report = service.shutdown_report(Duration::from_secs(5)).await;
+            if !report.child_stopped {
+                return Err("aria2 未能在保存会话后停止，设置未应用".into());
+            }
+        }
+        *self
+            .launch_config
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = launch_config;
+        let state = self.retry_locked(&mut slot).await;
+        if state.available {
+            Ok(state)
+        } else {
+            let error = state.error.unwrap_or_else(|| "aria2 配置应用失败".into());
+            *self
+                .launch_config
+                .write()
+                .unwrap_or_else(|error| error.into_inner()) = current_config;
+            let restored = self.retry_locked(&mut slot).await;
+            if restored.available {
+                Err(error)
+            } else {
+                Err(format!("{error}；且无法恢复原 aria2 配置"))
+            }
+        }
+    }
+
+    pub async fn reconfigure_aria2_settings(
+        &self,
+        aria2: crate::Aria2Settings,
+    ) -> Result<EngineAvailability, String> {
+        let mut launch_config = self
+            .launch_config
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        launch_config.aria2 = aria2;
+        self.reconfigure(launch_config).await
     }
 
     pub fn start_monitor(self: &Arc<Self>, interval: Duration) {
@@ -1108,6 +1185,11 @@ mod tests {
     }
 
     fn runtime(root: &std::path::Path) -> Arc<EngineRuntime> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut aria2 = crate::Aria2Settings::default();
+        aria2.rpc_port = listener.local_addr().unwrap().port();
+        aria2.rpc_token = format!("engine-runtime-unit-test-{}", aria2.rpc_port);
+        drop(listener);
         Arc::new(EngineRuntime::new(
             Aria2LaunchConfig {
                 binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1116,6 +1198,7 @@ mod tests {
                 download_dir: root.join("downloads"),
                 parent_pid: std::process::id(),
                 peer_discovery: false,
+                aria2,
             },
             Arc::new(TaskStore::open_in_memory().unwrap()),
             Arc::new(crate::aria2::sync::NoEvents),

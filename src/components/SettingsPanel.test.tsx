@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { SettingsPanel } from './SettingsPanel';
-import { defaultSettings } from "../lib/api";
+import { defaultSettings } from '../lib/api';
 
 const initial = {
   debugReports: false,
@@ -11,6 +11,7 @@ const initial = {
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 },
   deleteTransferredShareFilesAfterDownload: true
 };
 
@@ -18,13 +19,6 @@ it('keeps detailed report collection off by default', () => {
   render(<SettingsPanel initial={initial} onChange={() => {}} />);
   expect(screen.getByRole('tab', { name: '显示' })).toHaveAttribute('aria-selected', 'true');
   expect(screen.queryByRole('checkbox', { name: '启用调试报告' })).not.toBeInTheDocument();
-});
-
-it('enables cleanup for application-created transfer files by default', () => {
-  render(<SettingsPanel initial={defaultSettings} onChange={() => {}} />);
-
-  expect(screen.getByLabelText('下载完成后自动删除转存文件')).toBeChecked();
-  expect(screen.getByText('仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。')).toBeVisible();
 });
 
 it('changes the interface theme from display settings', async () => {
@@ -97,6 +91,13 @@ it('offers an OpenAI-compatible AI analysis configuration in advanced settings',
   expect(screen.getByRole('combobox', { name: 'AI 模型' })).toBeVisible();
 });
 
+it('enables cleanup for application-created transfer files by default', () => {
+  render(<SettingsPanel initial={defaultSettings} onChange={() => {}} />);
+
+  expect(screen.getByLabelText('下载完成后自动删除转存文件')).toBeChecked();
+  expect(screen.getByText('仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。')).toBeVisible();
+});
+
 it('saves the preferred magnet metadata service from advanced settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
@@ -147,6 +148,47 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 },
     deleteTransferredShareFilesAfterDownload: true
   });
+});
+
+it('saves aria2 RPC and transfer limits from the network settings', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={initial} onChange={onChange} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  await user.clear(screen.getByRole('spinbutton', { name: 'aria2 RPC 端口' }));
+  await user.type(screen.getByRole('spinbutton', { name: 'aria2 RPC 端口' }), '16800');
+  await user.type(screen.getByLabelText('aria2 RPC Token'), 'local-token');
+  await user.clear(screen.getByRole('spinbutton', { name: '最大并行任务数' }));
+  await user.type(screen.getByRole('spinbutton', { name: '最大并行任务数' }), '3');
+  await user.clear(screen.getByRole('spinbutton', { name: '单任务并发连接数' }));
+  await user.type(screen.getByRole('spinbutton', { name: '单任务并发连接数' }), '4');
+  await user.clear(screen.getByRole('spinbutton', { name: 'BT 分享率' }));
+  await user.type(screen.getByRole('spinbutton', { name: 'BT 分享率' }), '1.5');
+  await user.click(screen.getByRole('button', { name: '保存 aria2 设置' }));
+
+  expect(onChange).toHaveBeenLastCalledWith({
+    ...initial,
+    aria2: {
+      rpcPort: 16800,
+      rpcToken: 'local-token',
+      maxConcurrentDownloads: 3,
+      maxConnectionsPerServer: 4,
+      btSeedRatio: 1.5
+    }
+  });
+});
+
+it('shows the native aria2 error instead of claiming a failed configuration was applied', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn().mockRejectedValue(new Error('aria2 RPC 端口 16800 已被占用'));
+  render(<SettingsPanel initial={{ ...initial, aria2: { ...initial.aria2, rpcToken: 'local-token' } }} onChange={onChange} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+  await user.click(screen.getByRole('button', { name: '保存 aria2 设置' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('aria2 RPC 端口 16800 已被占用');
+  expect(screen.queryByText('已保存并立即应用')).not.toBeInTheDocument();
 });

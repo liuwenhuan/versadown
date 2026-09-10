@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
 import { vi } from 'vitest';
 import { NewDownloadDialog } from './NewDownloadDialog';
 
@@ -10,6 +11,42 @@ it('keeps the launcher placement and its compact-window close label by default',
   expect(screen.getByRole('dialog', { name: '新建下载' })).toHaveClass('launcher-panel');
   expect(screen.getByRole('button', { name: '收起下载输入' })).toBeVisible();
   expect(screen.queryByTestId('new-download-backdrop')).not.toBeInTheDocument();
+});
+
+it('uses concise quick-add controls without explanatory labels', () => {
+  render(<NewDownloadDialog open onParse={vi.fn()} onClose={vi.fn()} />);
+
+  expect(screen.getByRole('button', { name: '打开任务列表' })).toBeVisible();
+  expect(screen.queryByText('下载内容')).not.toBeInTheDocument();
+  expect(screen.queryByText('标准链接直接规则解析；复杂内容才会请求 AI 辅助。')).not.toBeInTheDocument();
+});
+
+it('uses a compact launcher card without a fixed blank lower area', () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<NewDownloadDialog open onParse={vi.fn()} onClose={vi.fn()} />);
+
+    const dialog = screen.getByRole('dialog', { name: '新建下载' });
+    const input = screen.getByLabelText('下载内容');
+    expect(getComputedStyle(dialog).width).toBe('410px');
+    expect(getComputedStyle(dialog).height).toBe('auto');
+    expect(getComputedStyle(input).height).toBe('88px');
+    expect(dialog.querySelector('.launcher-title strong')).toBeNull();
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('enables parsing only after the quick-add input contains content', async () => {
+  const user = userEvent.setup();
+  render(<NewDownloadDialog open onParse={vi.fn()} onClose={vi.fn()} />);
+
+  const submit = screen.getByRole('button', { name: '开始解析下载' });
+  expect(submit).toBeDisabled();
+  await user.type(screen.getByLabelText('下载内容'), 'https://example.com/file.zip');
+  expect(submit).toBeEnabled();
 });
 
 it('closes the modal through Escape, its backdrop, and its modal close button', async () => {
@@ -101,6 +138,7 @@ it('traps modal Tab navigation and restores focus to its opener when closed', as
   await user.click(opener);
   const input = screen.getByLabelText('下载内容');
   expect(input).toHaveFocus();
+  await user.type(input, 'https://example.com/file.zip');
 
   await user.tab({ shift: true });
   expect(screen.getByRole('button', { name: '关闭新建下载' })).toHaveFocus();

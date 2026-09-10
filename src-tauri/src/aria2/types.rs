@@ -3,17 +3,31 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Clone)]
-pub struct RpcSecret([u8; 32]);
+pub struct RpcSecret(String);
 
 impl RpcSecret {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+        Self(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+    pub fn from_token(token: impl AsRef<str>) -> Result<Self, Aria2Error> {
+        let token = token.as_ref();
+        if token.is_empty()
+            || token
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err(Aria2Error::InvalidField {
+                field: "rpcSecret",
+                value: "[REDACTED]".into(),
+            });
+        }
+        Ok(Self(token.into()))
     }
     pub fn authorization_param(&self) -> String {
         format!("token:{}", self.hex())
     }
     pub(super) fn hex(&self) -> String {
-        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+        self.0.clone()
     }
     pub(super) fn redact(&self, text: &str) -> String {
         text.replace(&self.hex(), "[REDACTED]")

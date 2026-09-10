@@ -226,6 +226,11 @@ impl LiveAria2Fixture {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut aria2 = alldownloader_lib::Aria2Settings::default();
+        aria2.rpc_port = listener.local_addr().unwrap().port();
+        aria2.rpc_token = format!("aria2-live-test-{}", aria2.rpc_port);
+        drop(listener);
         let config = Aria2LaunchConfig {
             binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
@@ -233,6 +238,7 @@ impl LiveAria2Fixture {
             download_dir: root.path().join("downloads"),
             parent_pid: std::process::id(),
             peer_discovery: false,
+            aria2,
         };
         let (process, client) = Aria2Process::start(config.clone()).await.unwrap();
         assert_eq!(client.get_version().await.unwrap().version, "1.37.0");

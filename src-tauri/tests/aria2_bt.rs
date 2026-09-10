@@ -180,16 +180,30 @@ async fn selected_torrent_uses_the_chosen_destination_before_unpausing() {
         other => panic!("unexpected method {other}"),
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store.create(NewTask::direct("magnet:?xt=urn:btih:fixture")).unwrap();
+    let task = store
+        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .unwrap();
     store.bind_gid(task.id, "torrent-gid").unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
-    store.upsert_files(task.id, &[(1, "D:/合集/episode.mp4".into(), 168996012, 0, true)]).unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(1, "D:/合集/episode.mp4".into(), 168996012, 0, true)],
+        )
+        .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
-    let started_task = service.select_files_with_options(task.id, vec![1], UriSubmissionOptions {
-        directory: Some(PathBuf::from("E:\\Media")),
-        ..Default::default()
-    }).await.unwrap();
+    let started_task = service
+        .select_files_with_options(
+            task.id,
+            vec![1],
+            UriSubmissionOptions {
+                directory: Some(PathBuf::from("E:\\Media")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
     assert_eq!(started_task.status, TaskStatus::Downloading);
     server.abort();

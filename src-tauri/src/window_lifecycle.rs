@@ -105,7 +105,9 @@ pub fn handle_manager_window_event(
             let Some(manager) = app.get_webview_window("main") else {
                 return;
             };
-            let _ = hide_window_immediately(&manager);
+            if hide_window_immediately(&manager).is_ok() {
+                crate::launcher::set_tray_manager_visibility(&app, false);
+            }
         });
     }
 }
