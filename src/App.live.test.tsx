@@ -98,6 +98,40 @@ it('keeps a live snapshot when the initial list returns an older copy', async ()
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
 });
 
+it('clears cleanup retry only after the typed task action result reports success', async () => {
+  const cleanupTask: QueueTask = {
+    id: 'cleanup-task', name: 'cleanup.bin', kind: 'cloud', status: 'completed', progress: 100,
+    source: 'cloud-share://baidu/share/entry', cleanup_pending: true, error: 'opaque provider failure',
+  };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [] : [cleanupTask]));
+  state.taskAction.mockResolvedValueOnce({
+    task: { ...cleanupTask, cleanup_pending: false, error: undefined },
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole('tab', { name: /已完成/ }));
+
+  fireEvent.click(await screen.findByRole('button', { name: '重试网盘清理 cleanup.bin' }));
+
+  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('cleanup-task', 'retry_cleanup'));
+  await waitFor(() => expect(screen.queryByRole('button', { name: '重试网盘清理 cleanup.bin' })).not.toBeInTheDocument());
+});
+
+it('keeps typed cleanup retry available when the task action fails', async () => {
+  const cleanupTask: QueueTask = {
+    id: 'cleanup-task', name: 'cleanup.bin', kind: 'cloud', status: 'completed', progress: 100,
+    source: 'cloud-share://baidu/share/entry', cleanup_pending: true,
+  };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [] : [cleanupTask]));
+  state.taskAction.mockRejectedValueOnce(new Error('cleanup retry failed'));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('tab', { name: /已完成/ }));
+
+  fireEvent.click(await screen.findByRole('button', { name: '重试网盘清理 cleanup.bin' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('cleanup retry failed');
+  expect(screen.getByRole('button', { name: '重试网盘清理 cleanup.bin' })).toBeVisible();
+});
+
 it('upserts a parsed task that already arrived through a live event', async () => {
   state.list.mockResolvedValueOnce([]);
   state.parse.mockResolvedValueOnce({ task: liveTask });

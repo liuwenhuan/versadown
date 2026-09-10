@@ -500,7 +500,7 @@ mod tests {
                         kind: "cloud".into(),
                     })
                     .unwrap();
-                plans.link_local_task(&task.source, task.id).unwrap();
+                plans.reserve_local_task(&task.source, task.id).unwrap();
                 tasks.transition(task.id, TaskStatus::Queued).unwrap();
                 tasks.transition(task.id, TaskStatus::Downloading).unwrap()
             })

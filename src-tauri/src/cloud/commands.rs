@@ -1734,7 +1734,11 @@ fn is_retryable_cloud_share_prepare(task: &DownloadTask) -> bool {
 fn cloud_share_task_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskActionOutcome {
     let files = tasks.files(task.id).unwrap_or_default();
     TaskActionOutcome {
-        payload: crate::commands::DownloadTaskPayload { task, files },
+        payload: crate::commands::DownloadTaskPayload {
+            task,
+            files,
+            cleanup_pending: false,
+        },
         duplicate: None,
     }
 }
@@ -1780,7 +1784,12 @@ pub(crate) async fn cleanup_cloud_share_task(
                 .store
                 .set_completed_cleanup_message(id, true)
                 .map_err(|_| QuarkError::Storage)?;
-            if let Ok(payload) = crate::commands::task_payload(&state.store, task.clone()) {
+            let cloud = app.try_state::<Arc<CloudState>>();
+            if let Ok(payload) = crate::commands::task_payload_with_cleanup(
+                &state.store,
+                cloud.as_ref().map(|cloud| &cloud.share_plans),
+                task.clone(),
+            ) {
                 let _ = app.emit("download-task-updated", payload);
             }
             Ok(task)
@@ -1839,7 +1848,11 @@ async fn cleanup_cloud_share_task_inner(
     })
     .await?;
     if let Some(updated) = updated {
-        if let Ok(payload) = crate::commands::task_payload(&state.store, updated.clone()) {
+        if let Ok(payload) = crate::commands::task_payload_with_cleanup(
+            &state.store,
+            Some(&cloud.share_plans),
+            updated.clone(),
+        ) {
             let _ = app.emit("download-task-updated", payload);
         }
         Ok(updated)

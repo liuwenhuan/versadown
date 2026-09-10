@@ -150,6 +150,35 @@ it('opens the download directory for a completed task without video files', asyn
   expect(onCommand).toHaveBeenCalledWith('completed-archive', 'open_directory');
 });
 
+it('offers cleanup retry only from the typed completed-task state', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      {
+        id: 'cleanup-pending', name: 'pending.bin', kind: 'cloud', status: 'completed', progress: 100,
+        source: 'cloud-share://baidu/share/entry', cleanup_pending: true, error: 'opaque provider failure',
+      },
+      {
+        id: 'cleanup-done', name: 'done.bin', kind: 'cloud', status: 'completed', progress: 100,
+        source: 'cloud-share://baidu/share/other', cleanup_pending: false,
+        error: 'cleanup_pending：这段旧文案不能决定界面能力',
+      },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '重试网盘清理 pending.bin' }));
+  expect(onCommand).toHaveBeenLastCalledWith('cleanup-pending', 'retry_cleanup');
+  expect(screen.queryByRole('button', { name: '重试网盘清理 done.bin' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '更多操作 pending.bin' }));
+  await user.click(screen.getByRole('menuitem', { name: '重试网盘清理' }));
+  expect(onCommand).toHaveBeenLastCalledWith('cleanup-pending', 'retry_cleanup');
+});
+
 it('keeps destructive cancellation in the menu while the row exposes pause and more actions', async () => {
   const user = userEvent.setup();
   render(<DownloadQueue

@@ -1167,6 +1167,38 @@ impl CloudSharePlanStore {
         })
     }
 
+    /// Reports cleanup capability for one exact persisted local task. A task is
+    /// never considered pending merely because another entry in the same share
+    /// has a failed cleanup journal record.
+    pub(crate) fn cleanup_pending_for_task(
+        &self,
+        source: &str,
+        task_id: uuid::Uuid,
+    ) -> Result<bool, QuarkError> {
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        let _guard = self.mutation.lock().map_err(|_| QuarkError::Storage)?;
+        let document = self.load()?;
+        let plan = &document
+            .plans
+            .get(&plan_key(provider, &share))
+            .ok_or_else(missing_plan)?
+            .plan;
+        if !plan
+            .linked_local_tasks
+            .get(&fingerprint)
+            .is_some_and(|ids| ids.contains(&task_id))
+        {
+            return Ok(false);
+        }
+        Ok(plan.transfers.iter().any(|transfer| {
+            transfer.entry_fingerprint == fingerprint
+                && matches!(
+                    transfer.cleanup_state,
+                    CloudShareCleanupState::Attempted | CloudShareCleanupState::Failed
+                )
+        }))
+    }
+
     /// Rebuild safe task messages from the durable journal after a restart.
     /// This reads the document without claiming, pruning, saving or provider IO.
     pub(crate) fn restore_cleanup_pending_messages(
@@ -1417,6 +1449,45 @@ mod tests {
             store.resolve_entry(&source).unwrap().plan.transfers[0].cleanup_state,
             CloudShareCleanupState::Attempted
         );
+    }
+
+    #[test]
+    fn cleanup_pending_is_scoped_to_the_exact_source_and_linked_task() {
+        let (store, _, _) = memory_store();
+        let mut plan = fixture("cleanup-status");
+        plan.entries.push(CloudShareEntry::new(
+            "cleanup-status",
+            "f2".into(),
+            "other.txt".into(),
+            vec![],
+            Some(3),
+        ));
+        let source = plan.source_for("f1");
+        let other_source = plan.source_for("f2");
+        let linked_task = uuid::Uuid::new_v4();
+        let unrelated_task = uuid::Uuid::new_v4();
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        store.link_local_task(&source, linked_task).unwrap();
+        store.record_transfer(&source, "created-id").unwrap();
+
+        assert!(!store.cleanup_pending_for_task(&source, linked_task).unwrap());
+        let ids = store
+            .mark_local_completion(&source, false, |_, _| true)
+            .unwrap();
+        assert!(store.cleanup_pending_for_task(&source, linked_task).unwrap());
+        assert!(!store.cleanup_pending_for_task(&source, unrelated_task).unwrap());
+        assert!(!store.cleanup_pending_for_task(&other_source, linked_task).unwrap());
+
+        store.finish_cleanup(&source, &ids, false).unwrap();
+        assert!(store.cleanup_pending_for_task(&source, linked_task).unwrap());
+        let retry_ids = store
+            .mark_local_completion(&source, true, |_, _| true)
+            .unwrap();
+        store.finish_cleanup(&source, &retry_ids, true).unwrap();
+        assert!(!store.cleanup_pending_for_task(&source, linked_task).unwrap());
     }
 
     #[test]

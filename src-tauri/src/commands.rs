@@ -45,6 +45,7 @@ pub struct DownloadTaskPayload {
     #[serde(flatten)]
     pub task: DownloadTask,
     pub files: Vec<TransferFile>,
+    pub cleanup_pending: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -59,8 +60,27 @@ pub(crate) fn task_payload(
     store: &TaskStore,
     task: DownloadTask,
 ) -> Result<DownloadTaskPayload, String> {
+    task_payload_with_cleanup(store, None, task)
+}
+
+pub(crate) fn task_payload_with_cleanup(
+    store: &TaskStore,
+    plans: Option<&crate::cloud::share::CloudSharePlanStore>,
+    task: DownloadTask,
+) -> Result<DownloadTaskPayload, String> {
+    let cleanup_pending = task.status == TaskStatus::Completed
+        && task.source.starts_with("cloud-share://")
+        && plans.is_some_and(|plans| {
+            plans
+                .cleanup_pending_for_task(&task.source, task.id)
+                .unwrap_or(false)
+        });
     let files = store.files(task.id).map_err(|error| error.to_string())?;
-    Ok(DownloadTaskPayload { task, files })
+    Ok(DownloadTaskPayload {
+        task,
+        files,
+        cleanup_pending,
+    })
 }
 
 pub(crate) fn task_action_outcome(
@@ -372,7 +392,13 @@ pub fn list_tasks(
     let cloud = app.try_state::<Arc<crate::cloud::commands::CloudState>>();
     list_tasks_with_cleanup_projection(&state.store, cloud.as_ref().map(|cloud| &cloud.share_plans))?
         .into_iter()
-        .map(|task| task_payload(&state.store, task))
+        .map(|task| {
+            task_payload_with_cleanup(
+                &state.store,
+                cloud.as_ref().map(|cloud| &cloud.share_plans),
+                task,
+            )
+        })
         .collect()
 }
 
@@ -400,7 +426,15 @@ pub async fn task_action(
         let task = crate::cloud::commands::cleanup_cloud_share_task(app.clone(), id, true)
             .await
             .map_err(|_| "网盘转存文件清理未完成，可重试清理".to_string())?;
-        return task_action_outcome(&state.store, task, None);
+        let cloud = app.try_state::<Arc<crate::cloud::commands::CloudState>>();
+        return Ok(TaskActionOutcome {
+            payload: task_payload_with_cleanup(
+                &state.store,
+                cloud.as_ref().map(|cloud| &cloud.share_plans),
+                task,
+            )?,
+            duplicate: None,
+        });
     }
     let service = state
         .runtime
@@ -1198,6 +1232,62 @@ mod tests {
         );
         assert!(!parsed.requires_confirmation);
         assert!(parsed.resources.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_payload_projects_cleanup_pending_from_the_exact_plan_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "payload-cleanup".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "payload-cleanup",
+                "entry".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            serde_json::json!({}),
+        );
+        let source = plan.source_for("entry");
+        plans.upsert(&plan).unwrap();
+        plans
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store.create(NewTask::direct(&source)).unwrap();
+        plans.link_local_task(&source, task.id).unwrap();
+        plans.record_transfer(&source, "created-id").unwrap();
+        plans
+            .mark_local_completion(&source, false, |_, _| true)
+            .unwrap();
+        let completed = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                ..task
+            })
+            .unwrap();
+
+        let payload = task_payload_with_cleanup(&store, Some(&plans), completed).unwrap();
+        let json = serde_json::to_value(payload).unwrap();
+        assert_eq!(json["cleanup_pending"], true);
+
+        let ordinary = store
+            .create(NewTask::direct("https://example.test/file.bin"))
+            .unwrap();
+        let ordinary = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                ..ordinary
+            })
+            .unwrap();
+        let ordinary = task_payload_with_cleanup(&store, Some(&plans), ordinary).unwrap();
+        assert!(!ordinary.cleanup_pending);
     }
 
     #[test]

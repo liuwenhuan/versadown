@@ -120,6 +120,7 @@ function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: 
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
   if (task.status === 'paused') commands.push({ command: 'resume', label: '继续下载' });
   if (task.status === 'failed') commands.push({ command: 'retry', label: '重新下载' });
+  if (task.status === 'completed' && task.cleanup_pending) commands.push({ command: 'retry_cleanup', label: '重试网盘清理' });
   commands.push({ command: 'open_directory', label: '打开下载目录', separated: commands.length > 0 });
   commands.push({ command: 'details', label: '查看任务详情' });
   if (task.source) commands.push({ command: 'copy_link', label: '复制下载链接' });
@@ -133,6 +134,7 @@ function MenuIcon({ command }: { command: TaskCommand }) {
   const paths: Record<TaskCommand, React.ReactNode> = {
     pause: <><path d="M8 5v14" /><path d="M16 5v14" /></>, resume: <path d="m9 6 9 6-9 6z" />,
     cancel: <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>, retry: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
+    retry_cleanup: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     open_directory: <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>,
     play_videos: <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>,
     copy_link: <><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
@@ -248,6 +250,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onCo
             </div>
             {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</>}</span></div></div>}
             <div className="task-actions">
+              {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasVideo ? `播放 ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasVideo ? '播放视频' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasVideo ? 'play_videos' : 'open_directory'); }}><ActionIcon action={completedHasVideo ? 'play' : 'folder'} /></button>}
               {task.status === 'awaiting_user' && (task.kind === 'magnet' || task.kind === 'torrent') && onConfirm && <button aria-label={`确认下载 ${taskName}`} title="确认下载内容" onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认</button>}
               {primaryAction && <button aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} /></button>}

@@ -104,7 +104,7 @@ export async function listPersistedTasks(): Promise<QueueTask[]> {
   return isTauriRuntime() ? invoke<QueueTask[]>('list_tasks') : [];
 }
 
-export async function runTaskAction(taskId: string, action: Extract<TaskCommand, 'pause' | 'resume' | 'cancel' | 'retry'>): Promise<TaskActionResult> {
+export async function runTaskAction(taskId: string, action: Extract<TaskCommand, 'pause' | 'resume' | 'cancel' | 'retry' | 'retry_cleanup'>): Promise<TaskActionResult> {
   if (!isTauriRuntime()) return {};
   return duplicateResult(await invoke<NativeTaskOutcome>('task_action', { taskId, action }));
 }
