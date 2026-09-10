@@ -260,6 +260,33 @@ mod tests {
         };
         assert_eq!(download.url, "http://download.quark.cn/movie?sign=secret");
     }
+    #[test]
+    fn quark_download_parser_accepts_http_and_rejects_unsafe_urls() {
+        for url in [
+            "http://download.quark.cn/file?sign=secret",
+            "https://download.quark.cn/file",
+        ] {
+            let body = json!({"data":[{"download_url":url}]}).to_string();
+            assert_eq!(parse_quark_download_url(&body).unwrap(), url);
+        }
+        for url in [
+            "ftp://download.quark.cn/file",
+            "file:///tmp/file",
+            "https://user:secret@download.quark.cn/file",
+            "http://user@download.quark.cn/file",
+            "not a URL",
+            "https://pan.quark.cn/s/share123",
+        ] {
+            let body = json!({"data":[{"download_url":url}]}).to_string();
+            assert!(
+                matches!(
+                    parse_quark_download_url(&body),
+                    Err(QuarkError::InvalidResponse)
+                ),
+                "unsafe URL accepted"
+            );
+        }
+    }
 }
 
 pub const QUARK_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch";
@@ -291,11 +318,12 @@ pub fn parse_quark_files(body: &str) -> Result<Vec<QuarkFile>, QuarkError> {
 }
 pub fn parse_quark_download_url(body: &str) -> Result<String, QuarkError> {
     let v: Value = serde_json::from_str(body).map_err(|_| QuarkError::InvalidResponse)?;
-    v.pointer("/data/0/download_url")
+    let url = v
+        .pointer("/data/0/download_url")
         .and_then(Value::as_str)
-        .filter(|u| u.starts_with("https://"))
-        .map(str::to_owned)
-        .ok_or(QuarkError::InvalidResponse)
+        .ok_or(QuarkError::InvalidResponse)?;
+    super::share::validate_direct_url(url)?;
+    Ok(url.to_owned())
 }
 pub struct QuarkClient<'a, T: CloudHttpTransport + ?Sized> {
     cookie: String,
@@ -528,14 +556,7 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         response: &CloudHttpResponse,
         name: &str,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-        let value: Value =
-            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        let url = value
-            .pointer("/data/0/download_url")
-            .and_then(Value::as_str)
-            .ok_or(QuarkError::InvalidResponse)?
-            .to_owned();
-        super::share::validate_direct_url(&url)?;
+        let url = parse_quark_download_url(&response.body)?;
         Ok(super::commands::ResolvedCloudDownload {
             url,
             name: name.into(),
