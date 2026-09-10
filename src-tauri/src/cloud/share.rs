@@ -2558,6 +2558,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_parsing_task_after_failed_failure_write_is_reused_on_retry() {
+        let (plans, _, _) = memory_store();
+        let plan = fixture("stale-parsing-retry");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let tasks = Arc::new(crate::TaskStore::open_path(&database).unwrap());
+        let administration = rusqlite::Connection::open(&database).unwrap();
+        let api = Arc::new(SagaAria2::default());
+        let service = Arc::new(crate::DownloadService::new(api.clone(), tasks.clone()));
+        let create_failure_trigger = database.clone();
+
+        let failed = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source.clone(),
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service.clone()) },
+            || async move {
+                rusqlite::Connection::open(create_failure_trigger)
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER reject_failed_status BEFORE UPDATE OF status ON tasks \
+                         WHEN NEW.status = 'failed' \
+                         BEGIN SELECT RAISE(FAIL, 'failed status rejected'); END;",
+                    )
+                    .unwrap();
+                Err(QuarkError::AuthorizationExpired)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(failed.payload.task.status, crate::TaskStatus::Failed);
+        assert_eq!(tasks.find(failed.payload.task.id).unwrap().status, crate::TaskStatus::Parsing);
+        administration
+            .execute_batch("DROP TRIGGER reject_failed_status")
+            .unwrap();
+        let adapter = SagaAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            fail_resolve: false,
+        };
+        let resolve_source = source.clone();
+
+        let retried = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source,
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async { resolve_current_share_download(&plans, &adapter, &resolve_source) },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(retried.payload.task.id, failed.payload.task.id);
+        assert_eq!(retried.payload.task.status, crate::TaskStatus::Downloading);
+        assert_eq!(api.add_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn files_read_failure_falls_back_to_an_empty_outcome_file_list() {
         let (plans, _, _) = memory_store();
         let plan = fixture("files-read-failure");

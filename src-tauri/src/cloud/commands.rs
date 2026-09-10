@@ -1725,9 +1725,10 @@ fn cloud_share_failure_outcome(
 
 fn is_retryable_cloud_share_prepare(task: &DownloadTask) -> bool {
     task.kind == "cloud"
-        && task.status == TaskStatus::Failed
         && task.aria_gid.is_none()
-        && task.error.as_deref() == Some(CLOUD_SHARE_PREPARE_FAILURE)
+        && (task.status == TaskStatus::Parsing
+            || (task.status == TaskStatus::Failed
+                && task.error.as_deref() == Some(CLOUD_SHARE_PREPARE_FAILURE)))
 }
 
 fn cloud_share_task_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskActionOutcome {
