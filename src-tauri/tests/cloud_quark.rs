@@ -119,7 +119,7 @@ struct SequencedHttp {
 }
 
 impl SequencedHttp {
-    fn new(bodies: impl IntoIterator<Item = &'static str>) -> Self {
+    fn new<T: Into<String>>(bodies: impl IntoIterator<Item = T>) -> Self {
         Self {
             responses: Mutex::new(
                 bodies
@@ -148,6 +148,38 @@ impl CloudHttpTransport for SequencedHttp {
             .unwrap()
             .pop_front()
             .ok_or(QuarkError::InvalidResponse)
+    }
+}
+
+struct MutatingHttp {
+    inner: SequencedHttp,
+    replacement_path: std::path::PathBuf,
+}
+
+impl MutatingHttp {
+    fn new<T: Into<String>>(
+        path: std::path::PathBuf,
+        bodies: impl IntoIterator<Item = T>,
+    ) -> Self {
+        Self {
+            inner: SequencedHttp::new(bodies),
+            replacement_path: path,
+        }
+    }
+
+    fn requests(&self) -> Vec<CloudHttpRequest> {
+        self.inner.requests()
+    }
+}
+
+impl CloudHttpTransport for MutatingHttp {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        let replace_after_hash_registration = request.url.contains("file/update/hash");
+        let response = self.inner.send(request)?;
+        if replace_after_hash_registration {
+            std::fs::write(&self.replacement_path, b"mutated upload data!").unwrap();
+        }
+        Ok(response)
     }
 }
 
@@ -233,10 +265,32 @@ fn quark_upload_runs_pre_hash_authorize_multipart_and_finish() {
     assert!(requests
         .iter()
         .all(|request| request.headers["Cookie"] == "sid=local-session"));
-    assert!(upload
-        .requests()
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.contains("file/upload/auth"))
+            .count(),
+        2
+    );
+    let upload_requests = upload.requests();
+    assert!(upload_requests
         .iter()
         .all(|request| request.url.starts_with("https://ul-zb.pds.quark.cn/")));
+    assert_eq!(upload_requests.len(), 2);
+    assert_eq!(
+        upload_requests[0]
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
+        Some("OSS temporary-put")
+    );
+    assert_eq!(
+        upload_requests[1]
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
+        Some("OSS temporary-complete")
+    );
 }
 
 #[test]
@@ -254,6 +308,111 @@ fn quark_upload_returns_hash_completed_file_without_object_transfer() {
     let uploaded = client.upload_file("0", fixture.path(), &upload).unwrap();
 
     assert_eq!(uploaded.id, "instant-1");
+    assert!(upload.requests().is_empty());
+    assert_eq!(http.requests().len(), 2);
+}
+
+#[test]
+fn quark_upload_rejects_same_size_replacement_after_hash_registration() {
+    // Break caught: the bytes transferred after hash registration must still
+    // match the MD5/SHA-1 provided to CloudDrive, even when their length is
+    // unchanged.
+    let fixture = upload_fixture();
+    let http = MutatingHttp::new(
+        fixture.path().to_path_buf(),
+        [
+            r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"https://pds.quark.cn"}}"#,
+            r#"{"code":0,"data":{"finish":false}}"#,
+            r#"{"code":0,"data":{"auth_key":"OSS temporary-put"}}"#,
+        ],
+    );
+    let upload = RecordingUpload::new([UploadHttpResponse {
+        status: 200,
+        headers: [("etag".into(), "\"part-1\"".into())].into(),
+        body: String::new(),
+    }]);
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    assert!(matches!(
+        client.upload_file("0", fixture.path(), &upload),
+        Err(QuarkError::InvalidInput(message)) if message.contains("上传过程中发生变化")
+    ));
+    assert_eq!(upload.requests().len(), 1);
+    assert!(!http
+        .requests()
+        .iter()
+        .any(|request| request.url.contains("file/upload/finish")));
+}
+
+#[test]
+fn quark_upload_rejects_a_malformed_object_authorization_before_sending_bytes() {
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"https://pds.quark.cn"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary\r\ninjected"}}"#,
+    ]);
+    let upload = RecordingUpload::new([]);
+    let fixture = upload_fixture();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    assert!(matches!(
+        client.upload_file("0", fixture.path(), &upload),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert!(upload.requests().is_empty());
+    assert_eq!(http.requests().len(), 3);
+}
+
+#[test]
+fn quark_upload_rejects_a_malformed_etag_before_multipart_completion() {
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"https://pds.quark.cn"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-put"}}"#,
+    ]);
+    let upload = RecordingUpload::new([UploadHttpResponse {
+        status: 200,
+        headers: [("etag".into(), "part-1\r\ninjected".into())].into(),
+        body: String::new(),
+    }]);
+    let fixture = upload_fixture();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    assert!(matches!(
+        client.upload_file("0", fixture.path(), &upload),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert_eq!(upload.requests().len(), 1);
+    assert_eq!(http.requests().len(), 3);
+}
+
+#[test]
+fn quark_upload_rejects_an_oversized_callback_before_authorizing_object_store() {
+    let pre = serde_json::json!({
+        "code": 0,
+        "data": {
+            "task_id": "task-1",
+            "auth_info": "one-shot",
+            "upload_id": "upload-1",
+            "obj_key": "objects/upload.txt",
+            "bucket": "ul-zb",
+            "upload_url": "https://pds.quark.cn",
+            "callback": "x".repeat(16 * 1024),
+        }
+    })
+    .to_string();
+    let http = SequencedHttp::new(vec![
+        pre,
+        r#"{"code":0,"data":{"finish":false}}"#.into(),
+    ]);
+    let upload = RecordingUpload::new([]);
+    let fixture = upload_fixture();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    assert!(matches!(
+        client.upload_file("0", fixture.path(), &upload),
+        Err(QuarkError::InvalidResponse)
+    ));
     assert!(upload.requests().is_empty());
     assert_eq!(http.requests().len(), 2);
 }

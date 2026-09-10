@@ -373,11 +373,15 @@ pub(crate) fn upload_cloud_drive_file(
     let mut remaining = size;
     let mut parts = Vec::new();
     let mut number = 1_u64;
+    let mut uploaded_md5 = md5::Context::new();
+    let mut uploaded_sha1 = Sha1::new();
     while remaining > 0 || number == 1 {
         let length = remaining.min(contract.part_size as u64) as usize;
         let mut bytes = vec![0; length];
         source.read_exact(&mut bytes).map_err(|_| file_error())?;
         remaining = remaining.saturating_sub(length as u64);
+        uploaded_md5.consume(&bytes);
+        uploaded_sha1.update(&bytes);
         let query = format!(
             "partNumber={number}&uploadId={}",
             encoded(&contract.upload_id)
@@ -398,6 +402,13 @@ pub(crate) fn upload_cloud_drive_file(
         if remaining == 0 {
             break;
         }
+    }
+    if format!("{:x}", uploaded_md5.finalize()) != md5
+        || format!("{:x}", uploaded_sha1.finalize()) != sha1
+    {
+        return Err(QuarkError::InvalidInput(
+            "本地文件在上传过程中发生变化".into(),
+        ));
     }
     let mut manifest = String::from("<CompleteMultipartUpload>");
     for (number, etag) in parts {
