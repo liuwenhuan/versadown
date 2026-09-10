@@ -363,6 +363,37 @@ it('formats large cloud files in practical size units', async () => {
   expect(screen.getByText('3.0 GB')).toBeVisible();
 });
 
+it('sorts cloud files by name, size, and modified time from their column headers', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
+    { id: 'largest', parentId: '0', name: 'zeta.txt', kind: 'file', size: 3_000, modifiedAt: '2025-06-03 08:00:00' },
+    { id: 'missing', parentId: '0', name: 'middle.txt', kind: 'file' },
+    { id: 'smallest', parentId: '0', name: 'alpha.txt', kind: 'file', size: 10, modifiedAt: '2025-06-01 08:00:00' },
+    { id: 'medium', parentId: '0', name: 'beta.txt', kind: 'file', size: 200, modifiedAt: '2025-06-02 08:00:00' }
+  ] }) });
+  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
+  const listedNames = () => Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"] b[title]'))
+    .map((name) => name.getAttribute('title'))
+    .filter((name): name is string => name !== null && name !== '回收站');
+
+  await user.click(screen.getByRole('button', { name: '按名称排序' }));
+  expect(listedNames()).toEqual(['alpha.txt', 'beta.txt', 'middle.txt', 'zeta.txt']);
+  await user.click(screen.getByRole('button', { name: '按名称排序' }));
+  expect(listedNames()).toEqual(['zeta.txt', 'middle.txt', 'beta.txt', 'alpha.txt']);
+
+  await user.click(screen.getByRole('button', { name: '按大小排序' }));
+  expect(listedNames()).toEqual(['alpha.txt', 'beta.txt', 'zeta.txt', 'middle.txt']);
+  await user.click(screen.getByRole('button', { name: '按大小排序' }));
+  expect(listedNames()).toEqual(['zeta.txt', 'beta.txt', 'alpha.txt', 'middle.txt']);
+
+  await user.click(screen.getByRole('button', { name: '按修改时间排序' }));
+  expect(listedNames()).toEqual(['alpha.txt', 'beta.txt', 'zeta.txt', 'middle.txt']);
+  await user.click(screen.getByRole('button', { name: '按修改时间排序' }));
+  expect(listedNames()).toEqual(['zeta.txt', 'beta.txt', 'alpha.txt', 'middle.txt']);
+});
+
 it('opens folders by double click without rendering an enter button', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();

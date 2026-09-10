@@ -159,6 +159,40 @@ function formatCloudModifiedAt(value: unknown) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
 }
 
+type CloudSortColumn = 'name' | 'size' | 'modifiedAt';
+type CloudSortDirection = 'ascending' | 'descending';
+type CloudSort = { column: CloudSortColumn; direction: CloudSortDirection };
+
+const cloudNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+
+function compareOptional<T>(left: T | undefined, right: T | undefined, compare: (left: T, right: T) => number) {
+  if (left === undefined) return { comparison: right === undefined ? 0 : 1, missing: true };
+  if (right === undefined) return { comparison: -1, missing: true };
+  return { comparison: compare(left, right), missing: false };
+}
+
+function sortableCloudModifiedAt(value: unknown) {
+  const formatted = formatCloudModifiedAt(value);
+  return formatted === '—' ? undefined : formatted;
+}
+
+function sortedCloudFiles(items: readonly CloudFile[], sort: CloudSort | null) {
+  if (!sort) return items;
+  return items.map((item, index) => ({ item, index })).sort((left, right) => {
+    const { comparison, missing } = sort.column === 'name'
+      ? { comparison: cloudNameCollator.compare(left.item.name, right.item.name), missing: false }
+      : sort.column === 'size'
+        ? compareOptional(left.item.size, right.item.size, (a, b) => a - b)
+        : compareOptional(
+          sortableCloudModifiedAt(left.item.modifiedAt),
+          sortableCloudModifiedAt(right.item.modifiedAt),
+          (a, b) => a.localeCompare(b),
+        );
+    if (comparison === 0) return left.index - right.index;
+    return sort.direction === 'ascending' || missing ? comparison : -comparison;
+  }).map(({ item }) => item);
+}
+
 function CloudFileIcon({ kind }: { kind: CloudFile['kind'] | 'recycle-bin' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{kind === 'recycle-bin'
     ? <><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6.5 7l.8 14h9.4l.8-14" /></>
@@ -396,6 +430,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [directoryState, setDirectoryState] = useState<DirectoryState>('idle');
   const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
   const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
+  const [sort, setSort] = useState<CloudSort | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const effectiveAuthorizationCapabilities = fixedAuthorizationCapabilities[provider];
@@ -419,13 +454,14 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const selectionMenuTrigger = useRef<HTMLButtonElement>(null);
 
   const activeAccount = accounts.find((account) => account.id === activeAccountId) ?? null;
-  const selected = directory?.items.filter((item) => selectedIds.includes(item.id)) ?? [];
+  const sortedItems = sortedCloudFiles(directory?.items ?? [], sort);
+  const selected = sortedItems.filter((item) => selectedIds.includes(item.id));
   const currentDirectoryId = directory?.id ?? breadcrumbs.at(-1)?.id ?? rootId;
   const recycleBinId = cloudRecycleBinDirectoryId[provider];
   const isRecycleBin = currentDirectoryId === recycleBinId;
   const isVirtualRecycleBinItem = (item: CloudFile | undefined) => item?.id === recycleBinId;
   const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
-  const selectableItems = directory?.items.filter((item) => !isVirtualRecycleBinItem(item)) ?? [];
+  const selectableItems = sortedItems.filter((item) => !isVirtualRecycleBinItem(item));
   const operationBusy = operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
   const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
@@ -639,10 +675,10 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   }
 
   function selectRow(event: ReactMouseEvent, item: CloudFile, index: number) {
-    if (event.shiftKey && selectionAnchor.current !== null && directory) {
+    if (event.shiftKey && selectionAnchor.current !== null) {
       const from = Math.min(selectionAnchor.current, index);
       const to = Math.max(selectionAnchor.current, index);
-      const range = directory.items.slice(from, to + 1).filter((entry) => !isVirtualRecycleBinItem(entry)).map((entry) => entry.id);
+      const range = sortedItems.slice(from, to + 1).filter((entry) => !isVirtualRecycleBinItem(entry)).map((entry) => entry.id);
       setSelectedIds(event.ctrlKey || event.metaKey ? (current) => Array.from(new Set([...current.filter((id) => id !== recycleBinId), ...range])) : range);
     } else if (event.ctrlKey || event.metaKey) {
       toggleSelection(item.id);
@@ -655,6 +691,12 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   function openFolder(item: CloudFile) {
     if (!activeAccount || isRecycleBin || item.kind !== 'folder' || operationBusy) return;
     void loadDirectory(activeAccount, item.id, [...breadcrumbs, { id: item.id, name: item.name }]);
+  }
+
+  function changeSort(column: CloudSortColumn) {
+    setSort((current) => current?.column === column
+      ? { column, direction: current.direction === 'ascending' ? 'descending' : 'ascending' }
+      : { column, direction: 'ascending' });
   }
 
   function downloadSelection() {
@@ -832,8 +874,8 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       onKeyDown={handleFileListKeyDown}
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
-      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin ? <span className="cloud-selection-hint">回收站仅可打开</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />恢复</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />永久删除</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : '名称'}</span><span>大小</span><span>修改时间</span></div>
-      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? '回收站为空' : '此目录为空'}</b><span>{isRecycleBin ? '没有可恢复或永久删除的项目' : '可在这里上传文件或新建目录'}</span></div> : directory?.items.map((item, index) => {
+      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin ? <span className="cloud-selection-hint">回收站仅可打开</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />恢复</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />永久删除</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label="按名称排序" aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>名称<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label="按大小排序" aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>大小<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label="按修改时间排序" aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>修改时间<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
+      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? '回收站为空' : '此目录为空'}</b><span>{isRecycleBin ? '没有可恢复或永久删除的项目' : '可在这里上传文件或新建目录'}</span></div> : sortedItems.map((item, index) => {
         const isSelected = selectedIds.includes(item.id);
         const iconKind = isVirtualRecycleBinItem(item) ? 'recycle-bin' : item.kind;
         return <div
