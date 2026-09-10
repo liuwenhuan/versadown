@@ -55,7 +55,7 @@ mod tests {
         ]
     }
     #[test]
-    fn quark_share_direct_uses_current_identity_without_transfer() {
+    fn quark_share_direct_requests_file_download_with_share_context() {
         let credentials = MemoryCredentialStore::default();
         credentials.save("quark", b"sid=current").unwrap();
         let mut replies = listing();
@@ -79,10 +79,20 @@ mod tests {
             .contains(&("Cookie".into(), "sid=current".into())));
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
-        assert!(requests[2].url.contains("share/sharepage/download"));
+        assert_eq!(requests[2].method, "POST");
+        assert_eq!(
+            requests[2].url,
+            "https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc"
+        );
         assert_eq!(requests[2].headers["User-Agent"], QUARK_DESKTOP_USER_AGENT);
-        let body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
-        assert_eq!(body["passcode"], "a123");
+        let token_body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(token_body["passcode"], "a123");
+        let download_body: Value =
+            serde_json::from_str(requests[2].body.as_ref().unwrap()).unwrap();
+        assert_eq!(download_body["fids"], json!(["11"]));
+        assert_eq!(download_body["pwd_id"], "share123");
+        assert_eq!(download_body["stoken"], "secret-token");
+        assert_eq!(download_body["fids_token"], json!(["file-secret"]));
     }
     #[test]
     fn quark_share_without_login_does_not_request_http() {
@@ -1005,7 +1015,7 @@ pub fn resolve_quark_share(
         return Err(QuarkError::InvalidResponse);
     }
     let context = &entry.plan.provider_context;
-    let response = client.share_request("POST", "share/sharepage/download", Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]})))?;
+    let response = client.share_request("POST", "file/download", Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]})))?;
     let value = response_json(&response)?;
     let files = value["data"]
         .as_array()
