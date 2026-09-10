@@ -498,9 +498,7 @@ impl UcShareAdapter<'_> {
             return Err(QuarkError::NotAuthorized);
         }
         // Use the same authenticated cookie snapshot for signing and downloading.
-        let valid = ["__pus", "__puus"]
-            .iter()
-            .all(|name| cookie_value(&session.cookie, name).is_some());
+        let valid = cookie_value(&session.cookie, "__puus").is_some();
         if !valid {
             return Err(QuarkError::AuthorizationExpired);
         }
@@ -948,6 +946,19 @@ mod tests {
             .unwrap();
         credentials
     }
+    fn share_credentials_with_server_session_only() -> MemoryCredentialStore {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "uc",
+                &serde_json::to_vec(&UcSession::cookie(
+                    "__puus=session; csrf_token=csrf-secret",
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        credentials
+    }
     fn share_entry() -> CloudShareResolvedEntry {
         entry(CloudSharePlan::new(
             CloudProvider::Uc,
@@ -962,6 +973,37 @@ mod tests {
             )],
             json!({"stoken":"old-token","files":{"f1":{"token":"file-token","parent":"0"}}}),
         ))
+    }
+    #[test]
+    fn uc_share_server_session_cookie_alone_inspects_and_resolves_direct_download() {
+        let credentials = share_credentials_with_server_session_only();
+        let token = json!({"code":0,"data":{"stoken":"fresh"}});
+        let http = Http::new(vec![
+            token.clone(),
+            json!({"code":0,"data":{"list":[{"fid":"f1","file_name":"one","dir":false,"share_fid_token":"file-token"}]},"metadata":{"_total":1}}),
+            token,
+            json!({"code":0,"data":[{"fid":"f1","download_url":"https://cdn.example/file"}]}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
+        let candidate = crate::parser::CloudShareCandidate {
+            provider: CloudProvider::Uc,
+            url: "https://drive.uc.cn/s/share123".into(),
+            access_code: Some("a123".into()),
+        };
+
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate).unwrap() else {
+            panic!("share inspection must produce a plan")
+        };
+        let selected = entry(plan);
+        let ShareResolution::Direct(download) = adapter.resolve(&selected).unwrap() else {
+            panic!("share must resolve its original direct download")
+        };
+
+        assert_eq!(download.url, "https://cdn.example/file");
+        for request in http.requests.lock().unwrap().iter() {
+            assert!(request.headers["Cookie"].contains("__puus=session"));
+            assert!(!request.headers["Cookie"].contains("__pus="));
+        }
     }
     struct ShareReplies {
         requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
