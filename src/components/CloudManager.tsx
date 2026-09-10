@@ -283,7 +283,7 @@ function CloudFileDetails({ file, path, onClose }: { file: CloudFile; path: stri
   </div>, document.body);
 }
 
-function CloudDestinationPicker({ action, provider, client, excludedIds, onChoose, onClose }: { action: DestinationAction; provider: CloudProvider; client: CloudManagerClient; excludedIds: readonly string[]; onChoose(parentId: string): void; onClose(): void }) {
+function CloudDestinationPicker({ action, provider, client, excludedIds, onChoose, onOfficialWebAuthorizationRequired, onClose }: { action: DestinationAction; provider: CloudProvider; client: CloudManagerClient; excludedIds: readonly string[]; onChoose(parentId: string): void; onOfficialWebAuthorizationRequired(error: unknown): void; onClose(): void }) {
   const rootId = cloudRootDirectoryId[provider];
   const [directory, setDirectory] = useState<CloudDirectory | null>(null);
   const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
@@ -310,6 +310,10 @@ function CloudDestinationPicker({ action, provider, client, excludedIds, onChoos
       setState('ready');
     } catch (error) {
       if (requestId !== requestSequence.current) return;
+      if (requiresOfficialWebAuthorization(error)) {
+        onOfficialWebAuthorizationRequired(error);
+        return;
+      }
       setMessage(errorMessage(error, '无法读取目录'));
       setState('error');
     }
@@ -819,6 +823,6 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isPikpakRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isPikpakRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
     {detailsFile && <CloudFileDetails file={detailsFile} path={`/${breadcrumbs.slice(1).map((crumb) => crumb.name).join('/') || ''}`} onClose={() => setDetailsFile(null)} />}
-    {destinationAction && <CloudDestinationPicker action={destinationAction} provider={provider} client={client} excludedIds={selectedIds} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
+    {destinationAction && <CloudDestinationPicker action={destinationAction} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { setDestinationAction(null); setReauthorizationRequired(true); setAuthorizationStatus(errorMessage(error, '读取目标目录需要网页验证。')); setOperation({ kind: 'error', message: `读取${destinationAction === 'copy' ? '复制' : '移动'}目标目录需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重新执行本次操作。` }); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
   </section>;
 }

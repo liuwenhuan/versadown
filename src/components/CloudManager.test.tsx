@@ -559,6 +559,27 @@ it('retries the destination directory that actually failed to load', async () =>
   expect(client.copyCloudFiles).toHaveBeenCalledWith('quark', ['file-1'], 'folder-1');
 });
 
+it('closes the destination picker and requires official web authorization when its directory read needs verification', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn()
+      .mockResolvedValueOnce({ id: '0', items: [{ id: 'folder-1', parentId: '0', name: '归档', kind: 'folder' }, { id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file' }] })
+      .mockRejectedValueOnce({ code: 'web_auth_required', message: '需要网页验证' })
+  });
+  render(<CloudManager provider="xunlei" client={client} initialAccounts={[{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }]} restoreOnMount={false} />);
+
+  await screen.findByText('报告.pdf');
+  fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 240 });
+  await user.click(screen.getByRole('menuitem', { name: '移动' }));
+
+  expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
+  expect(screen.queryByRole('dialog', { name: '选择移动位置' })).not.toBeInTheDocument();
+  expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+  expect(client.moveCloudFiles).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '重新网页授权' }));
+  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
+});
+
 it('shows concise file details in a separate dialog', async () => {
   const user = userEvent.setup();
   render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
