@@ -263,7 +263,7 @@ pub fn selected_share_sources(
     }
     let plan = store.resolve_entry(plan_source)?.plan;
     let mut selected = BTreeSet::new();
-    let sources: Vec<String> = selected_ids
+    selected_ids
         .iter()
         .map(|id| {
             let entry = plan
@@ -274,9 +274,7 @@ pub fn selected_share_sources(
                 .ok_or_else(missing_plan)?;
             Ok(plan.source_for(&entry.entry_id))
         })
-        .collect::<Result<_, _>>()?;
-    store.link_local_sources(&sources)?;
-    Ok(sources)
+        .collect::<Result<_, _>>()
 }
 
 pub(super) fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
@@ -438,23 +436,23 @@ impl CloudShareRefreshBudget {
 /// filename enter SQLite. Callers hold the source gate for duplicate detection.
 pub async fn submit_current_share_download(
     service: &crate::DownloadService,
-    source: &str,
+    prepared: &crate::DownloadTask,
     resolved: super::commands::ResolvedCloudDownload,
     configured: crate::UriSubmissionOptions,
 ) -> Result<crate::DownloadTask, QuarkError> {
-    parse_stable_cloud_share_source(source)?;
+    parse_stable_cloud_share_source(&prepared.source)?;
     let (signed_url, options) = share_submission_options(resolved, configured)?;
     let task = service
         .store()
-        .create(crate::NewTask {
-            source: source.into(),
-            name: options
-                .output_name
-                .clone()
-                .ok_or(QuarkError::InvalidResponse)?,
-            kind: "cloud".into(),
-        })
+        .find(prepared.id)
         .map_err(|_| QuarkError::Storage)?;
+    if task.source != prepared.source
+        || task.kind != "cloud"
+        || task.status != crate::TaskStatus::Parsing
+        || task.aria_gid.is_some()
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
     match service
         .submit_uri_with_options(task.id, vec![signed_url], options)
         .await
@@ -1089,6 +1087,26 @@ impl CloudSharePlanStore {
         })
     }
 
+    pub fn reserve_local_task(&self, source: &str, task_id: uuid::Uuid) -> Result<(), QuarkError> {
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, now| {
+            let key = plan_key(provider, &share);
+            let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            if !plan
+                .entries
+                .iter()
+                .any(|entry| entry.entry_fingerprint == fingerprint)
+            {
+                return Err(missing_plan());
+            }
+            plan.linked_local_tasks
+                .entry(fingerprint)
+                .or_default()
+                .insert(task_id);
+            document.touch(&key, now)
+        })
+    }
+
     pub fn unlink_local_task(&self, source: &str, task_id: uuid::Uuid) -> Result<(), QuarkError> {
         let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
         self.update(|document, now| {
@@ -1235,7 +1253,124 @@ impl CloudSharePlanStore {
 mod tests {
     use super::*;
     use crate::cloud::MemoryCredentialStore;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[derive(Default)]
+    struct SagaAria2 {
+        add_calls: AtomicU64,
+        reject_add: AtomicBool,
+    }
+
+    #[async_trait]
+    impl crate::aria2::Aria2Api for SagaAria2 {
+        async fn add_uri(
+            &self,
+            _: Vec<String>,
+            _: crate::aria2::Aria2Options,
+        ) -> Result<String, crate::aria2::Aria2Error> {
+            self.add_calls.fetch_add(1, Ordering::SeqCst);
+            if self.reject_add.load(Ordering::SeqCst) {
+                Err(crate::aria2::Aria2Error::Transport)
+            } else {
+                Ok("saga-gid".into())
+            }
+        }
+        async fn tell_status(
+            &self,
+            gid: &str,
+        ) -> Result<crate::aria2::Aria2Status, crate::aria2::Aria2Error> {
+            Ok(crate::aria2::Aria2Status {
+                gid: gid.into(),
+                status: "active".into(),
+                total_length: "1".into(),
+                completed_length: "0".into(),
+                download_speed: "0".into(),
+                upload_speed: "0".into(),
+                connections: "0".into(),
+                files: vec![],
+                followed_by: vec![],
+                error_code: None,
+                error_message: None,
+            })
+        }
+        async fn add_torrent(&self, _: String, _: Vec<String>, _: crate::aria2::Aria2Options) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+        async fn tell_active(&self) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> { unreachable!() }
+        async fn tell_waiting(&self, _: i64, _: u32) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> { unreachable!() }
+        async fn tell_stopped(&self, _: i64, _: u32) -> Result<Vec<crate::aria2::Aria2Status>, crate::aria2::Aria2Error> { unreachable!() }
+        async fn get_global_stat(&self) -> Result<crate::aria2::Aria2GlobalStat, crate::aria2::Aria2Error> { unreachable!() }
+        async fn multicall(&self, _: Vec<crate::aria2::RpcCall>) -> Result<Vec<Result<serde_json::Value, crate::aria2::RpcFault>>, crate::aria2::Aria2Error> { unreachable!() }
+        async fn pause(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+        async fn unpause(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+        async fn remove(&self, gid: &str) -> Result<String, crate::aria2::Aria2Error> { Ok(gid.into()) }
+        async fn force_remove(&self, _: &str) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+        async fn change_option(&self, _: &str, _: crate::aria2::Aria2Options) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+        async fn get_option(&self, _: &str) -> Result<crate::aria2::Aria2Options, crate::aria2::Aria2Error> { unreachable!() }
+        async fn save_session(&self) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+        async fn shutdown(&self) -> Result<String, crate::aria2::Aria2Error> { unreachable!() }
+    }
+
+    struct SagaAdapter {
+        resolve_calls: AtomicU64,
+        transfer_calls: AtomicU64,
+        fail_resolve: bool,
+    }
+
+    struct FailNthSaveCredentials {
+        inner: MemoryCredentialStore,
+        saves: AtomicU64,
+        fail_at: u64,
+    }
+
+    impl CredentialStore for FailNthSaveCredentials {
+        fn save(&self, key: &str, value: &[u8]) -> Result<(), QuarkError> {
+            let save = self.saves.fetch_add(1, Ordering::SeqCst) + 1;
+            if save == self.fail_at {
+                Err(QuarkError::Storage)
+            } else {
+                self.inner.save(key, value)
+            }
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+            self.inner.load(key)
+        }
+
+        fn remove(&self, key: &str) -> Result<(), QuarkError> {
+            self.inner.remove(key)
+        }
+    }
+
+    impl CloudShareAdapter for SagaAdapter {
+        fn inspect(
+            &self,
+            _: &crate::parser::CloudShareCandidate,
+        ) -> Result<ShareInspection, QuarkError> {
+            unreachable!()
+        }
+        fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
+            self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_resolve {
+                Err(QuarkError::AuthorizationExpired)
+            } else {
+                Ok(ShareResolution::Direct(
+                    super::super::commands::ResolvedCloudDownload {
+                        url: "https://cdn.example/file".into(),
+                        name: entry.entry.name.clone(),
+                        headers: vec![],
+                    },
+                ))
+            }
+        }
+        fn transfer(
+            &self,
+            _: &CloudShareResolvedEntry,
+            _: &CloudSharePlanStore,
+        ) -> Result<super::super::commands::ResolvedCloudDownload, QuarkError> {
+            self.transfer_calls.fetch_add(1, Ordering::SeqCst);
+            unreachable!()
+        }
+    }
 
     #[test]
     fn cleanup_claim_is_durable_and_one_shot_across_concurrent_completions() {
@@ -1540,6 +1675,27 @@ mod tests {
         )
         .is_err());
         assert!(selected_share_sources(&store, &confirmation.plan_source, &[]).is_err());
+    }
+
+    #[test]
+    fn selecting_share_sources_is_read_only_and_does_not_create_a_reservation() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("read-only-selection");
+        let source = plan.source_for("f1");
+        store.upsert(&plan).unwrap();
+        let selected_id = plan.entries[0].entry_fingerprint.clone();
+
+        assert_eq!(
+            selected_share_sources(&store, &source, &[selected_id]).unwrap(),
+            vec![source.clone()]
+        );
+
+        assert!(store
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .linked_local_tasks
+            .is_empty());
     }
 
     struct PlanAdapter(CloudSharePlan);
@@ -2040,6 +2196,109 @@ mod tests {
         let fingerprint = parse_stable_cloud_share_source(&source).unwrap().2;
         assert!(current.linked_local_tasks.contains_key(&fingerprint));
         assert!(current.linked_local_tasks[&fingerprint].is_empty());
+    }
+
+    #[test]
+    fn atomic_task_reservation_survives_an_old_same_source_task_being_unlinked_first() {
+        let (store, _, _) = memory_store();
+        let plan = fixture("same-source-replacement");
+        let source = plan.source_for("f1");
+        let old_task = uuid::Uuid::new_v4();
+        let new_task = uuid::Uuid::new_v4();
+        store.upsert(&plan).unwrap();
+        store.reserve_local_task(&source, old_task).unwrap();
+
+        store.unlink_local_task(&source, old_task).unwrap();
+        store.reserve_local_task(&source, new_task).unwrap();
+
+        let current = store.resolve_entry(&source).unwrap().plan;
+        let fingerprint = parse_stable_cloud_share_source(&source).unwrap().2;
+        assert_eq!(
+            current.linked_local_tasks[&fingerprint],
+            BTreeSet::from([new_task])
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_engine_prevents_task_creation_and_provider_resolution() {
+        let (plans, _, _) = memory_store();
+        let plan = fixture("engine-unavailable");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let tasks = Arc::new(crate::TaskStore::open_in_memory().unwrap());
+        let resolver_calls = Arc::new(AtomicU64::new(0));
+        let calls = resolver_calls.clone();
+
+        let result = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source,
+            crate::UriSubmissionOptions::default(),
+            || async {
+                Err::<Arc<crate::DownloadService>, _>(QuarkError::Transport(
+                    "engine unavailable".into(),
+                ))
+            },
+            || async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(QuarkError::InvalidResponse)
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(tasks.list().unwrap().is_empty());
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+        assert!(plans
+            .resolve_entry(&plan.source_for("f1"))
+            .unwrap()
+            .plan
+            .transfers
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_reservation_removes_the_unsubmitted_task_without_provider_calls() {
+        let credentials = Arc::new(FailNthSaveCredentials {
+            inner: MemoryCredentialStore::default(),
+            saves: AtomicU64::new(0),
+            fail_at: 3,
+        });
+        let plans = CloudSharePlanStore {
+            credentials,
+            mutation: Mutex::new(()),
+            now_ms: Arc::new(|| 1_000),
+        };
+        let plan = fixture("reservation-failure");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let tasks = Arc::new(crate::TaskStore::open_in_memory().unwrap());
+        let api = Arc::new(SagaAria2::default());
+        let service = Arc::new(crate::DownloadService::new(api.clone(), tasks.clone()));
+        let adapter = SagaAdapter {
+            resolve_calls: AtomicU64::new(0),
+            transfer_calls: AtomicU64::new(0),
+            fail_resolve: false,
+        };
+        let resolve_source = source.clone();
+
+        let result = crate::cloud::commands::submit_new_cloud_share_file_with(
+            tasks.clone(),
+            &plans,
+            source,
+            crate::UriSubmissionOptions::default(),
+            || async { Ok(service) },
+            || async {
+                resolve_current_share_download(&plans, &adapter, &resolve_source)
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(tasks.list().unwrap().is_empty());
+        assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(api.add_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -6,7 +6,8 @@ use std::{
 
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
-    prepare_download, DownloadAction, DownloadService, TaskStatus, TaskStore, UriSubmissionOptions,
+    prepare_download, DownloadAction, DownloadService, DownloadTask, NewTask, TaskStatus,
+    TaskStore, UriSubmissionOptions,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -50,6 +51,16 @@ impl RecordingAria2 {
             error_message: None,
         }
     }
+}
+
+fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> DownloadTask {
+    store
+        .create(NewTask {
+            source: source.into(),
+            name: name.into(),
+            kind: "cloud".into(),
+        })
+        .unwrap()
 }
 
 #[async_trait]
@@ -153,9 +164,10 @@ async fn cloud_share_submission_keeps_signed_url_and_headers_out_of_task_store()
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store.clone());
     let source = stable_share_source(CloudProvider::Aliyun, "private-share", "private-file");
+    let prepared = prepared_cloud_share_task(&store, &source, "video.mp4");
     let task = submit_current_share_download(
         &service,
-        &source,
+        &prepared,
         ResolvedCloudDownload {
             url: "https://cdn.example/video?signature=private-signature".into(),
             name: "video.mp4".into(),
@@ -197,9 +209,10 @@ async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store.clone());
     let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let prepared = prepared_cloud_share_task(&store, &source, "file");
     let result = submit_current_share_download(
         &service,
-        &source,
+        &prepared,
         ResolvedCloudDownload {
             url: "https://www.aliyundrive.com/s/share".into(),
             name: "file".into(),
@@ -210,7 +223,7 @@ async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2
     .await;
     assert!(result.is_err());
     assert!(api.calls().is_empty());
-    assert!(store.find_by_source(&source).unwrap().is_none());
+    assert_eq!(store.find(prepared.id).unwrap().status, TaskStatus::Parsing);
 }
 
 #[tokio::test]
@@ -229,9 +242,10 @@ async fn cloud_share_aria_failure_redacts_signed_urls_but_retains_http_error_cod
     });
     let service = DownloadService::new(api, store.clone());
     let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let prepared = prepared_cloud_share_task(&store, &source, "file");
     let task = submit_current_share_download(
         &service,
-        &source,
+        &prepared,
         ResolvedCloudDownload {
             url: "https://cdn.example/file?signature=secret-token".into(),
             name: "file".into(),
@@ -272,7 +286,8 @@ async fn cloud_share_cancel_after_outer_check_prevents_waiting_refresh_submissio
         name: "file".into(),
         headers: vec![],
     };
-    let checked = submit_current_share_download(&service, &source, resolved(), Default::default())
+    let prepared = prepared_cloud_share_task(&store, &source, "file");
+    let checked = submit_current_share_download(&service, &prepared, resolved(), Default::default())
         .await
         .unwrap();
     assert_eq!(checked.status, TaskStatus::Failed);
@@ -322,7 +337,8 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
         name: "file".into(),
         headers: vec![("x-share-token".into(), format!("token-{revision}"))],
     };
-    let task = submit_current_share_download(&service, &source, resolved(0), Default::default())
+    let prepared = prepared_cloud_share_task(&store, &source, "file");
+    let task = submit_current_share_download(&service, &prepared, resolved(0), Default::default())
         .await
         .unwrap();
     store
@@ -383,7 +399,8 @@ async fn cloud_share_stale_gid_is_skipped_even_when_task_is_failed_again() {
         name: "file".into(),
         headers: vec![],
     };
-    let checked = submit_current_share_download(&service, &source, resolved(), Default::default())
+    let prepared = prepared_cloud_share_task(&store, &source, "file");
+    let checked = submit_current_share_download(&service, &prepared, resolved(), Default::default())
         .await
         .unwrap();
     store
@@ -420,7 +437,8 @@ async fn cloud_share_manual_retry_can_restart_an_explicitly_cancelled_snapshot()
         name: "file".into(),
         headers: vec![],
     };
-    let task = submit_current_share_download(&service, &source, resolved(), Default::default())
+    let prepared = prepared_cloud_share_task(&store, &source, "file");
+    let task = submit_current_share_download(&service, &prepared, resolved(), Default::default())
         .await
         .unwrap();
     let cancelled = service

@@ -1572,7 +1572,7 @@ pub async fn submit_cloud_share_file(
     app: AppHandle,
     state: &AppState,
     source: String,
-    mut configured: UriSubmissionOptions,
+    configured: UriSubmissionOptions,
 ) -> Result<TaskActionOutcome, QuarkError> {
     share::parse_stable_cloud_share_source(&source)?;
     let _source_submission = state.cloud_download_sources.acquire(&source).await?;
@@ -1590,10 +1590,42 @@ pub async fn submit_cloud_share_file(
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
-    let entry = cloud.share_plans.resolve_entry(&source)?;
-    cloud
-        .share_plans
-        .link_local_sources(std::slice::from_ref(&source))?;
+    let resolve_source = source.clone();
+    let outcome = submit_new_cloud_share_file_with(
+        state.store.clone(),
+        &cloud.share_plans,
+        source,
+        configured,
+        || async {
+            state
+                .runtime
+                .service()
+                .await
+                .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))
+        },
+        || resolve_stable_cloud_share_download(app.clone(), &resolve_source),
+    )
+    .await?;
+    schedule_cloud_share_cleanup(app, &outcome.payload.task);
+    Ok(outcome)
+}
+
+pub(crate) async fn submit_new_cloud_share_file_with<S, SFut, R, RFut>(
+    tasks: Arc<TaskStore>,
+    plans: &share::CloudSharePlanStore,
+    source: String,
+    mut configured: UriSubmissionOptions,
+    service: S,
+    resolve: R,
+) -> Result<TaskActionOutcome, QuarkError>
+where
+    S: FnOnce() -> SFut,
+    SFut: std::future::Future<Output = Result<Arc<crate::DownloadService>, QuarkError>>,
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = Result<ResolvedCloudDownload, QuarkError>>,
+{
+    share::parse_stable_cloud_share_source(&source)?;
+    let entry = plans.resolve_entry(&source)?;
     if let Some(directory) = configured.directory.as_ref() {
         configured.directory = Some(directory_download_output_directory(
             directory,
@@ -1604,19 +1636,42 @@ pub async fn submit_cloud_share_file(
             "分享目录下载需要设置绝对下载目录".into(),
         ));
     }
-    let resolved = resolve_stable_cloud_share_download(app.clone(), &source).await?;
-    let service = state
-        .runtime
-        .service()
-        .await
-        .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?;
-    let task =
-        share::submit_current_share_download(&service, &source, resolved, configured).await?;
-    cloud.share_plans.link_local_task(&source, task.id)?;
-    if let Ok(latest) = state.store.find(task.id) {
-        schedule_cloud_share_cleanup(app.clone(), &latest);
+    let output_name = configured
+        .output_name
+        .clone()
+        .unwrap_or_else(|| safe_filename(&entry.entry.name));
+    configured.output_name = Some(output_name.clone());
+    configured
+        .clone()
+        .into_aria2_options()
+        .map_err(|_| QuarkError::InvalidInput("下载路径或文件名无效".into()))?;
+
+    let service = service().await?;
+    let prepared = tasks
+        .create(crate::NewTask {
+            source: source.clone(),
+            name: output_name,
+            kind: "cloud".into(),
+        })
+        .map_err(|_| QuarkError::Storage)?;
+    if let Err(error) = plans.reserve_local_task(&source, prepared.id) {
+        return match tasks.remove_task_record(prepared.id) {
+            Ok(()) | Err(crate::StoreError::NotFound(_)) => Err(error),
+            // The task may still be durable, so report the conservative
+            // recoverable state instead of claiming creation was rolled back.
+            Err(_) => Ok(TaskActionOutcome {
+                payload: crate::commands::DownloadTaskPayload {
+                    task: prepared,
+                    files: Vec::new(),
+                },
+                duplicate: None,
+            }),
+        };
     }
-    task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)
+
+    let resolved = resolve().await?;
+    let task = share::submit_current_share_download(&service, &prepared, resolved, configured).await?;
+    task_action_outcome(&tasks, task, None).map_err(QuarkError::Transport)
 }
 
 pub(crate) fn schedule_cloud_share_cleanup(app: AppHandle, task: &DownloadTask) {
