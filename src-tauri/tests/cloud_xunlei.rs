@@ -186,6 +186,51 @@ fn modern_web_mutations_map_root_and_keep_official_paths() {
     );
 }
 
+#[test]
+fn xunlei_recycle_list_restore_and_delete_refreshes_the_client_session() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
+        r#"{"files":[{"id":"trashed-id","name":"trashed.txt","kind":"drive#file","phase":"PHASE_TYPE_COMPLETE","trashed":true}],"next_page_token":""}"#,
+        r#"{}"#,
+        r#"{}"#,
+    ]);
+    let mut session = modern_session();
+    session.expires_at = 0;
+    let client = XunleiClient::new(session, &http);
+
+    let bin = client.list_recycle_bin().unwrap();
+    assert_eq!(bin.items[0].id, "trashed-id");
+    assert_eq!(bin.items[0].parent_id, bin.id);
+    client
+        .restore_recycle_entries(&[bin.items[0].id.clone()])
+        .unwrap();
+    client
+        .delete_recycle_entries(&[bin.items[0].id.clone()])
+        .unwrap();
+
+    assert_eq!(client.session().access_token, "rotated-access");
+    assert_eq!(client.session().refresh_token, "rotated-refresh");
+    let requests = http.requests();
+    assert!(requests[0].url.ends_with("/v1/auth/token"));
+    let list = &requests[1];
+    assert_eq!(list.method, "GET");
+    assert!(list.url.contains("/drive/v1/files?"));
+    let query = url::Url::parse(&list.url).unwrap();
+    assert!(query
+        .query_pairs()
+        .any(|(key, value)| { key == "filters" && value.contains(r#""trashed":{"eq":true}"#) }));
+    assert!(requests[2].url.ends_with("/drive/v1/files:batchUntrash"));
+    assert!(requests[3].url.ends_with("/drive/v1/files:batchDelete"));
+    for request in [&requests[2], &requests[3]] {
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(request.body.as_deref().unwrap()).unwrap()
+                ["ids"],
+            serde_json::json!(["trashed-id"])
+        );
+    }
+}
+
 fn modern_signed_session(token: &str, expires_at: u64) -> XunleiSession {
     let mut value = serde_json::to_value(modern_session()).unwrap();
     let timestamp = std::time::SystemTime::now()
@@ -970,8 +1015,13 @@ fn xunlei_directory_requests_and_maps_only_complete_downloadable_files() {
 
     let directory = client.directory("0").unwrap();
 
-    assert_eq!(directory.items.len(), 1);
-    assert_eq!(directory.items[0].id, "ready");
+    assert!(directory.items.iter().any(|item| item.id == "ready"));
+    assert!(directory.items.iter().any(|item| {
+        item.id == "__all_downloader_xunlei_recycle_bin__"
+            && item.parent_id == "0"
+            && item.name == "回收站"
+            && item.kind == "folder"
+    }));
     let request = http.requests().pop().unwrap();
     assert!(request.url.contains("__type=drive"));
     assert!(request.url.contains("with_audit=true"));

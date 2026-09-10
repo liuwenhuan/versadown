@@ -1246,6 +1246,9 @@ fn now() -> u64 {
         .as_secs()
 }
 
+pub(crate) const XUNLEI_RECYCLE_BIN_ID: &str = "__all_downloader_xunlei_recycle_bin__";
+const XUNLEI_RECYCLE_BIN_NAME: &str = "回收站";
+
 /// A blocking client whose refreshed session can be persisted by the command
 /// layer with [`Self::session`].
 pub struct XunleiClient<'a, T: CloudHttpTransport> {
@@ -1729,14 +1732,30 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
+        if parent == XUNLEI_RECYCLE_BIN_ID {
+            return self.list_recycle_bin();
+        }
+        self.list_files(parent, false)
+    }
+
+    fn list_files(&self, parent: &str, trashed: bool) -> Result<CloudDirectory, QuarkError> {
         let mut items = Vec::new();
         let mut page_token = String::new();
         let mut pages = HashSet::new();
-        let request_parent = self.request_parent(parent);
+        let request_parent = if trashed {
+            ""
+        } else {
+            self.request_parent(parent)
+        };
         let extras = if self.session.borrow().profile.is_modern_web() {
             ""
         } else {
             "__type=drive&refresh=true&__sync=true&"
+        };
+        let filter = if trashed {
+            r#"{"phase":{"eq":"PHASE_TYPE_COMPLETE"},"trashed":{"eq":true}}"#
+        } else {
+            r#"{"phase":{"eq":"PHASE_TYPE_COMPLETE"},"trashed":{"eq":false}}"#
         };
         loop {
             let value = self.request(
@@ -1745,7 +1764,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                     "/drive/v1/files?space=&{extras}parent_id={}&page_token={}&with_audit=true&limit=100&filters={}",
                     encoded(request_parent),
                     encoded(&page_token),
-                    encoded(r#"{"phase":{"eq":"PHASE_TYPE_COMPLETE"},"trashed":{"eq":false}}"#),
+                    encoded(filter),
                 )),
                 None,
             )?;
@@ -1756,10 +1775,31 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 if file["phase"].as_str() != Some("PHASE_TYPE_COMPLETE") {
                     continue;
                 }
-                items.push(Self::file(file, parent)?);
+                let mut item = Self::file(
+                    file,
+                    if trashed {
+                        XUNLEI_RECYCLE_BIN_ID
+                    } else {
+                        parent
+                    },
+                )?;
+                if trashed {
+                    item.parent_id = XUNLEI_RECYCLE_BIN_ID.into();
+                }
+                items.push(item);
             }
             page_token = value["next_page_token"].as_str().unwrap_or("").into();
             if page_token.is_empty() {
+                if parent == "0" && !trashed {
+                    items.push(CloudFile {
+                        id: XUNLEI_RECYCLE_BIN_ID.into(),
+                        parent_id: "0".into(),
+                        name: XUNLEI_RECYCLE_BIN_NAME.into(),
+                        kind: "folder".into(),
+                        size: None,
+                        modified_at: None,
+                    });
+                }
                 return Ok(CloudDirectory {
                     id: parent.into(),
                     items,
@@ -1769,6 +1809,10 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 return Err(QuarkError::InvalidResponse);
             }
         }
+    }
+
+    pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
+        self.list_files(XUNLEI_RECYCLE_BIN_ID, true)
     }
 
     fn file(value: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
@@ -1843,6 +1887,30 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 Some(json!({})),
             )?;
         }
+        Ok(())
+    }
+
+    pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        if ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件".into()));
+        }
+        self.request(
+            "POST",
+            self.drive_url("/drive/v1/files:batchUntrash"),
+            Some(json!({"ids": ids})),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        if ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件".into()));
+        }
+        self.request(
+            "POST",
+            self.drive_url("/drive/v1/files:batchDelete"),
+            Some(json!({"ids": ids})),
+        )?;
         Ok(())
     }
 

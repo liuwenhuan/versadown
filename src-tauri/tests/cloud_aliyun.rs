@@ -72,6 +72,93 @@ impl CloudUploadTransport for RecordingHttp {
 }
 
 #[test]
+fn aliyun_recycle_list_restore_and_delete_use_drive_scoped_ids() {
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive-42","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[],"next_marker":""}"#,
+        r#"{"items":[{"file_id":"recycle-record-1","file_name":"trashed.txt","type":"file","size":7}],"next_marker":""}"#,
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[],"next_marker":""}"#,
+        r#"{}"#,
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[],"next_marker":""}"#,
+        r#"{}"#,
+    ]);
+    let client = AliyunClient::new(&store, &http);
+
+    let bin = client.list_recycle_bin().unwrap();
+    assert_eq!(bin.items[0].id, "recycle-record-1");
+    assert_eq!(bin.items[0].parent_id, bin.id);
+    client
+        .restore_recycle_entries(&[bin.items[0].id.clone()])
+        .unwrap();
+    client
+        .delete_recycle_entries(&[bin.items[0].id.clone()])
+        .unwrap();
+
+    let requests = http.requests.lock().unwrap();
+    let recycle_requests = requests
+        .iter()
+        .filter(|request| request.url.contains("/v2/recyclebin/"))
+        .collect::<Vec<_>>();
+    assert_eq!(recycle_requests.len(), 3);
+    assert_eq!(
+        recycle_requests[0].url,
+        "https://api.aliyundrive.com/v2/recyclebin/list"
+    );
+    assert_eq!(
+        recycle_requests[1].url,
+        "https://api.aliyundrive.com/v2/recyclebin/restore"
+    );
+    assert_eq!(
+        recycle_requests[2].url,
+        "https://api.aliyundrive.com/v2/recyclebin/delete"
+    );
+    for request in &recycle_requests {
+        let body: serde_json::Value =
+            serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["drive_id"], "drive-42");
+    }
+    let restore: serde_json::Value =
+        serde_json::from_str(recycle_requests[1].body.as_deref().unwrap()).unwrap();
+    let delete: serde_json::Value =
+        serde_json::from_str(recycle_requests[2].body.as_deref().unwrap()).unwrap();
+    assert_eq!(restore["file_id"], "recycle-record-1");
+    assert_eq!(delete["file_id"], "recycle-record-1");
+}
+
+#[test]
+fn aliyun_root_exposes_a_reserved_recycle_bin_folder() {
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive-42","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"user_id":"u1","nick_name":"alice"}"#,
+        r#"{"items":[],"next_marker":""}"#,
+    ]);
+
+    let root = AliyunClient::new(&store, &http).directory("root").unwrap();
+
+    assert!(root.items.iter().any(|item| {
+        item.id == "__all_downloader_aliyun_recycle_bin__"
+            && item.parent_id == "root"
+            && item.name == "回收站"
+            && item.kind == "folder"
+    }));
+}
+
+#[test]
 fn aliyun_browser_session_uses_the_current_web_bearer_before_refreshing() {
     // A just-completed official web login already supplies a valid bearer token.
     // The authorization handshake must use it directly, so a transient refresh

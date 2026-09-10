@@ -5,7 +5,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 #[cfg(test)]
 mod tests {
@@ -347,6 +347,8 @@ mod tests {
 }
 
 pub const QUARK_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch";
+pub(crate) const QUARK_RECYCLE_BIN_ID: &str = "__all_downloader_quark_recycle_bin__";
+const QUARK_RECYCLE_BIN_NAME: &str = "回收站";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct QuarkFile {
@@ -489,6 +491,16 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
             }
             let total = v.pointer("/metadata/_total").and_then(Value::as_u64);
             if count < 200 || total.is_some_and(|t| items.len() as u64 >= t) {
+                if parent == "0" {
+                    items.push(CloudFile {
+                        id: QUARK_RECYCLE_BIN_ID.into(),
+                        parent_id: "0".into(),
+                        name: QUARK_RECYCLE_BIN_NAME.into(),
+                        kind: "folder".into(),
+                        size: None,
+                        modified_at: None,
+                    });
+                }
                 return Ok(CloudDirectory {
                     id: parent.into(),
                     items,
@@ -543,6 +555,133 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
     pub fn download_url(&self, id: &str) -> Result<CloudHttpResponse, QuarkError> {
         self.request("POST", "file/download", Some(json!({"fids":[id]})))
     }
+
+    /// Uploads one regular local file using Quark's authenticated CloudDrive
+    /// protocol. Object-store authorizations are generated for each transfer
+    /// request and remain local to the call.
+    pub fn upload_file<U: CloudUploadTransport>(
+        &self,
+        parent: &str,
+        path: &Path,
+        upload_http: &U,
+    ) -> Result<CloudFile, QuarkError> {
+        if parent == QUARK_RECYCLE_BIN_ID {
+            return Err(QuarkError::InvalidInput(
+                "回收站不能作为上传目标目录".into(),
+            ));
+        }
+        super::upload::upload_cloud_drive_file(
+            upload_http,
+            parent,
+            path,
+            |payload| {
+                self.request("POST", "file/upload/pre", Some(payload))
+                    .and_then(|response| response_json(&response))
+            },
+            |payload| {
+                self.request("POST", "file/update/hash", Some(payload))
+                    .and_then(|response| response_json(&response))
+            },
+            |payload| {
+                self.request("POST", "file/upload/auth", Some(payload))
+                    .and_then(|response| response_json(&response))
+            },
+            |payload| {
+                self.request("POST", "file/upload/finish", Some(payload))
+                    .and_then(|response| response_json(&response))
+            },
+        )
+    }
+
+    pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
+        let mut items = Vec::new();
+        for page in 1..=10_000 {
+            let response = self.request(
+                "GET",
+                &format!("file/recycle/list?_page={page}&_size=200"),
+                None,
+            )?;
+            let value = response_json(&response)?;
+            let files = value
+                .pointer("/data/list")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            let count = files.len();
+            items.extend(
+                files
+                    .iter()
+                    .map(quark_recycle_file)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            let total = value.pointer("/metadata/_total").and_then(Value::as_u64);
+            if count < 200 || total.is_some_and(|total| items.len() as u64 >= total) {
+                return Ok(CloudDirectory {
+                    id: QUARK_RECYCLE_BIN_ID.into(),
+                    items,
+                });
+            }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn restore_recycle_entries(&self, record_ids: &[String]) -> Result<(), QuarkError> {
+        validate_recycle_record_ids(record_ids)?;
+        self.request(
+            "POST",
+            "file/recycle/restore",
+            Some(json!({"select_mode":2,"record_list":record_ids})),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_recycle_entries(&self, record_ids: &[String]) -> Result<(), QuarkError> {
+        validate_recycle_record_ids(record_ids)?;
+        self.request(
+            "POST",
+            "file/recycle/remove",
+            Some(json!({"select_mode":2,"record_list":record_ids})),
+        )?;
+        Ok(())
+    }
+}
+
+fn quark_recycle_file(file: &Value) -> Result<CloudFile, QuarkError> {
+    Ok(CloudFile {
+        id: required(file, "record_id")?,
+        parent_id: QUARK_RECYCLE_BIN_ID.into(),
+        name: required(file, "file_name")?,
+        kind: if file
+            .get("dir")
+            .and_then(Value::as_bool)
+            .unwrap_or(file.get("file_type").and_then(Value::as_i64) == Some(0))
+        {
+            "folder"
+        } else {
+            "file"
+        }
+        .into(),
+        size: file.get("size").and_then(Value::as_u64),
+        modified_at: file.get("updated_at").and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_u64().map(|value| value.to_string()))
+        }),
+    })
+}
+
+fn validate_recycle_record_ids(record_ids: &[String]) -> Result<(), QuarkError> {
+    if record_ids.is_empty()
+        || record_ids.iter().any(|record_id| {
+            record_id.is_empty()
+                || record_id.len() > 512
+                || record_id.contains(['?', '#', '\r', '\n'])
+                || record_id.chars().any(char::is_control)
+        })
+    {
+        return Err(QuarkError::InvalidInput("回收站记录 ID 无效".into()));
+    }
+    Ok(())
 }
 
 use super::share::{

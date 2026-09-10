@@ -15,6 +15,8 @@ export const copyCloudFiles = (provider: CloudProvider, fileIds: string[], targe
 export const trashCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_trash', { provider, fileIds });
 /** Permanently deletes files already displayed inside a provider recycle bin. */
 export const deleteCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_delete', { provider, fileIds });
+/** Restores files already displayed inside a provider recycle bin. */
+export const restoreCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_restore', { provider, fileIds });
 type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState };
 type NativeCloudDirectoryDownload = {
   queuedCount: number;

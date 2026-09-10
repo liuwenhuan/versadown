@@ -6,11 +6,16 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 use zeroize::Zeroizing;
 
 const CLOUD: &str = "https://cloud.189.cn";
 const LOGIN: &str = "https://open.e.189.cn";
+pub const TIANYI_RECYCLE_BIN_ID: &str = "__all_downloader_tianyi_recycle_bin__";
+const TIANYI_RECYCLE_BIN_NAME: &str = "回收站";
 
 #[cfg(test)]
 mod tests {
@@ -392,7 +397,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             None,
         )?;
         let files = tianyi_file_list(&value)?;
-        let items = files
+        let mut items = files
             .iter()
             .map(|(file, listed_as_folder)| {
                 Ok(CloudFile {
@@ -416,10 +421,99 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                 })
             })
             .collect::<Result<Vec<_>, QuarkError>>()?;
+        if parent == "-11" {
+            items.push(CloudFile {
+                id: TIANYI_RECYCLE_BIN_ID.into(),
+                parent_id: parent.into(),
+                name: TIANYI_RECYCLE_BIN_NAME.into(),
+                kind: "folder".into(),
+                size: None,
+                modified_at: None,
+            });
+        }
         Ok(CloudDirectory {
             id: parent.into(),
             items,
         })
+    }
+
+    pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
+        let mut items = Vec::new();
+        let mut seen = BTreeSet::new();
+        for page in 1..=10_000 {
+            let value = self.request(
+                "GET",
+                "/api/open/file/listRecycleBinFiles.action",
+                &format!("pageNum={page}&pageSize=100&iconOption=1&family=false"),
+                None,
+            )?;
+            let files = value
+                .get("fileList")
+                .or_else(|| value.pointer("/data/fileList"))
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            let length = files.len();
+            for file in files {
+                let id = file
+                    .get("id")
+                    .and_then(string_or_number)
+                    .filter(|id| valid_tianyi_recycle_record_id(id))
+                    .ok_or(QuarkError::InvalidResponse)?;
+                if !seen.insert(id.clone()) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                items.push(CloudFile {
+                    id,
+                    parent_id: TIANYI_RECYCLE_BIN_ID.into(),
+                    name: required(file, "name").or_else(|_| required(file, "fileName"))?,
+                    kind: if bool_value(file.get("isFolder").or_else(|| file.get("folder"))) {
+                        "folder"
+                    } else {
+                        "file"
+                    }
+                    .into(),
+                    size: u64_value(file.get("size").or_else(|| file.get("fileSize"))),
+                    modified_at: file
+                        .get("lastOpTime")
+                        .or_else(|| file.get("lastOpDate"))
+                        .and_then(string_or_number),
+                });
+            }
+            if length < 100 {
+                return Ok(CloudDirectory {
+                    id: TIANYI_RECYCLE_BIN_ID.into(),
+                    items,
+                });
+            }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        let ids = validated_tianyi_recycle_record_ids(ids)?;
+        let task_infos = serde_json::to_string(
+            &ids.iter()
+                .map(|id| json!({ "fileId": id }))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| QuarkError::InvalidResponse)?;
+        self.form_request(
+            "POST",
+            "/api/open/batch/createBatchTask.action",
+            &[("type", "RESTORE"), ("taskInfos", &task_infos)],
+        )
+        .map(|_| ())
+    }
+
+    pub fn delete_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
+        let ids = validated_tianyi_recycle_record_ids(ids)?;
+        self.request(
+            "GET",
+            "/v2/deleteFile.action",
+            &format!("fileIdList={}", encoded(&ids.join(","))),
+            None,
+        )
+        .map(|_| ())
     }
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
         self.form_request(
@@ -1066,6 +1160,23 @@ fn string_or_number(value: &Value) -> Option<String> {
         .map(str::to_owned)
         .or_else(|| value.as_u64().map(|number| number.to_string()))
         .or_else(|| value.as_i64().map(|number| number.to_string()))
+}
+
+fn valid_tianyi_recycle_record_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn validated_tianyi_recycle_record_ids(ids: &[String]) -> Result<Vec<String>, QuarkError> {
+    if ids.is_empty()
+        || ids.iter().any(|id| !valid_tianyi_recycle_record_id(id))
+        || ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| ids[..index].contains(id))
+    {
+        return Err(QuarkError::InvalidInput("回收站记录 ID 无效".into()));
+    }
+    Ok(ids.to_vec())
 }
 
 fn i64_value(value: &Value) -> Option<i64> {

@@ -6,15 +6,17 @@
 //! and response cookies are kept in `UcDownload` for immediate use only.
 use super::{
     types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest,
-    CloudHttpResponse, CloudHttpTransport, CloudProvider, QuarkError,
+    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudUploadTransport, QuarkError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, path::Path};
 
 const API: &str = "https://pc-api.uc.cn/1/clouddrive";
 const WEB: &str = "https://drive.uc.cn";
 pub const UC_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
+pub(crate) const UC_RECYCLE_BIN_ID: &str = "__all_downloader_uc_recycle_bin__";
+const UC_RECYCLE_BIN_NAME: &str = "回收站";
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct UcSession {
@@ -246,6 +248,16 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             );
             let total = value.pointer("/metadata/_total").and_then(Value::as_u64);
             if count < 200 || total.is_some_and(|total| items.len() as u64 >= total) {
+                if parent == "0" {
+                    items.push(CloudFile {
+                        id: UC_RECYCLE_BIN_ID.into(),
+                        parent_id: "0".into(),
+                        name: UC_RECYCLE_BIN_NAME.into(),
+                        kind: "folder".into(),
+                        size: None,
+                        modified_at: None,
+                    });
+                }
                 return Ok(CloudDirectory {
                     id: parent.into(),
                     items,
@@ -316,6 +328,84 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             "",
             Some(json!({"action_type":2,"filelist":ids,"exclude_fids":[]})),
         )
+    }
+
+    /// Uploads one regular local file using UC's authenticated CloudDrive
+    /// endpoints. The shared transfer code never takes ownership of UC's
+    /// browser cookie or request headers.
+    pub fn upload_file<U: CloudUploadTransport>(
+        &self,
+        parent: &str,
+        path: &Path,
+        upload_http: &U,
+    ) -> Result<CloudFile, QuarkError> {
+        if parent == UC_RECYCLE_BIN_ID {
+            return Err(QuarkError::InvalidInput(
+                "回收站不能作为上传目标目录".into(),
+            ));
+        }
+        super::upload::upload_cloud_drive_file(
+            upload_http,
+            parent,
+            path,
+            |payload| self.request_json("POST", "file/upload/pre", "", Some(payload)),
+            |payload| self.request_json("POST", "file/update/hash", "", Some(payload)),
+            |payload| self.request_json("POST", "file/upload/auth", "", Some(payload)),
+            |payload| self.request_json("POST", "file/upload/finish", "", Some(payload)),
+        )
+    }
+
+    pub fn list_recycle_bin(&self) -> Result<CloudDirectory, QuarkError> {
+        let mut items = Vec::new();
+        for page in 1..=10_000 {
+            let value = self.request_json(
+                "GET",
+                "file/recycle/list",
+                &format!("_page={page}&_size=200"),
+                None,
+            )?;
+            let files = value
+                .pointer("/data/list")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            let count = files.len();
+            items.extend(
+                files
+                    .iter()
+                    .map(uc_recycle_file)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            let total = value.pointer("/metadata/_total").and_then(Value::as_u64);
+            if count < 200 || total.is_some_and(|total| items.len() as u64 >= total) {
+                return Ok(CloudDirectory {
+                    id: UC_RECYCLE_BIN_ID.into(),
+                    items,
+                });
+            }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn restore_recycle_entries(&self, record_ids: &[String]) -> Result<(), QuarkError> {
+        validate_recycle_record_ids(record_ids)?;
+        self.request(
+            "POST",
+            "file/recycle/restore",
+            "",
+            Some(json!({"select_mode":2,"record_list":record_ids})),
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_recycle_entries(&self, record_ids: &[String]) -> Result<(), QuarkError> {
+        validate_recycle_record_ids(record_ids)?;
+        self.request(
+            "POST",
+            "file/recycle/remove",
+            "",
+            Some(json!({"select_mode":2,"record_list":record_ids})),
+        )?;
+        Ok(())
     }
 
     /// Resolve an immediate, signed URL.  It is intentionally returned rather
@@ -403,6 +493,26 @@ fn parse_file(file: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
     })
 }
 
+fn uc_recycle_file(file: &Value) -> Result<CloudFile, QuarkError> {
+    Ok(CloudFile {
+        id: required(file, "record_id")?,
+        parent_id: UC_RECYCLE_BIN_ID.into(),
+        name: required(file, "file_name")?,
+        kind: if file
+            .get("dir")
+            .and_then(Value::as_bool)
+            .unwrap_or(file.get("file_type").and_then(Value::as_i64) == Some(0))
+        {
+            "folder"
+        } else {
+            "file"
+        }
+        .into(),
+        size: file.get("size").and_then(Value::as_u64),
+        modified_at: file.get("updated_at").and_then(string_or_number),
+    })
+}
+
 fn encoded(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
@@ -433,6 +543,20 @@ fn validate_ids(ids: &[String]) -> Result<(), QuarkError> {
         return Err(QuarkError::InvalidInput("请选择至少一个文件".into()));
     }
     ids.iter().try_for_each(|id| validate_id(id))
+}
+
+fn validate_recycle_record_ids(record_ids: &[String]) -> Result<(), QuarkError> {
+    if record_ids.is_empty()
+        || record_ids.iter().any(|record_id| {
+            record_id.is_empty()
+                || record_id.len() > 512
+                || record_id.contains(['?', '#', '\r', '\n'])
+                || record_id.chars().any(char::is_control)
+        })
+    {
+        return Err(QuarkError::InvalidInput("回收站记录 ID 无效".into()));
+    }
+    Ok(())
 }
 
 fn cookie_pair(value: &str) -> Option<(&str, &str)> {

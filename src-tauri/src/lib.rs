@@ -263,6 +263,7 @@ pub fn run() {
             cloud::commands::cloud_copy,
             cloud::commands::cloud_trash,
             cloud::commands::cloud_delete,
+            cloud::commands::cloud_restore,
             cloud::commands::cloud_download_url,
             cloud::commands::cloud_download_directory,
             cloud::commands::cloud_upload_files,

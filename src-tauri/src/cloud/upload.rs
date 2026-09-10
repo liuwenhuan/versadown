@@ -305,3 +305,367 @@ pub fn upload_pikpak_file(
     }
     Ok(file)
 }
+
+const CLOUD_DRIVE_DEFAULT_PART_SIZE: usize = 4 * 1024 * 1024;
+const CLOUD_DRIVE_OBJECT_HOST: &str = "pds.quark.cn";
+const CLOUD_DRIVE_OSS_USER_AGENT: &str = "aliyun-sdk-js/6.6.1";
+
+/// Runs the CloudDrive browser upload protocol shared by Quark and UC.
+///
+/// The adapters retain ownership of their authenticated API requests and
+/// headers.  This helper only processes the short-lived transfer contract on
+/// the stack, validates the object-store origin before bytes are sent, and
+/// never serializes or logs its authorization values.
+pub(crate) fn upload_cloud_drive_file(
+    http: &impl CloudUploadTransport,
+    parent: &str,
+    path: &Path,
+    pre_upload: impl FnOnce(Value) -> Result<Value, QuarkError>,
+    update_hash: impl FnOnce(Value) -> Result<Value, QuarkError>,
+    authorize: impl Fn(Value) -> Result<Value, QuarkError>,
+    finish: impl FnOnce(Value) -> Result<Value, QuarkError>,
+) -> Result<CloudFile, QuarkError> {
+    let (name, size, modified_at) = cloud_drive_file_metadata(path)?;
+    let (md5, sha1) = cloud_drive_hashes(path, size)?;
+    let content_type = "application/octet-stream";
+    let pre = pre_upload(json!({
+        "ccp_hash_update": true,
+        "parallel_upload": true,
+        "pdir_fid": parent,
+        "dir_name": "",
+        "file_name": name,
+        "format_type": content_type,
+        "l_created_at": modified_at,
+        "l_updated_at": modified_at,
+        "size": size,
+    }))?;
+    let pre_data = pre.get("data").ok_or(QuarkError::InvalidResponse)?;
+    let task_id = required(pre_data, "task_id")?;
+    let hash = update_hash(json!({"task_id":task_id,"md5":md5,"sha1":sha1}))?;
+    let hash_data = hash.get("data").ok_or(QuarkError::InvalidResponse)?;
+    if hash_data.get("finish").and_then(Value::as_bool) == Some(true) {
+        return cloud_drive_file(hash_data, parent, &name, size);
+    }
+
+    let contract = CloudDriveUploadContract {
+        task_id,
+        auth_info: required(pre_data, "auth_info")?,
+        upload_id: required(pre_data, "upload_id")?,
+        object_url: cloud_drive_object_url(
+            &required(pre_data, "bucket")?,
+            &required(pre_data, "obj_key")?,
+            &required(pre_data, "upload_url")?,
+        )?,
+        bucket: required(pre_data, "bucket")?,
+        object_key: required(pre_data, "obj_key")?,
+        callback: pre_data
+            .get("callback")
+            .filter(|value| !value.is_null())
+            .map(cloud_drive_callback)
+            .transpose()?,
+        part_size: cloud_drive_part_size(&pre)?,
+    };
+    if let Some(callback) = &contract.callback {
+        checked_temporary_header(callback)?;
+    }
+
+    let mut source = std::fs::File::open(path).map_err(|_| file_error())?;
+    let mut remaining = size;
+    let mut parts = Vec::new();
+    let mut number = 1_u64;
+    let mut uploaded_md5 = md5::Context::new();
+    let mut uploaded_sha1 = Sha1::new();
+    while remaining > 0 || number == 1 {
+        let length = remaining.min(contract.part_size as u64) as usize;
+        let mut bytes = vec![0; length];
+        source.read_exact(&mut bytes).map_err(|_| file_error())?;
+        remaining = remaining.saturating_sub(length as u64);
+        uploaded_md5.consume(&bytes);
+        uploaded_sha1.update(&bytes);
+        let query = format!(
+            "partNumber={number}&uploadId={}",
+            encoded(&contract.upload_id)
+        );
+        let request = cloud_drive_authorized_request(
+            &contract,
+            "PUT",
+            &query,
+            content_type,
+            bytes,
+            None,
+            &authorize,
+        )?;
+        let response = checked(http.send_upload(request)?)?;
+        let etag = checked_etag(&response)?;
+        parts.push((number, etag));
+        number += 1;
+        if remaining == 0 {
+            break;
+        }
+    }
+    if format!("{:x}", uploaded_md5.finalize()) != md5
+        || format!("{:x}", uploaded_sha1.finalize()) != sha1
+    {
+        return Err(QuarkError::InvalidInput(
+            "本地文件在上传过程中发生变化".into(),
+        ));
+    }
+    let mut manifest = String::from("<CompleteMultipartUpload>");
+    for (number, etag) in parts {
+        manifest.push_str(&format!(
+            "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
+            xml_escape(&etag)
+        ));
+    }
+    manifest.push_str("</CompleteMultipartUpload>");
+    let manifest = manifest.into_bytes();
+    let completed = checked(http.send_upload(cloud_drive_authorized_request(
+        &contract,
+        "POST",
+        &format!("uploadId={}", encoded(&contract.upload_id)),
+        "application/xml",
+        manifest,
+        contract.callback.as_deref(),
+        &authorize,
+    )?)?)?;
+    if !completed.body.contains("CompleteMultipartUploadResult") {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let final_response = finish(json!({
+        "task_id":contract.task_id,
+        "obj_key":contract.object_key,
+    }))?;
+    cloud_drive_file(
+        final_response
+            .get("data")
+            .ok_or(QuarkError::InvalidResponse)?,
+        parent,
+        &name,
+        size,
+    )
+}
+
+struct CloudDriveUploadContract {
+    task_id: String,
+    auth_info: String,
+    upload_id: String,
+    object_url: String,
+    bucket: String,
+    object_key: String,
+    callback: Option<String>,
+    part_size: usize,
+}
+
+fn cloud_drive_file_metadata(path: &Path) -> Result<(String, u64, u64), QuarkError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| file_error())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(QuarkError::InvalidInput("请选择普通文件上传".into()));
+    }
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && !value.contains(['/', '\\', '\r', '\n'])
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| QuarkError::InvalidInput("文件名无效".into()))?
+        .to_owned();
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .and_then(|millis| u64::try_from(millis).ok())
+        .unwrap_or(0);
+    Ok((name, metadata.len(), modified_at))
+}
+
+fn cloud_drive_hashes(path: &Path, expected_size: u64) -> Result<(String, String), QuarkError> {
+    let mut source = std::fs::File::open(path).map_err(|_| file_error())?;
+    let mut md5 = md5::Context::new();
+    let mut sha1 = Sha1::new();
+    let mut count = 0_u64;
+    let mut buffer = vec![0; 256 * 1024];
+    loop {
+        let read = source.read(&mut buffer).map_err(|_| file_error())?;
+        if read == 0 {
+            break;
+        }
+        count = count
+            .checked_add(read as u64)
+            .ok_or(QuarkError::InvalidInput("文件过大，无法上传".into()))?;
+        md5.consume(&buffer[..read]);
+        sha1.update(&buffer[..read]);
+    }
+    if count != expected_size {
+        return Err(QuarkError::InvalidInput("本地文件在上传前发生变化".into()));
+    }
+    Ok((
+        format!("{:x}", md5.finalize()),
+        format!("{:x}", sha1.finalize()),
+    ))
+}
+
+fn cloud_drive_object_url(bucket: &str, key: &str, upload_url: &str) -> Result<String, QuarkError> {
+    if bucket.is_empty()
+        || bucket.len() > 63
+        || bucket.starts_with('-')
+        || bucket.ends_with('-')
+        || !bucket
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || key.is_empty()
+        || key.len() > 2048
+        || key.starts_with('/')
+        || key.chars().any(char::is_control)
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let transfer_url = https_transfer_url(upload_url)?;
+    let mut url = url::Url::parse(&transfer_url).map_err(|_| QuarkError::InvalidResponse)?;
+    if url.path() != "/" || url.query().is_some() || !matches!(url.port(), None | Some(443)) {
+        return Err(QuarkError::InvalidResponse);
+    }
+    let host = url.host_str().ok_or(QuarkError::InvalidResponse)?;
+    let expected_host = format!("{bucket}.{CLOUD_DRIVE_OBJECT_HOST}");
+    if host != CLOUD_DRIVE_OBJECT_HOST && host != expected_host {
+        return Err(QuarkError::InvalidResponse);
+    }
+    if host == CLOUD_DRIVE_OBJECT_HOST {
+        url.set_host(Some(&expected_host))
+            .map_err(|_| QuarkError::InvalidResponse)?;
+    }
+    url.set_path(key);
+    https_transfer_url(url.as_str())
+}
+
+fn cloud_drive_callback(value: &Value) -> Result<String, QuarkError> {
+    let callback = serde_json::to_string(value).map_err(|_| QuarkError::InvalidResponse)?;
+    let callback = base64::engine::general_purpose::STANDARD.encode(callback);
+    checked_temporary_header(&callback)?;
+    Ok(callback)
+}
+
+fn cloud_drive_part_size(pre: &Value) -> Result<usize, QuarkError> {
+    let part_size = pre
+        .pointer("/metadata/part_size")
+        .and_then(Value::as_u64)
+        .unwrap_or(CLOUD_DRIVE_DEFAULT_PART_SIZE as u64);
+    if !(1024 * 1024..=64 * 1024 * 1024).contains(&part_size) {
+        return Err(QuarkError::InvalidResponse);
+    }
+    usize::try_from(part_size).map_err(|_| QuarkError::InvalidResponse)
+}
+
+fn cloud_drive_authorized_request(
+    contract: &CloudDriveUploadContract,
+    method: &'static str,
+    query: &str,
+    content_type: &str,
+    body: Vec<u8>,
+    callback: Option<&str>,
+    authorize: &impl Fn(Value) -> Result<Value, QuarkError>,
+) -> Result<UploadHttpRequest, QuarkError> {
+    let date = httpdate::fmt_http_date(std::time::SystemTime::now());
+    let content_md5 = if method == "POST" {
+        Some(base64::engine::general_purpose::STANDARD.encode(md5::compute(&body).0))
+    } else {
+        None
+    };
+    let mut oss_headers = String::new();
+    if let Some(callback) = callback {
+        checked_temporary_header(callback)?;
+        oss_headers.push_str(&format!("x-oss-callback:{callback}\n"));
+    }
+    oss_headers.push_str(&format!("x-oss-date:{date}\n"));
+    oss_headers.push_str(&format!("x-oss-user-agent:{CLOUD_DRIVE_OSS_USER_AGENT}\n"));
+    let auth = authorize(json!({
+        "task_id":&contract.task_id,
+        "auth_info":&contract.auth_info,
+        "auth_meta":format!("{method}\n{}\n{content_type}\n{date}\n{oss_headers}/{}/{}?{query}", content_md5.as_deref().unwrap_or(""), contract.bucket, contract.object_key),
+    }))?;
+    let auth_key = required(
+        auth.get("data").ok_or(QuarkError::InvalidResponse)?,
+        "auth_key",
+    )?;
+    checked_temporary_header(&auth_key)?;
+    let mut url = url::Url::parse(&contract.object_url).map_err(|_| QuarkError::InvalidResponse)?;
+    url.set_query(Some(query));
+    let url = https_transfer_url(url.as_str())?;
+    let mut headers = BTreeMap::from([
+        ("Content-Type".into(), content_type.into()),
+        ("x-oss-date".into(), date),
+        ("x-oss-user-agent".into(), CLOUD_DRIVE_OSS_USER_AGENT.into()),
+        ("Authorization".into(), auth_key),
+    ]);
+    if let Some(content_md5) = content_md5 {
+        checked_temporary_header(&content_md5)?;
+        headers.insert("Content-MD5".into(), content_md5);
+    }
+    if let Some(callback) = callback {
+        checked_temporary_header(callback)?;
+        headers.insert("x-oss-callback".into(), callback.into());
+    }
+    Ok(UploadHttpRequest {
+        method,
+        url,
+        headers,
+        body,
+    })
+}
+
+fn checked_temporary_header(value: &str) -> Result<(), QuarkError> {
+    if value.is_empty()
+        || value.len() > 16 * 1024
+        || value.contains(['\r', '\n'])
+        || value.chars().any(char::is_control)
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn checked_etag(response: &UploadHttpResponse) -> Result<String, QuarkError> {
+    let etag = response
+        .headers
+        .iter()
+        .find(|(name, value)| name.eq_ignore_ascii_case("etag") && !value.is_empty())
+        .map(|(_, value)| value.clone())
+        .ok_or(QuarkError::InvalidResponse)?;
+    checked_temporary_header(&etag)?;
+    Ok(etag)
+}
+
+fn cloud_drive_file(
+    value: &Value,
+    parent: &str,
+    fallback_name: &str,
+    fallback_size: u64,
+) -> Result<CloudFile, QuarkError> {
+    let value = value.get("file").unwrap_or(value);
+    let id = value
+        .get("fid")
+        .or_else(|| value.get("file_id"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(QuarkError::InvalidResponse)?;
+    Ok(CloudFile {
+        id: id.into(),
+        parent_id: parent.into(),
+        name: value
+            .get("file_name")
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback_name)
+            .into(),
+        kind: "file".into(),
+        size: value
+            .get("size")
+            .and_then(Value::as_u64)
+            .or(Some(fallback_size)),
+        modified_at: None,
+    })
+}
