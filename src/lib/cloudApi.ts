@@ -5,6 +5,7 @@ import { cloudRootDirectoryId, type CloudAccount, type CloudAuthorization, type 
 export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
 export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
+export const reauthorizeFailedCloudTask = (taskId: string) => invoke<CloudAuthorization>('cloud_reauthorize_failed_task', { taskId });
 export const loginCloudWithPassword = (provider: CloudProvider, credentials: CloudCredentials) => invoke<CloudAccount>('cloud_login_password', { provider, ...credentials });
 export const getCloudAccount = (provider: CloudProvider) => invoke<CloudAccount>('cloud_account', { provider });
 export const listCloudDirectory = (provider: CloudProvider, parentId = cloudRootDirectoryId[provider]) => invoke<CloudDirectory>('cloud_list_directory', { provider, parentId });

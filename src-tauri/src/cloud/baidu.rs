@@ -145,6 +145,59 @@ mod tests {
         credentials
     }
     #[test]
+    fn baidu_share_uses_the_current_share_list_endpoint() {
+        let credentials = credentials();
+        let http = Http::new(vec![listing()]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+
+        let result = adapter.inspect(&candidate());
+
+        assert!(matches!(result, Ok(ShareInspection::Plan(_))));
+        let request = &http.requests.lock().unwrap()[0];
+        assert_eq!(request.method, "GET");
+        assert!(request.body.is_none());
+        let url = url::Url::parse(&request.url).unwrap();
+        assert_eq!(url.path(), "/share/list");
+        let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("channel").map(String::as_str), Some("chunlei"));
+        assert_eq!(query.get("clienttype").map(String::as_str), Some("0"));
+        assert_eq!(query.get("app_id").map(String::as_str), Some("250528"));
+        assert_eq!(query.get("web").map(String::as_str), Some("1"));
+        assert_eq!(query.get("shorturl").map(String::as_str), Some("share123"));
+        assert_eq!(query.get("root").map(String::as_str), Some("1"));
+        assert_eq!(query.get("dir").map(String::as_str), Some("/"));
+        assert_eq!(query.get("num").map(String::as_str), Some("100"));
+        assert_eq!(query.get("page").map(String::as_str), Some("1"));
+        assert_eq!(query.get("order").map(String::as_str), Some("time"));
+    }
+    #[test]
+    fn baidu_share_current_list_accepts_top_level_payload() {
+        let credentials = credentials();
+        let response = json!({
+            "errno": 0,
+            "share_id": 22,
+            "uk": 33,
+            "list": [{
+                "fs_id": 11,
+                "server_filename": "movie.mp4",
+                "path": "/movie.mp4",
+                "isdir": 0,
+                "size": 123
+            }]
+        });
+        let http = Http::new(vec![response]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.provider_context["shareid"], "22");
+        assert_eq!(plan.provider_context["uk"], "33");
+        assert_eq!(plan.provider_context["seckey"], "");
+    }
+    #[test]
     fn baidu_share_direct_keeps_native_identity_and_secret_out_of_credentials() {
         let credentials = credentials();
         let http = Http::new(vec![
@@ -173,6 +226,17 @@ mod tests {
         let saved = String::from_utf8(credentials.load("baidu").unwrap().unwrap()).unwrap();
         assert!(!saved.contains("secret"));
         let requests = http.requests.lock().unwrap();
+        let tplconfig = url::Url::parse(&requests[1].url).unwrap();
+        let tplconfig_query: BTreeMap<_, _> = tplconfig.query_pairs().into_owned().collect();
+        assert_eq!(
+            tplconfig_query.get("share_id").map(String::as_str),
+            Some("22")
+        );
+        assert_eq!(tplconfig_query.get("uk").map(String::as_str), Some("33"));
+        assert_eq!(
+            tplconfig_query.get("surl").map(String::as_str),
+            Some("1share123")
+        );
         let form: BTreeMap<_, _> =
             url::form_urlencoded::parse(requests[2].body.as_ref().unwrap().as_bytes())
                 .into_owned()
@@ -188,6 +252,7 @@ mod tests {
             json!({"errno":-9}),
             json!({"errno":-6}),
             json!({"errno":-20}),
+            json!({"errno":9019}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
         let mut missing = candidate();
@@ -208,7 +273,11 @@ mod tests {
             adapter.inspect(&candidate()),
             Err(QuarkError::WebAuthorizationRequired)
         ));
-        assert_eq!(http.requests.lock().unwrap().len(), 4);
+        assert!(matches!(
+            adapter.inspect(&candidate()),
+            Err(QuarkError::CaptchaRequired)
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 5);
     }
     #[test]
     fn baidu_share_pages_nested_paths_and_empty_folder_stays_empty() {
@@ -228,11 +297,11 @@ mod tests {
         };
         assert_eq!(plan.entries.len(), 2);
         assert_eq!(plan.entries[1].relative_directory, vec!["season"]);
-        assert!(http.requests.lock().unwrap()[1]
-            .body
-            .as_ref()
-            .unwrap()
-            .contains("page=2"));
+        let requests = http.requests.lock().unwrap();
+        let second_page = url::Url::parse(&requests[1].url).unwrap();
+        assert!(second_page
+            .query_pairs()
+            .any(|(name, value)| name == "page" && value == "2"));
         let mut empty = listing();
         empty["data"]["list"] = json!([]);
         let http = Http::new(vec![empty]);
@@ -1479,6 +1548,9 @@ fn share_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if matches!(code, -6 | -7 | 111) {
         return Err(QuarkError::AuthorizationExpired);
     }
+    if code == 9019 {
+        return Err(QuarkError::CaptchaRequired);
+    }
     if code != 0 || !(200..300).contains(&response.status) {
         return Err(QuarkError::Provider("百度分享无效或请求被拒绝".into()));
     }
@@ -1509,18 +1581,21 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
                 return Err(QuarkError::InvalidResponse);
             }
             for page in 1..=10000 {
+                let query = form(&[
+                    ("shorturl", short.into()),
+                    ("pwd", candidate.access_code.clone().unwrap_or_default()),
+                    ("root", if root { "1" } else { "0" }.into()),
+                    ("dir", parent.clone()),
+                    ("num", "100".into()),
+                    ("page", page.to_string()),
+                    ("order", "time".into()),
+                ]);
                 let response = client.share_http(
-                    "POST",
-                    "/share/wxlist?channel=weixin&version=2.2.2&clienttype=25&web=1",
-                    Some(form(&[
-                        ("shorturl", short.into()),
-                        ("pwd", candidate.access_code.clone().unwrap_or_default()),
-                        ("root", if root { "1" } else { "0" }.into()),
-                        ("dir", parent.clone()),
-                        ("num", "100".into()),
-                        ("page", page.to_string()),
-                        ("order", "time".into()),
-                    ])),
+                    "GET",
+                    &format!(
+                        "/share/list?channel=chunlei&clienttype=0&app_id=250528&web=1&{query}"
+                    ),
+                    None,
                     context["bdclnd"].as_str().unwrap_or(""),
                 )?;
                 let raw: Value = serde_json::from_str(&response.body)
@@ -1533,9 +1608,18 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
                     };
                 }
                 let value = share_json(&response)?;
-                let data = &value["data"];
+                // `/share/list` is the currently supported endpoint.  Unlike
+                // the retired `/share/wxlist`, it returns the file list and
+                // share metadata at the top level rather than in `data`.
+                // Retain the nested form for recorded responses and older
+                // service versions.
+                let data = value
+                    .get("data")
+                    .filter(|data| data.is_object())
+                    .unwrap_or(&value);
                 if root && page == 1 {
-                    context["shareid"] = json!(numeric_field(data, "shareid")?);
+                    context["shareid"] = json!(numeric_field(data, "shareid")
+                        .or_else(|_| numeric_field(data, "share_id"))?);
                     context["uk"] = json!(numeric_field(data, "uk")?);
                     context["seckey"] = json!(data["seckey"].as_str().unwrap_or(""));
                 }
@@ -1745,7 +1829,22 @@ pub fn resolve_baidu_share(
     }
     let context = &entry.plan.provider_context;
     let bdclnd = context["bdclnd"].as_str().unwrap_or("");
-    let response = client.share_http("GET", &format!("/share/tplconfig?surl={}&fields=sign,timestamp&channel=chunlei&web=1&app_id=250528&clienttype=0", encoded(&required(context,"shorturl")?)), None, bdclnd)?;
+    let tplconfig_query = form(&[
+        ("surl", format!("1{}", required(context, "shorturl")?)),
+        ("fields", "sign,timestamp".into()),
+        ("channel", "chunlei".into()),
+        ("web", "1".into()),
+        ("app_id", "250528".into()),
+        ("clienttype", "0".into()),
+        ("share_id", numeric_field(context, "shareid")?),
+        ("uk", numeric_field(context, "uk")?),
+    ]);
+    let response = client.share_http(
+        "GET",
+        &format!("/share/tplconfig?{tplconfig_query}"),
+        None,
+        bdclnd,
+    )?;
     let value = share_json(&response)?;
     let sign = required(&value["data"], "sign")?;
     let timestamp = numeric_field(&value["data"], "timestamp")?;

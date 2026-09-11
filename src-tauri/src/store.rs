@@ -75,6 +75,7 @@ impl TaskStore {
             status: TaskStatus::Parsing,
             progress: 0,
             error: None,
+            failure_code: None,
             aria_gid: None,
             followed_by_gid: None,
             metadata_gid: None,
@@ -390,15 +391,48 @@ impl TaskStore {
     }
 
     pub fn fail(&self, id: Uuid, message: impl Into<String>) -> Result<DownloadTask, StoreError> {
+        self.fail_with_code(id, None, message)
+    }
+
+    /// Stores a durable, machine-readable failure kind alongside the safe
+    /// text displayed to the user. A missing code deliberately clears an old
+    /// cloud-auth classification left by an earlier attempt.
+    pub fn fail_with_code(
+        &self,
+        id: Uuid,
+        failure_code: Option<&str>,
+        message: impl Into<String>,
+    ) -> Result<DownloadTask, StoreError> {
         let mut task = self.transition(id, TaskStatus::Failed)?;
         let message = message.into();
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection.execute(
-            "UPDATE tasks SET error = ?1 WHERE id = ?2",
-            params![message, id.to_string()],
+            "UPDATE tasks SET error = ?1, failure_code = ?2 WHERE id = ?3",
+            params![message, failure_code, id.to_string()],
         )?;
         task.error = Some(message);
+        task.failure_code = failure_code.map(str::to_owned);
         Ok(task)
+    }
+
+    /// A failed task can be reclassified after an explicit retry reaches a
+    /// cloud authorization boundary. Do not transition it again: terminal
+    /// tasks intentionally do not permit Failed -> Failed transitions.
+    pub fn update_failed_failure(
+        &self,
+        id: Uuid,
+        failure_code: Option<&str>,
+        message: impl AsRef<str>,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET error = ?1, failure_code = ?2, updated_at = ?3 WHERE id = ?4 AND status = 'failed'",
+            params![message.as_ref(), failure_code, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
     }
 
     /// Cleanup may finish after a user action. Update only its safe message,
@@ -450,7 +484,7 @@ impl TaskStore {
             });
         }
         connection.execute(
-            "UPDATE tasks SET status='parsing',progress=0,error=NULL,aria_gid=?1,followed_by_gid=NULL,
+            "UPDATE tasks SET status='parsing',progress=0,error=NULL,failure_code=NULL,aria_gid=?1,followed_by_gid=NULL,
              metadata_gid=NULL,total_length=NULL,completed_length=0,download_speed=0,upload_speed=0,
              connections=0,eta_seconds=NULL,aria_error_code=NULL,selection_confirmed=0,completed_at=NULL,updated_at=?2
              WHERE id=?3",
@@ -469,7 +503,7 @@ impl TaskStore {
     ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let changed = connection.execute(
-            "UPDATE tasks SET aria_gid=?1,followed_by_gid=NULL,metadata_gid=NULL,status='failed',error=?2,
+            "UPDATE tasks SET aria_gid=?1,followed_by_gid=NULL,metadata_gid=NULL,status='failed',error=?2,failure_code=NULL,
              download_speed=0,upload_speed=0,eta_seconds=NULL,selection_confirmed=0,updated_at=?3
              WHERE id=?4",
             params![
@@ -587,11 +621,11 @@ impl TaskStore {
             current.completed_at
         };
         let changed = transaction.execute(
-            "UPDATE tasks SET name = ?1, status = ?2, progress = ?3, error = ?4, aria_gid = ?5, followed_by_gid = ?6,
-             total_length = ?7, completed_length = ?8, download_speed = ?9, upload_speed = ?10,
-             connections = ?11, eta_seconds = ?12, aria_error_code = ?13, updated_at = ?14, completed_at = ?15 WHERE id = ?16",
+            "UPDATE tasks SET name = ?1, status = ?2, progress = ?3, error = ?4, failure_code = ?5, aria_gid = ?6, followed_by_gid = ?7,
+             total_length = ?8, completed_length = ?9, download_speed = ?10, upload_speed = ?11,
+             connections = ?12, eta_seconds = ?13, aria_error_code = ?14, updated_at = ?15, completed_at = ?16 WHERE id = ?17",
             params![
-                snapshot.name, snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.aria_gid,
+                snapshot.name, snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.failure_code, snapshot.aria_gid,
                 snapshot.followed_by_gid, snapshot.total_length.map(|value| sqlite_i64("total_length", value)).transpose()?,
                 sqlite_i64("completed_length", snapshot.completed_length)?, sqlite_i64("download_speed", snapshot.download_speed)?,
                 sqlite_i64("upload_speed", snapshot.upload_speed)?, snapshot.connections,
@@ -671,11 +705,11 @@ impl TaskStore {
     }
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 6 {
+    if version >= 7 {
         return Ok(());
     }
 
@@ -690,6 +724,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         ("connections", "INTEGER NOT NULL DEFAULT 0"),
         ("eta_seconds", "INTEGER"),
         ("aria_error_code", "TEXT"),
+        ("failure_code", "TEXT"),
         ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
         ("completed_at", "INTEGER"),
         ("selection_confirmed", "INTEGER NOT NULL DEFAULT 0"),
@@ -742,7 +777,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS cloud_directory_group_items_task_id ON cloud_directory_group_items(task_id) WHERE task_id IS NOT NULL;
          UPDATE tasks SET created_at = updated_at WHERE created_at = 0;
          UPDATE tasks SET completed_at = updated_at WHERE status = 'completed' AND completed_at IS NULL AND updated_at > 0;
-         PRAGMA user_version = 6;",
+         PRAGMA user_version = 7;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -833,19 +868,20 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         status: TaskStatus::from_db(&status).ok_or(rusqlite::Error::InvalidQuery)?,
         progress: row.get(5)?,
         error: row.get(6)?,
-        aria_gid: row.get(7)?,
-        followed_by_gid: row.get(8)?,
-        total_length: optional_u64(row, 9)?,
-        completed_length: required_u64(row, 10)?,
-        download_speed: required_u64(row, 11)?,
-        upload_speed: required_u64(row, 12)?,
-        connections: row.get(13)?,
-        eta_seconds: optional_u64(row, 14)?,
-        aria_error_code: row.get(15)?,
-        updated_at: row.get(16)?,
-        completed_at: row.get(17)?,
-        metadata_gid: row.get(18)?,
-        created_at: row.get(19)?,
+        failure_code: row.get(7)?,
+        aria_gid: row.get(8)?,
+        followed_by_gid: row.get(9)?,
+        total_length: optional_u64(row, 10)?,
+        completed_length: required_u64(row, 11)?,
+        download_speed: required_u64(row, 12)?,
+        upload_speed: required_u64(row, 13)?,
+        connections: row.get(14)?,
+        eta_seconds: optional_u64(row, 15)?,
+        aria_error_code: row.get(16)?,
+        updated_at: row.get(17)?,
+        completed_at: row.get(18)?,
+        metadata_gid: row.get(19)?,
+        created_at: row.get(20)?,
     })
 }
 

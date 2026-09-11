@@ -20,6 +20,7 @@ import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNaviga
 import darkMintIcon from './assets/launcher/dark_mint_128.png';
 import mintWhiteIcon from './assets/launcher/mint_white_128.png';
 import { getResolvedTheme, subscribeTheme } from './lib/theme';
+import type { CloudAuthorization } from './lib/cloudTypes';
 
 type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
 type DownloadTab = 'new' | TaskListTab;
@@ -217,6 +218,7 @@ export function App() {
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [taskReauthorization, setTaskReauthorization] = useState<CloudAuthorization | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
   const activeTasks = useMemo(() => tasks.filter((task) => !inactiveStatuses.has(task.status)), [tasks]);
@@ -307,6 +309,38 @@ export function App() {
     const timer = window.setTimeout(() => setNotice(null), 2600);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    if (!taskReauthorization) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = () => {
+      timer = window.setTimeout(async () => {
+        try {
+          await cloudApi.completeCloudAuthorization(taskReauthorization.provider);
+          if (!cancelled) {
+            setTaskReauthorization(null);
+            setNotice({ kind: 'success', message: '授权成功，正在恢复受影响的下载任务' });
+          }
+        } catch (error) {
+          const code = typeof error === 'object' && error !== null && 'code' in error
+            ? String((error as { code?: unknown }).code)
+            : '';
+          if (!cancelled && code !== 'authorization_pending') {
+            setTaskReauthorization(null);
+            setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+            return;
+          }
+        }
+        if (!cancelled) poll();
+      }, timer === undefined ? 500 : 1_000);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [taskReauthorization]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -634,6 +668,12 @@ export function App() {
     if (command === 'details') { setSelectedTaskId(id); setDetailsTaskId(id); return; }
     if (command === 'remove_record') { setPendingPurgeTaskIds([id]); return; }
     try {
+      if (command === 'reauthorize') {
+        const authorization = await cloudApi.reauthorizeFailedCloudTask(id);
+        setTaskReauthorization(authorization);
+        setNotice({ kind: 'success', message: authorization.instructions });
+        return;
+      }
       if (command === 'move_to_recycle') {
         const recycled = await moveTaskToRecycle(id);
         if (recycled) {

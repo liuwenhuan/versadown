@@ -104,12 +104,12 @@ function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 
-function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'play' | 'folder' | 'more' }) {
+function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'play' | 'folder' | 'more' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause'
     ? <><path d="M8 5v14" /><path d="M16 5v14" /></>
     : action === 'resume' ? <path d="m9 6 9 6-9 6z" />
       : action === 'cancel' ? <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>
-        : action === 'retry' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
+        : action === 'retry' || action === 'reauthorize' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
           : action === 'play' ? <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>
             : action === 'folder' ? <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>
               : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
@@ -140,7 +140,9 @@ function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: 
   const commands: Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
   if (task.status === 'paused') commands.push({ command: 'resume', label: '继续下载' });
-  if (task.status === 'failed') commands.push({ command: 'retry', label: '重新下载' });
+  if (task.status === 'failed') commands.push(task.reauthorization_required
+    ? { command: 'reauthorize', label: '重新授权' }
+    : { command: 'retry', label: '重新下载' });
   if (task.status === 'completed' && task.cleanup_pending) commands.push({ command: 'retry_cleanup', label: '重试网盘清理' });
   commands.push({ command: 'open_directory', label: '打开下载目录', separated: commands.length > 0 });
   commands.push({ command: 'details', label: '查看任务详情' });
@@ -165,6 +167,7 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
   const paths: Record<TaskMenuCommand, React.ReactNode> = {
     pause: <><path d="M8 5v14" /><path d="M16 5v14" /></>, resume: <path d="m9 6 9 6-9 6z" />,
     cancel: <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>, retry: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
+    reauthorize: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     retry_cleanup: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     open_directory: <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>,
     play_videos: <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>,
@@ -259,7 +262,7 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const selectionAction = node.status === 'paused' || !fileIsSelected ? 'resume' as const : 'pause' as const;
     const primaryAction = node.status === 'downloading' ? 'pause' as const
       : node.status === 'paused' ? 'resume' as const
-        : node.status === 'failed' ? 'retry' as const : null;
+        : node.status === 'failed' ? (node.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
     const isBtFile = isBtFileTree && node.file_index !== undefined;
     const canUseFileSelection = isBtFile && Boolean(onFileSelection) && ['downloading', 'paused', 'queued'].includes(node.status);
     const canUseTaskCommand = !isBtFile && !isFolder && Boolean(primaryAction);
@@ -276,11 +279,11 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
         <small className="child-progress-value">{node.progress}%</small>
         <small className="child-transfer-size" title={node.size}>{node.size || '—'}</small>
         {(canUseFileSelection || canUseTaskCommand) && <span className="child-actions">
-          <button aria-label={`${primaryAction === 'retry' ? '重新下载' : selectionAction === 'pause' ? '暂停' : '继续'} ${nodeName}`} title={primaryAction === 'retry' ? '重新下载' : `${selectionAction === 'pause' ? '暂停' : '继续'}此文件`} onClick={(event) => {
+          <button aria-label={`${primaryAction === 'reauthorize' ? '重新授权' : primaryAction === 'retry' ? '重新下载' : selectionAction === 'pause' ? '暂停' : '继续'} ${nodeName}`} title={primaryAction === 'reauthorize' ? '重新授权' : primaryAction === 'retry' ? '重新下载' : `${selectionAction === 'pause' ? '暂停' : '继续'}此文件`} onClick={(event) => {
             event.stopPropagation();
             if (isBtFile) onFileSelection!(parentTaskId, node.file_index!, selectionAction === 'resume');
             else if (primaryAction) onCommand(node.id, primaryAction);
-          }}><ActionIcon action={primaryAction === 'retry' ? 'retry' : selectionAction} /></button>
+          }}><ActionIcon action={primaryAction === 'reauthorize' ? 'reauthorize' : primaryAction === 'retry' ? 'retry' : selectionAction} /></button>
           {isBtFile && fileIsSelected && onFileCancel
             ? <button className="child-cancel" aria-label={`取消 ${nodeName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onFileCancel(parentTaskId, node.file_index!); }}><ActionIcon action="cancel" /></button>
             : !isBtFile && canUseTaskCommand && node.status !== 'failed'
@@ -379,8 +382,8 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const subtitle = taskSubtitle(task);
         const primaryAction = task.status === 'downloading' ? 'pause' as const
           : task.status === 'paused' ? 'resume' as const
-            : task.status === 'failed' ? 'retry' as const : null;
-        const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : '重新下载';
+          : task.status === 'failed' ? (task.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
+        const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : primaryAction === 'reauthorize' ? '重新授权' : '重新下载';
         const completedSize = isCompleted ? completedTaskSize(task) : undefined;
         const completionTime = isCompleted ? completedAt(task.completed_at ?? task.completedAt) : undefined;
         const completedHasVideo = isCompleted && taskHasVideo(task);
@@ -396,7 +399,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasVideo ? `播放 ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasVideo ? '播放视频' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasVideo ? 'play_videos' : 'open_directory'); }}><ActionIcon action={completedHasVideo ? 'play' : 'folder'} /></button>}
               {task.status === 'awaiting_user' && (task.kind === 'magnet' || task.kind === 'torrent') && onConfirm && <button aria-label={`确认下载 ${taskName}`} title="确认下载内容" onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认</button>}
-              {primaryAction && <button aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} /></button>}
+              {primaryAction && <button className={primaryAction === 'reauthorize' ? 'reauthorize-action' : undefined} aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} />{primaryAction === 'reauthorize' && <span>重新授权</span>}</button>}
               <button className="task-more-button" aria-label={`更多操作 ${taskName}`} title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>
             </div>
           </article>

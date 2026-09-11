@@ -29,7 +29,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static s
         QuarkError::AuthorizationExpired => "网盘会话已过期，请重新登录授权",
         QuarkError::SessionRenewedRetryOperation => "登录已自动恢复，请重新执行本次操作",
         QuarkError::WebAuthorizationRequired => "此登录方式需要网页验证，请点击网页授权完成登录",
-        QuarkError::CaptchaRequired => "网盘要求更新操作验证，请重新网页授权",
+        QuarkError::CaptchaRequired => "网盘要求完成官方操作验证后重试",
         QuarkError::PikpakRegionalMembershipRestricted => {
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
         }
@@ -45,6 +45,33 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static s
     }
 }
 
+/// Keeps the durable failure code in one place for direct cloud downloads,
+/// share downloads, and directory leaves. UI decisions must use this code,
+/// never a localized provider message.
+pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
+    match error {
+        QuarkError::NotAuthorized => "not_authorized",
+        QuarkError::AuthorizationExpired => "credentials_expired",
+        QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
+        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
+        QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
+        QuarkError::AuthorizationPending => "authorization_pending",
+        QuarkError::InvalidResponse => "invalid_response",
+        QuarkError::Storage => "credential_storage_error",
+        QuarkError::Transport(_) => "network_error",
+        QuarkError::Provider(_) => "provider_error",
+        QuarkError::InvalidInput(_) => "invalid_input",
+        QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
+    }
+}
+
+pub(crate) fn requires_cloud_reauthorization_failure(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("not_authorized" | "credentials_expired" | "web_auth_required")
+    )
+}
+
 /// Personal files lock their exact source. Share files lock the stable plan,
 /// so new siblings, overwrite, refresh and cleanup cannot bypass each other
 /// while the plan's entry set changes. The guard covers resolution through
@@ -52,6 +79,12 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static s
 #[derive(Default)]
 pub struct CloudDownloadSourceGate {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+#[derive(Default)]
+struct PendingCloudAuthorizationRetries {
+    task_ids: HashSet<uuid::Uuid>,
+    directory_items: HashSet<(uuid::Uuid, uuid::Uuid)>,
 }
 
 impl CloudDownloadSourceGate {
@@ -81,6 +114,7 @@ pub struct CloudState {
     pub store: DpapiCredentialStore,
     pub share_plans: share::CloudSharePlanStore,
     pub share_refresh_budget: share::CloudShareRefreshBudget,
+    pending_authorization_retries: Mutex<HashMap<String, PendingCloudAuthorizationRetries>>,
     http: ReqwestTransport,
     quark_operation: Mutex<()>,
     pikpak_operation: Mutex<()>,
@@ -145,6 +179,7 @@ impl CloudState {
         Ok(Self {
             share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
             share_refresh_budget: Default::default(),
+            pending_authorization_retries: Default::default(),
             store: DpapiCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,
             quark_operation: Mutex::new(()),
@@ -155,6 +190,33 @@ impl CloudState {
             xunlei_operation: Mutex::new(()),
             uc_operation: Mutex::new(()),
         })
+    }
+
+    fn queue_authorization_retries(
+        &self,
+        provider: CloudProvider,
+        task_ids: impl IntoIterator<Item = uuid::Uuid>,
+        directory_items: impl IntoIterator<Item = (uuid::Uuid, uuid::Uuid)>,
+    ) -> Result<(), QuarkError> {
+        let mut pending = self
+            .pending_authorization_retries
+            .lock()
+            .map_err(|_| QuarkError::Storage)?;
+        let entry = pending.entry(provider.key().to_string()).or_default();
+        entry.task_ids.extend(task_ids);
+        entry.directory_items.extend(directory_items);
+        Ok(())
+    }
+
+    fn take_authorization_retries(
+        &self,
+        provider: CloudProvider,
+    ) -> Result<PendingCloudAuthorizationRetries, QuarkError> {
+        self.pending_authorization_retries
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .remove(provider.key())
+            .map_or_else(|| Ok(PendingCloudAuthorizationRetries::default()), Ok)
     }
     /// All session consumers, including recovery and logout, share this provider boundary.
     pub fn with_provider<T>(
@@ -235,8 +297,53 @@ async fn run_session_work<T: Send + 'static>(
     kind: SessionWorkKind,
     mut work: impl FnMut(&CloudState, &ReqwestTransport) -> Result<T, QuarkError> + Send + 'static,
 ) -> Result<T, QuarkError> {
+    let refresh_app = app.clone();
     run(app, provider, move |state, http| {
-        run_cloud_work(provider, kind, &state.store, http, || work(state, http))
+        let first = run_cloud_work(provider, kind, &state.store, http, || work(state, http));
+        let Err(error) = first else {
+            return first;
+        };
+        // Mutating provider operations are never replayed. A provider captcha
+        // is also never retried; the official page must handle it explicitly.
+        if kind != SessionWorkKind::Read || !can_retry_read_with_web_session(&error) {
+            return Err(error);
+        }
+        match retry_read_from_active_authorization_window(
+            &refresh_app,
+            provider,
+            &state.store,
+            || run_cloud_work(provider, kind, &state.store, http, || work(state, http)),
+        ) {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) | Err(_) => Err(error),
+        }
+    })
+    .await
+}
+
+async fn run_web_session_read_work<T: Send + 'static>(
+    app: AppHandle,
+    provider: CloudProvider,
+    mut work: impl FnMut(&CloudState, &ReqwestTransport) -> Result<T, QuarkError> + Send + 'static,
+) -> Result<T, QuarkError> {
+    let refresh_app = app.clone();
+    run(app, provider, move |state, http| {
+        let first = work(state, http);
+        let Err(error) = first else {
+            return first;
+        };
+        if !can_retry_read_with_web_session(&error) {
+            return Err(error);
+        }
+        match retry_read_from_active_authorization_window(
+            &refresh_app,
+            provider,
+            &state.store,
+            || work(state, http),
+        ) {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) | Err(_) => Err(error),
+        }
     })
     .await
 }
@@ -396,6 +503,95 @@ fn save_provider_session<T: Serialize>(
 ) -> Result<(), QuarkError> {
     let bytes = serde_json::to_vec(session).map_err(|_| QuarkError::Storage)?;
     store.save(provider.key(), &bytes)
+}
+
+/// Temporarily installs a fresh cookie snapshot captured from the already
+/// authorized official web tab, then keeps it only if the original read-only
+/// operation succeeds.  A rejected candidate never destroys the saved
+/// session that the user could still use after reopening the tab.
+fn retry_read_with_refreshed_web_session<T>(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    session: &[u8],
+    retry: impl FnOnce() -> Result<T, QuarkError>,
+) -> Result<T, QuarkError> {
+    if session.is_empty() {
+        return Err(QuarkError::AuthorizationExpired);
+    }
+    let previous = store.load(provider.key())?;
+    store.save(provider.key(), session)?;
+    match retry() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            match previous {
+                Some(previous) => store.save(provider.key(), &previous)?,
+                None => store.remove(provider.key())?,
+            }
+            Err(error)
+        }
+    }
+}
+
+fn can_retry_read_with_web_session(error: &QuarkError) -> bool {
+    matches!(
+        error,
+        QuarkError::AuthorizationExpired | QuarkError::WebAuthorizationRequired
+    )
+}
+
+/// Captures only the provider-specific session material from a live official
+/// authorization WebView. The window remains hidden after successful browser
+/// authorization, allowing a safe read/signing retry without another login.
+fn active_web_session_snapshot(
+    app: &AppHandle,
+    provider: CloudProvider,
+) -> Result<Option<Vec<u8>>, QuarkError> {
+    let Some(window) = app.get_webview_window(&format!("cloud-auth-{}", provider.key())) else {
+        return Ok(None);
+    };
+    let cookies = browser_cookies(&window, web_session_cookie_urls(provider))?;
+    let snapshot = match provider {
+        CloudProvider::Quark => {
+            let cookie = cookies.join("; ");
+            if cookie.is_empty() {
+                return Err(QuarkError::WebAuthorizationRequired);
+            }
+            cookie.into_bytes()
+        }
+        CloudProvider::Baidu => serde_json::to_vec(&baidu::parse_baidu_web_session(&cookies)?)
+            .map_err(|_| QuarkError::Storage)?,
+        CloudProvider::Tianyi => serde_json::to_vec(&tianyi::parse_tianyi_web_session(&cookies)?)
+            .map_err(|_| QuarkError::Storage)?,
+        CloudProvider::Uc => serde_json::to_vec(&uc::parse_uc_web_session(&cookies)?)
+            .map_err(|_| QuarkError::Storage)?,
+        CloudProvider::Pikpak | CloudProvider::Aliyun | CloudProvider::Xunlei => return Ok(None),
+    };
+    Ok(Some(snapshot))
+}
+
+fn retry_read_from_active_authorization_window<T>(
+    app: &AppHandle,
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    retry: impl FnOnce() -> Result<T, QuarkError>,
+) -> Result<Option<T>, QuarkError> {
+    let Some(snapshot) = active_web_session_snapshot(app, provider)? else {
+        return Ok(None);
+    };
+    retry_read_with_refreshed_web_session(provider, store, &snapshot, retry).map(Some)
+}
+
+/// The authorization page can visit several hosts, but a captured Cookie
+/// header is replayed to one provider API host.  Do not merge same-named
+/// host-only cookies from the login host into Tianyi's cloud API session.
+fn web_session_cookie_urls(provider: CloudProvider) -> &'static [&'static str] {
+    match provider {
+        CloudProvider::Tianyi => &["https://cloud.189.cn"],
+        CloudProvider::Quark => &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
+        CloudProvider::Baidu => &["https://pan.baidu.com"],
+        CloudProvider::Uc => &["https://drive.uc.cn", "https://pc-api.uc.cn"],
+        CloudProvider::Pikpak | CloudProvider::Aliyun | CloudProvider::Xunlei => &[],
+    }
 }
 
 fn browser_cookies(
@@ -635,8 +831,160 @@ pub async fn cloud_begin_authorization(
     Ok(CloudAuthorization {
         provider,
         window_label: label,
-        instructions: "请在弹出的官方网盘窗口完成登录；验证成功后授权窗口会自动关闭。".into(),
+        instructions: "请在弹出的官方网盘窗口完成登录；验证成功后授权窗口会自动收起。".into(),
     })
+}
+
+fn cloud_provider_from_download_source(source: &str) -> Result<CloudProvider, QuarkError> {
+    if source.starts_with("cloud-share://") {
+        return share::parse_stable_cloud_share_source(source).map(|(provider, _, _)| provider);
+    }
+    parse_stable_cloud_source(source).map(|(provider, _)| provider)
+}
+
+/// Registers every failed task of this provider that is blocked on a fresh
+/// official authorization, then opens exactly one official WebView. The
+/// pending list contains only durable IDs; tokens and signed URLs never enter
+/// it, so a manual login can safely refresh the whole provider batch.
+#[tauri::command]
+pub async fn cloud_reauthorize_failed_task(
+    app: AppHandle,
+    task_id: String,
+) -> Result<CloudAuthorization, QuarkError> {
+    let id = uuid::Uuid::parse_str(&task_id)
+        .map_err(|_| QuarkError::InvalidInput("任务 ID 无效".into()))?;
+    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
+
+    let requested_provider = match state.store.find(id) {
+        Ok(task) => {
+            if task.status != TaskStatus::Failed
+                || !requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+            {
+                return Err(QuarkError::InvalidInput("当前任务不需要重新授权".into()));
+            }
+            cloud_provider_from_download_source(&task.source)?
+        }
+        Err(crate::StoreError::NotFound(_)) => {
+            let mut provider = None;
+            for group in state
+                .store
+                .cloud_directory_groups()
+                .map_err(|_| QuarkError::Storage)?
+            {
+                let matches_requested = state
+                    .store
+                    .cloud_directory_group_items(group.id)
+                    .map_err(|_| QuarkError::Storage)?
+                    .into_iter()
+                    .any(|item| {
+                        item.id == id
+                            && item.task_id.is_none()
+                            && requires_cloud_reauthorization_failure(item.failure_code.as_deref())
+                    });
+                if matches_requested {
+                    provider = Some(group.provider);
+                    break;
+                }
+            }
+            provider.ok_or_else(|| QuarkError::InvalidInput("当前任务不需要重新授权".into()))?
+        }
+        Err(_) => return Err(QuarkError::Storage),
+    };
+
+    let task_ids = state
+        .store
+        .list()
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .filter(|task| {
+            task.status == TaskStatus::Failed
+                && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+                && cloud_provider_from_download_source(&task.source)
+                    .is_ok_and(|provider| provider == requested_provider)
+        })
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+    let mut directory_items = Vec::new();
+    for group in state
+        .store
+        .cloud_directory_groups()
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .filter(|group| group.provider == requested_provider)
+    {
+        let items = state
+            .store
+            .cloud_directory_group_items(group.id)
+            .map_err(|_| QuarkError::Storage)?;
+        directory_items.extend(items.into_iter().filter_map(|item| {
+            (item.task_id.is_none()
+                && requires_cloud_reauthorization_failure(item.failure_code.as_deref()))
+            .then_some((group.id, item.id))
+        }));
+    }
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    cloud.queue_authorization_retries(requested_provider, task_ids, directory_items)?;
+    cloud_begin_authorization(app, requested_provider).await
+}
+
+async fn resume_pending_authorization_retries(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<(), QuarkError> {
+    use tauri::Emitter;
+
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let pending = cloud.take_authorization_retries(provider)?;
+    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
+    for id in pending.task_ids {
+        let Ok(task) = state.store.find(id) else {
+            continue;
+        };
+        if task.status != TaskStatus::Failed
+            || !requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+            || cloud_provider_from_download_source(&task.source).ok() != Some(provider)
+            || !matches!(crate::retry_duplicate_state(&state.store, &task), Ok(None))
+        {
+            continue;
+        }
+        match crate::commands::resubmit_task(app.clone(), &state, task, Default::default()).await {
+            Ok(task) => {
+                if let Ok(outcome) = task_action_outcome(&state.store, task, None) {
+                    if let Some(queue_task) = outcome.queue_task {
+                        let _ = app.emit("download-task-updated", queue_task);
+                    } else {
+                        let _ = app.emit("download-task-updated", outcome.payload);
+                    }
+                }
+            }
+            Err(_) => {
+                if let Ok(task) = state.store.find(id) {
+                    if let Ok(payload) = crate::commands::task_update_payload(
+                        &state.store,
+                        Some(&cloud.share_plans),
+                        task,
+                    ) {
+                        let _ = app.emit("download-task-updated", payload);
+                    }
+                }
+            }
+        }
+    }
+    for (group_id, item_id) in pending.directory_items {
+        if let Ok(outcome) = retry_cloud_directory_group_item(app.clone(), group_id, item_id).await
+        {
+            if let Some(queue_task) = outcome.queue_task {
+                let _ = app.emit("download-task-updated", queue_task);
+            } else {
+                let _ = app.emit("download-task-updated", outcome.payload);
+            }
+        }
+    }
+    Ok(())
 }
 
 // Only selected token fields cross the native boundary. No password, full storage dump, or DOM is returned.
@@ -799,6 +1147,55 @@ pub fn plan_cloud_directory_download(
     if files.is_empty() {
         return Err(QuarkError::InvalidInput("空目录不能下载".into()));
     }
+    if has_windows_output_path_collision(&files) {
+        return Err(QuarkError::InvalidInput("目录下载的输出路径冲突".into()));
+    }
+    Ok(CloudDirectoryDownloadPlan { files })
+}
+
+/// Converts an already-inspected share selection into the same durable plan
+/// used by personal-cloud directories. Stable `cloud-share://` sources become
+/// group item identities; provider credentials and signed URLs remain only in
+/// the encrypted share-plan store.
+pub fn plan_cloud_share_directory_download(
+    selection: &share::CloudShareDownloadSelection,
+) -> Result<CloudDirectoryDownloadPlan, QuarkError> {
+    let root_name = selection
+        .directory_name
+        .as_deref()
+        .ok_or_else(|| QuarkError::InvalidInput("该分享选择不是目录下载".into()))?;
+    if selection.entries.is_empty() {
+        return Err(QuarkError::InvalidInput("空目录不能下载".into()));
+    }
+    if selection.entries.len() > MAX_DIRECTORY_DOWNLOAD_FILES {
+        return Err(QuarkError::InvalidInput("目录下载包含过多文件".into()));
+    }
+    let root = safe_directory_component(root_name);
+    let mut sources = HashSet::new();
+    let files = selection
+        .entries
+        .iter()
+        .map(|entry| {
+            share::parse_stable_cloud_share_source(&entry.source)?;
+            if !sources.insert(entry.source.clone()) {
+                return Err(QuarkError::InvalidInput("目录下载包含重复文件".into()));
+            }
+            let mut relative_directory = Vec::with_capacity(entry.relative_directory.len() + 1);
+            relative_directory.push(root.clone());
+            relative_directory.extend(
+                entry
+                    .relative_directory
+                    .iter()
+                    .map(|component| safe_directory_component(component)),
+            );
+            Ok(PlannedCloudFile {
+                file_id: entry.source.clone(),
+                relative_directory,
+                output_name: safe_filename(&entry.name),
+                size: entry.size,
+            })
+        })
+        .collect::<Result<Vec<_>, QuarkError>>()?;
     if has_windows_output_path_collision(&files) {
         return Err(QuarkError::InvalidInput("目录下载的输出路径冲突".into()));
     }
@@ -1219,15 +1616,13 @@ pub async fn cloud_complete_authorization(
     let window = app
         .get_webview_window(&format!("cloud-auth-{}", provider.key()))
         .ok_or(QuarkError::WebAuthorizationRequired)?;
-    run(app, provider, move |state, http| {
+    let account = run(app.clone(), provider, move |state, http| {
         let account = match provider {
             CloudProvider::Quark => {
                 // Must stay on the blocking worker, never the Windows UI thread (WebView2 deadlock).
-                let cookie = browser_cookies(
-                    &window,
-                    &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
-                )?
-                .join("; ");
+                let cookie =
+                    browser_cookies(&window, web_session_cookie_urls(CloudProvider::Quark))?
+                        .join("; ");
                 if cookie.is_empty() {
                     return Err(QuarkError::AuthorizationPending);
                 }
@@ -1255,19 +1650,21 @@ pub async fn cloud_complete_authorization(
             CloudProvider::Baidu => {
                 let session = baidu::parse_baidu_web_session(&browser_cookies(
                     &window,
-                    &["https://pan.baidu.com", "https://passport.baidu.com"],
+                    web_session_cookie_urls(CloudProvider::Baidu),
                 )?)?;
                 let account = finalize_baidu_web_authorization(session, &state.store, http)?;
-                let _ = window.close();
+                // Keep the authenticated official WebView alive but invisible.
+                // A future expired signing cookie can then refresh silently.
+                let _ = window.hide();
                 Ok(account)
             }
             CloudProvider::Tianyi => {
                 let session = tianyi::parse_tianyi_web_session(&browser_cookies(
                     &window,
-                    &["https://cloud.189.cn", "https://open.e.189.cn"],
+                    web_session_cookie_urls(CloudProvider::Tianyi),
                 )?)?;
                 let account = finalize_tianyi_web_authorization(session, &state.store, http)?;
-                let _ = window.close();
+                let _ = window.hide();
                 Ok(account)
             }
             CloudProvider::Aliyun => {
@@ -1301,10 +1698,10 @@ pub async fn cloud_complete_authorization(
             CloudProvider::Uc => {
                 let session = uc::parse_uc_web_session(&browser_cookies(
                     &window,
-                    &["https://drive.uc.cn", "https://pc-api.uc.cn"],
+                    web_session_cookie_urls(CloudProvider::Uc),
                 )?)?;
                 let account = finalize_uc_web_authorization(session, &state.store, http)?;
-                let _ = window.close();
+                let _ = window.hide();
                 Ok(account)
             }
         }?;
@@ -1313,7 +1710,12 @@ pub async fn cloud_complete_authorization(
         }
         Ok(account)
     })
-    .await
+    .await?;
+    // The session is persisted only after the official page has proved it can
+    // access the provider. Every queued failed task therefore resolves with
+    // the new shared credentials, not a stale per-task snapshot.
+    resume_pending_authorization_retries(app, provider).await?;
+    Ok(account)
 }
 #[tauri::command]
 pub async fn cloud_login_password(
@@ -1756,8 +2158,10 @@ pub async fn inspect_cloud_share(
     app: AppHandle,
     candidate: crate::parser::CloudShareCandidate,
 ) -> Result<share::ShareConfirmationOutcome, QuarkError> {
-    // Share challenges must not trigger the generic account/password recovery.
-    run(app, candidate.provider, move |state, http| {
+    // Share challenges must not trigger password recovery. An already-open
+    // official authorization WebView may, however, safely refresh a rejected
+    // read-only inspection cookie once.
+    run_web_session_read_work(app, candidate.provider, move |state, http| {
         let adapter = share::provider_share_adapter(candidate.provider, &state.store, http)?;
         share::inspect_share_with_adapter(&state.share_plans, adapter.as_ref(), &candidate)
     })
@@ -1770,7 +2174,7 @@ pub async fn resolve_stable_cloud_share_download(
 ) -> Result<ResolvedCloudDownload, QuarkError> {
     let (provider, _, _) = share::parse_stable_cloud_share_source(source)?;
     let source = source.to_owned();
-    run(app, provider, move |state, http| {
+    run_web_session_read_work(app, provider, move |state, http| {
         let adapter = share::provider_share_adapter(provider, &state.store, http)?;
         share::resolve_current_share_download(&state.share_plans, adapter.as_ref(), &source)
     })
@@ -1783,6 +2187,30 @@ pub async fn submit_cloud_share_file(
     source: String,
     configured: UriSubmissionOptions,
 ) -> Result<TaskActionOutcome, QuarkError> {
+    let submission =
+        submit_cloud_share_file_internal(app.clone(), state, source, configured, None, true)
+            .await?;
+    let outcome = match submission {
+        CloudShareFileSubmission::Queued(outcome)
+        | CloudShareFileSubmission::Duplicate(outcome) => outcome,
+    };
+    schedule_cloud_share_cleanup(app, &outcome.payload.task);
+    Ok(outcome)
+}
+
+enum CloudShareFileSubmission {
+    Queued(TaskActionOutcome),
+    Duplicate(TaskActionOutcome),
+}
+
+async fn submit_cloud_share_file_internal(
+    app: AppHandle,
+    state: &AppState,
+    source: String,
+    configured: UriSubmissionOptions,
+    directory_context: Option<DirectoryLeafContext>,
+    append_entry_directory: bool,
+) -> Result<CloudShareFileSubmission, QuarkError> {
     share::parse_stable_cloud_share_source(&source)?;
     let _source_submission = state.cloud_download_sources.acquire(&source).await?;
     if let Some(existing) = state
@@ -1794,19 +2222,23 @@ pub async fn submit_cloud_share_file(
         if !is_retryable_cloud_share_prepare(&existing) {
             let duplicate =
                 duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
-            return task_action_outcome(&state.store, existing, Some(duplicate))
-                .map_err(QuarkError::Transport);
+            return Ok(CloudShareFileSubmission::Duplicate(
+                task_action_outcome(&state.store, existing, Some(duplicate))
+                    .map_err(QuarkError::Transport)?,
+            ));
         }
     }
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
     let resolve_source = source.clone();
-    let outcome = submit_new_cloud_share_file_with(
+    let outcome = submit_new_cloud_share_file_scoped_with(
         state.store.clone(),
         &cloud.share_plans,
         source,
         configured,
+        directory_context,
+        append_entry_directory,
         || async {
             state
                 .runtime
@@ -1817,15 +2249,61 @@ pub async fn submit_cloud_share_file(
         || resolve_stable_cloud_share_download(app.clone(), &resolve_source),
     )
     .await?;
-    schedule_cloud_share_cleanup(app, &outcome.payload.task);
-    Ok(outcome)
+    Ok(CloudShareFileSubmission::Queued(outcome))
+}
+
+pub async fn submit_cloud_share_directory_leaf(
+    app: AppHandle,
+    state: &AppState,
+    source: String,
+    configured: UriSubmissionOptions,
+    context: DirectoryLeafContext,
+) -> Result<DirectoryLeafSubmission, QuarkError> {
+    match submit_cloud_share_file_internal(
+        app.clone(),
+        state,
+        source,
+        configured,
+        Some(context),
+        false,
+    )
+    .await?
+    {
+        CloudShareFileSubmission::Queued(outcome) => {
+            schedule_cloud_share_cleanup(app, &outcome.payload.task);
+            Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
+        }
+        CloudShareFileSubmission::Duplicate(_) => Ok(DirectoryLeafSubmission::Duplicate),
+    }
 }
 
 pub(crate) async fn submit_new_cloud_share_file_with<S, SFut, R, RFut>(
     tasks: Arc<TaskStore>,
     plans: &share::CloudSharePlanStore,
     source: String,
+    configured: UriSubmissionOptions,
+    service: S,
+    resolve: R,
+) -> Result<TaskActionOutcome, QuarkError>
+where
+    S: FnOnce() -> SFut,
+    SFut: std::future::Future<Output = Result<Arc<crate::DownloadService>, QuarkError>>,
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = Result<ResolvedCloudDownload, QuarkError>>,
+{
+    submit_new_cloud_share_file_scoped_with(
+        tasks, plans, source, configured, None, true, service, resolve,
+    )
+    .await
+}
+
+pub(crate) async fn submit_new_cloud_share_file_scoped_with<S, SFut, R, RFut>(
+    tasks: Arc<TaskStore>,
+    plans: &share::CloudSharePlanStore,
+    source: String,
     mut configured: UriSubmissionOptions,
+    directory_context: Option<DirectoryLeafContext>,
+    append_entry_directory: bool,
     service: S,
     resolve: R,
 ) -> Result<TaskActionOutcome, QuarkError>
@@ -1837,15 +2315,17 @@ where
 {
     share::parse_stable_cloud_share_source(&source)?;
     let entry = plans.resolve_entry(&source)?;
-    if let Some(directory) = configured.directory.as_ref() {
-        configured.directory = Some(directory_download_output_directory(
-            directory,
-            &entry.entry.relative_directory,
-        )?);
-    } else if !entry.entry.relative_directory.is_empty() {
-        return Err(QuarkError::InvalidInput(
-            "分享目录下载需要设置绝对下载目录".into(),
-        ));
+    if append_entry_directory {
+        if let Some(directory) = configured.directory.as_ref() {
+            configured.directory = Some(directory_download_output_directory(
+                directory,
+                &entry.entry.relative_directory,
+            )?);
+        } else if !entry.entry.relative_directory.is_empty() {
+            return Err(QuarkError::InvalidInput(
+                "分享目录下载需要设置绝对下载目录".into(),
+            ));
+        }
     }
     let output_name = configured
         .output_name
@@ -1857,7 +2337,21 @@ where
         .into_aria2_options()
         .map_err(|_| QuarkError::InvalidInput("下载路径或文件名无效".into()))?;
 
-    let service = service().await?;
+    // Preserve the single-file contract: an unavailable engine must not leave
+    // a task behind. A directory leaf is different because the durable group
+    // must retain a failed child for Failed/Recycle projections.
+    let mut service_factory = Some(service);
+    let eager_service = if directory_context.is_none() {
+        Some(
+            service_factory
+                .take()
+                .expect("service factory is available")()
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let prepared = match tasks
         .find_by_source(&source)
         .map_err(|_| QuarkError::Storage)?
@@ -1866,6 +2360,7 @@ where
         Some(mut prepared) => {
             prepared.status = TaskStatus::Parsing;
             prepared.error = None;
+            prepared.failure_code = None;
             tasks
                 .apply_transfer_snapshot(prepared)
                 .map_err(|_| QuarkError::Storage)?
@@ -1886,10 +2381,35 @@ where
             Err(_) => Ok(cloud_share_failure_outcome(
                 &tasks,
                 prepared,
+                None,
                 CLOUD_SHARE_PREPARE_FAILURE,
             )),
         };
     }
+    if let Some(context) = directory_context {
+        tasks
+            .link_cloud_directory_group_item_task(context.group_id, context.item_id, prepared.id)
+            .map_err(|_| QuarkError::Storage)?;
+    }
+
+    let service = match eager_service {
+        Some(service) => service,
+        None => match service_factory
+            .take()
+            .expect("directory service factory is available")()
+        .await
+        {
+            Ok(service) => service,
+            Err(error) => {
+                return Ok(cloud_share_failure_outcome(
+                    &tasks,
+                    prepared,
+                    Some(cloud_failure_code(&error)),
+                    share_resolution_failure_message(&error),
+                ))
+            }
+        },
+    };
 
     let resolved = match resolve().await {
         Ok(resolved) => resolved,
@@ -1897,6 +2417,7 @@ where
             return Ok(cloud_share_failure_outcome(
                 &tasks,
                 prepared,
+                Some(cloud_failure_code(&error)),
                 share_resolution_failure_message(&error),
             ))
         }
@@ -1909,6 +2430,7 @@ where
             return Ok(cloud_share_failure_outcome(
                 &tasks,
                 prepared,
+                None,
                 "aria2 未能接受网盘分享下载任务",
             ))
         }
@@ -1919,10 +2441,11 @@ where
 fn cloud_share_failure_outcome(
     tasks: &TaskStore,
     prepared: DownloadTask,
+    failure_code: Option<&str>,
     message: &'static str,
 ) -> TaskActionOutcome {
     let task = tasks
-        .fail(prepared.id, message)
+        .fail_with_code(prepared.id, failure_code, message)
         .or_else(|_| tasks.find(prepared.id))
         .unwrap_or(prepared);
     cloud_share_task_outcome(tasks, task)
@@ -1937,12 +2460,18 @@ fn is_retryable_cloud_share_prepare(task: &DownloadTask) -> bool {
 }
 
 fn cloud_share_task_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskActionOutcome {
+    if let Ok(outcome) = task_action_outcome(tasks, task.clone(), None) {
+        return outcome;
+    }
     let files = tasks.files(task.id).unwrap_or_default();
+    let reauthorization_required =
+        requires_cloud_reauthorization_failure(task.failure_code.as_deref());
     TaskActionOutcome {
         payload: crate::commands::DownloadTaskPayload {
             task,
             files,
             cleanup_pending: false,
+            reauthorization_required,
         },
         duplicate: None,
         queue_task: None,
@@ -1991,7 +2520,7 @@ pub(crate) async fn cleanup_cloud_share_task(
                 .set_completed_cleanup_message(id, true)
                 .map_err(|_| QuarkError::Storage)?;
             let cloud = app.try_state::<Arc<CloudState>>();
-            if let Ok(payload) = crate::commands::task_payload_with_cleanup(
+            if let Ok(payload) = crate::commands::task_update_payload(
                 &state.store,
                 cloud.as_ref().map(|cloud| &cloud.share_plans),
                 task.clone(),
@@ -2058,7 +2587,7 @@ async fn cleanup_cloud_share_task_inner(
     })
     .await?;
     if let Some(updated) = updated {
-        if let Ok(payload) = crate::commands::task_payload_with_cleanup(
+        if let Ok(payload) = crate::commands::task_update_payload(
             &state.store,
             Some(&cloud.share_plans),
             updated.clone(),
@@ -2244,6 +2773,34 @@ fn directory_download_output_directory(
     Ok(target)
 }
 
+/// Restores the exact target of a linked directory member before a retry.
+/// This is needed when resolution or engine submission failed before aria2
+/// could persist a file path for the local task.
+pub fn cloud_directory_member_retry_options(
+    store: &TaskStore,
+    task_id: uuid::Uuid,
+    mut configured: UriSubmissionOptions,
+) -> Result<UriSubmissionOptions, QuarkError> {
+    let Some(group) = store
+        .cloud_directory_group_for_task(task_id)
+        .map_err(|_| QuarkError::Storage)?
+    else {
+        return Ok(configured);
+    };
+    let item = store
+        .cloud_directory_group_items(group.id)
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .find(|item| item.task_id == Some(task_id))
+        .ok_or(QuarkError::Storage)?;
+    configured.directory = Some(directory_download_output_directory(
+        &group.output_directory,
+        &item.relative_directory,
+    )?);
+    configured.output_name = Some(item.output_name);
+    Ok(configured)
+}
+
 fn provider_directory_component(component: &str) -> Result<String, QuarkError> {
     let mut path_components = Path::new(component).components();
     // Reject drive prefixes, ADS and device names before safe_filename could
@@ -2314,6 +2871,7 @@ fn cloud_directory_group_task_outcome(
                 status: TaskStatus::Queued,
                 progress: 0,
                 error: None,
+                failure_code: None,
                 aria_gid: None,
                 followed_by_gid: None,
                 metadata_gid: None,
@@ -2330,6 +2888,7 @@ fn cloud_directory_group_task_outcome(
             },
             files: Vec::new(),
             cleanup_pending: false,
+            reauthorization_required: false,
         },
         duplicate: None,
         queue_task: Some(
@@ -2574,23 +3133,32 @@ pub async fn retry_cloud_directory_group_item(
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
-    let directory_context = DirectoryLeafContext { group_id, item_id };
     retry_cloud_directory_group_item_with(
         &store,
         group_id,
         item_id,
         configured,
-        move |provider, file_id, options, _| {
+        move |provider, file_id, options, context| {
             let app = submit_app.clone();
             async move {
                 let state = app.state::<AppState>();
+                if file_id.starts_with("cloud-share://") {
+                    return submit_cloud_share_directory_leaf(
+                        app.clone(),
+                        &state,
+                        file_id,
+                        options,
+                        context,
+                    )
+                    .await;
+                }
                 match submit_cloud_file(
                     app.clone(),
                     &state,
                     provider,
                     file_id,
                     options,
-                    Some(directory_context),
+                    Some(context),
                 )
                 .await?
                 {
@@ -2666,6 +3234,16 @@ pub async fn retry_cloud_directory_group(
             let app = submit_app.clone();
             async move {
                 let state = app.state::<AppState>();
+                if file_id.starts_with("cloud-share://") {
+                    return submit_cloud_share_directory_leaf(
+                        app.clone(),
+                        &state,
+                        file_id,
+                        options,
+                        context,
+                    )
+                    .await;
+                }
                 match submit_cloud_file(
                     app.clone(),
                     &state,
@@ -2952,7 +3530,10 @@ mod startup_tests;
 mod tests {
     use std::{cell::Cell, collections::VecDeque, sync::Mutex};
 
-    use super::{create_cloud_task, resolve_download};
+    use super::{
+        cloud_failure_code, create_cloud_task, requires_cloud_reauthorization_failure,
+        resolve_download, retry_read_with_refreshed_web_session,
+    };
     use crate::cloud::{
         baidu::{parse_baidu_web_session, BaiduSession},
         save_password_credential,
@@ -2964,6 +3545,45 @@ mod tests {
         QUARK_DESKTOP_USER_AGENT,
     };
     use crate::TaskStore;
+
+    #[test]
+    fn only_authorization_failures_request_a_new_official_login() {
+        assert!(requires_cloud_reauthorization_failure(Some(
+            cloud_failure_code(&QuarkError::AuthorizationExpired,)
+        )));
+        assert!(requires_cloud_reauthorization_failure(Some(
+            cloud_failure_code(&QuarkError::CaptchaRequired,)
+        )));
+        assert!(!requires_cloud_reauthorization_failure(Some(
+            cloud_failure_code(&QuarkError::Transport("offline".into()),)
+        )));
+        assert!(!requires_cloud_reauthorization_failure(Some(
+            cloud_failure_code(&QuarkError::Provider("temporary failure".into()),)
+        )));
+    }
+
+    #[test]
+    fn newly_failed_share_download_returns_the_reauthorization_action_hint() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let prepared = store
+            .create(crate::NewTask::direct(
+                "cloud-share://baidu/share-id/file-id",
+            ))
+            .unwrap();
+
+        let outcome = super::cloud_share_failure_outcome(
+            &store,
+            prepared,
+            Some("web_auth_required"),
+            "网盘要求完成官方操作验证后重试",
+        );
+
+        assert_eq!(
+            outcome.payload.task.failure_code.as_deref(),
+            Some("web_auth_required")
+        );
+        assert!(outcome.payload.reauthorization_required);
+    }
 
     #[test]
     fn recycle_directory_ids_route_to_provider_recycle_lists() {
@@ -3010,6 +3630,42 @@ mod tests {
     }
 
     #[test]
+    fn tianyi_web_session_capture_uses_only_the_cloud_host_cookie_jar() {
+        // Break caught: a same-named open.e.189.cn cookie overwrote the
+        // cloud.189.cn cookie and made only share-download signing fail.
+        assert_eq!(
+            super::web_session_cookie_urls(CloudProvider::Tianyi),
+            ["https://cloud.189.cn"]
+        );
+    }
+
+    #[test]
+    fn baidu_web_session_capture_uses_the_pan_api_cookie_jar() {
+        // Break caught: a host-only Passport cookie with the same name must
+        // not replace the Pan cookie that signs file-download requests.
+        assert_eq!(
+            super::web_session_cookie_urls(CloudProvider::Baidu),
+            ["https://pan.baidu.com"]
+        );
+    }
+
+    #[test]
+    fn web_session_refresh_never_retries_a_provider_captcha_challenge() {
+        // Break caught: retrying a provider risk challenge can create more
+        // challenges. Only a rejected/expired local session is safe to renew
+        // from the already-authorized official webview.
+        assert!(super::can_retry_read_with_web_session(
+            &QuarkError::AuthorizationExpired
+        ));
+        assert!(super::can_retry_read_with_web_session(
+            &QuarkError::WebAuthorizationRequired
+        ));
+        assert!(!super::can_retry_read_with_web_session(
+            &QuarkError::CaptchaRequired
+        ));
+    }
+
+    #[test]
     fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secrets() {
         let typed = [
             (QuarkError::NotAuthorized, "尚未授权此网盘，请登录后使用"),
@@ -3027,7 +3683,7 @@ mod tests {
             ),
             (
                 QuarkError::CaptchaRequired,
-                "网盘要求更新操作验证，请重新网页授权",
+                "网盘要求完成官方操作验证后重试",
             ),
             (
                 QuarkError::AuthorizationPending,
@@ -3041,6 +3697,10 @@ mod tests {
         for (error, expected) in typed {
             assert_eq!(super::share_resolution_failure_message(&error), expected);
         }
+        assert_eq!(
+            QuarkError::CaptchaRequired.to_string(),
+            "网盘要求完成官方操作验证后重试"
+        );
 
         let secret = "https://secret.example/file?token=do-not-leak";
         for error in [
@@ -3572,6 +4232,58 @@ mod tests {
                 .pop_front()
                 .ok_or(QuarkError::InvalidResponse)
         }
+    }
+
+    #[test]
+    fn refreshed_web_session_retries_read_work_and_keeps_the_verified_snapshot() {
+        // Break caught: a download-signing request can see an expired stored
+        // cookie while the already-authorized official tab has a newer one.
+        // The retry must use and retain that newer snapshot.
+        let store = MemoryCredentialStore::default();
+        store.save("uc", b"previous-session").unwrap();
+        let calls = Cell::new(0);
+
+        let result = retry_read_with_refreshed_web_session(
+            CloudProvider::Uc,
+            &store,
+            b"browser-session",
+            || {
+                calls.set(calls.get() + 1);
+                assert_eq!(
+                    store.load("uc").unwrap().as_deref(),
+                    Some(b"browser-session".as_slice())
+                );
+                Ok("signed-download")
+            },
+        );
+
+        assert_eq!(result.unwrap(), "signed-download");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            store.load("uc").unwrap().as_deref(),
+            Some(b"browser-session".as_slice())
+        );
+    }
+
+    #[test]
+    fn rejected_refreshed_web_session_restores_the_previous_snapshot() {
+        // Break caught: a stale or incomplete WebView cookie capture must not
+        // overwrite a previously usable stored authorization.
+        let store = MemoryCredentialStore::default();
+        store.save("tianyi", b"previous-session").unwrap();
+
+        let result: Result<(), QuarkError> = retry_read_with_refreshed_web_session(
+            CloudProvider::Tianyi,
+            &store,
+            b"browser-session",
+            || Err(QuarkError::AuthorizationExpired),
+        );
+
+        assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
+        assert_eq!(
+            store.load("tianyi").unwrap().as_deref(),
+            Some(b"previous-session".as_slice())
+        );
     }
 
     #[test]

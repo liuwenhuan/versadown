@@ -43,7 +43,10 @@ pub use models::{
     DuplicateDownloadState, LauncherVisibility, MagnetMetadataSettings, NewTask, ProxySettings,
     TaskStatus,
 };
-pub use parser::{classify_input, extract_candidates, Candidate, CandidateKind};
+pub use parser::{
+    classify_input, extract_candidates, extract_cloud_share_candidate, Candidate, CandidateKind,
+    CloudShareCandidate,
+};
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
 pub use store::{StoreError, TaskStore};
@@ -253,6 +256,7 @@ pub fn run() {
             cloud::commands::cloud_provider_capabilities,
             cloud::commands::cloud_begin_authorization,
             cloud::commands::cloud_complete_authorization,
+            cloud::commands::cloud_reauthorize_failed_task,
             cloud::commands::cloud_login_password,
             cloud::commands::cloud_account,
             cloud::commands::cloud_list_directory,

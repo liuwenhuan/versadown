@@ -95,6 +95,77 @@ mod tests {
         assert_eq!(download_body["fids_token"], json!(["file-secret"]));
     }
     #[test]
+    fn quark_share_download_cookie_rotation_persists_for_following_directory_entry() {
+        struct CookieHttp(std::sync::Mutex<std::collections::VecDeque<CloudHttpResponse>>);
+        impl CloudHttpTransport for CookieHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or(QuarkError::InvalidResponse)
+            }
+        }
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("quark", b"sid=current").unwrap();
+        let http = CookieHttp(std::sync::Mutex::new(
+            [
+                CloudHttpResponse {
+                    status: 200,
+                    body: json!({"code":0,"data":[{"fid":"f1","download_url":"https://download.quark.cn/first"}]}).to_string(),
+                    set_cookies: vec!["__puus=rotated; Path=/; Secure".into()],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: json!({"code":0,"data":[{"fid":"f2","download_url":"https://download.quark.cn/second"}]}).to_string(),
+                    set_cookies: vec![],
+                },
+            ]
+            .into(),
+        ));
+        let entries = vec![
+            CloudShareEntry::new("share123", "f1".into(), "first.bin".into(), vec![], Some(1)),
+            CloudShareEntry::new(
+                "share123",
+                "f2".into(),
+                "second.bin".into(),
+                vec![],
+                Some(1),
+            ),
+        ];
+        let plan = CloudSharePlan::new(
+            CloudProvider::Quark,
+            "share123".into(),
+            None,
+            entries.clone(),
+            json!({"stoken":"share-token","files":{"f1":{"token":"first-token"},"f2":{"token":"second-token"}}}),
+        );
+        let first = CloudShareResolvedEntry {
+            provider: CloudProvider::Quark,
+            plan: plan.clone(),
+            entry: entries[0].clone(),
+        };
+        let second = CloudShareResolvedEntry {
+            provider: CloudProvider::Quark,
+            plan,
+            entry: entries[1].clone(),
+        };
+
+        assert!(matches!(
+            resolve_quark_share(&credentials, &http, &first),
+            Ok(ShareResolution::Direct(_))
+        ));
+        let Ok(ShareResolution::Direct(second_download)) =
+            resolve_quark_share(&credentials, &http, &second)
+        else {
+            panic!("the second directory entry must resolve directly")
+        };
+        assert!(second_download
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Cookie" && value.contains("__puus=rotated")));
+    }
+    #[test]
     fn quark_share_without_login_does_not_request_http() {
         let credentials = MemoryCredentialStore::default();
         let http = Http::new(vec![]);
@@ -124,6 +195,54 @@ mod tests {
             adapter.inspect(&candidate()),
             Err(QuarkError::InvalidInput(_))
         ));
+    }
+    #[test]
+    fn quark_share_requires_an_access_code_even_when_the_server_uses_http_400() {
+        struct Http400;
+        impl CloudHttpTransport for Http400 {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                Ok(CloudHttpResponse {
+                    status: 400,
+                    body: json!({"code":41008,"message":"请输入提取码"}).to_string(),
+                    set_cookies: vec![],
+                })
+            }
+        }
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("quark", b"sid=current").unwrap();
+        let http = Http400;
+        let adapter = provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+        let mut missing_code = candidate();
+        missing_code.access_code = None;
+
+        assert!(matches!(
+            adapter.inspect(&missing_code),
+            Ok(ShareInspection::AccessCodeRequired)
+        ));
+    }
+    #[test]
+    fn quark_share_preserves_cancelled_and_blocked_failures_for_the_parse_ui() {
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("quark", b"sid=current").unwrap();
+        for (reply, expected) in [
+            (
+                json!({"code":41012,"message":"好友已取消了分享"}),
+                "夸克分享已被取消",
+            ),
+            (
+                json!({"code":41031,"message":"分享者用户封禁链接查看受限"}),
+                "夸克分享因账号封禁而无法访问",
+            ),
+        ] {
+            let http = Http::new(vec![reply]);
+            let adapter =
+                provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+
+            assert!(matches!(
+                adapter.inspect(&candidate()),
+                Err(QuarkError::Provider(message)) if message == expected
+            ));
+        }
     }
     #[test]
     fn quark_share_pages_nested_paths_and_empty_folder_stays_empty() {
@@ -811,6 +930,26 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
     }
 }
 
+fn persist_quark_download_cookies(
+    credentials: &dyn CredentialStore,
+    current_cookie: &str,
+    response: &CloudHttpResponse,
+) -> Result<(), QuarkError> {
+    if response.set_cookies.is_empty() {
+        return Ok(());
+    }
+    let merged_cookie = super::share::download_headers(
+        current_cookie,
+        &response.set_cookies,
+        QUARK_DESKTOP_USER_AGENT,
+        None,
+    )
+    .into_iter()
+    .find_map(|(name, value)| (name == "Cookie").then_some(value))
+    .ok_or(QuarkError::Storage)?;
+    credentials.save("quark", merged_cookie.as_bytes())
+}
+
 fn validate_share_codes(value: &Value) -> Result<i64, QuarkError> {
     let code = value["code"].as_i64().ok_or(QuarkError::InvalidResponse)?;
     // The generic decoder gives error_code precedence. Sharing must reject
@@ -834,12 +973,12 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
         let raw: Value =
             serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
         let code = validate_share_codes(&raw)?;
-        if response.status == 200
-            && code != 0
-            && matches!(
-                raw["message"].as_str(),
-                Some("提取码错误" | "提取码不正确" | "请输入提取码" | "提取码不能为空")
-            )
+        if code != 0
+            && (code == 41008
+                || matches!(
+                    raw["message"].as_str(),
+                    Some("提取码错误" | "提取码不正确" | "请输入提取码" | "提取码不能为空")
+                ))
         {
             return if candidate.access_code.is_none() {
                 Ok(ShareInspection::AccessCodeRequired)
@@ -848,6 +987,12 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
             };
         }
         let value = response_json(&response).map_err(|error| match error {
+            QuarkError::Provider(_) if code == 41012 => {
+                QuarkError::Provider("夸克分享已被取消".into())
+            }
+            QuarkError::Provider(_) if code == 41031 => {
+                QuarkError::Provider("夸克分享因账号封禁而无法访问".into())
+            }
             QuarkError::Provider(_) => QuarkError::Provider("夸克分享无效或已过期".into()),
             error => error,
         })?;
@@ -946,8 +1091,8 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
             error => error,
         })?;
         Ok(ShareOperationResult {
-            result: client
-                .share_download(&response, &entry.entry.name)
+            result: persist_quark_download_cookies(self.credentials, &client.cookie, &response)
+                .and_then(|_| client.share_download(&response, &entry.entry.name))
                 .map(RecordedTransferDownload::Available),
             updated_context: None,
         })
@@ -996,6 +1141,7 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
                         "file/download",
                         Some(json!({"fids":[id]})),
                     )?;
+                    persist_quark_download_cookies(self.credentials, &client.cookie, &response)?;
                     return client.share_download(&response, &entry.entry.name);
                 }
                 Some(0 | 1) => std::thread::sleep(std::time::Duration::from_millis(250)),
@@ -1018,6 +1164,7 @@ pub fn resolve_quark_share(
     }
     let context = &entry.plan.provider_context;
     let response = client.share_request("POST", "file/download", Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]})))?;
+    persist_quark_download_cookies(credentials, &client.cookie, &response)?;
     let value = response_json(&response)?;
     let files = value["data"]
         .as_array()

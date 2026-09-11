@@ -9,6 +9,9 @@ use std::{
 };
 use tokio::time::{timeout_at, Instant};
 
+const STARTUP_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const OPERATION_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Clone, Debug)]
 pub struct Aria2LaunchConfig {
     pub binary: PathBuf,
@@ -87,7 +90,7 @@ impl Aria2Process {
             let client = Aria2RpcClient::with_timeout(
                 format!("http://127.0.0.1:{}/jsonrpc", config.aria2.rpc_port),
                 secret.clone(),
-                Duration::from_secs(2),
+                STARTUP_RPC_TIMEOUT,
             )?;
             let mut command = Command::new(&config.binary);
             command
@@ -106,7 +109,20 @@ impl Aria2Process {
                 client: client.clone(),
             };
             match process.wait_ready(Duration::from_secs(5)).await {
-                Ok(()) => return Ok((process, client)),
+                Ok(()) => {
+                    // Startup probes should fail fast, but an established
+                    // aria2 instance can take longer to answer while opening
+                    // several authenticated HTTP connections. Returning the
+                    // two-second readiness client made a valid cloud task
+                    // appear to fail before aria2 received its first bytes.
+                    let client = Aria2RpcClient::with_timeout(
+                        format!("http://127.0.0.1:{}/jsonrpc", config.aria2.rpc_port),
+                        secret,
+                        OPERATION_RPC_TIMEOUT,
+                    )?;
+                    process.client = client.clone();
+                    return Ok((process, client));
+                }
                 Err(error) => {
                     last_error = error;
                     process.terminate_fallback()?;

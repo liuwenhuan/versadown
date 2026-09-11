@@ -48,6 +48,9 @@ pub struct DownloadTaskPayload {
     pub task: DownloadTask,
     pub files: Vec<TransferFile>,
     pub cleanup_pending: bool,
+    /// A queue-safe action hint for callers that receive a task-action result
+    /// before the next list projection arrives.
+    pub reauthorization_required: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -101,10 +104,14 @@ pub(crate) fn task_payload_with_cleanup(
             false
         };
     let files = store.files(task.id).map_err(|error| error.to_string())?;
+    let reauthorization_required = crate::cloud::commands::requires_cloud_reauthorization_failure(
+        task.failure_code.as_deref(),
+    );
     Ok(DownloadTaskPayload {
         task,
         files,
         cleanup_pending,
+        reauthorization_required,
     })
 }
 
@@ -345,7 +352,7 @@ pub async fn confirm_cloud_share_download(
     let cloud = app
         .try_state::<Arc<crate::cloud::commands::CloudState>>()
         .ok_or(crate::cloud::QuarkError::Storage)?;
-    let sources = crate::cloud::share::selected_share_sources(
+    let selection = crate::cloud::share::selected_share_download(
         &cloud.share_plans,
         &plan_source,
         &selected_ids,
@@ -353,7 +360,49 @@ pub async fn confirm_cloud_share_download(
     let configured =
         download_submission_options_for_directory(&state, destination_directory.as_deref())
             .map_err(crate::cloud::QuarkError::InvalidInput)?;
-    let selections = selected_ids.into_iter().zip(sources).collect();
+    if selection.directory_name.is_some() {
+        let plan = crate::cloud::commands::plan_cloud_share_directory_download(&selection)?;
+        let store = Arc::clone(&state.store);
+        let provider = selection.provider;
+        let group_source = selection.plan_source.clone();
+        let submit_app = app.clone();
+        let root_event_app = app.clone();
+        let outcome = crate::cloud::commands::submit_cloud_directory_plan_with_group_event(
+            &store,
+            provider,
+            &group_source,
+            plan,
+            configured,
+            move |root| {
+                use tauri::Emitter;
+                let _ = root_event_app.emit("download-task-updated", root);
+            },
+            move |_, source, options, context| {
+                let app = submit_app.clone();
+                async move {
+                    let state = app.state::<AppState>();
+                    crate::cloud::commands::submit_cloud_share_directory_leaf(
+                        app.clone(),
+                        &state,
+                        source,
+                        options,
+                        context,
+                    )
+                    .await
+                }
+            },
+        )
+        .await?;
+        return Ok(CloudShareBatchOutcome {
+            outcomes: vec![outcome.task],
+            failures: Vec::new(),
+        });
+    }
+    let selections = selection
+        .entries
+        .into_iter()
+        .map(|entry| (entry.selected_id, entry.source))
+        .collect();
     let state = &*state;
     Ok(submit_cloud_share_batch_with(selections, |source| {
         let app = app.clone();
@@ -555,11 +604,14 @@ fn apply_queue_cleanup_projection(
     Ok(())
 }
 
-fn queue_task_payload_from_task(
+pub(crate) fn queue_task_payload_from_task(
     store: &TaskStore,
     task: DownloadTask,
 ) -> Result<QueueTaskPayload, String> {
     let files = store.files(task.id).map_err(|error| error.to_string())?;
+    let reauthorization_required = crate::cloud::commands::requires_cloud_reauthorization_failure(
+        task.failure_code.as_deref(),
+    );
     Ok(QueueTaskPayload {
         id: task.id.to_string(),
         source: task.source,
@@ -568,6 +620,8 @@ fn queue_task_payload_from_task(
         status: task.status,
         progress: task.progress,
         error: task.error,
+        failure_code: task.failure_code,
+        reauthorization_required,
         aria_gid: task.aria_gid,
         followed_by_gid: task.followed_by_gid,
         metadata_gid: task.metadata_gid,
@@ -607,12 +661,15 @@ fn virtual_cloud_directory_item_payload(
     group: &CloudDirectoryGroup,
     item: &CloudDirectoryGroupItem,
     error: Option<String>,
+    failure_code: Option<String>,
 ) -> QueueTaskPayload {
     let status = if error.is_some() {
         TaskStatus::Failed
     } else {
         TaskStatus::Queued
     };
+    let reauthorization_required =
+        crate::cloud::commands::requires_cloud_reauthorization_failure(failure_code.as_deref());
     QueueTaskPayload {
         id: item.id.to_string(),
         source: format!(
@@ -625,6 +682,8 @@ fn virtual_cloud_directory_item_payload(
         status,
         progress: 0,
         error,
+        failure_code,
+        reauthorization_required,
         aria_gid: None,
         followed_by_gid: None,
         metadata_gid: None,
@@ -661,6 +720,8 @@ fn cloud_directory_folder_payload(
         status: TaskStatus::Completed,
         progress: 100,
         error: None,
+        failure_code: None,
+        reauthorization_required: false,
         aria_gid: None,
         followed_by_gid: None,
         metadata_gid: None,
@@ -794,6 +855,9 @@ fn aggregate_cloud_directory_root(
         error: (status == TaskStatus::Failed)
             .then(|| leaves.iter().find_map(|item| item.error.clone()))
             .flatten(),
+        failure_code: None,
+        reauthorization_required: status == TaskStatus::Failed
+            && leaves.iter().any(|item| item.reauthorization_required),
         aria_gid: None,
         followed_by_gid: None,
         metadata_gid: None,
@@ -859,12 +923,14 @@ pub(crate) fn project_cloud_directory_groups(
                         &group,
                         &item,
                         Some("关联的下载任务不存在，需重新提交网盘文件".to_string()),
+                        None,
                     ),
                 },
                 None => virtual_cloud_directory_item_payload(
                     &group,
                     &item,
                     item.failure_message.clone(),
+                    item.failure_code.clone(),
                 ),
             };
             // Planned paths include the selected directory itself because that
@@ -1162,7 +1228,7 @@ pub async fn resolve_duplicate_download(
     task_payload(&state.store, task)
 }
 
-async fn resubmit_task(
+pub(crate) async fn resubmit_task(
     app: AppHandle,
     state: &AppState,
     task: DownloadTask,
@@ -1191,6 +1257,12 @@ async fn resubmit_task(
         .service()
         .await
         .map_err(|error| error.to_string())?;
+    options = crate::cloud::commands::cloud_directory_member_retry_options(
+        &state.store,
+        task.id,
+        options,
+    )
+    .map_err(|error| error.to_string())?;
     let configured = download_submission_options(state)?;
     if options.directory.is_none() {
         options.directory = configured.directory;
@@ -1201,13 +1273,34 @@ async fn resubmit_task(
     if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
         let share = task.source.starts_with("cloud-share://");
         let resolved = if share {
-            crate::cloud::commands::resolve_stable_cloud_share_download(app, &task.source).await
+            crate::cloud::commands::resolve_stable_cloud_share_download(app.clone(), &task.source)
+                .await
         } else {
-            crate::cloud::commands::resolve_stable_cloud_download(app, &task.source).await
-        }
-        .map_err(|error| {
-            crate::cloud::commands::share_resolution_failure_message(&error).to_string()
-        })?;
+            crate::cloud::commands::resolve_stable_cloud_download(app.clone(), &task.source).await
+        };
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let message = crate::cloud::commands::share_resolution_failure_message(&error);
+                // A failed cloud task remains the same durable task while a
+                // retry discovers that its session now needs verification.
+                // Preserve a typed reason for the queue instead of making
+                // the frontend guess from this localized message.
+                if task.status == TaskStatus::Failed {
+                    let _ = state.store.update_failed_failure(
+                        task.id,
+                        Some(crate::cloud::commands::cloud_failure_code(&error)),
+                        message,
+                    );
+                    if let Ok(updated) = state.store.find(task.id) {
+                        if let Ok(payload) = task_update_payload(&state.store, None, updated) {
+                            let _ = app.emit("download-task-updated", payload);
+                        }
+                    }
+                }
+                return Err(message.to_string());
+            }
+        };
         if share {
             return crate::cloud::share::resubmit_current_share_download(
                 &service, &task, resolved, options,
@@ -1332,14 +1425,32 @@ pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) 
         if !matches!(retry_duplicate_state(&state.store, &current), Ok(None)) {
             return;
         }
-        // One attempt only. Challenge/unsupported errors preserve the failed task.
-        let Ok(resolved) = crate::cloud::commands::resolve_stable_cloud_share_download(
+        // One attempt only. If refresh identifies an expired session or an
+        // official verification challenge, preserve that durable reason for
+        // the Failed tab instead of leaving the stale aria2 error there.
+        let resolved = match crate::cloud::commands::resolve_stable_cloud_share_download(
             app.clone(),
             &current.source,
         )
         .await
-        else {
-            return;
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let code = crate::cloud::commands::cloud_failure_code(&error);
+                if crate::cloud::commands::requires_cloud_reauthorization_failure(Some(code)) {
+                    let _ = state.store.update_failed_failure(
+                        current.id,
+                        Some(code),
+                        crate::cloud::commands::share_resolution_failure_message(&error),
+                    );
+                    if let Ok(task) = state.store.find(current.id) {
+                        if let Ok(payload) = task_update_payload(&state.store, None, task) {
+                            let _ = app.emit("download-task-updated", payload);
+                        }
+                    }
+                }
+                return;
+            }
         };
         // Network resolution may outlive a user cancellation or manual retry.
         let Ok(latest) = state.store.find(failed.id) else {
@@ -1938,6 +2049,34 @@ mod tests {
     };
 
     #[test]
+    fn failed_cloud_authentication_task_projects_a_reauthorization_action() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://baidu/blocked-file"))
+            .unwrap();
+        store
+            .fail_with_code(
+                task.id,
+                Some("web_auth_required"),
+                "网盘要求完成官方操作验证后重试",
+            )
+            .unwrap();
+
+        let projected = list_queue_tasks_for_scope(&store, None).unwrap();
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected[0].failure_code.as_deref(),
+            Some("web_auth_required")
+        );
+        assert!(projected[0].reauthorization_required);
+        assert_eq!(
+            serde_json::to_value(&projected[0]).unwrap()["reauthorization_required"],
+            true
+        );
+    }
+
+    #[test]
     fn cloud_directory_group_projection_nests_linked_and_virtual_leaves() {
         let store = TaskStore::open_in_memory().unwrap();
         let group = store
@@ -2158,6 +2297,76 @@ mod tests {
         assert_eq!(payload.progress, 50);
         assert_eq!(payload.children[0].name, "资料");
         assert_eq!(payload.children[0].children[0].name, "讲义.pdf");
+    }
+
+    #[test]
+    fn failed_share_directory_stays_one_root_after_moving_to_recycle() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let share_hash = "a".repeat(64);
+        let first_hash = "b".repeat(64);
+        let second_hash = "c".repeat(64);
+        let first_source = format!("cloud-share://xunlei/{share_hash}/{first_hash}");
+        let second_source = format!("cloud-share://xunlei/{share_hash}/{second_hash}");
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Xunlei,
+                    first_source.clone(),
+                    "迅雷云盘分享目录",
+                    "C:\\Downloads",
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new(
+                        first_source.clone(),
+                        &["迅雷云盘分享目录"],
+                        "first.bin",
+                        Some(10),
+                    ),
+                    NewCloudDirectoryGroupItem::new(
+                        second_source.clone(),
+                        &["迅雷云盘分享目录", "nested"],
+                        "second.bin",
+                        Some(20),
+                    ),
+                ],
+            )
+            .unwrap();
+        let items = store.cloud_directory_group_items(group.id).unwrap();
+        let first = store.create(NewTask::direct(first_source)).unwrap();
+        let first = store
+            .fail(first.id, "provider rejected the transfer")
+            .unwrap();
+        let second = store.create(NewTask::direct(second_source)).unwrap();
+        let second = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                total_length: Some(20),
+                completed_length: 20,
+                ..second
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[0].id, first.id)
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[1].id, second.id)
+            .unwrap();
+
+        let failed = list_queue_tasks_for_scope(&store, Some("terminal")).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].id, group.id.to_string());
+        assert_eq!(failed[0].status, TaskStatus::Failed);
+        assert_eq!(failed[0].children.len(), 2);
+
+        let recycled = recycle_cloud_directory_group(&store, group.id).unwrap();
+        assert_eq!(recycled.id, group.id.to_string());
+        assert_eq!(recycled.status, TaskStatus::Recycled);
+        let recycle_scope = list_queue_tasks_for_scope(&store, Some("terminal")).unwrap();
+        assert_eq!(recycle_scope.len(), 1);
+        assert_eq!(recycle_scope[0].id, group.id.to_string());
+        assert_eq!(recycle_scope[0].status, TaskStatus::Recycled);
+        assert_eq!(recycle_scope[0].children.len(), 2);
     }
 
     #[test]
@@ -2481,7 +2690,7 @@ mod tests {
             .next()
             .expect("production source precedes tests");
         let body = production
-            .split_once("async fn resubmit_task(")
+            .split_once("pub(crate) async fn resubmit_task(")
             .expect("resubmit task exists")
             .1
             .split_once("fn task_output_directory")

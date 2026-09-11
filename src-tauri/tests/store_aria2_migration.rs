@@ -104,10 +104,39 @@ fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        6
+        7
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn current_database_persists_a_machine_readable_cloud_failure_code() {
+    let path = temporary_database_path();
+    let store = TaskStore::open_path(&path).expect("open database");
+    let task = store
+        .create(alldownloader_lib::NewTask::direct(
+            "cloud://baidu/blocked-file",
+        ))
+        .expect("create cloud task");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("reopen database");
+    connection
+        .execute(
+            "UPDATE tasks SET failure_code = 'web_auth_required' WHERE id = ?1",
+            [task.id.to_string()],
+        )
+        .expect("persist cloud failure code");
+    drop(connection);
+
+    let store = TaskStore::open_path(&path).expect("reopen store");
+    assert_eq!(
+        serde_json::to_value(store.find(task.id).expect("read task")).unwrap()["failure_code"],
+        "web_auth_required"
+    );
+    drop(store);
+    std::fs::remove_file(path).expect("remove test database");
 }
 
 #[test]
@@ -155,7 +184,7 @@ fn version_three_database_backfills_creation_time_from_the_existing_timestamp() 
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        6
+        7
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -204,6 +233,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             status: TaskStatus::Downloading,
             progress: 25,
             error: None,
+            failure_code: None,
             aria_gid: Some("gid-42".to_string()),
             followed_by_gid: Some("next-gid".to_string()),
             metadata_gid: None,

@@ -297,6 +297,32 @@ it('does not render a failure status pill in task rows', () => {
   expect(screen.queryByText('失败')).not.toBeInTheDocument();
 });
 
+it('offers reauthorization instead of a normal retry for a cloud task blocked by verification', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: 'reauthorize-cloud-task',
+    name: 'blocked.zip',
+    kind: 'cloud',
+    status: 'failed',
+    progress: 0,
+    source: 'cloud://baidu/blocked-file',
+    error: '网盘要求完成官方操作验证后重试',
+    reauthorization_required: true,
+  } as unknown as import('../lib/types').QueueTask;
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  expect(screen.getByRole('button', { name: '重新授权 blocked.zip' })).toBeVisible();
+  expect(screen.getByText('重新授权')).toBeVisible();
+  expect(screen.queryByRole('button', { name: '重新下载 blocked.zip' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '更多操作 blocked.zip' }));
+  expect(screen.getByRole('menuitem', { name: '重新授权' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '重新下载' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('menuitem', { name: '重新授权' }));
+  expect(onCommand).toHaveBeenCalledWith('reauthorize-cloud-task', 'reauthorize');
+});
+
 it('renders a completed video task compactly and plays its video files', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();

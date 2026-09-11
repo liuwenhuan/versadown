@@ -106,7 +106,7 @@ pub enum QuarkError {
     SessionRenewedRetryOperation,
     #[error("此登录方式需要网页验证，请点击网页授权完成登录")]
     WebAuthorizationRequired,
-    #[error("网盘要求更新操作验证，请重新网页授权")]
+    #[error("网盘要求完成官方操作验证后重试")]
     CaptchaRequired,
     #[error("区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员")]
     PikpakRegionalMembershipRestricted,

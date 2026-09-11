@@ -536,6 +536,41 @@ it('queues normal share results and presents duplicate results in FIFO order', a
   await waitFor(() => expect(screen.getByRole('dialog', { name: '检测到重复下载' })).toHaveTextContent('second-existing.bin'));
 });
 
+it('uses the single directory root returned for a confirmed share folder', async () => {
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'cloud-share://quark/share-plan', title: '分享目录', requiresConfirmation: true,
+      resources: [
+        { id: 'f1', name: 'first.jpg', size: '1 B', selected: true },
+        { id: 'f2', name: 'nested/second.jpg', size: '2 B', selected: true },
+      ], processing: []
+    }
+  });
+  state.confirmCloud.mockResolvedValueOnce({
+    outcomes: [{
+      task: { id: 'share-leaf', name: 'first.jpg', kind: 'cloud', status: 'downloading', progress: 0 },
+      queueTask: {
+        id: 'share-directory-root', name: '夸克分享目录', kind: 'folder', status: 'downloading', progress: 0,
+        children: [
+          { id: 'share-leaf', name: 'first.jpg', kind: 'cloud', status: 'downloading', progress: 0 },
+          { id: 'nested', name: 'nested', kind: 'folder', status: 'downloading', progress: 0, children: [] },
+        ],
+      },
+    }],
+    failures: [],
+  });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://pan.quark.cn/s/share-plan' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 2/ }));
+
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '确认下载内容' })).not.toBeInTheDocument());
+  const queue = screen.getByRole('region', { name: '下载队列' });
+  expect(within(queue).getByTitle('夸克分享目录')).toBeVisible();
+  expect(queue.querySelectorAll('article.task-row')).toHaveLength(1);
+});
+
 it('keeps only failed share entries selected while preserving earlier successful outcomes', async () => {
   state.parse.mockResolvedValueOnce({
     confirmation: {

@@ -47,8 +47,17 @@ impl UcSession {
 /// Convert official-WebView cookie records into the minimum restorable UC
 /// session.  Cookie attributes, trackers, and non-UC cookies are excluded.
 pub fn parse_uc_web_session(cookies: &[String]) -> Result<UcSession, QuarkError> {
-    const SESSION_COOKIE_NAMES: &[&str] =
-        &["__uid", "__pus", "__puus", "_UP_A4A_11_", "__kp", "__kps"];
+    const SESSION_COOKIE_NAMES: &[&str] = &[
+        "__uid",
+        "__pus",
+        "__puus",
+        "_UP_A4A_11_",
+        "__kp",
+        "__kps",
+        // Share-download signing requires this browser-issued anti-CSRF
+        // value even though directory listing does not.
+        "csrf_token",
+    ];
     let mut pairs: Vec<(String, String)> = Vec::new();
     for raw in cookies {
         let pair = raw.split(';').next().unwrap_or("").trim();
@@ -763,12 +772,22 @@ impl UcShareSession<'_> {
         if matches!(code, 9 | 4031) {
             return Err(QuarkError::WebAuthorizationRequired);
         }
-        if matches!(
-            value["message"].as_str(),
-            Some("提取码错误" | "提取码不正确" | "请输入提取码" | "提取码不能为空")
-        ) && code != 0
+        if code == 41008
+            || (matches!(
+                value["message"].as_str(),
+                Some(
+                    "提取码错误"
+                        | "提取码不正确"
+                        | "请输入提取码"
+                        | "提取码不能为空"
+                        | "需要提取码"
+                )
+            ) && code != 0)
         {
             return Err(QuarkError::InvalidInput("UC 分享访问码错误或缺失".into()));
+        }
+        if code == 41012 {
+            return Err(QuarkError::Provider("UC 分享已失效或已停止分享".into()));
         }
         uc_json(&response)?;
         if value
@@ -1152,6 +1171,34 @@ mod tests {
             .unwrap();
         credentials
     }
+
+    #[test]
+    fn uc_web_session_keeps_the_csrf_token_needed_for_share_download_signing() {
+        // Break caught: accepting an official web session for directory reads
+        // while dropping its csrf cookie makes a subsequently parsed share
+        // fail only at the signed-download endpoint.
+        let session = parse_uc_web_session(&[
+            "__uid=account-7".into(),
+            "__puus=web-session".into(),
+            "csrf_token=web-csrf".into(),
+        ])
+        .expect("the browser session should be accepted");
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("uc", &serde_json::to_vec(&session).unwrap())
+            .unwrap();
+        let adapter = UcShareAdapter {
+            credentials: &credentials,
+            http: &Http::new(vec![]),
+        };
+
+        let signing = adapter.session(None).expect("a share signing session");
+
+        assert_eq!(
+            signing.headers.get("x-csrf-token").map(String::as_str),
+            Some("web-csrf")
+        );
+    }
     fn share_entry() -> CloudShareResolvedEntry {
         entry(CloudSharePlan::new(
             CloudProvider::Uc,
@@ -1167,6 +1214,34 @@ mod tests {
             json!({"stoken":"old-token","files":{"f1":{"token":"file-token","parent":"0"}}}),
         ))
     }
+
+    #[test]
+    fn uc_share_access_code_and_cancelled_share_are_user_visible() {
+        let credentials = share_credentials();
+        let missing_code = Http::new(vec![json!({"code":41008,"message":"需要提取码"})]);
+        let mut without_code = crate::parser::CloudShareCandidate {
+            provider: CloudProvider::Uc,
+            url: "https://drive.uc.cn/s/share123".into(),
+            access_code: Some("placeholder".into()),
+        };
+        without_code.access_code = None;
+        assert!(matches!(
+            provider_share_adapter(CloudProvider::Uc, &credentials, &missing_code)
+                .unwrap()
+                .inspect(&without_code),
+            Ok(ShareInspection::AccessCodeRequired)
+        ));
+
+        let cancelled = Http::new(vec![json!({"code":41012,"message":"好友已取消了分享"})]);
+        let Err(error) = provider_share_adapter(CloudProvider::Uc, &credentials, &cancelled)
+            .unwrap()
+            .inspect(&without_code)
+        else {
+            panic!("a cancelled share must be rejected");
+        };
+        assert!(error.to_string().contains("UC 分享已失效或已停止分享"));
+    }
+
     #[test]
     fn uc_share_server_session_cookie_alone_inspects_and_resolves_direct_download() {
         let credentials = share_credentials_with_server_session_only();

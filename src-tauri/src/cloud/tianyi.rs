@@ -43,6 +43,76 @@ mod tests {
     fn checked() -> Value {
         json!({"res_code":0,"shareId":22})
     }
+
+    #[test]
+    fn tianyi_web_session_keeps_cloud_scoped_cookie_needed_by_share_downloads() {
+        // Break caught: list operations can authenticate with the SSO cookie
+        // alone while the share-download endpoint also requires a cloud-host
+        // session cookie issued by the official page.
+        let session = parse_tianyi_web_session(&[
+            "COOKIE_LOGIN_USER=authorized-user".into(),
+            "JSESSIONID=cloud-download-session".into(),
+        ])
+        .expect("an official Tianyi web session");
+
+        assert!(session.cookie.contains("COOKIE_LOGIN_USER=authorized-user"));
+        assert!(session.cookie.contains("JSESSIONID=cloud-download-session"));
+    }
+
+    #[test]
+    fn tianyi_share_prompts_for_access_code_before_requiring_hidden_share_id() {
+        let store = credentials();
+        // The live endpoint omits shareId until an access code has been
+        // supplied. The user should still receive the access-code prompt.
+        let protected = json!({
+            "res_code": 0,
+            "fileId": "protected-file",
+            "fileName": "protected.zip",
+            "isFolder": false,
+            "needAccessCode": 1,
+            "shareMode": 1
+        });
+        let http = Http::new(vec![protected]);
+        let mut input = candidate(CloudProvider::Tianyi);
+        input.access_code = None;
+
+        let result = provider_share_adapter(CloudProvider::Tianyi, &store, &http)
+            .unwrap()
+            .inspect(&input);
+
+        assert!(matches!(result, Ok(ShareInspection::AccessCodeRequired)));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tianyi_share_accepts_zero_count_directory_without_list_fields() {
+        let store = credentials();
+        let directory = json!({
+            "res_code": 0,
+            "shareId": 22,
+            "fileId": "empty-root",
+            "fileName": "empty",
+            "isFolder": true,
+            "needAccessCode": 0,
+            "shareMode": 1
+        });
+        // The live API returns exactly this compact empty-directory shape.
+        let empty_page = json!({"res_code": 0, "fileListAO": {"count": 0}});
+        let http = Http::new(vec![directory, empty_page]);
+        let mut input = candidate(CloudProvider::Tianyi);
+        input.access_code = None;
+
+        let result = provider_share_adapter(CloudProvider::Tianyi, &store, &http)
+            .unwrap()
+            .inspect(&input);
+
+        let ShareInspection::Plan(plan) = result.unwrap() else {
+            panic!("empty directory should still produce a share plan")
+        };
+        assert!(matches!(plan.root_kind, CloudShareRootKind::Directory));
+        assert!(plan.entries.is_empty());
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
+    }
     #[test]
     fn tianyi_share_validates_code_recurses_pages_and_carries_session_headers() {
         let store = credentials();
@@ -177,6 +247,25 @@ mod tests {
     }
 
     #[test]
+    fn tianyi_share_invalid_session_key_requires_reauthorization() {
+        let store = credentials();
+        let http = Http::new(vec![
+            json!({"res_code":0,"shareId":22,"fileId":"single","fileName":"verify.mp4","isFolder":false,"needAccessCode":0,"shareMode":1}),
+            json!({"errorCode":"InvalidSessionKey","errorMsg":"session invalid","success":false}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Tianyi, &store, &http).unwrap();
+        let mut input = candidate(CloudProvider::Tianyi);
+        input.access_code = None;
+        let ShareInspection::Plan(plan) = adapter.inspect(&input).unwrap() else {
+            panic!()
+        };
+
+        let result = adapter.resolve(&entry(plan));
+
+        assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
+    }
+
+    #[test]
     fn tianyi_share_rejects_wrong_checked_code_and_repeated_directory_entries() {
         let store = credentials();
         for checked in [
@@ -276,22 +365,37 @@ impl TianyiSession {
 }
 
 pub fn parse_tianyi_web_session(cookies: &[String]) -> Result<TianyiSession, QuarkError> {
-    let pairs = cookies
-        .iter()
-        .filter_map(|raw| {
-            let pair = raw.split(';').next()?.trim();
-            let (name, value) = pair.split_once('=')?;
-            (!value.is_empty() && matches!(name, "COOKIE_LOGIN_USER" | "SSON" | "SESSION" | "LT"))
-                .then(|| format!("{name}={value}"))
-        })
-        .collect::<Vec<_>>();
-    if !pairs
-        .iter()
-        .any(|pair| pair.starts_with("COOKIE_LOGIN_USER=") || pair.starts_with("SSON="))
-    {
+    // The WebView has already scoped these cookies to cloud.189.cn.  Keep the
+    // complete valid cookie jar: Tianyi's directory endpoint accepts only SSO
+    // cookies in some sessions, but its share-download endpoint can require a
+    // cloud-host session cookie such as JSESSIONID as well.
+    let mut pairs = BTreeMap::new();
+    for raw in cookies {
+        let pair = raw.split(';').next().unwrap_or("").trim();
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if valid_cookie_name(name) && !value.is_empty() && !value.chars().any(char::is_control) {
+            pairs.insert(name, value);
+        }
+    }
+    if !pairs.contains_key("COOKIE_LOGIN_USER") && !pairs.contains_key("SSON") {
         return Err(QuarkError::AuthorizationExpired);
     }
-    Ok(TianyiSession::cookie(pairs.join("; ")))
+    Ok(TianyiSession::cookie(
+        pairs
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    ))
+}
+
+fn valid_cookie_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
 #[derive(Clone, Debug)]
@@ -900,6 +1004,13 @@ fn tianyi_share_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> 
             }
         }
     }
+    if ["errorCode", "error_code"].iter().any(|field| {
+        value[*field]
+            .as_str()
+            .is_some_and(|code| code.eq_ignore_ascii_case("InvalidSessionKey"))
+    }) {
+        return Err(QuarkError::AuthorizationExpired);
+    }
     for key in ["res_code", "result", "errorCode", "error_code"] {
         if let Some(code) = value.get(key) {
             match i64_value(code) {
@@ -995,11 +1106,6 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
             "/api/open/share/getShareInfoByCode.action",
             &format!("shareCode={}", encoded(&code)),
         )?;
-        let id = info
-            .get("shareId")
-            .and_then(string_or_number)
-            .filter(|id| !id.is_empty())
-            .ok_or(QuarkError::InvalidResponse)?;
         let needs_code = match info.get("needAccessCode") {
             Some(value) => tianyi_share_flag(value)?,
             None => false,
@@ -1008,8 +1114,18 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
             let Some(access) = candidate.access_code.as_deref() else {
                 return Ok(ShareInspection::AccessCodeRequired);
             };
+            let id = info
+                .get("shareId")
+                .and_then(string_or_number)
+                .filter(|id| !id.is_empty())
+                .ok_or(QuarkError::InvalidResponse)?;
             session.check(&code, access, &id)?;
         }
+        let id = info
+            .get("shareId")
+            .and_then(string_or_number)
+            .filter(|id| !id.is_empty())
+            .ok_or(QuarkError::InvalidResponse)?;
         let root = info
             .get("fileId")
             .and_then(string_or_number)
@@ -1235,7 +1351,9 @@ fn tianyi_file_list(value: &Value) -> Result<Vec<(&Value, bool)>, QuarkError> {
             .filter_map(|(listing, _, _)| *listing)
             .all(|listing| listing.as_array().is_some_and(Vec::is_empty));
         let has_listing = listings.iter().any(|(listing, _, _)| listing.is_some());
-        if !items.is_empty() || (has_listing && known_empty_listing) {
+        let server_confirmed_empty =
+            !has_listing && u64_value(container.get("count")).is_some_and(|count| count == 0);
+        if !items.is_empty() || (has_listing && known_empty_listing) || server_confirmed_empty {
             return Ok(items);
         }
     }

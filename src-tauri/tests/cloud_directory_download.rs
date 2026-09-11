@@ -1,10 +1,12 @@
 use alldownloader_lib::cloud::{
     commands::{
-        plan_cloud_directory_download, retry_cloud_directory_group_item_with,
+        cloud_directory_member_retry_options, plan_cloud_directory_download,
+        plan_cloud_share_directory_download, retry_cloud_directory_group_item_with,
         retry_cloud_directory_group_with, submit_cloud_directory_plan,
         submit_cloud_directory_plan_with_group_event, CloudDownloadSourceGate,
         DirectoryLeafSubmission,
     },
+    share::{CloudShareDownloadEntry, CloudShareDownloadSelection},
     CloudDirectory, CloudFile, CloudProvider, QuarkError,
 };
 use alldownloader_lib::{
@@ -42,6 +44,94 @@ fn folder(id: &str, parent_id: &str, name: &str) -> CloudFile {
         size: None,
         modified_at: None,
     }
+}
+
+#[test]
+fn converts_a_share_directory_selection_into_one_safe_directory_plan() {
+    let share_hash = "a".repeat(64);
+    let first_hash = "b".repeat(64);
+    let second_hash = "c".repeat(64);
+    let selection = CloudShareDownloadSelection {
+        provider: CloudProvider::Quark,
+        plan_source: format!("cloud-share://quark/{share_hash}/{first_hash}"),
+        directory_name: Some("夸克分享目录".into()),
+        entries: vec![
+            CloudShareDownloadEntry {
+                selected_id: "first".into(),
+                source: format!("cloud-share://quark/{share_hash}/{first_hash}"),
+                name: "cover.jpg".into(),
+                relative_directory: vec![],
+                size: Some(11),
+            },
+            CloudShareDownloadEntry {
+                selected_id: "second".into(),
+                source: format!("cloud-share://quark/{share_hash}/{second_hash}"),
+                name: "nested.jpg".into(),
+                relative_directory: vec!["mobile".into()],
+                size: Some(22),
+            },
+        ],
+    };
+
+    let plan = plan_cloud_share_directory_download(&selection).unwrap();
+
+    assert_eq!(plan.files.len(), 2);
+    assert_eq!(plan.files[0].relative_directory, vec!["夸克分享目录"]);
+    assert_eq!(plan.files[0].output_name, "cover.jpg");
+    assert_eq!(plan.files[0].size, Some(11));
+    assert_eq!(
+        plan.files[1].relative_directory,
+        vec!["夸克分享目录", "mobile"]
+    );
+    assert_eq!(plan.files[1].size, Some(22));
+}
+
+#[tokio::test]
+async fn retrying_a_linked_share_leaf_reuses_its_original_directory_and_name() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let share_hash = "a".repeat(64);
+    let entry_hash = "b".repeat(64);
+    let source = format!("cloud-share://quark/{share_hash}/{entry_hash}");
+    let plan =
+        plan_cloud_directory_download(CloudProvider::Quark, "root", "夸克分享目录", |id| {
+            match id {
+                "root" => Ok(directory(id, vec![folder("mobile", id, "mobile")])),
+                "mobile" => Ok(directory(id, vec![file("wallpaper", id, "wallpaper.jpg")])),
+                _ => Err(QuarkError::InvalidResponse),
+            }
+        })
+        .unwrap();
+    let task_id = Arc::new(Mutex::new(None));
+    let recorded_task_id = Arc::clone(&task_id);
+    submit_cloud_directory_plan(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        plan,
+        UriSubmissionOptions {
+            directory: Some(destination.path().to_path_buf()),
+            ..Default::default()
+        },
+        |_, _, _| {
+            let task = store.create(NewTask::direct(source.clone())).unwrap();
+            *recorded_task_id.lock().unwrap() = Some(task.id);
+            std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+        },
+    )
+    .await
+    .unwrap();
+    let task_id = task_id.lock().unwrap().expect("directory leaf task");
+
+    let configured =
+        cloud_directory_member_retry_options(&store, task_id, UriSubmissionOptions::default())
+            .unwrap();
+
+    assert_eq!(
+        configured.directory,
+        Some(destination.path().join("夸克分享目录").join("mobile"))
+    );
+    assert_eq!(configured.output_name.as_deref(), Some("wallpaper.jpg"));
 }
 
 #[test]

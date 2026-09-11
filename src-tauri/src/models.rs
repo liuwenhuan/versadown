@@ -272,6 +272,11 @@ pub struct DownloadTask {
     pub status: TaskStatus,
     pub progress: u8,
     pub error: Option<String>,
+    /// Stable, user-safe classification for a terminal cloud failure. This is
+    /// intentionally separate from aria2's numeric error code so the UI can
+    /// offer the correct next action without parsing localized text.
+    #[serde(default)]
+    pub failure_code: Option<String>,
     #[serde(default)]
     pub aria_gid: Option<String>,
     #[serde(default)]
@@ -350,6 +355,13 @@ pub struct QueueTaskPayload {
     pub status: TaskStatus,
     pub progress: u8,
     pub error: Option<String>,
+    /// Stable, user-safe classification for a terminal cloud failure. This is
+    /// intentionally separate from aria2's numeric error code so the UI can
+    /// offer the correct next action without parsing localized text.
+    #[serde(default, rename = "failure_code")]
+    pub failure_code: Option<String>,
+    #[serde(rename = "reauthorization_required")]
+    pub reauthorization_required: bool,
     pub aria_gid: Option<String>,
     pub followed_by_gid: Option<String>,
     pub metadata_gid: Option<String>,

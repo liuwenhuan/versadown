@@ -83,6 +83,48 @@ mod tests {
         assert!(requests[5].url.contains("pass_code_token=pass-secret"));
     }
     #[test]
+    fn pikpak_share_uses_source_media_link_when_web_content_link_is_omitted() {
+        let store = credentials();
+        let http = Http::new(vec![
+            cap(),
+            pass(),
+            listing(),
+            cap(),
+            pass(),
+            json!({
+                "share_status":"OK",
+                "file_info":{
+                    "id":"f1",
+                    "kind":"drive#file",
+                    "medias":[{"link":{"url":"https://cdn.example/source-file"}}]
+                }
+            }),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
+        let ShareInspection::Plan(plan) =
+            adapter.inspect(&candidate(CloudProvider::Pikpak)).unwrap()
+        else {
+            panic!()
+        };
+
+        let ShareResolution::Direct(direct) = adapter.resolve(&entry(plan)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(direct.url, "https://cdn.example/source-file");
+    }
+    #[test]
+    fn pikpak_share_preserves_not_found_and_deleted_failures_for_the_parse_ui() {
+        for (share_status, expected) in [
+            ("NOT_FOUND", "PikPak 分享的文件不存在"),
+            ("DELETED", "PikPak 分享已删除"),
+        ] {
+            assert!(matches!(
+                pikpak_share_status(&json!({"share_status":share_status})),
+                Err(QuarkError::Provider(message)) if message == expected
+            ));
+        }
+    }
+    #[test]
     fn pikpak_share_pages_recursively_and_never_retries_challenges() {
         let store = credentials();
         let http = Http::new(vec![
@@ -1035,6 +1077,8 @@ fn pikpak_share_status(value: &Value) -> Result<(), QuarkError> {
         Some("PASS_CODE_EMPTY" | "PASS_CODE_ERROR") => Err(QuarkError::InvalidInput(
             "PikPak 分享访问码错误或缺失".into(),
         )),
+        Some("NOT_FOUND") => Err(QuarkError::Provider("PikPak 分享的文件不存在".into())),
+        Some("DELETED") => Err(QuarkError::Provider("PikPak 分享已删除".into())),
         Some(_) => Err(QuarkError::Provider("PikPak 分享已失效或无权访问".into())),
         None => Err(QuarkError::InvalidResponse),
     }
@@ -1163,8 +1207,10 @@ pub fn resolve_pikpak_share(
     if file["id"].as_str() != Some(entry.entry.entry_id.as_str()) || file["kind"] != "drive#file" {
         return Err(QuarkError::InvalidResponse);
     }
-    // A missing original URL is not permission to save a file or substitute a transcode.
-    let url = required(file, "web_content_link")?;
+    // Newer share responses can omit `web_content_link` while retaining the
+    // provider-issued source-media link.  Use only that first-party direct
+    // link; do not save the shared item into the user's personal drive.
+    let url = pikpak_share_content_link(file)?;
     super::share::validate_direct_url(&url)?;
     Ok(ShareResolution::Direct(
         super::commands::ResolvedCloudDownload {
@@ -1173,6 +1219,27 @@ pub fn resolve_pikpak_share(
             headers: session.headers.into_iter().collect(),
         },
     ))
+}
+fn pikpak_share_content_link(file: &Value) -> Result<String, QuarkError> {
+    match file.get("web_content_link") {
+        Some(Value::String(url)) if !url.is_empty() => return Ok(url.clone()),
+        Some(Value::Null | Value::String(_)) | None => {}
+        Some(_) => return Err(QuarkError::InvalidResponse),
+    }
+
+    let media = file
+        .get("medias")
+        .and_then(Value::as_array)
+        .and_then(|medias| medias.first())
+        .ok_or(QuarkError::InvalidResponse)?;
+    let link = media
+        .get("link")
+        .and_then(Value::as_object)
+        .ok_or(QuarkError::InvalidResponse)?;
+    match link.get("url") {
+        Some(Value::String(url)) if !url.is_empty() => Ok(url.clone()),
+        _ => Err(QuarkError::InvalidResponse),
+    }
 }
 pub fn parse_pikpak_file(v: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
     Ok(CloudFile {

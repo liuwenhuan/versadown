@@ -290,17 +290,50 @@ fn format_confirmation_size(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-pub fn selected_share_sources(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudShareDownloadEntry {
+    pub selected_id: String,
+    pub source: String,
+    pub name: String,
+    pub relative_directory: Vec<String>,
+    pub size: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudShareDownloadSelection {
+    pub provider: CloudProvider,
+    /// A stable, opaque source from the encrypted plan. It is safe to persist
+    /// as the directory-group identity and contains no share code or token.
+    pub plan_source: String,
+    /// Present only when the selected share resources must be represented by
+    /// one durable, expandable directory task.
+    pub directory_name: Option<String>,
+    pub entries: Vec<CloudShareDownloadEntry>,
+}
+
+fn provider_share_directory_name(provider: CloudProvider) -> &'static str {
+    match provider {
+        CloudProvider::Quark => "夸克分享目录",
+        CloudProvider::Pikpak => "PikPak分享目录",
+        CloudProvider::Baidu => "百度网盘分享目录",
+        CloudProvider::Tianyi => "天翼云盘分享目录",
+        CloudProvider::Aliyun => "阿里云盘分享目录",
+        CloudProvider::Xunlei => "迅雷云盘分享目录",
+        CloudProvider::Uc => "UC网盘分享目录",
+    }
+}
+
+pub fn selected_share_download(
     store: &CloudSharePlanStore,
     plan_source: &str,
     selected_ids: &[String],
-) -> Result<Vec<String>, QuarkError> {
+) -> Result<CloudShareDownloadSelection, QuarkError> {
     if selected_ids.is_empty() {
         return Err(QuarkError::InvalidInput("请至少选择一个分享文件".into()));
     }
     let plan = store.resolve_entry(plan_source)?.plan;
     let mut selected = BTreeSet::new();
-    selected_ids
+    let entries = selected_ids
         .iter()
         .map(|id| {
             let entry = plan
@@ -309,9 +342,50 @@ pub fn selected_share_sources(
                 .find(|entry| &entry.entry_fingerprint == id)
                 .filter(|_| selected.insert(id))
                 .ok_or_else(missing_plan)?;
-            Ok(plan.source_for(&entry.entry_id))
+            Ok(CloudShareDownloadEntry {
+                selected_id: id.clone(),
+                source: plan.source_for(&entry.entry_id),
+                name: entry.name.clone(),
+                relative_directory: entry.relative_directory.clone(),
+                size: entry.size,
+            })
         })
-        .collect::<Result<_, _>>()
+        .collect::<Result<Vec<_>, QuarkError>>()?;
+    let exact_shared_file = matches!(
+        &plan.root_kind,
+        CloudShareRootKind::File { entry_id }
+            if entries.len() == 1
+                && plan.entries.iter().any(|entry| {
+                    entry.entry_id == *entry_id
+                        && entry.entry_fingerprint == entries[0].selected_id
+                })
+    );
+    let grouped = !exact_shared_file
+        && (matches!(
+            plan.root_kind,
+            CloudShareRootKind::Directory | CloudShareRootKind::Collection
+        ) || entries.len() > 1
+            || entries
+                .iter()
+                .any(|entry| !entry.relative_directory.is_empty()));
+    Ok(CloudShareDownloadSelection {
+        provider: plan.provider,
+        plan_source: plan_source.to_owned(),
+        directory_name: grouped.then(|| provider_share_directory_name(plan.provider).to_owned()),
+        entries,
+    })
+}
+
+pub fn selected_share_sources(
+    store: &CloudSharePlanStore,
+    plan_source: &str,
+    selected_ids: &[String],
+) -> Result<Vec<String>, QuarkError> {
+    Ok(selected_share_download(store, plan_source, selected_ids)?
+        .entries
+        .into_iter()
+        .map(|entry| entry.source)
+        .collect())
 }
 
 pub(super) fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
@@ -2672,6 +2746,72 @@ mod tests {
     }
 
     #[test]
+    fn selected_directory_share_keeps_safe_paths_and_requests_one_group_root() {
+        let (store, _, _) = memory_store();
+        let mut plan = CloudSharePlan::new(
+            CloudProvider::Quark,
+            "shared-wallpapers".into(),
+            None,
+            vec![
+                CloudShareEntry::new(
+                    "shared-wallpapers",
+                    "cover".into(),
+                    "cover.jpg".into(),
+                    vec![],
+                    Some(11),
+                ),
+                CloudShareEntry::new(
+                    "shared-wallpapers",
+                    "nested".into(),
+                    "nested.jpg".into(),
+                    vec!["mobile".into()],
+                    Some(22),
+                ),
+            ],
+            serde_json::json!({}),
+        );
+        plan.root_kind = CloudShareRootKind::Directory;
+        let plan_source = plan.source_for("cover");
+        let selected_ids = plan
+            .entries
+            .iter()
+            .map(|entry| entry.entry_fingerprint.clone())
+            .collect::<Vec<_>>();
+        store.upsert(&plan).unwrap();
+
+        let selected = selected_share_download(&store, &plan_source, &selected_ids).unwrap();
+
+        assert_eq!(selected.provider, CloudProvider::Quark);
+        assert_eq!(selected.directory_name.as_deref(), Some("夸克分享目录"));
+        assert_eq!(selected.entries.len(), 2);
+        assert_eq!(selected.entries[0].selected_id, selected_ids[0]);
+        assert_eq!(selected.entries[0].relative_directory, Vec::<String>::new());
+        assert_eq!(selected.entries[0].size, Some(11));
+        assert!(selected.entries[0]
+            .source
+            .starts_with("cloud-share://quark/"));
+        assert_eq!(selected.entries[1].relative_directory, vec!["mobile"]);
+        assert_eq!(selected.entries[1].size, Some(22));
+    }
+
+    #[test]
+    fn exact_shared_file_remains_an_individual_download() {
+        let (store, _, _) = memory_store();
+        let mut plan = fixture("single-file-share");
+        plan.root_kind = CloudShareRootKind::File {
+            entry_id: "f1".into(),
+        };
+        let source = plan.source_for("f1");
+        let selected_id = plan.entries[0].entry_fingerprint.clone();
+        store.upsert(&plan).unwrap();
+
+        let selected = selected_share_download(&store, &source, &[selected_id]).unwrap();
+
+        assert_eq!(selected.directory_name, None);
+        assert_eq!(selected.entries.len(), 1);
+    }
+
+    #[test]
     fn stable_share_source_has_only_hashes_and_binds_entry_to_share() {
         let source = stable_share_source(CloudProvider::Baidu, "share-id", "file-id");
         let (provider, share, entry) = parse_stable_cloud_share_source(&source).unwrap();
@@ -3021,6 +3161,82 @@ mod tests {
             .plan
             .transfers
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_engine_keeps_a_share_directory_leaf_linked_to_its_failed_root() {
+        let (plans, _, _) = memory_store();
+        let plan = fixture("directory-engine-unavailable");
+        let source = plan.source_for("f1");
+        plans.upsert(&plan).unwrap();
+        let tasks = Arc::new(crate::TaskStore::open_in_memory().unwrap());
+        let destination = tempfile::tempdir().unwrap();
+        let group = tasks
+            .create_cloud_directory_group(
+                crate::models::NewCloudDirectoryGroup::new(
+                    CloudProvider::Baidu,
+                    source.clone(),
+                    "百度网盘分享目录",
+                    destination.path(),
+                ),
+                &[crate::models::NewCloudDirectoryGroupItem::new(
+                    source.clone(),
+                    &["百度网盘分享目录"],
+                    "file.txt",
+                    Some(7),
+                )],
+            )
+            .unwrap();
+        let item = tasks
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
+        let resolver_calls = Arc::new(AtomicU64::new(0));
+        let calls = resolver_calls.clone();
+
+        let outcome = crate::cloud::commands::submit_new_cloud_share_file_scoped_with(
+            tasks.clone(),
+            &plans,
+            source,
+            crate::UriSubmissionOptions {
+                directory: Some(destination.path().join("百度网盘分享目录")),
+                ..Default::default()
+            },
+            Some(crate::cloud::commands::DirectoryLeafContext {
+                group_id: group.id,
+                item_id: item.id,
+            }),
+            false,
+            || async {
+                Err::<Arc<crate::DownloadService>, _>(QuarkError::Transport(
+                    "engine unavailable".into(),
+                ))
+            },
+            || async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(QuarkError::InvalidResponse)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
+        assert_eq!(
+            outcome.queue_task.as_ref().map(|task| task.id.clone()),
+            Some(group.id.to_string())
+        );
+        assert_eq!(
+            outcome.queue_task.as_ref().map(|task| task.status),
+            Some(crate::TaskStatus::Failed)
+        );
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            tasks
+                .cloud_directory_group_for_task(outcome.payload.task.id)
+                .unwrap()
+                .map(|linked| linked.id),
+            Some(group.id)
+        );
     }
 
     #[tokio::test]

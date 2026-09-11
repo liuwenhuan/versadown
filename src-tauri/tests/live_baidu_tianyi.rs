@@ -8,14 +8,17 @@
 
 use alldownloader_lib::cloud::{
     baidu::{BaiduClient, BaiduSession},
+    share::{CloudShareResolvedEntry, ShareInspection, ShareResolution},
     tianyi::{TianyiClient, TianyiSession},
     CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport,
     CredentialStore, DpapiCredentialStore, QuarkError, ReqwestTransport, UploadHttpRequest,
     UploadHttpResponse,
 };
+use alldownloader_lib::extract_cloud_share_candidate;
 use std::{
     error::Error,
     fs, io,
+    io::Read,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -63,6 +66,85 @@ impl LiveTransport {
     }
 }
 
+/// Reports only response schema and public protocol flags. It must never
+/// include filenames, share identifiers, cookies, URLs, access codes, or
+/// server text, all of which may be private share context.
+fn public_value_shape(value: Option<&serde_json::Value>) -> String {
+    match value {
+        None => "absent".into(),
+        Some(serde_json::Value::Null) => "null".into(),
+        Some(serde_json::Value::Bool(value)) => format!("bool({value})"),
+        Some(serde_json::Value::Number(value)) => format!("number({value})"),
+        Some(serde_json::Value::String(value)) => {
+            let safe = value.len() <= 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte));
+            if safe {
+                format!("code({value})")
+            } else {
+                format!("string(len={})", value.len())
+            }
+        }
+        Some(serde_json::Value::Array(values)) => format!("array({})", values.len()),
+        Some(serde_json::Value::Object(_)) => "object".into(),
+    }
+}
+
+fn share_response_profile(value: Option<&serde_json::Value>) -> String {
+    let Some(value) = value else {
+        return String::new();
+    };
+    let mut fields = Vec::new();
+    for field in [
+        "errno",
+        "errtype",
+        "errorCode",
+        "needAccessCode",
+        "isFolder",
+        "shareMode",
+    ] {
+        if value.get(field).is_some() {
+            fields.push(format!("{field}={}", public_value_shape(value.get(field))));
+        }
+    }
+    if let Some(list) = value.get("fileListAO") {
+        fields.push(format!(
+            "list.count={}",
+            public_value_shape(list.get("count"))
+        ));
+        fields.push(format!(
+            "list.files={}",
+            public_value_shape(list.get("fileList"))
+        ));
+        fields.push(format!(
+            "list.folders={}",
+            public_value_shape(list.get("folderList"))
+        ));
+    }
+    if let Some(data) = value.get("data") {
+        fields.push(format!("data={}", public_value_shape(Some(data))));
+        if let Some(data) = data.as_object() {
+            for field in ["shareid", "uk", "has_more", "list"] {
+                if let Some(value) = data.get(field) {
+                    fields.push(format!("data.{field}={}", public_value_shape(Some(value))));
+                }
+            }
+            if data.contains_key("seckey") {
+                fields.push("data.seckey=present".into());
+            }
+        }
+    }
+    if let Some(list) = value.get("list") {
+        fields.push(format!("list={}", public_value_shape(Some(list))));
+    }
+    if fields.is_empty() {
+        String::new()
+    } else {
+        format!("; profile({})", fields.join(","))
+    }
+}
+
 impl CloudHttpTransport for LiveTransport {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         let request_description = Self::observe_request(&request);
@@ -75,6 +157,7 @@ impl CloudHttpTransport for LiveTransport {
                         .or_else(|| value.get("res_code"))
                         .or_else(|| value.get("result"))
                         .or_else(|| value.get("code"))
+                        .or_else(|| value.get("errorCode"))
                         .and_then(serde_json::Value::as_i64)
                 });
                 let markup_code = (!response.body.trim_start().starts_with('{'))
@@ -122,11 +205,12 @@ impl CloudHttpTransport for LiveTransport {
                     None => "non-json".into(),
                 };
                 self.observations.lock().unwrap().push(format!(
-                    "{request_description}; HTTP {}; provider_code={}; response={shape}",
+                    "{request_description}; HTTP {}; provider_code={}; response={shape}{}",
                     response.status,
                     code.map(|value| value.to_string())
                         .or(markup_code)
-                        .unwrap_or_else(|| "none".into())
+                        .unwrap_or_else(|| "none".into()),
+                    share_response_profile(parsed.as_ref())
                 ));
                 Ok(response)
             }
@@ -264,6 +348,620 @@ fn cookie_names(cookie: &str) -> String {
     names.sort_unstable();
     names.dedup();
     names.join(",")
+}
+
+/// Opens a real direct-download response but consumes at most the first KiB.
+/// This verifies the transfer boundary while keeping the 33 MB Tianyi sample
+/// and any other large public sample out of the local Downloads directory.
+/// The signed URL and all request headers deliberately remain unreported.
+fn probe_direct_download(
+    url: &str,
+    headers: &[(String, String)],
+) -> LiveResult<(u16, usize, Option<u64>)> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let mut request = client.get(url).header("Range", "bytes=0-1023");
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let mut response = request.send()?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Err(failure(format!(
+            "provider direct download returned HTTP {status}"
+        )));
+    }
+    let total = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit('/').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| response.content_length());
+    let mut bytes = [0_u8; 1024];
+    let read = response.read(&mut bytes)?;
+    if read == 0 {
+        return Err(failure("provider direct download returned an empty body"));
+    }
+    Ok((status, read, total))
+}
+
+fn require_live_share_samples() -> LiveResult<()> {
+    if std::env::var("ALLDOWNLOADER_LIVE_SHARE_SAMPLES").as_deref() != Ok("1") {
+        return Err(failure(
+            "live share-sample regression requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1",
+        ));
+    }
+    Ok(())
+}
+
+fn app_session_store() -> LiveResult<DpapiCredentialStore> {
+    let app_data = std::env::var_os("APPDATA")
+        .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
+    Ok(DpapiCredentialStore::new(
+        PathBuf::from(app_data)
+            .join("com.alldownloader.desktop")
+            .join("cloud-sessions"),
+    )?)
+}
+
+fn supplied_access_code(provider: &str, category: &str) -> Option<String> {
+    let variable = match (provider, category) {
+        ("百度", "目录（不提供访问码）") => "ALLDOWNLOADER_LIVE_BAIDU_ACCESS_CODE",
+        _ => return None,
+    };
+    std::env::var(variable)
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn report_share_error(provider: &str, category: &str, error: &QuarkError) {
+    // `Display` contains the app's localized user-facing error, never a
+    // request URL, cookie, signed link, or access code.
+    eprintln!("LIVE-SHARE {provider} {category}: error={error}");
+}
+
+/// Isolates which official web-context headers Baidu currently requires for
+/// the read-only share-list endpoint. Each request only lists the same public
+/// root and logs the numeric result code, never the response or session data.
+fn probe_baidu_share_header_profiles(
+    credentials: &DpapiCredentialStore,
+    http: &LiveTransport,
+) -> LiveResult<()> {
+    let session: BaiduSession = serde_json::from_slice(
+        &credentials
+            .load("baidu")?
+            .ok_or_else(|| failure("百度测试会话不存在"))?,
+    )?;
+    let form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("shorturl", "dG1NCeH")
+        .append_pair("pwd", "")
+        .append_pair("root", "1")
+        .append_pair("dir", "/")
+        .append_pair("num", "100")
+        .append_pair("page", "1")
+        .append_pair("order", "time")
+        .finish();
+    let native = "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;";
+    let browser = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
+    for (profile, user_agent, origin, referer) in [
+        ("native", native, None, None),
+        (
+            "native-referer",
+            native,
+            None,
+            Some("https://pan.baidu.com/s/1dG1NCeH"),
+        ),
+        (
+            "browser-referer",
+            browser,
+            None,
+            Some("https://pan.baidu.com/s/1dG1NCeH"),
+        ),
+        (
+            "browser-origin-referer",
+            browser,
+            Some("https://pan.baidu.com"),
+            Some("https://pan.baidu.com/s/1dG1NCeH"),
+        ),
+    ] {
+        let mut headers = std::collections::BTreeMap::from([
+            ("Cookie".into(), session.cookie.clone()),
+            ("User-Agent".into(), user_agent.into()),
+            (
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            ),
+        ]);
+        if let Some(origin) = origin {
+            headers.insert("Origin".into(), origin.into());
+        }
+        if let Some(referer) = referer {
+            headers.insert("Referer".into(), referer.into());
+        }
+        let response = http.send(CloudHttpRequest {
+            method: "POST",
+            url: "https://pan.baidu.com/share/wxlist?channel=weixin&version=2.2.2&clienttype=25&web=1".into(),
+            headers,
+            body: Some(form.clone()),
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&response.body)
+            .map_err(|_| failure("百度分享端点返回了无效 JSON"))?;
+        let errno = value
+            .get("errno")
+            .and_then(serde_json::Value::as_i64)
+            .map_or_else(|| "absent".into(), |value| value.to_string());
+        let errtype = value
+            .get("errtype")
+            .and_then(serde_json::Value::as_i64)
+            .map_or_else(|| "absent".into(), |value| value.to_string());
+        eprintln!("LIVE-SHARE 百度 header-profile={profile}: errno={errno}, errtype={errtype}");
+    }
+    let query = "shorturl=dG1NCeH&root=1&dir=%2F&num=100&page=1&order=time&desc=1";
+    for (method, body, mode) in [
+        (
+            "GET",
+            None,
+            "https://pan.baidu.com/share/list?web=1&channel=chunlei&clienttype=0&app_id=250528",
+        ),
+        (
+            "POST",
+            Some(form.clone()),
+            "https://pan.baidu.com/share/list?web=1&channel=chunlei&clienttype=0&app_id=250528",
+        ),
+    ] {
+        for (profile, user_agent, referer) in [
+            ("native", native, None),
+            (
+                "native-referer",
+                native,
+                Some("https://pan.baidu.com/s/1dG1NCeH"),
+            ),
+            (
+                "browser-referer",
+                browser,
+                Some("https://pan.baidu.com/s/1dG1NCeH"),
+            ),
+        ] {
+            let mut headers = std::collections::BTreeMap::from([
+                ("Cookie".into(), session.cookie.clone()),
+                ("User-Agent".into(), user_agent.into()),
+            ]);
+            if let Some(referer) = referer {
+                headers.insert("Referer".into(), referer.into());
+            }
+            if method == "POST" {
+                headers.insert(
+                    "Content-Type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                );
+            }
+            let response = http.send(CloudHttpRequest {
+                method,
+                url: format!("{mode}&{query}"),
+                headers,
+                body: body.clone(),
+            })?;
+            let value: serde_json::Value = serde_json::from_str(&response.body)
+                .map_err(|_| failure("百度候选分享端点返回了无效 JSON"))?;
+            let errno = value
+                .get("errno")
+                .and_then(serde_json::Value::as_i64)
+                .map_or_else(|| "absent".into(), |value| value.to_string());
+            eprintln!(
+                "LIVE-SHARE 百度 endpoint-profile=share-list-{method}-{profile}: errno={errno}{}",
+                share_response_profile(Some(&value))
+            );
+        }
+    }
+    let adapter_query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("shorturl", "dG1NCeH")
+        .append_pair("pwd", "")
+        .append_pair("root", "1")
+        .append_pair("dir", "/")
+        .append_pair("num", "100")
+        .append_pair("page", "1")
+        .append_pair("order", "time")
+        .finish();
+    let response = http.send(CloudHttpRequest {
+        method: "GET",
+        url: format!(
+            "https://pan.baidu.com/share/list?web=1&channel=chunlei&clienttype=0&app_id=250528&{adapter_query}"
+        ),
+        headers: std::collections::BTreeMap::from([
+            ("Cookie".into(), session.cookie),
+            ("User-Agent".into(), native.into()),
+        ]),
+        body: None,
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&response.body)
+        .map_err(|_| failure("百度当前分享请求返回了无效 JSON"))?;
+    let errno = value
+        .get("errno")
+        .and_then(serde_json::Value::as_i64)
+        .map_or_else(|| "absent".into(), |value| value.to_string());
+    eprintln!(
+        "LIVE-SHARE 百度 endpoint-profile=adapter-current: errno={errno}{}",
+        share_response_profile(Some(&value))
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1 and an existing local Baidu session"]
+fn live_baidu_share_header_profile_probe() -> LiveResult<()> {
+    require_live_share_samples()?;
+    let credentials = app_session_store()?;
+    let http = LiveTransport::new()?;
+    probe_baidu_share_header_profiles(&credentials, &http)?;
+    http.report();
+    Ok(())
+}
+
+#[test]
+#[ignore = "diagnostic: requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1 and an existing local Baidu session"]
+fn live_baidu_single_download_response_probe() -> LiveResult<()> {
+    require_live_share_samples()?;
+    let credentials = app_session_store()?;
+    let http = LiveTransport::new()?;
+    let candidate = extract_cloud_share_candidate("https://pan.baidu.com/s/1dG1NCeH", None)?
+        .ok_or_else(|| failure("百度单文件样本未被识别"))?;
+    let adapter = alldownloader_lib::cloud::share::provider_share_adapter(
+        candidate.provider,
+        &credentials,
+        &http,
+    )?;
+    let ShareInspection::Plan(plan) = adapter.inspect(&candidate)? else {
+        return Err(failure("百度单文件样本意外要求访问码"));
+    };
+    let share_id = plan.provider_context["shareid"]
+        .as_str()
+        .ok_or_else(|| failure("百度单文件样本缺少 shareid"))?
+        .to_owned();
+    let uk = plan.provider_context["uk"]
+        .as_str()
+        .ok_or_else(|| failure("百度单文件样本缺少 uk"))?
+        .to_owned();
+    let shorturl = plan.provider_context["shorturl"]
+        .as_str()
+        .ok_or_else(|| failure("百度单文件样本缺少 shorturl"))?
+        .to_owned();
+    let session: BaiduSession = serde_json::from_slice(
+        &credentials
+            .load("baidu")?
+            .ok_or_else(|| failure("百度测试会话不存在"))?,
+    )?;
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("surl", &shorturl)
+        .append_pair("fields", "sign,timestamp")
+        .append_pair("channel", "chunlei")
+        .append_pair("web", "1")
+        .append_pair("app_id", "250528")
+        .append_pair("clienttype", "0")
+        .append_pair("share_id", &share_id)
+        .append_pair("uk", &uk)
+        .finish();
+    for (profile, user_agent, referer) in [
+        (
+            "native",
+            "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;",
+            None,
+        ),
+        (
+            "native-referer",
+            "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;",
+            Some("https://pan.baidu.com/s/1dG1NCeH"),
+        ),
+        (
+            "browser-referer",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+            Some("https://pan.baidu.com/s/1dG1NCeH"),
+        ),
+    ] {
+        let mut headers = std::collections::BTreeMap::from([
+            ("Cookie".into(), session.cookie.clone()),
+            ("User-Agent".into(), user_agent.into()),
+        ]);
+        if let Some(referer) = referer {
+            headers.insert("Referer".into(), referer.into());
+        }
+        let response = http.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("https://pan.baidu.com/share/tplconfig?{query}"),
+            headers,
+            body: None,
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&response.body)
+            .map_err(|_| failure("百度签名配置端点返回了无效 JSON"))?;
+        let errno = value
+            .get("errno")
+            .and_then(serde_json::Value::as_i64)
+            .map_or_else(|| "absent".into(), |value| value.to_string());
+        eprintln!("LIVE-SHARE 百度 tplconfig-profile={profile}: errno={errno}");
+    }
+    let leading_surl_query =
+        query.replacen(&format!("surl={shorturl}"), &format!("surl=1{shorturl}"), 1);
+    for (profile, user_agent, referer) in [
+        (
+            "native-leading-surl",
+            "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;",
+            None,
+        ),
+        (
+            "browser-referer-leading-surl",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+            Some("https://pan.baidu.com/s/1dG1NCeH"),
+        ),
+    ] {
+        let mut headers = std::collections::BTreeMap::from([
+            ("Cookie".into(), session.cookie.clone()),
+            ("User-Agent".into(), user_agent.into()),
+        ]);
+        if let Some(referer) = referer {
+            headers.insert("Referer".into(), referer.into());
+        }
+        let response = http.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("https://pan.baidu.com/share/tplconfig?{leading_surl_query}"),
+            headers,
+            body: None,
+        })?;
+        let value: serde_json::Value = serde_json::from_str(&response.body)
+            .map_err(|_| failure("百度带前缀签名配置端点返回了无效 JSON"))?;
+        let errno = value
+            .get("errno")
+            .and_then(serde_json::Value::as_i64)
+            .map_or_else(|| "absent".into(), |value| value.to_string());
+        eprintln!("LIVE-SHARE 百度 tplconfig-profile={profile}: errno={errno}");
+    }
+    let entry = CloudShareResolvedEntry {
+        provider: plan.provider,
+        entry: plan
+            .entries
+            .first()
+            .cloned()
+            .ok_or_else(|| failure("百度单文件样本缺少文件项"))?,
+        plan,
+    };
+    match adapter.resolve(&entry) {
+        Ok(ShareResolution::Direct(_)) => eprintln!("LIVE-SHARE 百度 单文件: direct-resolution=ok"),
+        Ok(ShareResolution::TransferRequired(_)) => {
+            eprintln!("LIVE-SHARE 百度 单文件: transfer-required")
+        }
+        Err(error) => report_share_error("百度", "单文件 download-resolution", &error),
+    }
+    http.report();
+    Ok(())
+}
+
+/// Exercised against the user-supplied current samples only when explicitly
+/// enabled. It performs read-only share inspection plus a 1 KiB range probe
+/// for directly downloadable single files; it never stores a share plan,
+/// submits an aria2 task, copies share content to a personal cloud drive, or
+/// guesses a password. This keeps the user's task list and cloud data intact.
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1 and the current local Baidu/Tianyi sessions"]
+fn live_baidu_and_tianyi_share_samples() -> LiveResult<()> {
+    require_live_share_samples()?;
+    let credentials = app_session_store()?;
+    let http = LiveTransport::new()?;
+    for (provider, session) in [
+        (
+            "百度",
+            credentials
+                .load("baidu")?
+                .ok_or_else(|| failure("百度测试会话不存在"))?,
+        ),
+        (
+            "天翼",
+            credentials
+                .load("tianyi")?
+                .ok_or_else(|| failure("天翼测试会话不存在"))?,
+        ),
+    ] {
+        let result = if provider == "百度" {
+            let session: BaiduSession = serde_json::from_slice(&session)?;
+            BaiduClient::new(session, &http).account().map(|_| ())
+        } else {
+            let session: TianyiSession = serde_json::from_slice(&session)?;
+            TianyiClient::new(session, &http).account().map(|_| ())
+        };
+        match result {
+            Ok(()) => eprintln!("LIVE-SHARE {provider} account-probe=ok"),
+            Err(error) => report_share_error(provider, "account-probe", &error),
+        }
+    }
+    let samples = [
+        (
+            "百度",
+            "单文件",
+            "https://pan.baidu.com/s/1dG1NCeH",
+            false,
+            true,
+        ),
+        (
+            "百度",
+            "目录（不提供访问码）",
+            "https://pan.baidu.com/s/1_49elQi_54BPJASvAxAB6w",
+            true,
+            false,
+        ),
+        (
+            "百度",
+            "已取消",
+            "https://pan.baidu.com/s/1hIm_wG-LtGPYQ3lY2ANvxQ",
+            false,
+            false,
+        ),
+        (
+            "百度",
+            "带密码（不提供访问码）",
+            "https://pan.baidu.com/s/1ekPm-ooS0uvVA_J7ZqVGDQ",
+            true,
+            false,
+        ),
+        (
+            "天翼",
+            "单文件",
+            "https://cloud.189.cn/t/MjaIzmMJfeqy",
+            false,
+            true,
+        ),
+        (
+            "天翼",
+            "目录",
+            "https://cloud.189.cn/t/F7jUJnM7rINv",
+            false,
+            false,
+        ),
+        (
+            "天翼",
+            "已失效",
+            "https://cloud.189.cn/t/EvmUnymYBzyi",
+            false,
+            false,
+        ),
+        (
+            "天翼",
+            "带密码（不提供访问码）",
+            "https://cloud.189.cn/t/R7ZR7f73aEBb",
+            true,
+            false,
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    let provider_filter = std::env::var("ALLDOWNLOADER_LIVE_PROVIDER").ok();
+    let sample_filter = std::env::var("ALLDOWNLOADER_LIVE_SAMPLE").ok();
+    for (provider, category, url, expect_access_code, probe_download) in samples {
+        if provider_filter
+            .as_deref()
+            .is_some_and(|filter| filter != provider)
+            || sample_filter
+                .as_deref()
+                .is_some_and(|filter| filter != category)
+        {
+            continue;
+        }
+        let access_code = supplied_access_code(provider, category);
+        let candidate = extract_cloud_share_candidate(url, access_code.as_deref())
+            .map_err(|error| {
+                failure(format!(
+                    "{provider} {category}: parser rejected URL: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                failure(format!(
+                    "{provider} {category}: parser did not recognize URL"
+                ))
+            })?;
+        let adapter = alldownloader_lib::cloud::share::provider_share_adapter(
+            candidate.provider,
+            &credentials,
+            &http,
+        )?;
+        match adapter.inspect(&candidate) {
+            Ok(ShareInspection::AccessCodeRequired)
+                if expect_access_code && access_code.is_none() =>
+            {
+                eprintln!("LIVE-SHARE {provider} {category}: access-code-required");
+            }
+            Ok(ShareInspection::AccessCodeRequired) => failures.push(format!(
+                "{provider} {category}: unexpectedly requested an access code"
+            )),
+            Ok(ShareInspection::Plan(plan)) if expect_access_code && access_code.is_none() => {
+                failures.push(format!(
+                "{provider} {category}: unexpectedly inspected without an access code ({} entries)",
+                plan.entries.len()
+            ))
+            }
+            Ok(ShareInspection::Plan(plan)) => {
+                let root = match &plan.root_kind {
+                    alldownloader_lib::cloud::share::CloudShareRootKind::File { .. } => "file",
+                    alldownloader_lib::cloud::share::CloudShareRootKind::Directory => "directory",
+                    alldownloader_lib::cloud::share::CloudShareRootKind::Collection => "collection",
+                    alldownloader_lib::cloud::share::CloudShareRootKind::Unknown => "unknown",
+                };
+                eprintln!(
+                    "LIVE-SHARE {provider} {category}: inspected root={root}, entries={}",
+                    plan.entries.len()
+                );
+                if probe_download {
+                    let entry = plan.entries.first().cloned().ok_or_else(|| {
+                        failure(format!(
+                            "{provider} {category}: share has no downloadable entry"
+                        ))
+                    })?;
+                    let entry = CloudShareResolvedEntry {
+                        provider: plan.provider,
+                        plan,
+                        entry,
+                    };
+                    match adapter.resolve(&entry) {
+                        Ok(ShareResolution::Direct(download)) => {
+                            let (status, bytes, total) =
+                                probe_direct_download(&download.url, &download.headers)?;
+                            eprintln!(
+                                "LIVE-SHARE {provider} {category}: direct-transfer-started HTTP {status}, sampled={bytes}B, total={}",
+                                total.map_or_else(|| "unknown".into(), |size| size.to_string())
+                            );
+                        }
+                        Ok(ShareResolution::TransferRequired(_)) => failures.push(format!(
+                            "{provider} {category}: requires a personal-cloud transfer before download; probe intentionally did not mutate cloud data"
+                        )),
+                        Err(error) => {
+                            report_share_error(provider, category, &error);
+                            if provider == "百度" && matches!(&error, QuarkError::CaptchaRequired) {
+                                eprintln!(
+                                    "LIVE-SHARE {provider} {category}: download blocked by the provider captcha; no bypass attempted"
+                                );
+                            } else if provider == "天翼"
+                                && matches!(&error, QuarkError::AuthorizationExpired)
+                            {
+                                eprintln!(
+                                    "LIVE-SHARE {provider} {category}: download blocked because the saved authorized session has expired"
+                                );
+                            } else {
+                                failures.push(format!("{provider} {category}: {error}"));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                report_share_error(provider, category, &error);
+                if expect_access_code
+                    && access_code.is_some()
+                    && matches!(error, QuarkError::InvalidInput(_))
+                {
+                    eprintln!(
+                        "LIVE-SHARE {provider} {category}: remote rejected the explicitly supplied access code"
+                    );
+                } else if expect_access_code {
+                    failures.push(format!(
+                        "{provider} {category}: expected access-code-required, got {error}"
+                    ));
+                } else if category.contains("已取消") || category.contains("已失效") {
+                    if !matches!(error, QuarkError::Provider(_)) {
+                        failures.push(format!(
+                            "{provider} {category}: expected readable provider error, got {error}"
+                        ));
+                    }
+                } else {
+                    failures.push(format!("{provider} {category}: {error}"));
+                }
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failure(format!(
+            "live share sample failures: {}",
+            failures.join(" | ")
+        )))
+    }
 }
 
 fn tianyi_unauthenticated_response_shape(cookie: &str) -> LiveResult<String> {
