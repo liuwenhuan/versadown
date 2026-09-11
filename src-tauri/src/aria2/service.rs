@@ -939,14 +939,19 @@ impl DownloadService {
         task.upload_speed = snapshot.upload_speed;
         task.connections = snapshot.connections;
         task.eta_seconds = snapshot.eta_seconds;
-        task.aria_error_code = snapshot.error_code;
-        task.error = if task.source.starts_with("cloud-share://") {
-            snapshot
-                .error_message
-                .map(|_| "网盘分享下载失败，请重试或重新解析分享链接".into())
+        if task.status == TaskStatus::Completed {
+            task.aria_error_code = None;
+            task.error = None;
         } else {
-            snapshot.error_message
-        };
+            task.aria_error_code = snapshot.error_code;
+            task.error = if task.source.starts_with("cloud-share://") {
+                snapshot
+                    .error_message
+                    .map(|_| "网盘分享下载失败，请重试或重新解析分享链接".into())
+            } else {
+                snapshot.error_message
+            };
+        }
         let files = (!preserve_paused_progress)
             .then(|| {
                 snapshot

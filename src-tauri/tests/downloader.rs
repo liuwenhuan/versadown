@@ -20,6 +20,7 @@ struct RecordingAria2 {
     add_error: bool,
     pause_error: bool,
     status_error_message: Option<String>,
+    completed_status_error_message: Option<String>,
     cancel_release: Option<Arc<tokio::sync::Notify>>,
 }
 
@@ -84,6 +85,10 @@ impl Aria2Api for RecordingAria2 {
         let mut status = Self::active(gid);
         if let Some(message) = &self.status_error_message {
             status.status = "error".into();
+            status.error_code = Some("22".into());
+            status.error_message = Some(message.clone());
+        } else if let Some(message) = &self.completed_status_error_message {
+            status.status = "complete".into();
             status.error_code = Some("22".into());
             status.error_message = Some(message.clone());
         }
@@ -261,6 +266,40 @@ async fn cloud_share_aria_failure_redacts_signed_urls_but_retains_http_error_cod
     assert!(!serde_json::to_string(&store.find(task.id).unwrap())
         .unwrap()
         .contains("cdn.example"));
+}
+
+#[tokio::test]
+async fn cloud_share_completion_discards_a_stale_failure_message() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{stable_share_source, submit_current_share_download},
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = Arc::new(RecordingAria2 {
+        completed_status_error_message: Some("a stale aria2 error".into()),
+        ..Default::default()
+    });
+    let service = DownloadService::new(api, store.clone());
+    let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
+    let prepared = prepared_cloud_share_task(&store, &source, "episode.mp4");
+
+    let completed = submit_current_share_download(
+        &service,
+        &prepared,
+        ResolvedCloudDownload {
+            url: "https://cdn.example/episode?signature=secret-token".into(),
+            name: "episode.mp4".into(),
+            headers: vec![],
+        },
+        UriSubmissionOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(completed.status, TaskStatus::Completed);
+    assert_eq!(completed.error, None);
+    assert_eq!(store.find(completed.id).unwrap().error, None);
 }
 
 #[tokio::test]

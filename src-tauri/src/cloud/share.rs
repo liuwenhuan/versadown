@@ -311,7 +311,7 @@ pub struct CloudShareDownloadSelection {
     pub entries: Vec<CloudShareDownloadEntry>,
 }
 
-fn provider_share_directory_name(provider: CloudProvider) -> &'static str {
+pub(crate) fn provider_share_directory_name(provider: CloudProvider) -> &'static str {
     match provider {
         CloudProvider::Quark => "夸克分享目录",
         CloudProvider::Pikpak => "PikPak分享目录",
@@ -321,6 +321,18 @@ fn provider_share_directory_name(provider: CloudProvider) -> &'static str {
         CloudProvider::Xunlei => "迅雷云盘分享目录",
         CloudProvider::Uc => "UC网盘分享目录",
     }
+}
+
+fn parsed_share_directory_name(entries: &[CloudShareDownloadEntry]) -> Option<String> {
+    let root = entries.first()?.relative_directory.first()?.trim();
+    (!root.is_empty()
+        && entries.iter().all(|entry| {
+            entry
+                .relative_directory
+                .first()
+                .is_some_and(|component| component == root)
+        }))
+    .then(|| root.to_owned())
 }
 
 pub fn selected_share_download(
@@ -371,7 +383,10 @@ pub fn selected_share_download(
     Ok(CloudShareDownloadSelection {
         provider: plan.provider,
         plan_source: plan_source.to_owned(),
-        directory_name: grouped.then(|| provider_share_directory_name(plan.provider).to_owned()),
+        directory_name: grouped.then(|| {
+            parsed_share_directory_name(&entries)
+                .unwrap_or_else(|| provider_share_directory_name(plan.provider).to_owned())
+        }),
         entries,
     })
 }
@@ -2792,6 +2807,45 @@ mod tests {
             .starts_with("cloud-share://quark/"));
         assert_eq!(selected.entries[1].relative_directory, vec!["mobile"]);
         assert_eq!(selected.entries[1].size, Some(22));
+    }
+
+    #[test]
+    fn selected_directory_share_uses_its_single_parsed_directory_name() {
+        let (store, _, _) = memory_store();
+        let mut plan = CloudSharePlan::new(
+            CloudProvider::Quark,
+            "shared-video".into(),
+            None,
+            vec![
+                CloudShareEntry::new(
+                    "shared-video",
+                    "episode".into(),
+                    "episode.mp4".into(),
+                    vec!["YM-JFSMBYHS".into()],
+                    Some(100),
+                ),
+                CloudShareEntry::new(
+                    "shared-video",
+                    "bonus".into(),
+                    "bonus.mp4".into(),
+                    vec!["YM-JFSMBYHS".into(), "Extras".into()],
+                    Some(200),
+                ),
+            ],
+            serde_json::json!({}),
+        );
+        plan.root_kind = CloudShareRootKind::Directory;
+        let plan_source = plan.source_for("episode");
+        let selected_ids = plan
+            .entries
+            .iter()
+            .map(|entry| entry.entry_fingerprint.clone())
+            .collect::<Vec<_>>();
+        store.upsert(&plan).unwrap();
+
+        let selected = selected_share_download(&store, &plan_source, &selected_ids).unwrap();
+
+        assert_eq!(selected.directory_name.as_deref(), Some("YM-JFSMBYHS"));
     }
 
     #[test]

@@ -3,7 +3,6 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BatchTaskCommand, displayTaskName, DownloadQueue } from './components/DownloadQueue';
 import { NewDownloadDialog } from './components/NewDownloadDialog';
-import { NewDownloadTab } from './components/NewDownloadTab';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
 import { RemoveTaskDialog } from './components/RemoveTaskDialog';
@@ -12,7 +11,7 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace } from './components/CloudWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { cancelDownloadFile, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
@@ -23,10 +22,11 @@ import { getResolvedTheme, subscribeTheme } from './lib/theme';
 import type { CloudAuthorization } from './lib/cloudTypes';
 
 type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
-type DownloadTab = 'new' | TaskListTab;
 type TaskSortMode = 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
 
 const defaultTaskSort: TaskSortMode = 'created-desc';
+const backgroundPurgeThreshold = 100;
+const backgroundPurgeBatchSize = 50;
 const initialTaskSorts: Record<TaskListTab, TaskSortMode> = {
   active: defaultTaskSort,
   completed: defaultTaskSort,
@@ -209,8 +209,9 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<ParseResult | null>(null);
   const [duplicateQueue, setDuplicateQueue] = useState<DuplicateDownload[]>([]);
+  const [resolvingDuplicateId, setResolvingDuplicateId] = useState<string | null>(null);
   const [view, setView] = useState<ManagerView>('downloads');
-  const [downloadTab, setDownloadTab] = useState<DownloadTab>('active');
+  const [downloadTab, setDownloadTab] = useState<TaskListTab>('active');
   const [taskSorts, setTaskSorts] = useState<Record<TaskListTab, TaskSortMode>>(initialTaskSorts);
   const [searchInput, setSearchInput] = useState('');
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
@@ -225,11 +226,10 @@ export function App() {
   const completedTasks = useMemo(() => tasks.filter((task) => task.status === 'completed'), [tasks]);
   const failedTasks = useMemo(() => tasks.filter((task) => task.status === 'failed'), [tasks]);
   const recycledTasks = useMemo(() => tasks.filter((task) => task.status === 'recycled' || task.status === 'cancelled'), [tasks]);
-  const taskListTab: TaskListTab = downloadTab === 'new' ? 'active' : downloadTab;
-  const unsortedVisibleTasks = taskListTab === 'active' ? activeTasks
-    : taskListTab === 'completed' ? completedTasks
-      : taskListTab === 'failed' ? failedTasks : recycledTasks;
-  const visibleTasks = useMemo(() => sortTasks(unsortedVisibleTasks, taskSorts[taskListTab]), [taskListTab, taskSorts, unsortedVisibleTasks]);
+  const unsortedVisibleTasks = downloadTab === 'active' ? activeTasks
+    : downloadTab === 'completed' ? completedTasks
+      : downloadTab === 'failed' ? failedTasks : recycledTasks;
+  const visibleTasks = useMemo(() => sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]), [downloadTab, taskSorts, unsortedVisibleTasks]);
   const detailsTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, tasks]);
   const downloadingTasks = tasks.filter((task) => task.status === 'downloading');
   const pausedTasks = tasks.filter((task) => task.status === 'paused');
@@ -246,12 +246,11 @@ export function App() {
   const engineEventEpoch = useRef(0);
   const tasksRef = useRef<QueueTask[]>(tasks);
   const confirmationGeneration = useRef(0);
-  const newDownloadConfirmationResolver = useRef<((confirmed: boolean) => void) | null>(null);
   const shareConfirmationsInFlight = useRef(new Set<number>());
   const duplicateActionInFlight = useRef(false);
   const duplicateCloseInFlight = useRef(false);
   tasksRef.current = tasks;
-  const duplicate = duplicateQueue[0] ?? null;
+  const duplicate = resolvingDuplicateId ? null : duplicateQueue[0] ?? null;
 
   function enqueueDuplicate(next: DuplicateDownload) {
     setDuplicateQueue((current) => [...current, next]);
@@ -265,18 +264,6 @@ export function App() {
   function dismissConfirmation() {
     confirmationGeneration.current += 1;
     setConfirmation(null);
-    newDownloadConfirmationResolver.current?.(false);
-    newDownloadConfirmationResolver.current = null;
-  }
-
-  function awaitNewDownloadConfirmation(): Promise<boolean> {
-    newDownloadConfirmationResolver.current?.(false);
-    return new Promise((resolve) => { newDownloadConfirmationResolver.current = resolve; });
-  }
-
-  function finishNewDownloadConfirmation(confirmed: boolean) {
-    newDownloadConfirmationResolver.current?.(confirmed);
-    newDownloadConfirmationResolver.current = null;
   }
 
   function dismissDuplicate(taskId: string) {
@@ -513,7 +500,10 @@ export function App() {
     let unlisten: (() => void) | undefined;
     listen<unknown>('launcher-navigate', (event) => {
       const destination = managerViewFromLauncherPayload(event.payload);
-      if (destination) setView(destination);
+      if (destination) {
+        setView(destination);
+        if (destination !== 'downloads') setSidebarCollapsed(false);
+      }
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
     return () => { disposed = true; unlisten?.(); };
   }, []);
@@ -563,6 +553,7 @@ export function App() {
     if (!duplicate || duplicateActionInFlight.current) return;
     duplicateActionInFlight.current = true;
     const taskId = duplicate.task.id;
+    setResolvingDuplicateId(taskId);
     try {
       const updated = await resolveDuplicateDownload(taskId, action);
       if (updated) {
@@ -575,6 +566,7 @@ export function App() {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
     } finally {
       duplicateActionInFlight.current = false;
+      setResolvingDuplicateId((current) => current === taskId ? null : current);
     }
   }
 
@@ -621,7 +613,6 @@ export function App() {
           }
         } else {
           setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? null : current);
-          finishNewDownloadConfirmation(true);
         }
       } catch (error) {
         if (confirmationGeneration.current === requestGeneration) {
@@ -642,7 +633,6 @@ export function App() {
     const confirmed = nativeTask ?? task;
     recordTaskEvent(confirmed);
     setTasks((current) => upsertTask(current, confirmed)); setSelectedTaskId(confirmed.id); setConfirmation(null);
-    finishNewDownloadConfirmation(true);
   }
 
   function reopenTaskConfirmation(task: QueueTask) {
@@ -684,6 +674,10 @@ export function App() {
       }
       if (command === 'open_directory') {
         await openTaskDirectory(id);
+        return;
+      }
+      if (command === 'open_file') {
+        await openTaskFile(id);
         return;
       }
       if (command === 'play_videos') {
@@ -815,14 +809,42 @@ export function App() {
   async function confirmTaskRemoval(deleteFiles: boolean) {
     const ids = pendingPurgeTaskIds ?? [];
     if (!ids.length) return;
+    const removeTasksFromQueue = (taskIds: readonly string[]) => {
+      const removed = new Set(taskIds);
+      setTasks((current) => current.filter((task) => !removed.has(task.id)));
+      setSelectedTaskId((current) => current && removed.has(current) ? null : current);
+      setDetailsTaskId((current) => current && removed.has(current) ? null : current);
+    };
+    const successMessage = deleteFiles ? '任务和下载文件已彻底删除' : '任务已从回收站彻底删除，下载文件已保留';
+    if (ids.length >= backgroundPurgeThreshold) {
+      setPendingPurgeTaskIds(null);
+      setNotice({ kind: 'success', message: `正在后台删除 0 / ${ids.length} 个任务` });
+      void (async () => {
+        let deleted = 0;
+        for (let start = 0; start < ids.length; start += backgroundPurgeBatchSize) {
+          const batch = ids.slice(start, start + backgroundPurgeBatchSize);
+          try {
+            await purgeRecycledTasks(batch, deleteFiles);
+          } catch (error) {
+            setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+            void refreshTaskSnapshot(() => false, 'terminal');
+            return;
+          }
+          removeTasksFromQueue(batch);
+          await refreshTaskSnapshot(() => false, 'terminal');
+          deleted += batch.length;
+          setNotice({ kind: 'success', message: `正在后台删除 ${deleted} / ${ids.length} 个任务` });
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        }
+        setNotice({ kind: 'success', message: successMessage });
+      })();
+      return;
+    }
     try {
       await purgeRecycledTasks(ids, deleteFiles);
-      const removed = new Set(ids);
-      setTasks((current) => current.filter((task) => !removed.has(task.id)));
-      if (selectedTaskId && removed.has(selectedTaskId)) setSelectedTaskId(null);
-      if (detailsTaskId && removed.has(detailsTaskId)) setDetailsTaskId(null);
+      removeTasksFromQueue(ids);
       setPendingPurgeTaskIds(null);
-      setNotice({ kind: 'success', message: deleteFiles ? '任务和下载文件已彻底删除' : '任务已从回收站彻底删除，下载文件已保留' });
+      setNotice({ kind: 'success', message: successMessage });
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
     }
@@ -841,7 +863,7 @@ export function App() {
     setDownloadTab('active');
   }
 
-  function selectDownloadTab(tab: DownloadTab) {
+  function selectDownloadTab(tab: TaskListTab) {
     setDownloadTab(tab);
     setSelectedTaskId(null);
   }
@@ -880,15 +902,6 @@ export function App() {
           <div className="brand-mark" data-icon-variant={resolvedTheme} aria-hidden="true"><img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" /></div>
           <h1>万能下载</h1>
         </div>
-        <button
-          type="button"
-          className="sidebar-toggle"
-          aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-          aria-controls="primary-navigation"
-          aria-expanded={!sidebarCollapsed}
-          title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-          onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
-        ><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
         <label className="global-search">
           <span aria-hidden="true">⌕</span>
           <input
@@ -919,8 +932,8 @@ export function App() {
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
+            <button type="button" className="sidebar-toggle" aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
             <div className="download-tab-list workspace-tab-list" role="tablist" aria-label="下载任务">
-              <button role="tab" aria-selected={downloadTab === 'new'} onClick={() => selectDownloadTab('new')}>新建下载</button>
               <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'failed'} onClick={() => selectDownloadTab('failed')}>失败 <b>{failedTasks.length}</b></button>
@@ -931,11 +944,11 @@ export function App() {
               {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" onClick={requestRecycleClear}>清空</button>}
             </div>
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
-            {downloadTab !== 'new' && <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} />}
+            <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} />
           </header>
-          {downloadTab === 'new' ? <NewDownloadTab onParse={parse} onAwaitConfirmation={awaitNewDownloadConfirmation} onComplete={() => setDownloadTab('active')} /> : <section className="queue-area">
+          <section className="queue-area">
             <DownloadQueue tasks={visibleTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onFileSelection={selectTaskFile} onFileCancel={cancelTaskFile} onConfirm={reopenTaskConfirmation} />
-          </section>}
+          </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} /></section>
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} /></section>}

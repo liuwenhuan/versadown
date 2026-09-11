@@ -1171,6 +1171,12 @@ pub fn plan_cloud_share_directory_download(
         return Err(QuarkError::InvalidInput("目录下载包含过多文件".into()));
     }
     let root = safe_directory_component(root_name);
+    let strip_promoted_root = selection.entries.iter().all(|entry| {
+        entry
+            .relative_directory
+            .first()
+            .is_some_and(|component| component == root_name)
+    });
     let mut sources = HashSet::new();
     let files = selection
         .entries
@@ -1186,6 +1192,7 @@ pub fn plan_cloud_share_directory_download(
                 entry
                     .relative_directory
                     .iter()
+                    .skip(usize::from(strip_promoted_root))
                     .map(|component| safe_directory_component(component)),
             );
             Ok(PlannedCloudFile {
@@ -3534,6 +3541,7 @@ mod tests {
         cloud_failure_code, create_cloud_task, requires_cloud_reauthorization_failure,
         resolve_download, retry_read_with_refreshed_web_session,
     };
+    use crate::cloud::share::{CloudShareDownloadEntry, CloudShareDownloadSelection};
     use crate::cloud::{
         baidu::{parse_baidu_web_session, BaiduSession},
         save_password_credential,
@@ -3560,6 +3568,47 @@ mod tests {
         assert!(!requires_cloud_reauthorization_failure(Some(
             cloud_failure_code(&QuarkError::Provider("temporary failure".into()),)
         )));
+    }
+
+    #[test]
+    fn shared_directory_plan_does_not_repeat_the_promoted_root_in_its_file_tree() {
+        let selection = CloudShareDownloadSelection {
+            provider: CloudProvider::Quark,
+            plan_source: "cloud-share://quark/plan".into(),
+            directory_name: Some("YM-JFSMBYHS".into()),
+            entries: vec![
+                CloudShareDownloadEntry {
+                    selected_id: "episode".into(),
+                    source: crate::cloud::share::stable_share_source(
+                        CloudProvider::Quark,
+                        "share",
+                        "episode",
+                    ),
+                    name: "episode.mp4".into(),
+                    relative_directory: vec!["YM-JFSMBYHS".into()],
+                    size: Some(100),
+                },
+                CloudShareDownloadEntry {
+                    selected_id: "bonus".into(),
+                    source: crate::cloud::share::stable_share_source(
+                        CloudProvider::Quark,
+                        "share",
+                        "bonus",
+                    ),
+                    name: "bonus.mp4".into(),
+                    relative_directory: vec!["YM-JFSMBYHS".into(), "Extras".into()],
+                    size: Some(200),
+                },
+            ],
+        };
+
+        let plan = super::plan_cloud_share_directory_download(&selection).unwrap();
+
+        assert_eq!(plan.files[0].relative_directory, vec!["YM-JFSMBYHS"]);
+        assert_eq!(
+            plan.files[1].relative_directory,
+            vec!["YM-JFSMBYHS", "Extras"]
+        );
     }
 
     #[test]

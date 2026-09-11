@@ -116,6 +116,10 @@ export async function openTaskDirectory(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_directory', { taskId });
 }
 
+export async function openTaskFile(taskId: string): Promise<void> {
+  if (isTauriRuntime()) await invoke('open_task_file', { taskId });
+}
+
 export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<CloudShareBatchResult> {
   if (!isTauriRuntime()) return { outcomes: [], failures: [] };
   const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, destinationDirectory });

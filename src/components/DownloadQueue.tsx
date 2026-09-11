@@ -54,17 +54,45 @@ function displayChildName(child: QueueTask, root: string | undefined): string {
   return display.join('/') || child.name;
 }
 
-const videoExtensions = new Set(['3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'ts', 'webm', 'wmv']);
+const playableMediaExtensions = new Set(['3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'ts', 'webm', 'wmv', 'aac', 'aiff', 'alac', 'ape', 'flac', 'm4a', 'mka', 'mp3', 'oga', 'ogg', 'opus', 'wav', 'wma']);
+type AssociatedFileType = 'text' | 'image' | 'pdf' | 'office';
 
-function hasVideoExtension(path: string): boolean {
+const associatedFileExtensions: Record<AssociatedFileType, ReadonlySet<string>> = {
+  text: new Set(['cfg', 'conf', 'csv', 'css', 'htm', 'html', 'ini', 'json', 'log', 'md', 'markdown', 'rst', 'text', 'toml', 'tsv', 'txt', 'xml', 'yaml', 'yml']),
+  image: new Set(['avif', 'bmp', 'gif', 'heic', 'ico', 'jpeg', 'jpg', 'png', 'svg', 'tif', 'tiff', 'webp']),
+  pdf: new Set(['pdf']),
+  office: new Set(['doc', 'docm', 'docx', 'dot', 'dotm', 'dotx', 'odp', 'ods', 'odt', 'pot', 'potm', 'potx', 'pps', 'ppsm', 'ppsx', 'ppt', 'pptm', 'pptx', 'rtf', 'wps', 'xls', 'xlsb', 'xlsm', 'xlsx', 'xlt', 'xltm', 'xltx']),
+};
+
+const associatedFileLabels: Record<AssociatedFileType, string> = {
+  text: '打开文本',
+  image: '打开图片',
+  pdf: '打开 PDF',
+  office: '打开 Office 文档',
+};
+
+function hasPlayableMediaExtension(path: string): boolean {
   const extension = path.trim().split(/[?#]/, 1)[0].split('.').pop()?.toLowerCase();
-  return extension !== undefined && videoExtensions.has(extension);
+  return extension !== undefined && playableMediaExtensions.has(extension);
 }
 
-export function taskHasVideo(task: QueueTask): boolean {
+function associatedFileType(path: string): AssociatedFileType | undefined {
+  const basename = path.trim().replace(/\\/g, '/').split('/').at(-1);
+  const extension = basename?.split('.').pop()?.toLowerCase();
+  if (!extension) return undefined;
+  return (Object.keys(associatedFileExtensions) as AssociatedFileType[]).find((type) => associatedFileExtensions[type].has(extension));
+}
+
+function taskAssociatedFileType(task: QueueTask): AssociatedFileType | undefined {
+  if (task.kind === 'folder' || task.children?.length) return undefined;
   const files = task.files?.filter((file) => file.selected !== false) ?? [];
-  if (files.length) return files.some((file) => hasVideoExtension(file.path));
-  return [task.name, ...(task.children?.map((child) => child.name) ?? [])].some(hasVideoExtension);
+  return files.length === 1 ? associatedFileType(files[0].path) : undefined;
+}
+
+export function taskHasPlayableMedia(task: QueueTask): boolean {
+  const files = task.files?.filter((file) => file.selected !== false) ?? [];
+  if (files.length) return files.some((file) => hasPlayableMediaExtension(file.path));
+  return task.kind !== 'folder' && hasPlayableMediaExtension(task.name);
 }
 
 export function completedTaskSize(task: QueueTask): string | undefined {
@@ -87,13 +115,23 @@ export function completedAt(completedAt: number | undefined): string | undefined
   return `完成于 ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function childFileSize(task: QueueTask): string {
+  if (typeof task.total_length === 'number' && task.total_length > 0) return formatBytes(task.total_length);
+  const fileSize = task.files
+    ?.filter((file) => file.selected !== false)
+    .reduce((total, file) => total + Math.max(file.length, file.completed_length), 0);
+  if (fileSize && fileSize > 0) return formatBytes(fileSize);
+  if (task.status === 'completed' && task.completed_length && task.completed_length > 0) return formatBytes(task.completed_length);
+  return task.size || '—';
+}
+
 function taskSubtitle(task: QueueTask): string | undefined {
   if (task.error) return task.error;
   if (task.statusMessage) return task.statusMessage;
   const fileCount = task.children?.length ?? task.files?.length ?? 0;
   if (task.kind === 'magnet') return `磁力任务 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
   if (task.kind === 'torrent') return `BT 种子 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
-  if (task.kind === 'folder') return `目录任务 · ${fileCount} 个文件`;
+  if (task.kind === 'folder') return '网盘下载任务';
   if (task.kind === 'cloud') return '网盘下载任务';
   return undefined;
 }
@@ -104,7 +142,7 @@ function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 
-function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'play' | 'folder' | 'more' }) {
+function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'play' | 'folder' | AssociatedFileType | 'more' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause'
     ? <><path d="M8 5v14" /><path d="M16 5v14" /></>
     : action === 'resume' ? <path d="m9 6 9 6-9 6z" />
@@ -112,7 +150,11 @@ function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry
         : action === 'retry' || action === 'reauthorize' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
           : action === 'play' ? <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>
             : action === 'folder' ? <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>
-              : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
+              : action === 'text' ? <><path d="M7 3.5h7l3 3V20.5H7z" /><path d="M14 3.5v3h3M9.5 11h5M9.5 14h5M9.5 17h3" /></>
+                : action === 'image' ? <><rect x="3.5" y="5" width="17" height="14" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m5.5 17 4.5-4 3.5 3 2.5-2 2.5 3" /></>
+                  : action === 'pdf' ? <><path d="M7 3.5h7l3 3V20.5H7z" /><path d="M14 3.5v3h3M9.5 16.5h5M9.5 12h5" /></>
+                    : action === 'office' ? <><path d="M7 3.5h7l3 3V20.5H7z" /><path d="M14 3.5v3h3M9.5 11h5M9.5 15h5M12 9v8" /></>
+                      : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
 }
 
 type TaskMenuCommand = TaskCommand | 'delete';
@@ -170,6 +212,7 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
     reauthorize: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     retry_cleanup: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     open_directory: <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>,
+    open_file: <><path d="M7 3.5h7l3 3V20.5H7z" /><path d="M14 3.5v3h3M9.5 12h5M9.5 16h5" /></>,
     play_videos: <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>,
     copy_link: <><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
     details: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5M12 8h.01" /></>,
@@ -248,10 +291,11 @@ interface QueueTreeRowsProps {
   onFileCancel?: DownloadQueueProps['onFileCancel'];
   parentTaskId: string;
   isBtFileTree: boolean;
+  completedRoot: boolean;
   childRoot?: string;
 }
 
-function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSelection, onFileCancel, parentTaskId, isBtFileTree, childRoot }: QueueTreeRowsProps) {
+function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSelection, onFileCancel, parentTaskId, isBtFileTree, completedRoot, childRoot }: QueueTreeRowsProps) {
   return <>{nodes.map((node) => {
     const nodeChildren = node.children ?? [];
     const hasChildren = nodeChildren.length > 0;
@@ -266,7 +310,13 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const isBtFile = isBtFileTree && node.file_index !== undefined;
     const canUseFileSelection = isBtFile && Boolean(onFileSelection) && ['downloading', 'paused', 'queued'].includes(node.status);
     const canUseTaskCommand = !isBtFile && !isFolder && Boolean(primaryAction);
-    const error = node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
+    const canPlay = !isFolder && node.status === 'completed' && hasPlayableMediaExtension(node.name);
+    const openableFileType = node.status === 'completed' ? taskAssociatedFileType(node) : undefined;
+    const error = node.status === 'completed' ? undefined : node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
+    const transferSize = childFileSize(node);
+    const isFileLeaf = !hasChildren && !isFolder;
+    const completionTime = completedRoot && isFileLeaf && node.status === 'completed' ? completedAt(node.completed_at ?? node.completedAt) : undefined;
+    const showsCompletionSummary = completedRoot && isFileLeaf && node.status === 'completed';
     return <div className="queue-tree-node" key={node.id}>
       <article className={`child-row queue-tree-row${hasChildren ? ' has-children' : ''}`} style={{ paddingLeft: `${21 + depth * 22}px` }}>
         <span className="child-name">
@@ -275,23 +325,27 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
           <b title={nodeName}>{nodeName}</b>
           {error && <small className="queue-tree-error" title={error}>{error}</small>}
         </span>
-        <span className="child-progress" aria-hidden="true"><i><b style={{ width: `${node.progress}%` }} /></i></span>
-        <small className="child-progress-value">{node.progress}%</small>
-        <small className="child-transfer-size" title={node.size}>{node.size || '—'}</small>
-        {(canUseFileSelection || canUseTaskCommand) && <span className="child-actions">
-          <button aria-label={`${primaryAction === 'reauthorize' ? '重新授权' : primaryAction === 'retry' ? '重新下载' : selectionAction === 'pause' ? '暂停' : '继续'} ${nodeName}`} title={primaryAction === 'reauthorize' ? '重新授权' : primaryAction === 'retry' ? '重新下载' : `${selectionAction === 'pause' ? '暂停' : '继续'}此文件`} onClick={(event) => {
-            event.stopPropagation();
-            if (isBtFile) onFileSelection!(parentTaskId, node.file_index!, selectionAction === 'resume');
-            else if (primaryAction) onCommand(node.id, primaryAction);
-          }}><ActionIcon action={primaryAction === 'reauthorize' ? 'reauthorize' : primaryAction === 'retry' ? 'retry' : selectionAction} /></button>
-          {isBtFile && fileIsSelected && onFileCancel
-            ? <button className="child-cancel" aria-label={`取消 ${nodeName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onFileCancel(parentTaskId, node.file_index!); }}><ActionIcon action="cancel" /></button>
-            : !isBtFile && canUseTaskCommand && node.status !== 'failed'
-              ? <button className="child-cancel" aria-label={`取消 ${nodeName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onCommand(node.id, 'cancel'); }}><ActionIcon action="cancel" /></button>
-              : null}
+        {showsCompletionSummary
+          ? <small className="child-completion-time" style={{ gridColumn: 'span 2' }}>{completionTime}</small>
+          : <><span className="child-progress" aria-hidden="true"><i><b style={{ width: `${node.progress}%` }} /></i></span><small className="child-progress-value">{node.progress}%</small></>}
+        <small className="child-transfer-size" title={transferSize}>{transferSize}</small>
+        {(canUseFileSelection || canUseTaskCommand || canPlay || openableFileType) && <span className="child-actions">
+          {canPlay ? <button aria-label={`播放 ${nodeName}`} title="播放" onClick={(event) => { event.stopPropagation(); onCommand(node.id, 'play_videos'); }}><ActionIcon action="play" /></button> : <>
+            {openableFileType ? <button aria-label={`${associatedFileLabels[openableFileType]} ${nodeName}`} title="使用系统默认应用打开" onClick={(event) => { event.stopPropagation(); onCommand(node.id, 'open_file'); }}><ActionIcon action={openableFileType} /></button> : <button aria-label={`${primaryAction === 'reauthorize' ? '重新授权' : primaryAction === 'retry' ? '重新下载' : selectionAction === 'pause' ? '暂停' : '继续'} ${nodeName}`} title={primaryAction === 'reauthorize' ? '重新授权' : primaryAction === 'retry' ? '重新下载' : `${selectionAction === 'pause' ? '暂停' : '继续'}此文件`} onClick={(event) => {
+              event.stopPropagation();
+              if (isBtFile) onFileSelection!(parentTaskId, node.file_index!, selectionAction === 'resume');
+              else if (primaryAction) onCommand(node.id, primaryAction);
+            }}><ActionIcon action={primaryAction === 'reauthorize' ? 'reauthorize' : primaryAction === 'retry' ? 'retry' : selectionAction} /></button>
+            }
+            {isBtFile && fileIsSelected && onFileCancel
+              ? <button className="child-cancel" aria-label={`取消 ${nodeName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onFileCancel(parentTaskId, node.file_index!); }}><ActionIcon action="cancel" /></button>
+              : !isBtFile && canUseTaskCommand && node.status !== 'failed'
+                ? <button className="child-cancel" aria-label={`取消 ${nodeName} 下载`} title="取消此文件下载" onClick={(event) => { event.stopPropagation(); onCommand(node.id, 'cancel'); }}><ActionIcon action="cancel" /></button>
+                : null}
+          </>}
         </span>}
       </article>
-      {hasChildren && isExpanded && <div className="queue-tree-children"><QueueTreeRows nodes={nodeChildren} depth={depth + 1} expanded={expanded} onToggle={onToggle} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={parentTaskId} isBtFileTree={isBtFileTree} /></div>}
+      {hasChildren && isExpanded && <div className="queue-tree-children"><QueueTreeRows nodes={nodeChildren} depth={depth + 1} expanded={expanded} onToggle={onToggle} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={parentTaskId} isBtFileTree={isBtFileTree} completedRoot={completedRoot} /></div>}
     </div>;
   })}</>;
 }
@@ -386,7 +440,8 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : primaryAction === 'reauthorize' ? '重新授权' : '重新下载';
         const completedSize = isCompleted ? completedTaskSize(task) : undefined;
         const completionTime = isCompleted ? completedAt(task.completed_at ?? task.completedAt) : undefined;
-        const completedHasVideo = isCompleted && taskHasVideo(task);
+        const completedHasPlayableMedia = isCompleted && taskHasPlayableMedia(task);
+        const completedFileType = isCompleted ? taskAssociatedFileType(task) : undefined;
         return <div className="task-group" key={task.id}>
           <article className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
@@ -397,13 +452,13 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
             {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</>}</span></div></div>}
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
-              {isCompleted && <button className="completed-quick-action" aria-label={completedHasVideo ? `播放 ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasVideo ? '播放视频' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasVideo ? 'play_videos' : 'open_directory'); }}><ActionIcon action={completedHasVideo ? 'play' : 'folder'} /></button>}
+              {isCompleted && <button className="completed-quick-action" aria-label={completedHasPlayableMedia ? `播放 ${taskName}` : completedFileType ? `${associatedFileLabels[completedFileType]} ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasPlayableMedia ? '播放视频或音频' : completedFileType ? '使用系统默认应用打开' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasPlayableMedia ? 'play_videos' : completedFileType ? 'open_file' : 'open_directory'); }}><ActionIcon action={completedHasPlayableMedia ? 'play' : completedFileType ?? 'folder'} /></button>}
               {task.status === 'awaiting_user' && (task.kind === 'magnet' || task.kind === 'torrent') && onConfirm && <button aria-label={`确认下载 ${taskName}`} title="确认下载内容" onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认</button>}
               {primaryAction && <button className={primaryAction === 'reauthorize' ? 'reauthorize-action' : undefined} aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} />{primaryAction === 'reauthorize' && <span>重新授权</span>}</button>}
               <button className="task-more-button" aria-label={`更多操作 ${taskName}`} title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>
             </div>
           </article>
-          {hasChildren && isExpanded && <div className="children queue-tree"><QueueTreeRows nodes={taskChildren!} depth={0} expanded={expanded} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={task.id} isBtFileTree={isBtFileTree} childRoot={childRoot} /></div>}
+          {hasChildren && isExpanded && <div className="children queue-tree"><QueueTreeRows nodes={taskChildren!} depth={0} expanded={expanded} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={task.id} isBtFileTree={isBtFileTree} completedRoot={isCompleted} childRoot={childRoot} /></div>}
         </div>;
       })}
       {contextMenu && <TaskContextMenu state={contextMenu} onClose={closeContextMenu} onCommand={runCommand} />}

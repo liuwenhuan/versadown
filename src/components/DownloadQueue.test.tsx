@@ -100,6 +100,26 @@ it('reveals nested cloud directory files only after each directory is expanded',
   expect(onCommand).toHaveBeenCalledWith('behind', 'pause');
 });
 
+it('shows an active cloud directory with the standard transfer metrics', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'shared-directory', name: 'YM-JFSMBYHS', kind: 'folder', status: 'downloading', progress: 9,
+      total_length: 178 * 1024 * 1024, completed_length: Math.round(15.8 * 1024 * 1024),
+      download_speed: Math.round(313.5 * 1024), eta_seconds: 8 * 60 + 49,
+      children: [{ id: 'episode', name: 'episode.mp4', kind: 'cloud', status: 'downloading', progress: 9 }],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('15.8 MB / 178 MB')).toBeVisible();
+  expect(screen.getByText('网盘下载任务')).toBeVisible();
+  expect(screen.getByText('剩余 8 分 49 秒')).toBeVisible();
+  expect(screen.getByText('313.5 KB/s')).toBeVisible();
+  expect(screen.queryByText('目录任务 · 1 个文件')).not.toBeInTheDocument();
+});
+
 it('does not expose expansion for a single-file torrent task', () => {
   render(<DownloadQueue
     tasks={[{
@@ -161,6 +181,100 @@ it('keeps completed BT file lists collapsed while completed cloud folders remain
   expect(screen.queryByText('one.mkv')).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '展开 完成的云盘目录' }));
   expect(screen.getByText('archived.mkv')).toBeVisible();
+});
+
+it('renders completed cloud-directory media children with full sizes and playback actions', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'completed-cloud-directory', name: '已完成媒体目录', kind: 'folder', status: 'completed', progress: 100,
+      children: [
+        {
+          id: 'completed-video-child', name: 'episode.mp4', kind: 'cloud', status: 'completed', progress: 100,
+          total_length: 1_048_576, completed_length: 512, error: '网盘分享下载失败，请重试或重新解析分享链接',
+        },
+        {
+          id: 'completed-audio-child', name: 'commentary.mp3', kind: 'cloud', status: 'completed', progress: 100,
+          total_length: 2_097_152, completed_length: 1_024,
+        },
+        {
+          id: 'completed-file-metadata-child', name: 'cached.mp4', kind: 'cloud', status: 'completed', progress: 100,
+          files: [{ index: 1, path: 'D:/Downloads/cached.mp4', length: 3_145_728, completed_length: 3_145_728, selected: true }],
+        },
+      ],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '展开 已完成媒体目录' }));
+
+  expect(screen.getByText('1 MB')).toBeVisible();
+  expect(screen.getByText('2 MB')).toBeVisible();
+  expect(screen.getByText('3 MB')).toBeVisible();
+  expect(screen.queryByText('网盘分享下载失败，请重试或重新解析分享链接')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '播放 episode.mp4' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-video-child', 'play_videos');
+  await user.click(screen.getByRole('button', { name: '播放 commentary.mp3' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-audio-child', 'play_videos');
+});
+
+it('shows each completed file time instead of progress in a completed cloud directory', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const { container } = render(<DownloadQueue
+    tasks={[{
+      id: 'completed-time-directory', name: '已完成归档', kind: 'folder', status: 'completed', progress: 100,
+      children: [{
+        id: 'completed-time-file', name: 'finale.mp4', kind: 'cloud', status: 'completed', progress: 100,
+        completed_at: 1_789_095_720, total_length: 1_048_576, completed_length: 1_048_576,
+      }],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '展开 已完成归档' }));
+
+  const fileRow = container.querySelector('.child-row')!;
+  expect(fileRow).toHaveTextContent('完成于 2026-09-11 11:02');
+  expect(fileRow).toHaveTextContent('1 MB');
+  expect(fileRow.querySelector('.child-progress')).toBeNull();
+  expect(fileRow.querySelector('.child-progress-value')).toBeNull();
+  await user.click(screen.getByRole('button', { name: '播放 finale.mp4' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-time-file', 'play_videos');
+});
+
+it('keeps completed nested directories on their existing progress display', async () => {
+  const user = userEvent.setup();
+  const { container } = render(<DownloadQueue
+    tasks={[{
+      id: 'completed-nested-root', name: '完成根目录', kind: 'folder', status: 'completed', progress: 100,
+      children: [{
+        id: 'completed-nested-directory', name: '第二季', kind: 'folder', status: 'completed', progress: 100,
+        children: [{
+          id: 'completed-nested-file', name: 'finale.mp4', kind: 'cloud', status: 'completed', progress: 100,
+          completed_at: 1_789_095_720,
+        }],
+      }],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '展开 完成根目录' }));
+
+  const directoryRow = container.querySelector('.child-row')!;
+  expect(directoryRow).toHaveTextContent('100%');
+  expect(directoryRow.querySelector('.child-progress')).not.toBeNull();
+  expect(directoryRow.querySelector('.child-completion-time')).toBeNull();
+
+  await user.click(screen.getByRole('button', { name: '展开 第二季' }));
+  expect(screen.getByText('完成于 2026-09-11 11:02')).toBeVisible();
 });
 
 it('uses file operations instead of transfer status for expanded multi-file tasks and removes local path noise', async () => {
@@ -367,6 +481,74 @@ it('opens the download directory for a completed task without video files', asyn
   expect(screen.getByText('1.5 MB')).toBeVisible();
   await user.click(screen.getByRole('button', { name: '打开 archive.zip 所在目录' }));
   expect(onCommand).toHaveBeenCalledWith('completed-archive', 'open_directory');
+});
+
+it('opens completed text, image, PDF, and Office files with their associated applications', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      {
+        id: 'completed-text', name: 'notes.txt', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes.txt', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-image', name: 'cover.png', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/cover.png', length: 256, completed_length: 256, selected: true }],
+      },
+      {
+        id: 'completed-pdf', name: 'guide.pdf', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/guide.pdf', length: 512, completed_length: 512, selected: true }],
+      },
+      {
+        id: 'completed-office', name: 'report.docx', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/report.docx', length: 1024, completed_length: 1024, selected: true }],
+      },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '打开文本 notes.txt' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-text', 'open_file');
+  await user.click(screen.getByRole('button', { name: '打开图片 cover.png' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-image', 'open_file');
+  await user.click(screen.getByRole('button', { name: '打开 PDF guide.pdf' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-pdf', 'open_file');
+  await user.click(screen.getByRole('button', { name: '打开 Office 文档 report.docx' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-office', 'open_file');
+});
+
+it('classifies completed local filenames without treating hash or question-mark characters as URL syntax', () => {
+  render(<DownloadQueue
+    tasks={[
+      {
+        id: 'completed-hash-text', name: 'notes#1.txt', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes#1.txt', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-disguised-executable', name: 'notes.txt#1.exe', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes.txt#1.exe', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-question-text', name: 'notes?1.txt', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes?1.txt', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-question-executable', name: 'notes.txt?1.exe', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes.txt?1.exe', length: 128, completed_length: 128, selected: true }],
+      },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByRole('button', { name: '打开文本 notes#1.txt' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 notes.txt#1.exe 所在目录' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开文本 notes?1.txt' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 notes.txt?1.exe 所在目录' })).toBeVisible();
 });
 
 it('offers cleanup retry only from the typed completed-task state', async () => {

@@ -239,6 +239,7 @@ pub fn run() {
             commands::task_action,
             commands::resolve_duplicate_download,
             commands::open_task_directory,
+            commands::open_task_file,
             commands::play_task_videos,
             commands::remove_task_record,
             commands::recycle_task,

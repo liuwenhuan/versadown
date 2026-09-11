@@ -188,32 +188,7 @@ it('requests active tasks for the first paint before loading terminal tabs in th
   expect(state.list.mock.calls.map(([scope]) => scope)).toEqual(['active', 'terminal']);
 });
 
-it('parses each non-empty line from the first new-download tab and then opens downloading tasks', async () => {
-  const user = userEvent.setup();
-  const firstTask: QueueTask = { id: 'batch-1', name: 'first.zip', kind: 'file', status: 'downloading', progress: 0 };
-  const secondTask: QueueTask = { id: 'batch-2', name: 'second.mp4', kind: 'file', status: 'queued', progress: 0 };
-  state.parse
-    .mockResolvedValueOnce({ task: firstTask })
-    .mockResolvedValueOnce({ task: secondTask });
-
-  render(<App />);
-
-  const tabs = screen.getAllByRole('tab');
-  expect(tabs[0]).toHaveAccessibleName('新建下载');
-  await user.click(tabs[0]);
-  await user.type(screen.getByRole('textbox', { name: '下载链接' }), 'https://example.test/first.zip{enter}{enter}https://example.test/second.mp4');
-  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
-
-  await waitFor(() => expect(state.parse.mock.calls).toEqual([
-    ['https://example.test/first.zip', undefined],
-    ['https://example.test/second.mp4', undefined],
-  ]));
-  expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true');
-  expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('first.zip')).toBeVisible();
-  expect(within(screen.getByRole('region', { name: '下载队列' })).getByTitle('second.mp4')).toBeVisible();
-});
-
-it('opens downloading tasks after confirming a download parsed from the new-download tab', async () => {
+it('opens downloading tasks after confirming a download parsed from the toolbar dialog', async () => {
   const user = userEvent.setup();
   state.parse.mockResolvedValueOnce({
     confirmation: {
@@ -224,12 +199,11 @@ it('opens downloading tasks after confirming a download parsed from the new-down
   state.confirm.mockResolvedValueOnce({ id: 'torrent-batch', name: 'collection', kind: 'torrent', status: 'downloading', progress: 0 });
 
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: '新建下载' }));
-  await user.type(screen.getByRole('textbox', { name: '下载链接' }), 'magnet:?xt=urn:btih:abc');
+  await user.click(screen.getByRole('button', { name: '新建下载' }));
+  await user.type(screen.getByRole('textbox', { name: '下载内容' }), 'magnet:?xt=urn:btih:abc');
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
 
   expect(await screen.findByRole('dialog', { name: '确认下载内容' })).toBeVisible();
-  expect(screen.getByRole('tab', { name: '新建下载' })).toHaveAttribute('aria-selected', 'true');
   await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
 
   await waitFor(() => expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true'));
@@ -431,6 +405,58 @@ it('opens one permanent-delete confirmation for all selected recycled tasks', as
   expect(screen.getByRole('dialog', { name: '彻底删除任务' })).toHaveTextContent('2 个任务');
   fireEvent.click(screen.getByRole('button', { name: '彻底删除' }));
   await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledWith(expect.arrayContaining(['purge-1', 'purge-2']), false));
+});
+
+it('keeps large recycle cleanup visible until each 50-task background batch completes', async () => {
+  const user = userEvent.setup();
+  const firstBatch = deferred<void>();
+  const secondBatch = deferred<void>();
+  const recycled = Array.from({ length: 100 }, (_, index): QueueTask => ({
+    ...oldTask,
+    id: `background-purge-${index}`,
+    name: `background-purge-${index}.zip`,
+    status: 'recycled',
+    progress: 100,
+  }));
+  let terminalTasks = recycled;
+  let batchNumber = 0;
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? terminalTasks : []));
+  state.purgeTasks.mockImplementation((ids: string[]) => {
+    const completion = batchNumber++ === 0 ? firstBatch : secondBatch;
+    return completion.promise.then(() => {
+      terminalTasks = terminalTasks.filter((task) => !ids.includes(task.id));
+    });
+  });
+  render(<App />);
+
+  await user.click(await screen.findByRole('tab', { name: /回收站/ }));
+  await user.click(screen.getByRole('button', { name: '清空' }));
+  const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
+  expect(dialog).toHaveTextContent('100 个任务');
+
+  await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
+
+  await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledOnce());
+  const firstBatchIds = state.purgeTasks.mock.calls[0][0] as string[];
+  expect(firstBatchIds).toHaveLength(50);
+  expect(state.purgeTasks.mock.calls[0][1]).toBe(false);
+  expect(screen.queryByRole('dialog', { name: '彻底删除任务' })).not.toBeInTheDocument();
+  const firstBatchName = recycled.find((task) => task.id === firstBatchIds[0])!.name;
+  const waitingTaskName = recycled.find((task) => !firstBatchIds.includes(task.id))!.name;
+  expect(screen.getByText(firstBatchName)).toBeVisible();
+
+  await act(async () => { firstBatch.resolve(undefined); });
+
+  await waitFor(() => {
+    expect(screen.queryByText(firstBatchName)).not.toBeInTheDocument();
+    expect(screen.getByText(waitingTaskName)).toBeVisible();
+    expect(state.purgeTasks).toHaveBeenCalledTimes(2);
+  });
+  expect(state.purgeTasks.mock.calls[1][0]).toHaveLength(50);
+  expect(state.purgeTasks.mock.calls[1][1]).toBe(false);
+
+  await act(async () => { secondBatch.resolve(undefined); });
+  await waitFor(() => expect(screen.queryByText(waitingTaskName)).not.toBeInTheDocument());
 });
 
 it('clears cleanup retry only after the typed task action result reports success', async () => {
@@ -780,6 +806,28 @@ it('ignores concurrent duplicate resolutions and advances to the next duplicate 
   await waitFor(() => expect(screen.getByRole('dialog', { name: '检测到重复下载' })).toHaveTextContent('second-existing.bin'));
 });
 
+it('closes an overwrite confirmation before its native resolution completes', async () => {
+  const resolution = deferred<QueueTask>();
+  state.parse.mockResolvedValueOnce({
+    duplicate: {
+      task: { id: 'overwrite-existing', name: 'overwrite.bin', kind: 'file', status: 'failed', progress: 28 },
+      state: 'overwrite_required',
+    },
+  });
+  state.resolveDuplicate.mockReturnValueOnce(resolution.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://example.test/overwrite.bin' }); });
+  const dialog = await screen.findByRole('dialog', { name: '检测到重复下载' });
+  fireEvent.click(within(dialog).getByRole('button', { name: '覆盖并重新下载' }));
+
+  expect(state.resolveDuplicate).toHaveBeenCalledWith('overwrite-existing', 'overwrite');
+  expect(screen.queryByRole('dialog', { name: '检测到重复下载' })).not.toBeInTheDocument();
+
+  await act(async () => { resolution.resolve({ id: 'overwrite-existing', name: 'overwrite.bin', kind: 'file', status: 'downloading', progress: 0 }); });
+});
+
 it('retrieves a compatible service model and persists the selected AI configuration', async () => {
   const user = userEvent.setup();
   state.listAiModels.mockResolvedValue(['gpt-4.1-mini', 'gpt-5-mini']);
@@ -813,6 +861,21 @@ it('opens the normal new-download dialog from the floating-ball menu command', a
   act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
 
   expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+});
+
+it('expands primary navigation when the launcher opens a non-download workspace', async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  const navigation = screen.getByRole('navigation', { name: '主导航' });
+  await waitFor(() => expect(state.listeners.get('launcher-navigate')).toBeDefined());
+
+  await user.click(screen.getByRole('button', { name: '收起侧边栏' }));
+  expect(navigation).toHaveAttribute('aria-hidden', 'true');
+
+  act(() => { state.listeners.get('launcher-navigate')?.({ payload: 'cloud' }); });
+
+  expect(navigation).toHaveAttribute('aria-hidden', 'false');
+  expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
 });
 
 it('uses the existing native task action for floating-ball batch resume', async () => {
