@@ -142,3 +142,33 @@ Rust 均设置 `CARGO_TARGET_DIR=.tools/test-target` 并调用 `C:/Users/deepin/
 - checked：Tauri 命令名/参数、账户 JSON、file kind、stable sources 和安全单账号保存流程未变；只在成功账户返回后保存密码凭据，验证失败不会进入 browser host。
 - checked：回退判定没有再包住 post-validation；百度偏好写入也不发生在失败的 account/root 之前；真实 fixture 明确证明底层 login 已完成才发生注入错误。
 - 疑虑：未做真实账号/实际 WebView 交互；天翼 account 无独立网络阶段的测试限制见上。没有剩余已知阻塞问题。
+
+## Fix round 2：session 保存失败不触碰浏览器偏好（2026-09-12）
+
+复审确认前一轮仍遗漏 save 阶段：百度在 account/root 验证后先清除 preference，再保存 session；session 保存失败虽不回退浏览器，但已有 preference remove 副作用。本轮范围仅此顺序，不改协议、接口或 UI。
+
+### RED → GREEN
+
+先增加百度、天翼各一项真实 driver 保存失败用例，共同复用完整登录、account/root fixture，只在 CredentialStore 保存 session 的边界注入 Storage、带原始消息的 Provider 和 CaptchaRequired。断言原错误 JSON code/message、browser host 0 次、旧 session 未替换，以及 store 记录只能有一次失败的 session save，不能有 preference save/remove。
+
+- RED 命令：`cargo test --manifest-path src-tauri/Cargo.toml --lib native_driver_session_save_failure`。
+- RED 结果：1 failed（百度）/1 passed（天翼），百度实际记录 `[remove:cloud-password-baidu-browser-preferred, save:baidu]`，预期仅 `[save:baidu]`。失败前的错误、浏览器次数和旧会话断言均已通过；这是实际副作用失败，不是编译/环境错误。
+- 最小实现：把百度 `set_browser_password_login_preferred(..., false)` 移至 `save_provider_session(...)?` 成功之后；天翼生产代码无需更改。
+- GREEN：同一命令退出 0，2 passed；三种错误均保持原样且没有偏好副作用。
+
+### 本轮验收与自审
+
+本轮所有 Rust 命令仍使用 `C:/Users/deepin/.cargo/bin/cargo.exe`、`CARGO_TARGET_DIR=.tools/test-target`。
+
+| 实际命令 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib cloud::commands` | 90 通过，241 未运行 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_provider_contract --test cloud_session` | 16 + 15 = 31 通过 |
+| `./scripts/build-windows.ps1` | 退出 0；release 27.88 秒，重新发布 exe 和 aria2 sidecar |
+| `git diff --check` | 退出 0 |
+
+本轮实际重跑 Rust 121 项。按本轮指示，纯 Rust 顺序微调复用同一 Task 4 fix round 1 的前端 113 项与 `pnpm build`（62 模块）通过证据，未声称本轮重跑前端；发布脚本确认前端未变并复用 dist。没有执行全量测试，只有基线编译提示。
+
+自审：生产 diff 仅一行重排；commands/driver 职责、唯一 factory provider match、Tauri 名称和前端契约均未改变。新增两项测试共 111 行，测试模块 346 → 457 行。确认 session save 的 Err 在到达偏好清除前即退出；天翼路径始终没有偏好写删。
+
+风险边界：没有引入跨键事务；session 成功保存后若偏好清除本身失败，仍原样返回该错误，不回退浏览器。本轮只修复“session 保存失败时不得先修改偏好”，未扩大为通用凭据事务。未使用真实账号或实际 WebView；无剩余已知阻塞问题。

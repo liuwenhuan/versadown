@@ -165,8 +165,8 @@ impl ProviderAuth for BaiduDriver<'_> {
             let client = baidu::BaiduClient::new(session.clone(), http);
             let account = client.account()?;
             client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
-            set_browser_password_login_preferred(store, provider, false)?;
             save_provider_session(CloudProvider::Baidu, store, &session)?;
+            set_browser_password_login_preferred(store, provider, false)?;
             Ok(account)
         })
     }

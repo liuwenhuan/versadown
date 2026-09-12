@@ -197,6 +197,117 @@ impl CredentialStore for LoginStore {
     }
 }
 
+struct SessionSaveFailureStore {
+    store: LoginStore,
+    provider: CloudProvider,
+    error: Mutex<Option<QuarkError>>,
+}
+
+impl CredentialStore for SessionSaveFailureStore {
+    fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+        if key == self.provider.key() {
+            self.store
+                .mutations
+                .lock()
+                .unwrap()
+                .push(format!("save:{key}"));
+            return Err(self
+                .error
+                .lock()
+                .unwrap()
+                .take()
+                .expect("session save retried"));
+        }
+        self.store.save(key, bytes)
+    }
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+        self.store.load(key)
+    }
+    fn remove(&self, key: &str) -> Result<(), QuarkError> {
+        self.store.remove(key)
+    }
+}
+
+fn assert_native_driver_session_save_failure(
+    provider: CloudProvider,
+    native: impl Fn() -> SessionRecoveryTransport,
+    root_body: &str,
+) {
+    for error in [
+        QuarkError::Storage,
+        QuarkError::Provider("session-save-fixture".into()),
+        QuarkError::CaptchaRequired,
+    ] {
+        let expected = serde_json::to_value(&error).unwrap();
+        let store = SessionSaveFailureStore {
+            store: LoginStore::default(),
+            provider,
+            error: Mutex::new(Some(error)),
+        };
+        store
+            .store
+            .inner
+            .save(provider.key(), b"previous-session")
+            .unwrap();
+        let http = native();
+        http.0.lock().unwrap().push_back(CloudHttpResponse {
+            status: 200,
+            body: root_body.into(),
+            ..Default::default()
+        });
+        let browser_calls = Cell::new(0);
+        let error = password_login_with_browser(
+            provider,
+            &store,
+            crate::cloud::ProviderRegistry::global()
+                .driver(provider, &store, &http)
+                .auth(),
+            "alice@fixture.test",
+            "fixture-password",
+            |_| {
+                browser_calls.set(browser_calls.get() + 1);
+                Err(QuarkError::InvalidResponse)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            http.remaining(),
+            0,
+            "login/account/root must complete before save failure"
+        );
+        assert_eq!(browser_calls.get(), 0);
+        assert_eq!(serde_json::to_value(error).unwrap(), expected);
+        assert_eq!(
+            store.load(provider.key()).unwrap().as_deref(),
+            Some(b"previous-session".as_slice()),
+        );
+        assert!(!browser_password_login_preferred(&store, provider).unwrap());
+        assert_eq!(
+            *store.store.mutations.lock().unwrap(),
+            [format!("save:{}", provider.key())],
+            "failed session save must not write or remove browser preference",
+        );
+    }
+}
+
+#[test]
+fn baidu_native_driver_session_save_failure_has_no_preference_side_effect() {
+    assert_native_driver_session_save_failure(
+        CloudProvider::Baidu,
+        || SessionRecoveryTransport::baidu_password_relogin("account-1"),
+        r#"{"errno":0,"list":[]}"#,
+    );
+}
+
+#[test]
+fn tianyi_native_driver_session_save_failure_has_no_preference_side_effect() {
+    assert_native_driver_session_save_failure(
+        CloudProvider::Tianyi,
+        tianyi_native_login_fixture,
+        r#"<listFiles><fileList></fileList></listFiles>"#,
+    );
+}
+
 impl CloudHttpTransport for FailPostLoginTransport {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         let mut calls = self.calls.lock().unwrap();
