@@ -2,21 +2,20 @@ use super::{CloudProvider, QuarkError};
 use zeroize::Zeroizing;
 
 #[derive(Default)]
-pub(crate) struct PasswordDownloadRefreshBudget(
+pub(crate) struct CloudDownloadRefreshBudget(
     std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 );
 
-impl PasswordDownloadRefreshBudget {
+impl CloudDownloadRefreshBudget {
     pub(crate) fn claim(&self, source: &str, error: Option<&str>) -> bool {
-        // aria2 HTTP authorization failure. Do not repeatedly retry unrelated
-        // network, disk, or permission errors.
+        // aria2 HTTP transfer failure. A temporary cloud URL may have expired,
+        // or its previous validator may no longer match after it is re-signed.
+        // Re-resolve every valid personal-cloud source once, but do not retry
+        // unrelated network, disk, or permission errors.
         if error != Some("22") {
             return false;
         }
-        let Ok((provider, _)) = super::commands::parse_stable_cloud_source(source) else {
-            return false;
-        };
-        if !supports_browser_password(provider) {
+        if super::commands::parse_stable_cloud_source(source).is_err() {
             return false;
         }
         let Ok(mut attempts) = self.0.lock() else {
@@ -84,14 +83,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn password_download_refresh_is_provider_scoped_and_bounded() {
-        let budget = PasswordDownloadRefreshBudget::default();
+    fn personal_cloud_download_refresh_is_provider_scoped_and_bounded() {
+        let budget = CloudDownloadRefreshBudget::default();
         assert!(!budget.claim("cloud://baidu/file", Some("9")));
-        assert!(!budget.claim("cloud://quark/file", Some("22")));
         assert!(!budget.claim("https://example.org/file", Some("22")));
-        assert!(budget.claim("cloud://baidu/file", Some("22")));
-        assert!(!budget.claim("cloud://baidu/file", Some("22")));
-        assert!(budget.claim("cloud://tianyi/file", Some("22")));
+        for provider in [
+            "quark", "pikpak", "baidu", "tianyi", "aliyun", "xunlei", "uc",
+        ] {
+            let source = format!("cloud://{provider}/file");
+            assert!(
+                budget.claim(&source, Some("22")),
+                "{provider} should re-sign once"
+            );
+            assert!(
+                !budget.claim(&source, Some("22")),
+                "{provider} retry must stay bounded"
+            );
+        }
         budget.0.lock().unwrap().insert(
             "cloud://baidu/file".into(),
             std::time::Instant::now() - std::time::Duration::from_secs(301),

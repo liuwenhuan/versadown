@@ -48,7 +48,7 @@ pub struct CloudState {
     pub store: DpapiCredentialStore,
     pub share_plans: share::CloudSharePlanStore,
     pub share_refresh_budget: share::CloudShareRefreshBudget,
-    pub(crate) password_download_refresh_budget: browser_login::PasswordDownloadRefreshBudget,
+    pub(crate) cloud_download_refresh_budget: browser_login::CloudDownloadRefreshBudget,
     authorization_resumption: CloudDownloadSourceGate,
     authorization_completion: CloudDownloadSourceGate,
     authorization_results: Mutex<HashMap<CloudProvider, CloudAccount>>,
@@ -102,7 +102,7 @@ impl CloudState {
         let state = Self {
             share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
             share_refresh_budget: Default::default(),
-            password_download_refresh_budget: Default::default(),
+            cloud_download_refresh_budget: Default::default(),
             authorization_resumption: Default::default(),
             authorization_completion: Default::default(),
             authorization_results: Default::default(),

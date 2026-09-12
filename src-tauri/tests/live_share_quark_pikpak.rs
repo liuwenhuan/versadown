@@ -7,7 +7,7 @@
 //! direct download URLs.
 
 use alldownloader_lib::cloud::{
-    commands::restore_account,
+    commands::{parse_stable_cloud_source, resolve_download, restore_account},
     share::{
         inspect_share_with_adapter, provider_share_adapter, resolve_current_share_download,
         selected_share_sources, CloudSharePlanStore, ShareConfirmationOutcome,
@@ -19,6 +19,7 @@ use alldownloader_lib::{
     aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process},
     Aria2Settings, DownloadAction, DownloadService, NewTask, TaskStore, UriSubmissionOptions,
 };
+use rusqlite::{Connection, OpenFlags};
 use std::{
     collections::BTreeSet,
     path::PathBuf,
@@ -312,6 +313,95 @@ async fn wait_for_download(
             _ => tokio::time::sleep(Duration::from_millis(250)).await,
         }
     }
+}
+
+fn latest_personal_quark_file_id() -> Result<String, Box<dyn std::error::Error>> {
+    let app_data = PathBuf::from(std::env::var_os("APPDATA").ok_or("APPDATA missing")?)
+        .join("com.alldownloader.desktop");
+    let database = app_data.join("tasks.sqlite");
+    let database_uri = format!(
+        "file:{}?immutable=1",
+        database.to_string_lossy().replace('\\', "/")
+    );
+    let connection = Connection::open_with_flags(
+        database_uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    let source = connection.query_row(
+        "SELECT source FROM tasks WHERE source LIKE 'cloud://quark/%' ORDER BY updated_at DESC LIMIT 1",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let (provider, file_id) = parse_stable_cloud_source(&source)?;
+    if provider != CloudProvider::Quark {
+        return Err("latest personal Quark task resolved to another provider".into());
+    }
+    Ok(file_id)
+}
+
+#[test]
+#[ignore = "requires the current user's authorized Quark session and one existing personal Quark task"]
+fn live_personal_quark_download_resumes_existing_payload_with_aria2_next(
+) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("ALLDOWNLOADER_LIVE_QUARK_PERSONAL").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let file_id = latest_personal_quark_file_id()?;
+    let credentials = app_session_store()?;
+    let transport = RedactedTransport::new()?;
+    let resolved = resolve_download(CloudProvider::Quark, &file_id, &credentials, &transport)?;
+    let temporary = tempfile::tempdir()?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let engine = IsolatedAria2::start(temporary.path()).await?;
+        let tasks = Arc::new(TaskStore::open_path(
+            &temporary.path().join("tasks.sqlite"),
+        )?);
+        let service = DownloadService::new(Arc::new(engine.client.clone()), Arc::clone(&tasks));
+        let output_name = resolved.name.clone();
+        let direct_url = resolved.url.clone();
+        std::fs::create_dir_all(&engine.downloads)?;
+        std::fs::write(engine.downloads.join(&output_name), [0_u8])?;
+        let prepared = tasks.create(NewTask {
+            source: "cloud://quark/redacted-live-fixture".into(),
+            name: output_name,
+            kind: "cloud".into(),
+            is_private: false,
+        })?;
+        let mut options = resolved.into_uri_submission_options();
+        options.directory = Some(engine.downloads.clone());
+        let submitted = service
+            .submit_uri_with_options(prepared.id, vec![direct_url], options)
+            .await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let outcome = loop {
+            let task = service.reconcile_task(submitted.id).await?;
+            let gid = task.aria_gid.as_deref().ok_or("aria2 GID missing")?;
+            let status = engine.client.tell_status(gid).await?;
+            let completed = status.completed_length.parse::<u64>()?;
+            match status.status.as_str() {
+                "complete" if completed > 0 => break Ok(()),
+                _ if completed > 0 => {
+                    service.control(submitted.id, DownloadAction::Pause).await?;
+                    break Ok(());
+                }
+                "error" | "removed" => {
+                    break Err(format!(
+                        "aria2 {} {}: {}",
+                        status.status,
+                        status.error_code.as_deref().unwrap_or("unknown"),
+                        status.error_message.as_deref().unwrap_or("unknown")
+                    ))
+                }
+                _ if tokio::time::Instant::now() >= deadline => {
+                    break Err("Quark download produced no payload before timeout".into())
+                }
+                _ => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        };
+        engine.shutdown().await?;
+        outcome.map_err(Into::into)
+    })
 }
 
 #[test]

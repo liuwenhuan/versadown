@@ -1731,7 +1731,7 @@ fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::
 
 /// Called after event publication; the task worker never blocks the aria2
 /// synchronization callback. The source gate is released on every return path.
-pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) {
+pub(crate) fn schedule_cloud_download_refresh(app: AppHandle, task: &DownloadTask) {
     if task.status != TaskStatus::Failed {
         return;
     }
@@ -1746,7 +1746,7 @@ pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) 
             .unwrap_or(false)
     } else {
         cloud
-            .password_download_refresh_budget
+            .cloud_download_refresh_budget
             .claim(&task.source, task.aria_error_code.as_deref())
     };
     if !claimed {
