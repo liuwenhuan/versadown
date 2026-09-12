@@ -27,6 +27,7 @@ pub struct ProviderDescriptor {
     pub provider: CloudProvider,
     pub display_name: &'static str,
     pub share_display_name: &'static str,
+    pub upload_display_name: &'static str,
     pub share_directory_name: &'static str,
     pub root_directory_id: &'static str,
     pub recycle_bin_directory_id: &'static str,
@@ -219,6 +220,15 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Aliyun => "阿里云盘",
             Xunlei => "迅雷网盘",
             Uc => "UC 网盘",
+        },
+        upload_display_name: match provider {
+            Quark => "夸克",
+            Pikpak => "PikPak",
+            Baidu => "百度网盘",
+            Tianyi => "天翼云盘",
+            Aliyun => "阿里云盘",
+            Xunlei => "迅雷云盘",
+            Uc => "UC网盘",
         },
         share_directory_name: match provider {
             Quark => "夸克分享目录",

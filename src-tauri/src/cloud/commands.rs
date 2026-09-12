@@ -731,7 +731,9 @@ fn browser_password_login(
     let script = Arc::new(browser_login::password_script(
         provider, username, password,
     )?);
-    let url = super::ProviderRegistry::global().get(provider).authorization_url;
+    let url = super::ProviderRegistry::global()
+        .get(provider)
+        .authorization_url;
     let mut builder = WebviewWindowBuilder::new(
         app,
         &label,
@@ -873,7 +875,7 @@ fn validate_browser_password_session(
             report_stage("账号信息校验");
             let account = client.account()?;
             report_stage("目录访问校验");
-            client.directory("/")?;
+            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
             (
                 account,
                 serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
@@ -894,7 +896,7 @@ fn validate_browser_password_session(
             report_stage("账号信息校验");
             let account = client.account()?;
             report_stage("目录访问校验");
-            client.directory("-11")?;
+            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
             (
                 account,
                 serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
@@ -931,7 +933,7 @@ fn recover_provider_password_session(
             let client = PikPakClient::new(http, &temporary);
             client.login(credential.username(), credential.password())?;
             let account = client.account()?;
-            client.list("0")?;
+            client.list(ProviderRegistry::global().get(provider).root_directory_id)?;
             let session = temporary
                 .load(CloudProvider::Pikpak.key())?
                 .ok_or(QuarkError::Storage)?;
@@ -1028,7 +1030,7 @@ pub fn restore_account(
             {
                 // Validate the root before restoring the workspace. The helper
                 // also preserves modern refresh rotation when this probe fails.
-                client.directory("0")?;
+                client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
                 return client.web_account();
             }
             client.account()
@@ -1450,7 +1452,9 @@ pub async fn cloud_begin_authorization(
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
         let _ = window.set_focus();
     } else {
-        let url = super::ProviderRegistry::global().get(provider).authorization_url;
+        let url = super::ProviderRegistry::global()
+            .get(provider)
+            .authorization_url;
         let mut builder = WebviewWindowBuilder::new(
             &app,
             &label,
@@ -1832,7 +1836,12 @@ pub fn plan_cloud_directory_download(
     if root_id.trim().is_empty() {
         return Err(QuarkError::InvalidInput("目录 ID 无效".into()));
     }
-    if provider == CloudProvider::Pikpak && root_id == PIKPAK_RECYCLE_BIN_ID {
+    if provider == CloudProvider::Pikpak
+        && root_id
+            == ProviderRegistry::global()
+                .get(provider)
+                .recycle_bin_directory_id
+    {
         return Err(QuarkError::InvalidInput("PikPak 回收站不能下载目录".into()));
     }
 
@@ -1878,7 +1887,12 @@ pub fn plan_cloud_directory_download(
                     if item.id.trim().is_empty() {
                         return Err(QuarkError::InvalidResponse);
                     }
-                    if provider == CloudProvider::Pikpak && item.id == PIKPAK_RECYCLE_BIN_ID {
+                    if provider == CloudProvider::Pikpak
+                        && item.id
+                            == ProviderRegistry::global()
+                                .get(provider)
+                                .recycle_bin_directory_id
+                    {
                         return Err(QuarkError::InvalidInput("PikPak 回收站不能下载目录".into()));
                     }
                     let mut child_path = relative_directory.clone();
@@ -2021,7 +2035,10 @@ fn list_cloud_directory(
 }
 
 fn is_provider_recycle_bin(provider: CloudProvider, directory_id: &str) -> bool {
-    directory_id == super::ProviderRegistry::global().get(provider).recycle_bin_directory_id
+    directory_id
+        == super::ProviderRegistry::global()
+            .get(provider)
+            .recycle_bin_directory_id
 }
 
 fn list_provider_recycle_bin(
@@ -2031,7 +2048,11 @@ fn list_provider_recycle_bin(
 ) -> Result<CloudDirectory, QuarkError> {
     match provider {
         CloudProvider::Quark => QuarkClient::new(cookie(store)?, http).list_recycle_bin(),
-        CloudProvider::Pikpak => PikPakClient::new(http, store).list(PIKPAK_RECYCLE_BIN_ID),
+        CloudProvider::Pikpak => PikPakClient::new(http, store).list(
+            ProviderRegistry::global()
+                .get(provider)
+                .recycle_bin_directory_id,
+        ),
         CloudProvider::Baidu => {
             baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http)
                 .list_recycle_bin()
@@ -2090,7 +2111,11 @@ fn restore_provider_recycle_entries(
         }
         CloudProvider::Pikpak => {
             let client = PikPakClient::new(http, store);
-            let recycle_bin = client.list(PIKPAK_RECYCLE_BIN_ID)?;
+            let recycle_bin = client.list(
+                ProviderRegistry::global()
+                    .get(provider)
+                    .recycle_bin_directory_id,
+            )?;
             validate_recycle_entry_ids(file_ids, &recycle_bin)?;
             client.restore_recycle_entries(file_ids)
         }
@@ -2145,7 +2170,11 @@ fn delete_provider_recycle_entries(
         }
         CloudProvider::Pikpak => {
             let client = PikPakClient::new(http, store);
-            let recycle_bin = client.list(PIKPAK_RECYCLE_BIN_ID)?;
+            let recycle_bin = client.list(
+                ProviderRegistry::global()
+                    .get(provider)
+                    .recycle_bin_directory_id,
+            )?;
             validate_recycle_entry_ids(file_ids, &recycle_bin)?;
             client.delete(file_ids)
         }
@@ -2269,6 +2298,7 @@ pub fn authorization_result<T>(result: Result<T, QuarkError>) -> Result<T, Quark
 }
 
 fn finalize_baidu_web_authorization(
+    descriptor: &ProviderDescriptor,
     session: baidu::BaiduSession,
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
@@ -2281,12 +2311,13 @@ fn finalize_baidu_web_authorization(
     // Authentication and verification failures map to AuthorizationPending,
     // so frontend polling keeps the window open for the user to finish the
     // official flow instead of creating an immediately-expired tab.
-    authorization_result(client.directory("/"))?;
+    authorization_result(client.directory(descriptor.root_directory_id))?;
     save_provider_session(CloudProvider::Baidu, store, &session)?;
     Ok(account)
 }
 
 fn finalize_tianyi_web_authorization(
+    descriptor: &ProviderDescriptor,
     session: tianyi::TianyiSession,
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
@@ -2295,18 +2326,21 @@ fn finalize_tianyi_web_authorization(
     // The web window owns login, but a candidate session must prove it can
     // read the drive before replacing a previously usable stored session.
     // The caller only closes the authorization window after this succeeds.
-    client.directory("-11").map_err(|error| match error {
-        QuarkError::AuthorizationExpired
-        | QuarkError::WebAuthorizationRequired
-        | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
-        other => other,
-    })?;
+    client
+        .directory(descriptor.root_directory_id)
+        .map_err(|error| match error {
+            QuarkError::AuthorizationExpired
+            | QuarkError::WebAuthorizationRequired
+            | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
+            other => other,
+        })?;
     let account = client.web_account()?;
     save_provider_session(CloudProvider::Tianyi, store, &session)?;
     Ok(account)
 }
 
 fn finalize_xunlei_web_authorization(
+    descriptor: &ProviderDescriptor,
     mut session: xunlei::XunleiSession,
     context: xunlei::XunleiWebContext,
     store: &impl CredentialStore,
@@ -2332,13 +2366,16 @@ fn finalize_xunlei_web_authorization(
         | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
         other => other,
     };
-    client.directory("0").map_err(final_error)?;
+    client
+        .directory(descriptor.root_directory_id)
+        .map_err(final_error)?;
     let account = client.web_account().map_err(final_error)?;
     save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
     Ok(account)
 }
 
 fn finalize_uc_web_authorization(
+    descriptor: &ProviderDescriptor,
     session: uc::UcSession,
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
@@ -2347,7 +2384,7 @@ fn finalize_uc_web_authorization(
     // A cookie pair only says that the WebView completed part of its flow.
     // Verify the exact first read the workspace needs before replacing the
     // stored account and closing the official authorization window.
-    authorization_result(client.directory("0"))?;
+    authorization_result(client.directory(descriptor.root_directory_id))?;
     let account = client.web_account()?;
     save_provider_session(CloudProvider::Uc, store, &session)?;
     Ok(account)
@@ -2397,7 +2434,12 @@ pub async fn cloud_complete_authorization(
                     &window,
                     web_session_cookie_urls(CloudProvider::Baidu),
                 )?)?;
-                let account = finalize_baidu_web_authorization(session, &state.store, http)?;
+                let account = finalize_baidu_web_authorization(
+                    crate::cloud::ProviderRegistry::global().get(CloudProvider::Baidu),
+                    session,
+                    &state.store,
+                    http,
+                )?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -2411,8 +2453,12 @@ pub async fn cloud_complete_authorization(
                     window: &window,
                     native: http,
                 };
-                let account =
-                    finalize_tianyi_web_authorization(session, &state.store, &validation_http)?;
+                let account = finalize_tianyi_web_authorization(
+                    crate::cloud::ProviderRegistry::global().get(CloudProvider::Tianyi),
+                    session,
+                    &state.store,
+                    &validation_http,
+                )?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -2436,6 +2482,7 @@ pub async fn cloud_complete_authorization(
                     asynchronous_web_tokens(&window, XUNLEI_WEB_TOKENS_JS)?,
                 )?;
                 let account = finalize_xunlei_web_authorization(
+                    crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
                     session,
                     captured_context,
                     &state.store,
@@ -2449,7 +2496,12 @@ pub async fn cloud_complete_authorization(
                     &window,
                     web_session_cookie_urls(CloudProvider::Uc),
                 )?)?;
-                let account = finalize_uc_web_authorization(session, &state.store, http)?;
+                let account = finalize_uc_web_authorization(
+                    crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
+                    session,
+                    &state.store,
+                    http,
+                )?;
                 let _ = window.close();
                 Ok(account)
             }
@@ -2502,7 +2554,7 @@ pub async fn cloud_login_password(
                 let client = PikPakClient::new(http, &temporary);
                 client.login(&username, &password)?;
                 let account = client.account()?;
-                client.list("0")?;
+                client.list(ProviderRegistry::global().get(provider).root_directory_id)?;
                 state.store.save(
                     "pikpak",
                     &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
@@ -2548,7 +2600,7 @@ pub async fn cloud_login_password(
                 set_browser_password_login_preferred(&state.store, provider, false)?;
                 let client = baidu::BaiduClient::new(session.clone(), http);
                 let account = client.account()?;
-                client.directory("/")?;
+                client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
                 save_provider_session(CloudProvider::Baidu, &state.store, &session)?;
                 account
             }
@@ -2585,7 +2637,7 @@ pub async fn cloud_login_password(
                 };
                 let client = tianyi::TianyiClient::new(session.clone(), http);
                 let account = client.account()?;
-                client.directory("-11")?;
+                client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
                 save_provider_session(CloudProvider::Tianyi, &state.store, &session)?;
                 account
             }
@@ -2936,7 +2988,10 @@ pub fn parse_stable_cloud_source(source: &str) -> Result<(CloudProvider, String)
         .strip_prefix("cloud://")
         .and_then(|value| value.split_once('/'))
         .ok_or_else(invalid)?;
-    let provider = super::ProviderRegistry::global().by_key(provider).ok_or_else(invalid)?.provider;
+    let provider = super::ProviderRegistry::global()
+        .by_key(provider)
+        .ok_or_else(invalid)?
+        .provider;
     if encoded.is_empty() || encoded.contains(['/', '?', '#', '&', '=']) || !encoded.is_ascii() {
         return Err(invalid());
     }
@@ -4378,6 +4433,112 @@ mod tests {
     };
     use crate::TaskStore;
 
+    struct MetadataRequestTransport {
+        requests: Mutex<Vec<CloudHttpRequest>>,
+        responses: Mutex<VecDeque<&'static str>>,
+    }
+
+    impl CloudHttpTransport for MetadataRequestTransport {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: self.responses.lock().unwrap().pop_front().unwrap().into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn provider_metadata_controls_baidu_authorization_root_request() {
+        let mut descriptor = crate::cloud::ProviderRegistry::global()
+            .get(CloudProvider::Baidu)
+            .clone();
+        // A valid Baidu directory reference for fsid 123 at /catalog-root.
+        descriptor.root_directory_id = "bdr_eyJmc2lkIjoiMTIzIiwicGF0aCI6Ii9jYXRhbG9nLXJvb3QifQ";
+        let store = MemoryCredentialStore::default();
+        let http = MetadataRequestTransport {
+            requests: Mutex::new(vec![]),
+            responses: Mutex::new(VecDeque::from([
+                r#"{"errno":0,"user":{"uk":"b1","netdisk_name":"baidu"}}"#,
+                r#"{"errno":0,"list":[]}"#,
+            ])),
+        };
+        let account = super::finalize_baidu_web_authorization(
+            &descriptor,
+            BaiduSession::cookie("BDUSS=fixture"),
+            &store,
+            &http,
+        )
+        .unwrap();
+        assert_eq!(account.id, "b1");
+        let requests = http.requests.lock().unwrap();
+        let root_url = url::Url::parse(&requests[1].url).unwrap();
+        assert_eq!(
+            root_url
+                .query_pairs()
+                .find(|(key, _)| key == "dir")
+                .unwrap()
+                .1,
+            "/catalog-root"
+        );
+        assert!(store.load("baidu").unwrap().is_some());
+    }
+
+    #[test]
+    fn provider_metadata_controls_tianyi_authorization_root_request() {
+        let mut descriptor = crate::cloud::ProviderRegistry::global()
+            .get(CloudProvider::Tianyi)
+            .clone();
+        descriptor.root_directory_id = "98765";
+        let store = MemoryCredentialStore::default();
+        let http = MetadataRequestTransport {
+            requests: Mutex::new(vec![]),
+            responses: Mutex::new(VecDeque::from([
+                r#"{"res_code":0,"fileListAO":{"fileList":[],"folderList":[],"count":0}}"#,
+            ])),
+        };
+        super::finalize_tianyi_web_authorization(
+            &descriptor,
+            TianyiSession::cookie("SSON=fixture"),
+            &store,
+            &http,
+        )
+        .unwrap();
+        let requests = http.requests.lock().unwrap();
+        let root_url = url::Url::parse(&requests[0].url).unwrap();
+        assert_eq!(
+            root_url
+                .query_pairs()
+                .find(|(key, _)| key == "folderId")
+                .unwrap()
+                .1,
+            "98765"
+        );
+        assert!(store.load("tianyi").unwrap().is_some());
+    }
+
+    #[test]
+    fn provider_metadata_controls_upload_picker_title_and_preserves_selection() {
+        let mut descriptor = crate::cloud::ProviderRegistry::global()
+            .get(CloudProvider::Baidu)
+            .clone();
+        descriptor.upload_display_name = "动态上传网盘";
+        let paths = super::select_cloud_upload_paths(&descriptor, None, |title| {
+            assert_eq!(title, "选择上传到 动态上传网盘 的文件");
+            Ok(vec![std::path::PathBuf::from("selected.txt")])
+        })
+        .unwrap();
+        assert_eq!(paths, vec![std::path::PathBuf::from("selected.txt")]);
+        let paths = super::select_cloud_upload_paths(
+            &descriptor,
+            Some(vec!["supplied.txt".into()]),
+            |_| panic!("explicit paths must not open a picker"),
+        )
+        .unwrap();
+        assert_eq!(paths, vec![std::path::PathBuf::from("supplied.txt")]);
+    }
+
     #[test]
     fn only_authorization_failures_request_a_new_official_login() {
         assert!(requires_cloud_reauthorization_failure(Some(
@@ -5489,6 +5650,7 @@ mod tests {
         ])));
 
         let result = super::finalize_baidu_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Baidu),
             BaiduSession::cookie("BDUSS=browser-session"),
             &credentials,
             &transport,
@@ -5804,8 +5966,13 @@ mod tests {
         ])
         .expect("the official WebView should provide its authenticated cookie pairs");
 
-        let account = super::finalize_baidu_web_authorization(session, &credentials, &transport)
-            .expect("a browser session with a readable root should authorize");
+        let account = super::finalize_baidu_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Baidu),
+            session,
+            &credentials,
+            &transport,
+        )
+        .expect("a browser session with a readable root should authorize");
         let restored = super::restore_account(CloudProvider::Baidu, &credentials, &transport)
             .expect("the saved browser session should restore after reopening the tab");
         let root = super::list_cloud_directory(CloudProvider::Baidu, &credentials, &transport, "/")
@@ -5827,6 +5994,7 @@ mod tests {
         let transport = TianyiRootAcceptingTransport(Mutex::new(0));
 
         let account = super::finalize_tianyi_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Tianyi),
             TianyiSession::cookie("SSON=official-browser-session"),
             &credentials,
             &transport,
@@ -5844,6 +6012,7 @@ mod tests {
         let credentials = MemoryCredentialStore::default();
 
         let result = super::finalize_tianyi_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Tianyi),
             TianyiSession::cookie("SSON=browser-session"),
             &credentials,
             &TianyiRootRejectingTransport,
@@ -5876,9 +6045,14 @@ mod tests {
         };
 
         let root = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
-        let account =
-            super::finalize_xunlei_web_authorization(session, context, &credentials, &root)
-                .expect("a complete browser context can use its current bearer as session id");
+        let account = super::finalize_xunlei_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
+            session,
+            context,
+            &credentials,
+            &root,
+        )
+        .expect("a complete browser context can use its current bearer as session id");
 
         assert_eq!(account.id, "browser-user");
         let saved: XunleiSession = serde_json::from_slice(
@@ -5910,9 +6084,14 @@ mod tests {
         };
 
         let root = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
-        let account =
-            super::finalize_xunlei_web_authorization(session, context, &credentials, &root)
-                .expect("the current bearer completes authorization until it expires");
+        let account = super::finalize_xunlei_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
+            session,
+            context,
+            &credentials,
+            &root,
+        )
+        .expect("the current bearer completes authorization until it expires");
 
         assert_eq!(account.id, "browser-user");
         let saved: XunleiSession = serde_json::from_slice(
@@ -5949,9 +6128,14 @@ mod tests {
             credit_key: "official-credit".into(),
         };
 
-        let account =
-            super::finalize_xunlei_web_authorization(session, context, &credentials, &transport)
-                .expect("a browser session with a readable root directory should authorize");
+        let account = super::finalize_xunlei_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
+            session,
+            context,
+            &credentials,
+            &transport,
+        )
+        .expect("a browser session with a readable root directory should authorize");
 
         assert_eq!(account.id, "browser-user");
         let requests = transport.0.lock().unwrap();
@@ -5992,9 +6176,14 @@ mod tests {
             r#"{"error_code":4121,"error":"expired"}"#,
         ])));
 
-        let error =
-            super::finalize_xunlei_web_authorization(session, context, &credentials, &rejecting)
-                .unwrap_err();
+        let error = super::finalize_xunlei_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
+            session,
+            context,
+            &credentials,
+            &rejecting,
+        )
+        .unwrap_err();
 
         assert!(matches!(error, QuarkError::AuthorizationPending));
         assert_eq!(credentials.load("xunlei").unwrap(), Some(previous));
@@ -6016,6 +6205,7 @@ mod tests {
             session.refresh_token.clear();
             let rejecting = SequenceTransport(Mutex::new(VecDeque::from([rejection, rejection])));
             let error = super::finalize_xunlei_web_authorization(
+                crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
                 session,
                 XunleiWebContext::default(),
                 &credentials,
@@ -6035,6 +6225,7 @@ mod tests {
             r#"{"files":[],"next_page_token":""}"#,
         ])));
         let account = super::finalize_xunlei_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
             modern_xunlei_fixture(),
             XunleiWebContext::default(),
             &credentials,
@@ -6128,6 +6319,7 @@ mod tests {
         ])));
 
         let error = super::finalize_uc_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
             UcSession::cookie("__uid=browser-user; __pus=identity; __puus=session"),
             &credentials,
             &transport,
@@ -6151,6 +6343,7 @@ mod tests {
         ])));
 
         let error = super::finalize_uc_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
             UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
             &credentials,
             &transport,
@@ -6177,6 +6370,7 @@ mod tests {
         ])));
 
         let account = super::finalize_uc_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
             UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
             &credentials,
             &transport,
@@ -6201,6 +6395,7 @@ mod tests {
         ] {
             let credentials = MemoryCredentialStore::default();
             let result = super::finalize_tianyi_web_authorization(
+                crate::cloud::ProviderRegistry::global().get(CloudProvider::Tianyi),
                 TianyiSession::cookie("SSON=candidate-session"),
                 &credentials,
                 &TianyiRootAuthorizationErrorTransport(error),
@@ -6219,6 +6414,7 @@ mod tests {
         credentials.save("tianyi", &existing).unwrap();
 
         let result = super::finalize_tianyi_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Tianyi),
             TianyiSession::cookie("SSON=candidate-session"),
             &credentials,
             &TianyiRootRejectingTransport,
@@ -6236,6 +6432,7 @@ mod tests {
         credentials.save("tianyi", &existing).unwrap();
 
         let result = super::finalize_tianyi_web_authorization(
+            crate::cloud::ProviderRegistry::global().get(CloudProvider::Tianyi),
             TianyiSession::cookie("SSON=candidate-session"),
             &credentials,
             &TianyiMalformedRootTransport,
@@ -6326,6 +6523,20 @@ mod tests {
     }
 }
 
+fn select_cloud_upload_paths(
+    descriptor: &ProviderDescriptor,
+    paths: Option<Vec<String>>,
+    pick_files: impl FnOnce(String) -> Result<Vec<PathBuf>, QuarkError>,
+) -> Result<Vec<PathBuf>, QuarkError> {
+    match paths {
+        Some(paths) => Ok(paths.into_iter().map(PathBuf::from).collect()),
+        None => pick_files(format!(
+            "选择上传到 {} 的文件",
+            descriptor.upload_display_name
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn cloud_upload_files(
     app: AppHandle,
@@ -6334,37 +6545,26 @@ pub async fn cloud_upload_files(
     paths: Option<Vec<String>>,
 ) -> Result<Vec<CloudFile>, QuarkError> {
     let picker = app.clone();
-    let provider_label = match provider {
-        CloudProvider::Quark => "夸克",
-        CloudProvider::Pikpak => "PikPak",
-        CloudProvider::Baidu => "百度网盘",
-        CloudProvider::Tianyi => "天翼云盘",
-        CloudProvider::Aliyun => "阿里云盘",
-        CloudProvider::Xunlei => "迅雷云盘",
-        CloudProvider::Uc => "UC网盘",
-    };
+    let descriptor = ProviderRegistry::global().get(provider);
     // The native picker may stay open indefinitely; it must hold no session lock.
-    let paths =
-        tauri::async_runtime::spawn_blocking(move || -> Result<Vec<PathBuf>, QuarkError> {
-            let paths = match paths {
-                Some(paths) => paths.into_iter().map(PathBuf::from).collect(),
-                None => picker
-                    .dialog()
-                    .file()
-                    .set_title(format!("选择上传到 {provider_label} 的文件"))
-                    .blocking_pick_files()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|p| {
-                        p.into_path()
-                            .map_err(|_| QuarkError::InvalidInput("无法访问选中的文件".into()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            };
-            Ok(paths)
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        select_cloud_upload_paths(descriptor, paths, |title| {
+            picker
+                .dialog()
+                .file()
+                .set_title(title)
+                .blocking_pick_files()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|path| {
+                    path.into_path()
+                        .map_err(|_| QuarkError::InvalidInput("无法访问选中的文件".into()))
+                })
+                .collect()
         })
-        .await
-        .map_err(|_| QuarkError::InvalidInput("文件选择中断".into()))??;
+    })
+    .await
+    .map_err(|_| QuarkError::InvalidInput("文件选择中断".into()))??;
     tauri::async_runtime::spawn_blocking(move || {
         let s = app.state::<Arc<CloudState>>();
         let h = ReqwestTransport::new()?;

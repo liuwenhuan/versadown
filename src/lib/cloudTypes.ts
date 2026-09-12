@@ -12,6 +12,7 @@ export interface ProviderDescriptor {
   provider: CloudProvider;
   displayName: string;
   shareDisplayName: string;
+  uploadDisplayName: string;
   shareDirectoryName: string;
   rootDirectoryId: string;
   recycleBinDirectoryId: string;

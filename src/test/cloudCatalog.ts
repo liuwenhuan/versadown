@@ -9,6 +9,7 @@ export const cloudCatalog: ProviderDescriptor[] = [
 ].map(([provider, displayName, rootDirectoryId, passwordLoginMode]) => ({
   provider: provider as CloudProvider, displayName, rootDirectoryId,
   shareDisplayName: displayName + '网盘',
+  uploadDisplayName: displayName,
   shareDirectoryName: displayName + '分享目录',
   passwordLoginHosts: [],
   recycleBinDirectoryId: `__all_downloader_${provider}_recycle_bin__`,
