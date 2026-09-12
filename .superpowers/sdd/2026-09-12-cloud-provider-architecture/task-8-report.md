@@ -39,3 +39,26 @@ Rust 命令使用 `C:/Users/deepin/.cargo/bin/cargo.exe`，环境 `CARGO_TARGET_
 发布产物：当前工作树 `artifacts/alldownloader.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。保留已有 dead-code、linker/canonicalize 信息及前端 dynamic/static import 警告；未新增构建错误。发布构建本身没有触发全量测试。
 
 自审限定本项 diff：source map/source mutex 锁顺序、snapshot CAS/取消边界、mutation 不重放、迅雷 preflight，以及原有 owner/cleanup journal 均有对应验证。提交说明：`perf(cloud): narrow session locks and reclaim source gates`。
+
+## Fix round 1/5 — 承接同次 CAS 后的 ProfileContinuation
+
+本轮仅修聚焦审查的一个 P2：due proactive 恢复失败建立 continuation 后，普通操作合法轮换 action ticket/cookie，使 revision 递增；旧 continuation 因版本不匹配而跳过 ProfileOnly。没有派生代理，也没有新增其他改造。
+
+严格 TDD：先运行 `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_auth_supervisor rotated_ -- --nocapture`，3 条均行为失败：Read 与 Mutation 没有得到 profile session，attempt 变化的 Read 意外执行第二次。随后运行强化过的 `review_failed_profile_continuation`，观察到轮换后跳过 ProfileOnly、没有返回预期的 WebAuthorizationRequired。
+
+修复只在本次 `persist_snapshot` 成功 CAS 返回新 revision，且 ticket 原 revision、account、lineage 都与原 snapshot 一致时，承接 ticket 的 revision。实际 ProfileOnly 之前仍在 provider 锁内重新检查 account、lineage、失败次数、next_allowed 和 RiskBlocked；版本承接本身不授予新的登录 attempt。其他调用的版本变化不继承该资格。
+
+新增 Read/Mutation 正向测试证明恢复 phase 为 Proactive→ProfileOnly；Read 仅重试一次，Mutation closure 仍只执行一次并返回 SessionRenewedRetryOperation。表驱动负向测试覆盖账号替换、A→B→A lineage、持久 failure 次数/期限及 RiskBlocked；原跨调用/重启测试加入 action ticket 轮换，证明失败的 profile attempt 仍保留 5 分钟退避，下一调用及重启都无法重用 continuation。所有新增测试无需 sleep。
+
+本轮最终实际验证（仍使用 `.tools/test-target`）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_auth_supervisor` | 22 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_coordination --test cloud_session --test cloud_sessions` | 5 + 18 + 33 = 56 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib share` | 146 通过，191 未运行 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib session` | 55 通过，282 未运行 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1` | 使用此前获准的构建权限，退出 0；复用前端 dist，release 1m09s，主程序与 sidecar 已生成 |
+| `git diff --check` | 通过 |
+
+本轮没有执行前端测试或任何全量测试。生产改动只在 `auth_supervisor.rs`；另更新对应集成测试与本报告。提交说明：`fix(cloud): preserve profile continuation across session rotation`。

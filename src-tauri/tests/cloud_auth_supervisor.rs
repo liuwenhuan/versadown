@@ -205,7 +205,10 @@ fn review_failed_profile_continuation_cannot_escape_backoff_in_another_run_or_re
         &store,
         provider,
         SessionWorkKind::Mutation,
-        |_| Err(CloudError::AuthorizationExpired),
+        |snapshot| {
+            snapshot.save(provider.key(), br#"{"expires_at":2000,"ticket":"rotated"}"#)?;
+            Err(CloudError::AuthorizationExpired)
+        },
         |phase| {
             phases.lock().unwrap().push(phase);
             Err(CloudError::WebAuthorizationRequired)
@@ -236,6 +239,157 @@ fn review_failed_profile_continuation_cannot_escape_backoff_in_another_run_or_re
                 .consecutive_failures,
             1
         );
+    }
+}
+
+#[test]
+fn rotated_read_keeps_its_same_run_profile_continuation() {
+    rotated_operation_continues_profile(SessionWorkKind::Read);
+}
+
+#[test]
+fn rotated_mutation_continues_profile_without_replaying_the_mutation() {
+    rotated_operation_continues_profile(SessionWorkKind::Mutation);
+}
+
+fn rotated_operation_continues_profile(kind: SessionWorkKind) {
+    let (supervisor, clock, store) = fixture(1000, 30);
+    let provider = CloudProvider::Xunlei;
+    store
+        .save(provider.key(), br#"{"expires_at":2000}"#)
+        .unwrap();
+    supervisor
+        .ready(&store, provider, Some("A".into()), None, Some(2000))
+        .unwrap();
+    clock.store(1670, Ordering::SeqCst);
+    let calls = AtomicUsize::new(0);
+    let phases = std::sync::Mutex::new(Vec::new());
+    let result = supervisor.run(
+        &store,
+        provider,
+        kind,
+        |snapshot| {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                snapshot.save(provider.key(), br#"{"expires_at":2000,"ticket":"rotated"}"#)?;
+                Err(CloudError::AuthorizationExpired)
+            } else {
+                assert_eq!(snapshot.load(provider.key())?.unwrap(), b"profile-session");
+                Ok(())
+            }
+        },
+        |phase| {
+            phases.lock().unwrap().push(phase);
+            match phase {
+                RecoveryPhase::Proactive => Err(CloudError::WebAuthorizationRequired),
+                RecoveryPhase::ProfileOnly => store.save(provider.key(), b"profile-session"),
+                RecoveryPhase::AuthFailure => {
+                    panic!("the same attempt must continue at profile only")
+                }
+            }
+        },
+    );
+    assert_eq!(
+        store.load(provider.key()).unwrap().unwrap(),
+        b"profile-session"
+    );
+    let phases = phases.into_inner().unwrap();
+    assert!(phases == [RecoveryPhase::Proactive, RecoveryPhase::ProfileOnly]);
+    match kind {
+        SessionWorkKind::Read => {
+            result.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        }
+        SessionWorkKind::Mutation => {
+            assert!(matches!(
+                result,
+                Err(CloudError::SessionRenewedRetryOperation)
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        SessionWorkKind::Logout => unreachable!(),
+    }
+    let record = supervisor.record(&store, provider).unwrap();
+    assert_eq!(record.health, AuthHealth::Ready);
+    assert_eq!(record.consecutive_failures, 0);
+    assert_eq!(record.next_allowed_attempt_at, None);
+}
+
+#[test]
+fn rotated_profile_continuation_rejects_changed_owner_lineage_or_attempt() {
+    for change in ["account", "lineage", "failures", "deadline", "risk"] {
+        let (supervisor, clock, store) = fixture(1000, 30);
+        let provider = CloudProvider::Aliyun;
+        let initial = br#"{"expires_at":2000}"#;
+        store.save(provider.key(), initial).unwrap();
+        supervisor
+            .ready(&store, provider, Some("A".into()), None, Some(2000))
+            .unwrap();
+        clock.store(1670, Ordering::SeqCst);
+        let calls = AtomicUsize::new(0);
+        let phases = std::sync::Mutex::new(Vec::new());
+        let result: Result<(), _> = supervisor.run(
+            &store,
+            provider,
+            SessionWorkKind::Read,
+            |snapshot| {
+                assert_eq!(
+                    calls.fetch_add(1, Ordering::SeqCst),
+                    0,
+                    "{change}: invalid continuation must not retry"
+                );
+                match change {
+                    "account" => {
+                        store.save(provider.key(), b"account-B")?;
+                        supervisor.ready(&store, provider, Some("B".into()), None, None)?;
+                    }
+                    "lineage" => {
+                        for bytes in [b"other-session".as_slice(), initial.as_slice()] {
+                            store.save(provider.key(), bytes)?;
+                            supervisor.run(
+                                &store,
+                                provider,
+                                SessionWorkKind::Read,
+                                |current| current.load(provider.key()),
+                                |_| panic!("no recovery"),
+                            )?;
+                        }
+                    }
+                    _ => {
+                        let mut record = supervisor.record(&store, provider)?;
+                        match change {
+                            "failures" => record.consecutive_failures += 1,
+                            "deadline" => record.next_allowed_attempt_at = Some(2270),
+                            "risk" => record.health = AuthHealth::RiskBlocked,
+                            _ => unreachable!(),
+                        }
+                        store.save(
+                            "cloud-auth-maintenance-aliyun",
+                            &serde_json::to_vec(&record).unwrap(),
+                        )?;
+                    }
+                }
+                snapshot.save(provider.key(), br#"{"expires_at":2000,"ticket":"rotated"}"#)?;
+                Err(CloudError::AuthorizationExpired)
+            },
+            |phase| {
+                phases.lock().unwrap().push(phase);
+                assert!(
+                    phase == RecoveryPhase::Proactive,
+                    "{change}: no profile grant"
+                );
+                Err(CloudError::WebAuthorizationRequired)
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CloudError::NotAuthorized | CloudError::WebAuthorizationRequired)
+            ),
+            "{change}: {result:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(phases.into_inner().unwrap().len(), 1);
     }
 }
 

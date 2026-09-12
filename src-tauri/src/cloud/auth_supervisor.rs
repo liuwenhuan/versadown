@@ -64,6 +64,7 @@ impl From<bool> for RecoveryPhase {
 // This capability never leaves one run invocation or survives a restart.
 struct ProfileContinuation {
     revision: u64,
+    account_id: Option<String>,
     failures: u32,
     next_allowed: Option<i64>,
     binding: uuid::Uuid,
@@ -452,6 +453,7 @@ impl AuthSupervisor {
                 if matches!(result, Err(CloudError::WebAuthorizationRequired)) {
                     continuation = Some(ProfileContinuation {
                         revision: record.session_revision,
+                        account_id: record.account_id,
                         failures: record.consecutive_failures,
                         next_allowed: record.next_allowed_attempt_at,
                         binding,
@@ -466,6 +468,18 @@ impl AuthSupervisor {
         let result = work(&snapshot);
         check()?;
         let revision = self.persist_snapshot(store, provider, revision, &snapshot, &check)?;
+        if let Some(ticket) = continuation.as_mut() {
+            // Only this operation's successful CAS may carry its ticket to a
+            // new revision. This does not grant recovery: the original durable
+            // attempt, account and lineage are rechecked under the lock below.
+            if revision != snapshot.revision
+                && ticket.revision == snapshot.revision
+                && ticket.account_id == snapshot.account_id
+                && ticket.binding == snapshot.binding
+            {
+                ticket.revision = revision;
+            }
+        }
         match result {
             Err(error @ CloudError::CaptchaRequired) => {
                 self.with_provider(provider, || {
@@ -491,7 +505,9 @@ impl AuthSupervisor {
                     self.with_provider(provider, || {
                         let mut record = self.record(store, provider)?;
                         let current = self.snapshot(store, provider)?;
-                        if current.binding != ticket.binding {
+                        if current.binding != ticket.binding
+                            || current.account_id != ticket.account_id
+                        {
                             return Err(CloudError::NotAuthorized);
                         }
                         if record.session_revision != ticket.revision {
