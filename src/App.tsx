@@ -20,6 +20,7 @@ import darkMintIcon from './assets/launcher/dark_mint_128.png';
 import mintWhiteIcon from './assets/launcher/mint_white_128.png';
 import { getResolvedTheme, subscribeTheme } from './lib/theme';
 import type { CloudAuthorization } from './lib/cloudTypes';
+import { installWindowResizePerformanceMode } from './lib/windowResizePerformance';
 
 type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
 type TaskSortMode = 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
@@ -292,6 +293,8 @@ export function App() {
   const duplicateCloseInFlight = useRef(false);
   tasksRef.current = tasks;
   const duplicate = resolvingDuplicateId ? null : duplicateQueue[0] ?? null;
+
+  useEffect(() => installWindowResizePerformanceMode(), []);
 
   function enqueueDuplicate(next: DuplicateDownload) {
     setDuplicateQueue((current) => [...current, next]);
@@ -1083,7 +1086,7 @@ export function App() {
     <main className="app-shell">
       <header className="app-header">
         <div className="app-header-drag-space" data-tauri-drag-region aria-hidden="true" />
-        <div className="brand" data-tauri-drag-region>
+        <div className="brand" data-tauri-drag-region="deep">
           <div className="brand-mark" data-icon-variant={resolvedTheme} aria-hidden="true"><img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" /></div>
           <h1>万能下载</h1>
         </div>

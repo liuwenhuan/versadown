@@ -25,13 +25,13 @@ fn launcher_window() -> Value {
 }
 
 #[test]
-fn main_window_opens_with_the_compact_desktop_dimensions() {
+fn main_window_uses_the_requested_960_by_640_minimum() {
     let window = main_window();
 
-    assert_eq!(window["width"], 900);
-    assert_eq!(window["height"], 575);
-    assert_eq!(window["minWidth"], 720);
-    assert_eq!(window["minHeight"], 500);
+    assert_eq!(window["width"], 960);
+    assert_eq!(window["height"], 640);
+    assert_eq!(window["minWidth"], 960);
+    assert_eq!(window["minHeight"], 640);
 }
 
 #[test]

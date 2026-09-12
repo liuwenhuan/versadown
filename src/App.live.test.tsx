@@ -19,6 +19,7 @@ vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
+  getPrivacyTaskVisibility: vi.fn().mockResolvedValue({ enabled: false, unlocked: false }),
   defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } },
   getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } }),
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
@@ -93,12 +94,12 @@ beforeEach(() => {
   });
 });
 
-it('uses native drag regions for the app title bar without the delayed bridge call', () => {
+it('uses a deep native drag region so title-bar children drag without a bridge call', () => {
   render(<App />);
   const header = document.querySelector('.app-header')!;
   const brand = document.querySelector('.brand')!;
 
-  expect(brand).toHaveAttribute('data-tauri-drag-region');
+  expect(brand).toHaveAttribute('data-tauri-drag-region', 'deep');
   expect(header.querySelector('[data-tauri-drag-region]')).toBeInTheDocument();
 
   fireEvent.mouseDown(brand, { button: 0 });
@@ -616,12 +617,12 @@ it('keeps a protected share open for an access code before completing its normal
   expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
   expect(downloadInput).toHaveValue(shareLink);
   expect(accessCode).toHaveFocus();
-  expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined);
+  expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined, false);
 
   await user.type(accessCode, '1234');
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
 
-  await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234'));
+  await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234', false));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
   expect(screen.getByText('archive.iso')).toBeVisible();
 });
@@ -896,7 +897,7 @@ it('does not let an old response clear a reparsed confirmation for the same shar
   fireEvent.click(secondSubmit);
   fireEvent.click(secondSubmit);
   expect(state.confirmCloud).toHaveBeenCalledTimes(2);
-  expect(state.confirmCloud).toHaveBeenLastCalledWith('cloud-share://uc/same-plan', ['f2'], undefined);
+  expect(state.confirmCloud).toHaveBeenLastCalledWith('cloud-share://uc/same-plan', ['f2'], undefined, false);
 
   await act(async () => { firstSubmission.resolve({ outcomes: [], failures: [] }); });
 
@@ -1166,7 +1167,7 @@ it('reopens awaiting magnet file confirmation and confirms only through the dial
   expect(state.selectFiles).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
 
-  expect(state.confirm).toHaveBeenCalledWith('magnet-awaiting', ['1']);
+  expect(state.confirm).toHaveBeenCalledWith('magnet-awaiting', ['1'], undefined, false);
   expect(state.selectFiles).not.toHaveBeenCalled();
 });
 
