@@ -1,3 +1,5 @@
+#[path = "support/upload.rs"]
+mod upload_support;
 use alldownloader_lib::cloud::{
     uc::{parse_uc_web_session, UcClient, UcSession, UC_DESKTOP_USER_AGENT},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
@@ -282,6 +284,7 @@ impl RecordingUpload {
 
 impl CloudUploadTransport for RecordingUpload {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        let request = upload_support::consume(request)?;
         self.requests.lock().unwrap().push(request);
         self.responses
             .lock()

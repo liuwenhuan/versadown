@@ -262,6 +262,9 @@ impl CloudHttpTransport for HttpRef<'_> {
 
 struct UploadHttpRef<'a>(&'a dyn UploadHttp);
 impl CloudHttpTransport for UploadHttpRef<'_> {
+    fn check_transfer(&self) -> Result<(), CloudError> {
+        self.0.check_transfer()
+    }
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
         self.0.send(request)
     }

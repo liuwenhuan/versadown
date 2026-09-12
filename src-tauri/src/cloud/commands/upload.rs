@@ -42,20 +42,23 @@ pub async fn cloud_upload_files(
     })
     .await
     .map_err(|_| QuarkError::InvalidInput("文件选择中断".into()))??;
-    tauri::async_runtime::spawn_blocking(move || {
-        let s = app.state::<Arc<CloudState>>();
-        let h = ReqwestTransport::new()?;
-        let mut files = Vec::new();
-        for path in paths {
-            let file = ProviderRegistry::global()
-                .driver(provider, &s.store, &h)
-                .upload(&s, &h, &parent_id, &path)?;
-            files.push(file);
-        }
-        Ok(files)
-    })
+    let state = app.state::<Arc<CloudState>>().inner().clone();
+    crate::cloud::schedule_uploads(
+        paths,
+        descriptor.max_upload_concurrency,
+        crate::cloud::UploadControl::default(),
+        move |path, control| {
+            let h = ReqwestTransport::new()?;
+            let h = crate::cloud::http::ControlledUploadHttp { inner: &h, control };
+            let result = ProviderRegistry::global()
+                .driver(provider, &state.store, &h)
+                .upload(&state, &h, &parent_id, &path);
+            result
+        },
+    )
     .await
-    .map_err(|_| QuarkError::Transport("上传任务中断".into()))?
+    .into_iter()
+    .collect()
 }
 
 impl CloudState {
@@ -65,7 +68,7 @@ impl CloudState {
         http: &impl CloudHttpTransport,
         mut work: impl FnMut(&crate::cloud::driver::StoreRef<'_>) -> Result<T, CloudError>,
     ) -> Result<T, CloudError> {
-        self.auth_supervisor.run(
+        self.auth_supervisor.run_checked(
             &self.store,
             provider,
             SessionWorkKind::Mutation,
@@ -81,6 +84,7 @@ impl CloudState {
                     || Ok(false),
                 )
             },
+            || http.check_transfer(),
         )
     }
     pub fn upload_pikpak_file(
@@ -89,18 +93,8 @@ impl CloudState {
         parent: &str,
         path: &Path,
     ) -> Result<CloudFile, QuarkError> {
-        crate::cloud::upload_pikpak_file(http, parent, path, |payload| {
-            self.initialize_pikpak_upload(http, payload)
-        })
-    }
-    fn initialize_pikpak_upload(
-        &self,
-        http: &impl CloudHttpTransport,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value, QuarkError> {
-        const URL: &str = "https://api-drive.mypikpak.com/drive/v1/files";
         self.with_upload_session(CloudProvider::Pikpak, http, |store| {
-            PikPakClient::new(http, store).request("POST", URL.into(), Some(payload.clone()))
+            PikPakClient::new(http, store).upload_file(parent, path)
         })
     }
 }

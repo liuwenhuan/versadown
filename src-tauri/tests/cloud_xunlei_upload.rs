@@ -1,3 +1,5 @@
+#[path = "support/upload.rs"]
+mod upload_support;
 use alldownloader_lib::cloud::{
     xunlei::{XunleiClient, XunleiClientProfile, XunleiSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
@@ -52,6 +54,7 @@ impl CloudHttpTransport for UploadFixture {
 
 impl CloudUploadTransport for UploadFixture {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        let request = upload_support::consume(request)?;
         let response = match (request.method, request.url.contains("uploads")) {
             ("POST", true) => UploadHttpResponse { status: 200, headers: Default::default(), body: "<InitiateMultipartUploadResult><UploadId>upload-1</UploadId></InitiateMultipartUploadResult>".into() },
             ("PUT", _) => UploadHttpResponse { status: 200, headers: [("ETag".into(), "\"part-etag\"".into())].into(), body: String::new() },
@@ -154,9 +157,11 @@ fn aliyun_contract_uses_oss_signing_and_completes_binary_upload() {
         let uploads = http.uploads.lock().unwrap();
         assert_eq!(uploads.len(), 3);
         assert_eq!(uploads[0].url, expected_url);
-        assert_eq!(uploads[1].body, b"xunlei-bytes");
-        assert!(String::from_utf8_lossy(&uploads[2].body)
-            .contains("<ETag>&quot;part-etag&quot;</ETag>"));
+        assert_eq!(upload_support::bytes(&uploads[1].body), b"xunlei-bytes");
+        assert!(
+            String::from_utf8_lossy(upload_support::bytes(&uploads[2].body))
+                .contains("<ETag>&quot;part-etag&quot;</ETag>")
+        );
         let canonical = format!("POST\n\napplication/octet-stream\n{}\nx-oss-security-token:upload-token\n/test-bucket/objects/upload.bin?uploads", uploads[0].headers["Date"]);
         let mut mac = Hmac::<Sha1>::new_from_slice(b"upload-secret").unwrap();
         mac.update(canonical.as_bytes());
@@ -168,6 +173,24 @@ fn aliyun_contract_uses_oss_signing_and_completes_binary_upload() {
         );
         assert!(!uploads[0].headers.contains_key("x-amz-security-token"));
     }
+}
+
+#[test]
+fn aws_contract_signs_the_streamed_payload_digest_and_completes() {
+    let mut local = tempfile::NamedTempFile::new().unwrap();
+    local.write_all(b"hello").unwrap();
+    let http = UploadFixture::new(resumable("aws", "https://s3.example.com"));
+    XunleiClient::new(session(), &http)
+        .upload_file("parent", local.path())
+        .unwrap();
+    let uploads = http.uploads.lock().unwrap();
+    assert_eq!(uploads.len(), 3);
+    assert_eq!(upload_support::bytes(&uploads[1].body), b"hello");
+    assert_eq!(
+        uploads[1].headers["x-amz-content-sha256"],
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    assert!(uploads[1].headers["Authorization"].starts_with("AWS4-HMAC-SHA256 "));
 }
 
 #[test]

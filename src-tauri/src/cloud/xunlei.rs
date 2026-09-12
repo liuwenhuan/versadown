@@ -87,7 +87,10 @@ mod tests {
             .unwrap();
         let snapshot =
             auth_supervisor::SessionSnapshot::new(&credentials, CloudProvider::Xunlei).unwrap();
-        let http = Http::new(vec![cap(), json!({"error_code":16,"error":"unauthenticated"})]);
+        let http = Http::new(vec![
+            cap(),
+            json!({"error_code":16,"error":"unauthenticated"}),
+        ]);
         let adapter = provider_share_adapter(CloudProvider::Xunlei, &snapshot, &http).unwrap();
         let result = adapter.refresh_recorded_transfer(&selected(), "recorded-file");
         assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
@@ -2114,6 +2117,7 @@ impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
     /// completes the negotiated OSS or AWS multipart upload. The STS credentials
     /// and upload URLs live only on this stack and are never serialized.
     pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
+        let snapshot = super::UploadFileSnapshot::capture(path)?;
         let metadata = std::fs::symlink_metadata(path)
             .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -2126,6 +2130,7 @@ impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
             .into_owned();
         let size = metadata.len();
         let gcid = xunlei_gcid(path, size)?;
+        snapshot.validate()?;
         let value = self.request(
             "POST",
             self.drive_url("/drive/v1/files"),
@@ -2138,6 +2143,7 @@ impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
             )),
         )?;
         let file_value = value.get("file").ok_or(QuarkError::InvalidResponse)?;
+        snapshot.validate()?;
         let file = Self::file(file_value, parent)?;
         // The official web upload flow returns a completed file before
         // examining upload_type or any object-storage credentials.
@@ -2149,8 +2155,8 @@ impl<'a, T: CloudHttpTransport + CloudUploadTransport> XunleiClient<'a, T> {
             return Err(QuarkError::InvalidResponse);
         }
         match upload.provider.as_str() {
-            "aws" => AwsMultipart::from_upload(&upload)?.upload(self.http, path, size)?,
-            "PROVIDER_ALIYUN" => upload_oss(&upload, self.http, path, size)?,
+            "aws" => AwsMultipart::from_upload(&upload)?.upload(self.http, &snapshot, size)?,
+            "PROVIDER_ALIYUN" => upload_oss(&upload, self.http, &snapshot, size)?,
             _ => return Err(QuarkError::InvalidResponse),
         }
         if self.session().profile.is_modern_web() {
@@ -2269,11 +2275,11 @@ impl AwsMultipart {
         method: &'static str,
         raw_query: &str,
         canonical_query: &str,
-        body: Vec<u8>,
+        body: super::UploadBody,
     ) -> Result<UploadHttpRequest, QuarkError> {
         let timestamp = aws_timestamp();
         let date = &timestamp[..8];
-        let payload_hash = hex(&Sha256::digest(&body));
+        let payload_hash = body.sha256()?;
         let host = self.object_host()?;
         let canonical_headers = format!(
             "host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{timestamp}\nx-amz-security-token:{}\n",
@@ -2326,12 +2332,12 @@ impl AwsMultipart {
     fn upload(
         &self,
         http: &impl CloudUploadTransport,
-        path: &Path,
+        snapshot: &super::UploadFileSnapshot,
         size: u64,
     ) -> Result<(), QuarkError> {
         upload_multipart(
             http,
-            path,
+            snapshot,
             size,
             |method, raw_query, canonical_query, body| {
                 self.request(method, raw_query, canonical_query, body)
@@ -2392,7 +2398,7 @@ fn object_storage_endpoint(upload: &XunleiResumableUpload) -> Result<url::Url, Q
 fn upload_oss(
     upload: &XunleiResumableUpload,
     http: &impl CloudUploadTransport,
-    path: &Path,
+    snapshot: &super::UploadFileSnapshot,
     size: u64,
 ) -> Result<(), QuarkError> {
     let mut endpoint = object_storage_endpoint(upload)?;
@@ -2408,7 +2414,7 @@ fn upload_oss(
         secret: upload.access_key_secret.clone(),
         token: upload.security_token.clone(),
     };
-    upload_multipart(http, path, size, |method, raw_query, _, body| {
+    upload_multipart(http, snapshot, size, |method, raw_query, _, body| {
         let query = if raw_query.is_empty() {
             String::new()
         } else {
@@ -2420,28 +2426,33 @@ fn upload_oss(
 
 fn upload_multipart(
     http: &impl CloudUploadTransport,
-    path: &Path,
+    snapshot: &super::UploadFileSnapshot,
     size: u64,
-    request: impl Fn(&'static str, &str, &str, Vec<u8>) -> Result<UploadHttpRequest, QuarkError>,
+    request: impl Fn(
+        &'static str,
+        &str,
+        &str,
+        super::UploadBody,
+    ) -> Result<UploadHttpRequest, QuarkError>,
 ) -> Result<(), QuarkError> {
     if size == 0 {
-        let response = http.send_upload(request("PUT", "", "", Vec::new())?)?;
+        let response = http.send_upload(request("PUT", "", "", snapshot.slice(0, 0)?)?)?;
         return aws_checked(response).map(|_| ());
     }
-    let started =
-        aws_checked(http.send_upload(request("POST", "uploads", "uploads=", Vec::new())?)?)?;
+    let started = aws_checked(http.send_upload(request(
+        "POST",
+        "uploads",
+        "uploads=",
+        Vec::new().into(),
+    )?)?)?;
     let upload_id = xml_tag(&started.body, "UploadId")?;
-    let mut file = std::fs::File::open(path)
-        .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
     let mut remaining = size;
     let mut parts = Vec::new();
     let mut number = 1_u64;
     while remaining > 0 {
-        let length = remaining.min(AWS_PART_SIZE) as usize;
-        let mut body = vec![0; length];
-        file.read_exact(&mut body)
-            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-        remaining = remaining.saturating_sub(length as u64);
+        let length = remaining.min(AWS_PART_SIZE);
+        let body = snapshot.slice(size - remaining, length)?;
+        remaining = remaining.saturating_sub(length);
         let encoded_upload = aws_percent(&upload_id);
         let query = format!("partNumber={number}&uploadId={encoded_upload}");
         let response = aws_checked(http.send_upload(request("PUT", &query, &query, body)?)?)?;
@@ -2462,9 +2473,15 @@ fn upload_multipart(
         ));
     }
     complete.push_str("</CompleteMultipartUpload>");
+    snapshot.validate()?;
     let encoded_upload = aws_percent(&upload_id);
     let query = format!("uploadId={encoded_upload}");
-    aws_checked(http.send_upload(request("POST", &query, &query, complete.into_bytes())?)?)?;
+    aws_checked(http.send_upload(request(
+        "POST",
+        &query,
+        &query,
+        complete.into_bytes().into(),
+    )?)?)?;
     Ok(())
 }
 

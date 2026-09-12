@@ -27,6 +27,11 @@ pub struct CloudHttpResponse {
 pub trait CloudHttpTransport: Send + Sync {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError>;
 
+    /// Upload workers can prevent snapshot publication after cooperative cancellation.
+    fn check_transfer(&self) -> Result<(), QuarkError> {
+        Ok(())
+    }
+
     /// Creates a clean cookie context for account login. Stateless test
     /// transports can keep the default and receive the requests directly.
     fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> {
@@ -43,6 +48,41 @@ pub trait CloudHttpTransport: Send + Sync {
     /// rotated by the validation responses.
     fn cookies_for_url(&self, _url: &str) -> Result<Vec<String>, QuarkError> {
         Ok(Vec::new())
+    }
+}
+
+pub(crate) struct ControlledUploadHttp<'a, T> {
+    pub inner: &'a T,
+    pub control: super::UploadControl,
+}
+impl<T: CloudHttpTransport> CloudHttpTransport for ControlledUploadHttp<'_, T> {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        self.control.check()?;
+        self.inner.send(request)
+    }
+    fn check_transfer(&self) -> Result<(), QuarkError> {
+        self.control.check()
+    }
+    fn manages_cookie_session(&self) -> bool {
+        self.inner.manages_cookie_session()
+    }
+    fn cookies_for_url(&self, url: &str) -> Result<Vec<String>, QuarkError> {
+        self.inner.cookies_for_url(url)
+    }
+}
+impl<T: super::CloudUploadTransport> super::CloudUploadTransport for ControlledUploadHttp<'_, T> {
+    fn send_upload(
+        &self,
+        mut request: super::UploadHttpRequest,
+    ) -> Result<super::UploadHttpResponse, QuarkError> {
+        self.control.check()?;
+        request.body = super::UploadBody::Controlled {
+            body: Box::new(request.body),
+            control: self.control.clone(),
+        };
+        let response = self.inner.send_upload(request)?;
+        self.control.check()?;
+        Ok(response)
     }
 }
 pub struct ReqwestTransport {
@@ -262,4 +302,99 @@ pub(crate) fn response_json(r: &CloudHttpResponse) -> Result<Value, QuarkError> 
         )));
     }
     Ok(v)
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use crate::cloud::{
+        CloudUploadTransport, UploadBody, UploadControl, UploadFileSnapshot, UploadHttpRequest,
+    };
+    use std::io::{Read, Write};
+
+    #[test]
+    fn reqwest_streams_exact_content_length_and_file_slice() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(source.path(), b"prefix-PAYLOAD-suffix").unwrap();
+        let snapshot = UploadFileSnapshot::capture(source.path()).unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/upload", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+            }
+            let headers = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+            assert!(headers.contains("content-length: 7\r\n"));
+            assert!(!headers.contains("transfer-encoding:"));
+            let mut body = [0; 7];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(&body, b"PAYLOAD");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let control = UploadControl::default();
+        let http = ReqwestTransport::new().unwrap();
+        let controlled = ControlledUploadHttp {
+            inner: &http,
+            control: control.clone(),
+        };
+        let result = controlled.send_upload(UploadHttpRequest {
+            method: "PUT",
+            url,
+            headers: BTreeMap::new(),
+            body: snapshot.slice(7, 7).unwrap(),
+        });
+        worker.join().unwrap();
+        assert_eq!(result.unwrap().status, 200);
+        assert_eq!(control.bytes_read(), 7);
+    }
+
+    #[test]
+    fn cancelled_transport_sends_neither_metadata_nor_mutation_requests() {
+        struct Never;
+        impl CloudHttpTransport for Never {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                panic!("cancelled metadata request started")
+            }
+        }
+        impl CloudUploadTransport for Never {
+            fn send_upload(
+                &self,
+                _: UploadHttpRequest,
+            ) -> Result<crate::cloud::UploadHttpResponse, QuarkError> {
+                panic!("cancelled transfer started")
+            }
+        }
+        let control = UploadControl::default();
+        let http = ControlledUploadHttp {
+            inner: &Never,
+            control: control.clone(),
+        };
+        control.cancel();
+        assert!(http.check_transfer().is_err());
+        assert!(http
+            .send(CloudHttpRequest {
+                method: "POST",
+                url: "https://example.com/commit".into(),
+                headers: BTreeMap::new(),
+                body: None
+            })
+            .is_err());
+        assert!(http
+            .send_upload(UploadHttpRequest {
+                method: "POST",
+                url: "https://example.com/upload".into(),
+                headers: BTreeMap::new(),
+                body: UploadBody::Bytes(vec![])
+            })
+            .is_err());
+    }
 }

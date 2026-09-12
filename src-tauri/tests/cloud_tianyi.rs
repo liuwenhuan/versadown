@@ -1,3 +1,5 @@
+#[path = "support/upload.rs"]
+mod upload_support;
 use alldownloader_lib::cloud::{
     tianyi::{parse_tianyi_web_session, TianyiClient, TianyiSession, TIANYI_RECYCLE_BIN_ID},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
@@ -184,6 +186,7 @@ impl UploadRecordingHttp {
 
 impl CloudUploadTransport for UploadRecordingHttp {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        let request = upload_support::consume(request)?;
         self.requests.lock().unwrap().push(request);
         self.replies
             .lock()
@@ -892,8 +895,7 @@ fn tianyi_uploads_a_local_file_to_the_ephemeral_https_host() {
     let requests = upload.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].url, "https://upload.example/receiver");
-    assert!(requests[0]
-        .body
+    assert!(upload_support::bytes(&requests[0].body)
         .windows(b"hello tianyi".len())
         .any(|part| part == b"hello tianyi"));
     assert!(requests[0]

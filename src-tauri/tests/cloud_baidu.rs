@@ -1,3 +1,5 @@
+#[path = "support/upload.rs"]
+mod upload_support;
 use alldownloader_lib::cloud::{
     baidu::{parse_baidu_web_session, BaiduClient, BaiduSession, BAIDU_RECYCLE_BIN_ID},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
@@ -169,6 +171,7 @@ impl UploadRecordingHttp {
 
 impl CloudUploadTransport for UploadRecordingHttp {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        let request = upload_support::consume(request)?;
         self.requests.lock().unwrap().push(request);
         self.replies
             .lock()
@@ -1170,8 +1173,7 @@ fn baidu_uploads_a_local_file_then_commits_without_retaining_the_transfer_url() 
     assert_eq!(requests.len(), 1);
     assert!(requests[0].url.starts_with("https://"));
     assert!(requests[0].url.contains("method=upload"));
-    assert!(requests[0]
-        .body
+    assert!(upload_support::bytes(&requests[0].body)
         .windows(b"hello baidu".len())
         .any(|part| part == b"hello baidu"));
     assert!(requests[0]

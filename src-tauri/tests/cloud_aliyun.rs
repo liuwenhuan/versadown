@@ -1,3 +1,5 @@
+#[path = "support/upload.rs"]
+mod upload_support;
 use alldownloader_lib::cloud::{
     aliyun::{AliyunClient, AliyunSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, CredentialStore,
@@ -91,6 +93,7 @@ impl CloudHttpTransport for RecordingHttp {
 
 impl CloudUploadTransport for RecordingHttp {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        let request = upload_support::consume(request)?;
         self.upload_requests.lock().unwrap().push(request);
         self.upload_responses
             .lock()
@@ -757,7 +760,7 @@ fn aliyun_upload_file_transfers_https_part_then_completes_without_persisting_tem
         uploads[0].url,
         "https://upload.example/part?temporary=secret"
     );
-    assert_eq!(uploads[0].body, b"cloud-bytes");
+    assert_eq!(upload_support::bytes(&uploads[0].body), b"cloud-bytes");
     drop(uploads);
     let requests = http.requests.lock().unwrap();
     let complete = requests.last().unwrap();

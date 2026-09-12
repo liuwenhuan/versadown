@@ -887,6 +887,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         local_path: &Path,
         upload_http: &U,
     ) -> Result<CloudFile, QuarkError> {
+        let snapshot = super::UploadFileSnapshot::capture(local_path)?;
         if parent.is_empty() {
             return Err(QuarkError::InvalidInput("请选择目标目录".into()));
         }
@@ -901,11 +902,6 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             .filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
             .ok_or_else(|| QuarkError::InvalidInput("文件名无效".into()))?
             .to_owned();
-        let bytes = std::fs::read(local_path)
-            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-        if bytes.len() as u64 != metadata.len() {
-            return Err(QuarkError::InvalidInput("本地文件在上传前发生变化".into()));
-        }
         let session_key = self.page_session_key()?;
         let endpoint = required(&self.upload()?, "uploadUrl")?;
         let endpoint = super::https_transfer_url(&endpoint)?;
@@ -919,7 +915,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             ],
             "Filedata",
             &name,
-            bytes,
+            snapshot.slice(0, snapshot.len())?,
         )?;
         let mut headers = self.headers();
         headers.insert("Content-Type".into(), content_type);
@@ -929,6 +925,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             headers,
             body,
         })?;
+        snapshot.validate()?;
         tianyi_upload_response(&response, parent, &name, metadata.len())
     }
     pub fn download(&self, id: &str) -> Result<TianyiDownload, QuarkError> {

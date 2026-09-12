@@ -1,3 +1,5 @@
+#[path = "support/upload.rs"]
+mod upload_support;
 use alldownloader_lib::cloud::{
     parse_quark_download_url, parse_quark_files, CloudHttpRequest, CloudHttpResponse,
     CloudHttpTransport, CloudUploadTransport, CredentialStore, MemoryCredentialStore, QuarkClient,
@@ -230,6 +232,7 @@ impl RecordingUpload {
 
 impl CloudUploadTransport for RecordingUpload {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        let request = upload_support::consume(request)?;
         self.requests.lock().unwrap().push(request);
         self.responses
             .lock()
@@ -364,11 +367,65 @@ fn quark_upload_rejects_same_size_replacement_after_hash_registration() {
         client.upload_file("0", fixture.path(), &upload),
         Err(QuarkError::InvalidInput(message)) if message.contains("上传过程中发生变化")
     ));
-    assert_eq!(upload.requests().len(), 1);
+    assert!(upload.requests().is_empty());
     assert!(!http
         .requests()
         .iter()
         .any(|request| request.url.contains("file/upload/finish")));
+}
+
+#[test]
+fn quark_streaming_preserves_uploaded_hash_verification_when_mtime_is_restored() {
+    struct Rewrite<'a> {
+        inner: SequencedHttp,
+        path: &'a std::path::Path,
+        modified: std::time::SystemTime,
+    }
+    impl CloudHttpTransport for Rewrite<'_> {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            if request.url.contains("file/update/hash") {
+                std::fs::write(self.path, b"changed upload bytes").unwrap();
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.path)
+                    .unwrap()
+                    .set_modified(self.modified)
+                    .unwrap();
+            }
+            self.inner.send(request)
+        }
+    }
+    let fixture = upload_fixture();
+    let http = Rewrite {
+        path: fixture.path(),
+        modified: fixture.as_file().metadata().unwrap().modified().unwrap(),
+        inner: SequencedHttp::new([
+            r#"{"code":0,"data":{"task_id":"task","auth_info":"info","upload_id":"upload","obj_key":"objects/file","bucket":"ul-zb","upload_url":"https://pds.quark.cn"}}"#,
+            r#"{"code":0,"data":{"finish":false}}"#,
+            r#"{"code":0,"data":{"auth_key":"OSS put"}}"#,
+            r#"{"code":0,"data":{"auth_key":"OSS complete"}}"#,
+            r#"{"code":0,"data":{"fid":"file"}}"#,
+        ]),
+    };
+    let upload = RecordingUpload::new([
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "part".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "<CompleteMultipartUploadResult/>".into(),
+        },
+    ]);
+    let result =
+        QuarkClient::new("sid=session".into(), &http).upload_file("0", fixture.path(), &upload);
+    assert!(
+        matches!(result, Err(QuarkError::InvalidInput(_))),
+        "stream must still match its registered hash"
+    );
+    assert_eq!(upload.requests().len(), 1);
 }
 
 #[test]

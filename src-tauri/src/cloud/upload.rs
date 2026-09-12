@@ -9,6 +9,8 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use std::{collections::BTreeMap, io::Read, path::Path};
+mod body;
+pub use body::*;
 
 /// Validates a server-provided transfer endpoint before file bytes are sent.
 /// Scheme-relative endpoints are normalised to HTTPS; credentials and fragments
@@ -37,8 +39,8 @@ pub(crate) fn multipart_file(
     fields: &[(&str, String)],
     file_field: &str,
     file_name: &str,
-    file: Vec<u8>,
-) -> Result<(String, Vec<u8>), QuarkError> {
+    file: UploadBody,
+) -> Result<(String, UploadBody), QuarkError> {
     let safe_header = |value: &str| !value.is_empty() && !value.contains(['\r', '\n']);
     if !safe_header(file_field)
         || !safe_header(file_name)
@@ -62,16 +64,21 @@ pub(crate) fn multipart_file(
         )
         .as_bytes(),
     );
-    body.extend_from_slice(&file);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    Ok((format!("multipart/form-data; boundary={boundary}"), body))
+    Ok((
+        format!("multipart/form-data; boundary={boundary}"),
+        UploadBody::Multipart {
+            prefix: body,
+            file: Box::new(file),
+            suffix: format!("\r\n--{boundary}--\r\n").into_bytes(),
+        },
+    ))
 }
 
 pub struct UploadHttpRequest {
     pub method: &'static str,
     pub url: String,
     pub headers: BTreeMap<String, String>,
-    pub body: Vec<u8>,
+    pub body: UploadBody,
 }
 pub struct UploadHttpResponse {
     pub status: u16,
@@ -93,8 +100,11 @@ impl CloudUploadTransport for ReqwestTransport {
         for (k, v) in r.headers {
             b = b.header(k, v)
         }
+        let length = r.body.len();
+        let reader = r.body.reader(UploadControl::default())?;
         let response = b
-            .body(r.body)
+            .header(reqwest::header::CONTENT_LENGTH, length)
+            .body(reqwest::blocking::Body::sized(reader, length))
             .send()
             .map_err(|_| QuarkError::Transport("上传分片连接失败，请重试".into()))?;
         let status = response.status().as_u16();
@@ -156,7 +166,7 @@ impl Oss {
         &self,
         method: &'static str,
         query: &str,
-        body: Vec<u8>,
+        body: impl Into<UploadBody>,
     ) -> Result<UploadHttpRequest, QuarkError> {
         let date = httpdate::fmt_http_date(std::time::SystemTime::now());
         let canonical = format!(
@@ -191,7 +201,7 @@ impl Oss {
                 ("Content-Type".into(), "application/octet-stream".into()),
                 ("x-oss-security-token".into(), self.token.clone()),
             ]),
-            body,
+            body: body.into(),
         })
     }
 }
@@ -238,6 +248,7 @@ pub fn upload_pikpak_file(
     path: &Path,
     initialize: impl FnOnce(Value) -> Result<Value, QuarkError>,
 ) -> Result<CloudFile, QuarkError> {
+    let snapshot = UploadFileSnapshot::capture(path)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|_| file_error())?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(QuarkError::InvalidInput("请选择普通文件上传".into()));
@@ -249,9 +260,11 @@ pub fn upload_pikpak_file(
         .into_owned();
     let size = metadata.len();
     let hash = pikpak_hash(path)?;
+    snapshot.validate()?;
     let init = initialize(
         json!({"kind":"drive#file","name":name,"size":size.to_string(),"hash":hash,"parent_id":if parent=="0"{""}else{parent},"upload_type":"UPLOAD_TYPE_RESUMABLE","objProvider":{"provider":"UPLOAD_TYPE_UNKNOWN"}}),
     )?;
+    snapshot.validate()?;
     let file = parse_pikpak_file(&init["file"], parent)?;
     if init["file"]["phase"] == "PHASE_TYPE_COMPLETE" {
         return Ok(file);
@@ -267,14 +280,13 @@ pub fn upload_pikpak_file(
     };
     let started = checked(http.send_upload(oss.request("POST", "?uploads", Vec::new())?)?)?;
     let id = xml_tag(&started.body, "UploadId")?;
-    let mut input = std::fs::File::open(path).map_err(|_| file_error())?;
     let mut remaining = size;
     let mut number = 1;
     let mut completion = String::from("<CompleteMultipartUpload>");
     loop {
-        let mut bytes = vec![0; remaining.min(10 * 1024 * 1024) as usize];
-        input.read_exact(&mut bytes).map_err(|_| file_error())?;
-        remaining -= bytes.len() as u64;
+        let length = remaining.min(10 * 1024 * 1024);
+        let bytes = snapshot.slice(size - remaining, length)?;
+        remaining -= length;
         let part = checked(http.send_upload(oss.request(
             "PUT",
             &format!("?partNumber={number}&uploadId={}", encoded(&id)),
@@ -295,6 +307,7 @@ pub fn upload_pikpak_file(
         }
     }
     completion.push_str("</CompleteMultipartUpload>");
+    snapshot.validate()?;
     let done = checked(http.send_upload(oss.request(
         "POST",
         &format!("?uploadId={}", encoded(&id)),
@@ -325,8 +338,10 @@ pub(crate) fn upload_cloud_drive_file(
     authorize: impl Fn(Value) -> Result<Value, QuarkError>,
     finish: impl FnOnce(Value) -> Result<Value, QuarkError>,
 ) -> Result<CloudFile, QuarkError> {
+    let snapshot = UploadFileSnapshot::capture(path)?;
     let (name, size, modified_at) = cloud_drive_file_metadata(path)?;
     let (md5, sha1) = cloud_drive_hashes(path, size)?;
+    snapshot.validate()?;
     let content_type = "application/octet-stream";
     let pre = pre_upload(json!({
         "ccp_hash_update": true,
@@ -340,9 +355,11 @@ pub(crate) fn upload_cloud_drive_file(
         "size": size,
     }))?;
     let pre_data = pre.get("data").ok_or(QuarkError::InvalidResponse)?;
+    snapshot.validate()?;
     let task_id = required(pre_data, "task_id")?;
     let hash = update_hash(json!({"task_id":task_id,"md5":md5,"sha1":sha1}))?;
     let hash_data = hash.get("data").ok_or(QuarkError::InvalidResponse)?;
+    snapshot.validate()?;
     if hash_data.get("finish").and_then(Value::as_bool) == Some(true) {
         return cloud_drive_file(hash_data, parent, &name, size);
     }
@@ -369,19 +386,17 @@ pub(crate) fn upload_cloud_drive_file(
         checked_temporary_header(callback)?;
     }
 
-    let mut source = std::fs::File::open(path).map_err(|_| file_error())?;
     let mut remaining = size;
     let mut parts = Vec::new();
     let mut number = 1_u64;
-    let mut uploaded_md5 = md5::Context::new();
-    let mut uploaded_sha1 = Sha1::new();
+    let uploaded_digest = UploadDigest::default();
     while remaining > 0 || number == 1 {
-        let length = remaining.min(contract.part_size as u64) as usize;
-        let mut bytes = vec![0; length];
-        source.read_exact(&mut bytes).map_err(|_| file_error())?;
-        remaining = remaining.saturating_sub(length as u64);
-        uploaded_md5.consume(&bytes);
-        uploaded_sha1.update(&bytes);
+        let length = remaining.min(contract.part_size as u64);
+        let mut bytes = snapshot.slice(size - remaining, length)?;
+        if let UploadBody::FileSlice { digest, .. } = &mut bytes {
+            *digest = Some(uploaded_digest.clone());
+        }
+        remaining = remaining.saturating_sub(length);
         let query = format!(
             "partNumber={number}&uploadId={}",
             encoded(&contract.upload_id)
@@ -403,13 +418,8 @@ pub(crate) fn upload_cloud_drive_file(
             break;
         }
     }
-    if format!("{:x}", uploaded_md5.finalize()) != md5
-        || format!("{:x}", uploaded_sha1.finalize()) != sha1
-    {
-        return Err(QuarkError::InvalidInput(
-            "本地文件在上传过程中发生变化".into(),
-        ));
-    }
+    snapshot.validate()?;
+    uploaded_digest.verify(&md5, &sha1)?;
     let mut manifest = String::from("<CompleteMultipartUpload>");
     for (number, etag) in parts {
         manifest.push_str(&format!(
@@ -424,13 +434,14 @@ pub(crate) fn upload_cloud_drive_file(
         "POST",
         &format!("uploadId={}", encoded(&contract.upload_id)),
         "application/xml",
-        manifest,
+        manifest.into(),
         contract.callback.as_deref(),
         &authorize,
     )?)?)?;
     if !completed.body.contains("CompleteMultipartUploadResult") {
         return Err(QuarkError::InvalidResponse);
     }
+    snapshot.validate()?;
     let final_response = finish(json!({
         "task_id":contract.task_id,
         "obj_key":contract.object_key,
@@ -563,13 +574,16 @@ fn cloud_drive_authorized_request(
     method: &'static str,
     query: &str,
     content_type: &str,
-    body: Vec<u8>,
+    body: UploadBody,
     callback: Option<&str>,
     authorize: &impl Fn(Value) -> Result<Value, QuarkError>,
 ) -> Result<UploadHttpRequest, QuarkError> {
     let date = httpdate::fmt_http_date(std::time::SystemTime::now());
     let content_md5 = if method == "POST" {
-        Some(base64::engine::general_purpose::STANDARD.encode(md5::compute(&body).0))
+        let UploadBody::Bytes(bytes) = &body else {
+            return Err(QuarkError::InvalidResponse);
+        };
+        Some(base64::engine::general_purpose::STANDARD.encode(md5::compute(bytes).0))
     } else {
         None
     };

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Seek, SeekFrom},
+    io::Read,
     path::Path,
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -1205,10 +1205,12 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         local_path: &Path,
         upload_http: &U,
     ) -> Result<CloudFile, QuarkError> {
+        let snapshot = super::UploadFileSnapshot::capture(local_path)?;
         let parent = parse_parent_reference(parent)?;
         let (name, size) = local_file_metadata(local_path)?;
         let path = join_path(&parent.path, &name)?;
         let blocks = baidu_block_hashes(local_path, size)?;
+        snapshot.validate()?;
         let token = self.web_token()?;
         let precreate = self.web_form(
             "/api/precreate",
@@ -1226,6 +1228,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         // commit unless the service has already returned a concrete file.
         // Treating precreate itself as a completed file loses valid rapid
         // uploads because that response normally contains only an upload id.
+        snapshot.validate()?;
         if precreate.get("return_type").and_then(Value::as_i64) == Some(2)
             && precreate.get("info").is_some()
         {
@@ -1246,11 +1249,14 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         for part in requested_blocks {
-            let bytes = baidu_block(local_path, size, part)?;
+            let offset = part as u64 * BAIDU_UPLOAD_BLOCK_SIZE as u64;
+            let bytes =
+                snapshot.slice(offset, (size - offset).min(BAIDU_UPLOAD_BLOCK_SIZE as u64))?;
             let response = upload_http
                 .send_upload(self.slice_request(&path, &upload_id, part, &token, &name, bytes)?)?;
             validate_slice_response(&response, &blocks[part])?;
         }
+        snapshot.validate()?;
         let committed = self.web_form(
             "/api/create",
             &write_query(&token, "a=commit"),
@@ -1403,7 +1409,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         part: usize,
         token: &str,
         name: &str,
-        bytes: Vec<u8>,
+        bytes: super::UploadBody,
     ) -> Result<UploadHttpRequest, QuarkError> {
         let mut url =
             url::Url::parse(BAIDU_UPLOAD_HOST).map_err(|_| QuarkError::InvalidResponse)?;
@@ -1689,25 +1695,6 @@ fn baidu_block_hashes(path: &Path, size: u64) -> Result<Vec<String>, QuarkError>
         hashes.push(format!("{:x}", md5::compute(bytes)));
     }
     Ok(hashes)
-}
-
-fn baidu_block(path: &Path, size: u64, index: usize) -> Result<Vec<u8>, QuarkError> {
-    let offset = u64::try_from(index)
-        .ok()
-        .and_then(|index| index.checked_mul(BAIDU_UPLOAD_BLOCK_SIZE as u64))
-        .ok_or(QuarkError::InvalidResponse)?;
-    if offset >= size {
-        return Err(QuarkError::InvalidResponse);
-    }
-    let expected = (size - offset).min(BAIDU_UPLOAD_BLOCK_SIZE as u64) as usize;
-    let mut file = std::fs::File::open(path)
-        .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-    let mut bytes = vec![0; expected];
-    file.read_exact(&mut bytes)
-        .map_err(|_| QuarkError::InvalidInput("本地文件在上传过程中发生变化".into()))?;
-    Ok(bytes)
 }
 
 fn validate_slice_response(

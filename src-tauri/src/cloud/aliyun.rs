@@ -9,7 +9,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, io::Read, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 // The current official web client renews the browser-granted `token` entry
 // through this endpoint.  The legacy auth.aliyundrive.com endpoint rejects
@@ -767,6 +767,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport + CloudUploadTransport> Aliyu
     /// tell Aliyun Drive to publish the completed object.  The temporary URLs are
     /// intentionally scoped to this call and never enter the credential store.
     pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
+        let snapshot = super::UploadFileSnapshot::capture(path)?;
         let metadata = std::fs::symlink_metadata(path)
             .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -798,16 +799,12 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport + CloudUploadTransport> Aliyu
         let upload_id = required(&init, "upload_id")?;
         let upload_parts = upload_parts(&init, parts)?;
 
-        let mut input = std::fs::File::open(path)
-            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
+        snapshot.validate()?;
         let mut remaining = size;
         for part in upload_parts {
-            let length = remaining.min(ALIYUN_PART_SIZE) as usize;
-            let mut body = vec![0; length];
-            input
-                .read_exact(&mut body)
-                .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-            remaining = remaining.saturating_sub(length as u64);
+            let length = remaining.min(ALIYUN_PART_SIZE);
+            let body = snapshot.slice(size - remaining, length)?;
+            remaining = remaining.saturating_sub(length);
             let mut headers = BTreeMap::new();
             if let Some(content_type) = part.content_type {
                 headers.insert("Content-Type".into(), content_type);
@@ -828,6 +825,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport + CloudUploadTransport> Aliyu
         if remaining != 0 {
             return Err(QuarkError::InvalidInput("无法读取选中的本地文件".into()));
         }
+        snapshot.validate()?;
         self.api(
             &session,
             "/v2/file/complete",
