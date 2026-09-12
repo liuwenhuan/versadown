@@ -11,7 +11,8 @@ const state = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
   confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
-  updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined)
+  updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
+  reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
@@ -29,6 +30,14 @@ vi.mock('./lib/downloadEvents', async (importOriginal) => {
     state.onTask = onTask;
     return Promise.resolve(() => undefined);
   }) };
+});
+vi.mock('./lib/cloudApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/cloudApi')>();
+  return {
+    ...actual,
+    reauthorizeFailedCloudTask: state.reauthorizeFailedCloudTask,
+    completeCloudAuthorization: state.completeCloudAuthorization,
+  };
 });
 vi.mock('@tauri-apps/api/event', () => ({ listen: state.listen }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite }));
@@ -72,6 +81,8 @@ beforeEach(() => {
   state.listAiModels.mockReset();
   state.startDragging.mockReset();
   state.startDragging.mockResolvedValue(undefined);
+  state.reauthorizeFailedCloudTask.mockReset();
+  state.completeCloudAuthorization.mockReset();
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -82,26 +93,29 @@ beforeEach(() => {
   });
 });
 
-it('starts native dragging from the application icon and title', () => {
-  render(<App />);
-
-  fireEvent.mouseDown(document.querySelector('.brand')!, { button: 0 });
-
-  expect(state.startDragging).toHaveBeenCalledOnce();
-});
-
-it('starts native dragging from blank title-bar space without stealing interactive controls', () => {
+it('uses native drag regions for the app title bar without the delayed bridge call', () => {
   render(<App />);
   const header = document.querySelector('.app-header')!;
+  const brand = document.querySelector('.brand')!;
 
-  fireEvent.mouseDown(header, { button: 0 });
-  expect(state.startDragging).toHaveBeenCalledOnce();
+  expect(brand).toHaveAttribute('data-tauri-drag-region');
+  expect(header.querySelector('[data-tauri-drag-region]')).toBeInTheDocument();
+
+  fireEvent.mouseDown(brand, { button: 0 });
+
+  expect(state.startDragging).not.toHaveBeenCalled();
+});
+
+it('keeps title-bar controls outside native drag regions', () => {
+  render(<App />);
+
+  expect(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' })).not.toHaveAttribute('data-tauri-drag-region');
+  expect(screen.getByRole('button', { name: '最小化' })).not.toHaveAttribute('data-tauri-drag-region');
 
   fireEvent.mouseDown(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), { button: 0 });
-  fireEvent.mouseDown(screen.getByRole('button', { name: '新建下载' }), { button: 0 });
   fireEvent.mouseDown(screen.getByRole('button', { name: '最小化' }), { button: 0 });
 
-  expect(state.startDragging).toHaveBeenCalledOnce();
+  expect(state.startDragging).not.toHaveBeenCalled();
 });
 
 it('uses regular font weight for task tabs and file titles', async () => {
@@ -188,7 +202,69 @@ it('requests active tasks for the first paint before loading terminal tabs in th
   expect(state.list.mock.calls.map(([scope]) => scope)).toEqual(['active', 'terminal']);
 });
 
-it('opens downloading tasks after confirming a download parsed from the toolbar dialog', async () => {
+it('shows a reauthorized Baidu task as downloading after its authorization succeeds', async () => {
+  vi.useFakeTimers();
+  try {
+    const failedTask: QueueTask = {
+      id: 'baidu-reauthorize-task', name: '需要验证的文件.mp4', kind: 'cloud', status: 'failed', progress: 0,
+      source: 'cloud://baidu/file-123', error: '网盘要求完成官方操作验证后重试', reauthorization_required: true,
+    };
+    const resumedTask: QueueTask = {
+      ...failedTask, status: 'downloading', error: undefined, reauthorization_required: false,
+    };
+    let authorizationCompleted = false;
+    state.list.mockImplementation((scope?: string) => {
+      if (scope === 'active') return Promise.resolve(authorizationCompleted ? [resumedTask] : [failedTask]);
+      if (scope === 'terminal') return Promise.resolve(authorizationCompleted ? [] : [failedTask]);
+      return Promise.resolve(authorizationCompleted ? [resumedTask] : [failedTask]);
+    });
+    state.reauthorizeFailedCloudTask.mockResolvedValue({
+      provider: 'baidu', windowLabel: 'cloud-auth-baidu', instructions: '请在官方网盘窗口完成登录',
+    });
+    state.completeCloudAuthorization.mockImplementation(() => {
+      authorizationCompleted = true;
+      return Promise.resolve({ provider: 'baidu', id: 'baidu-user', displayName: '百度用户', authMethod: 'web' });
+    });
+
+    render(<App />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole('tab', { name: /失败/ }));
+    fireEvent.click(screen.getByRole('button', { name: '重新授权 需要验证的文件.mp4' }));
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByRole('status')).toHaveTextContent('授权成功，正在恢复受影响的下载任务');
+
+    fireEvent.click(screen.getByRole('tab', { name: /下载中/ }));
+    expect(screen.getByTitle('需要验证的文件.mp4')).toBeVisible();
+    expect(screen.getByRole('progressbar', { name: '需要验证的文件.mp4 下载进度' })).toHaveAttribute('aria-valuenow', '0');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('refreshes a task after automatic password renewal without polling a closed authorization window', async () => {
+  const failed: QueueTask = { id: 'automatic-login', name: '自动恢复.mp4', kind: 'cloud',
+    status: 'failed', progress: 0, source: 'cloud://baidu/file-1', reauthorization_required: true };
+  let recovered = false;
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active'
+    ? recovered ? [{ ...failed, status: 'downloading', reauthorization_required: false }] : []
+    : recovered ? [] : [failed]));
+  state.reauthorizeFailedCloudTask.mockImplementation(async () => {
+    recovered = true;
+    return { provider: 'baidu', windowLabel: '', completed: true, instructions: '登录已自动恢复，正在继续下载' };
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(await screen.findByRole('button', { name: '重新授权 自动恢复.mp4' }));
+  await screen.findByText('登录已自动恢复，正在继续下载');
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  expect(await screen.findByTitle('自动恢复.mp4')).toBeVisible();
+  expect(state.completeCloudAuthorization).not.toHaveBeenCalled();
+});
+
+it('keeps task confirmation in the header panel after parsing a download link', async () => {
   const user = userEvent.setup();
   state.parse.mockResolvedValueOnce({
     confirmation: {
@@ -199,11 +275,12 @@ it('opens downloading tasks after confirming a download parsed from the toolbar 
   state.confirm.mockResolvedValueOnce({ id: 'torrent-batch', name: 'collection', kind: 'torrent', status: 'downloading', progress: 0 });
 
   render(<App />);
-  await user.click(screen.getByRole('button', { name: '新建下载' }));
-  await user.type(screen.getByRole('textbox', { name: '下载内容' }), 'magnet:?xt=urn:btih:abc');
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), 'magnet:?xt=urn:btih:abc{Enter}');
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toHaveClass('header-download-dialog');
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
 
-  expect(await screen.findByRole('dialog', { name: '确认下载内容' })).toBeVisible();
+  const confirmation = await screen.findByRole('dialog', { name: '确认下载内容' });
+  expect(confirmation.closest('.header-input-panel')).not.toBeNull();
   await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
 
   await waitFor(() => expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true'));
@@ -407,11 +484,10 @@ it('opens one permanent-delete confirmation for all selected recycled tasks', as
   await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledWith(expect.arrayContaining(['purge-1', 'purge-2']), false));
 });
 
-it('keeps large recycle cleanup visible until each 50-task background batch completes', async () => {
+it('submits a large recycle cleanup once and starts draining the visible list before it finishes', async () => {
   const user = userEvent.setup();
-  const firstBatch = deferred<void>();
-  const secondBatch = deferred<void>();
-  const recycled = Array.from({ length: 100 }, (_, index): QueueTask => ({
+  const completion = deferred<void>();
+  const recycled = Array.from({ length: 1_000 }, (_, index): QueueTask => ({
     ...oldTask,
     id: `background-purge-${index}`,
     name: `background-purge-${index}.zip`,
@@ -419,10 +495,8 @@ it('keeps large recycle cleanup visible until each 50-task background batch comp
     progress: 100,
   }));
   let terminalTasks = recycled;
-  let batchNumber = 0;
   state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? terminalTasks : []));
   state.purgeTasks.mockImplementation((ids: string[]) => {
-    const completion = batchNumber++ === 0 ? firstBatch : secondBatch;
     return completion.promise.then(() => {
       terminalTasks = terminalTasks.filter((task) => !ids.includes(task.id));
     });
@@ -432,31 +506,53 @@ it('keeps large recycle cleanup visible until each 50-task background batch comp
   await user.click(await screen.findByRole('tab', { name: /回收站/ }));
   await user.click(screen.getByRole('button', { name: '清空' }));
   const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
-  expect(dialog).toHaveTextContent('100 个任务');
+  expect(dialog).toHaveTextContent('1000 个任务');
 
   await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
 
   await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledOnce());
-  const firstBatchIds = state.purgeTasks.mock.calls[0][0] as string[];
-  expect(firstBatchIds).toHaveLength(50);
+  const submittedIds = state.purgeTasks.mock.calls[0][0] as string[];
+  expect(submittedIds).toHaveLength(1_000);
   expect(state.purgeTasks.mock.calls[0][1]).toBe(false);
   expect(screen.queryByRole('dialog', { name: '彻底删除任务' })).not.toBeInTheDocument();
-  const firstBatchName = recycled.find((task) => task.id === firstBatchIds[0])!.name;
-  const waitingTaskName = recycled.find((task) => !firstBatchIds.includes(task.id))!.name;
-  expect(screen.getByText(firstBatchName)).toBeVisible();
+  expect(screen.getByRole('button', { name: '清空' })).toBeDisabled();
+  await act(async () => { await new Promise<void>((resolve) => window.setTimeout(resolve, 40)); });
+  expect(screen.getByRole('status')).toHaveTextContent('正在后台删除');
+  expect(screen.queryByText(recycled.at(-1)!.name)).not.toBeInTheDocument();
+  expect(screen.getByText(recycled[0].name)).toBeVisible();
+  expect(state.purgeTasks).toHaveBeenCalledOnce();
 
-  await act(async () => { firstBatch.resolve(undefined); });
+  await act(async () => { completion.resolve(undefined); });
+  await waitFor(() => expect(screen.queryByText(recycled[0].name)).not.toBeInTheDocument());
+});
 
-  await waitFor(() => {
-    expect(screen.queryByText(firstBatchName)).not.toBeInTheDocument();
-    expect(screen.getByText(waitingTaskName)).toBeVisible();
-    expect(state.purgeTasks).toHaveBeenCalledTimes(2);
-  });
-  expect(state.purgeTasks.mock.calls[1][0]).toHaveLength(50);
-  expect(state.purgeTasks.mock.calls[1][1]).toBe(false);
+it('does not restore a permanently purged task from a late task event', async () => {
+  const user = userEvent.setup();
+  const completion = deferred<void>();
+  const recycled: QueueTask = {
+    ...oldTask,
+    id: 'late-purge-event',
+    name: 'late-purge-event.zip',
+    status: 'recycled',
+    progress: 100,
+  };
+  let terminalTasks = [recycled];
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? terminalTasks : []));
+  state.purgeTasks.mockImplementation(() => completion.promise.then(() => {
+    terminalTasks = [];
+  }));
+  render(<App />);
 
-  await act(async () => { secondBatch.resolve(undefined); });
-  await waitFor(() => expect(screen.queryByText(waitingTaskName)).not.toBeInTheDocument());
+  await user.click(await screen.findByRole('tab', { name: /回收站/ }));
+  await user.click(screen.getByRole('button', { name: '清空' }));
+  await user.click(within(screen.getByRole('dialog', { name: '彻底删除任务' })).getByRole('button', { name: '彻底删除' }));
+  await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledOnce());
+
+  await act(async () => { completion.resolve(undefined); });
+  await waitFor(() => expect(screen.queryByText(recycled.name)).not.toBeInTheDocument());
+  act(() => { state.onTask?.(recycled); });
+
+  expect(screen.queryByText(recycled.name)).not.toBeInTheDocument();
 });
 
 it('clears cleanup retry only after the typed task action result reports success', async () => {
@@ -512,9 +608,8 @@ it('keeps a protected share open for an access code before completing its normal
     .mockResolvedValueOnce({ task: liveTask });
   render(<App />);
 
-  await user.click(await screen.findByRole('button', { name: '新建下载' }));
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), `${shareLink}{Enter}`);
   const downloadInput = screen.getByLabelText('下载内容');
-  await user.type(downloadInput, shareLink);
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
 
   const accessCode = await screen.findByLabelText('访问码');
@@ -529,6 +624,39 @@ it('keeps a protected share open for an access code before completing its normal
   await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234'));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
   expect(screen.getByText('archive.iso')).toBeVisible();
+});
+
+it('uses a non-link query to find local active, completed, and failed tasks', async () => {
+  const user = userEvent.setup();
+  const active = { id: 'active-document', name: '正在下载的文档.zip', kind: 'file' as const, status: 'downloading' as const, progress: 40 };
+  const completed = { id: 'completed-document', name: '已完成文档.pdf', kind: 'file' as const, status: 'completed' as const, progress: 100 };
+  const failed = { id: 'failed-document', name: '失败的文档.docx', kind: 'file' as const, status: 'failed' as const, progress: 0 };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [active] : scope === 'terminal' ? [completed, failed] : [active, completed, failed]));
+  render(<App />);
+
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), '文档{Enter}');
+
+  const results = await screen.findByRole('region', { name: '搜索结果' });
+  expect(within(results).getByRole('button', { name: /正在下载的文档\.zip/ })).toBeVisible();
+  expect(within(results).getByRole('button', { name: /已完成文档\.pdf/ })).toBeVisible();
+  expect(within(results).getByRole('button', { name: /失败的文档\.docx/ })).toBeVisible();
+
+  await user.click(within(results).getByRole('button', { name: /已完成文档\.pdf/ }));
+  expect(screen.getByRole('tab', { name: /已完成/ })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByTitle('已完成文档.pdf')).toBeVisible();
+});
+
+it('opens the header download panel immediately when pasted content spans multiple lines', async () => {
+  render(<App />);
+  const content = 'https://example.test/first.zip\nhttps://example.test/second.zip';
+
+  fireEvent.paste(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), {
+    clipboardData: { getData: () => content }
+  });
+
+  const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+  expect(dialog).toHaveClass('header-download-dialog');
+  expect(screen.getByRole('textbox', { name: '下载内容' })).toHaveValue(content);
 });
 
 it('queues normal share results and presents duplicate results in FIFO order', async () => {

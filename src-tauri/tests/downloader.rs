@@ -356,6 +356,64 @@ async fn cloud_share_cancel_after_outer_check_prevents_waiting_refresh_submissio
 }
 
 #[tokio::test]
+async fn password_cloud_refresh_uses_new_credentials_and_honors_cancellation() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload, share::resubmit_current_cloud_download,
+    };
+    for provider in ["baidu", "tianyi"] {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let api = RecordingAria2::successful();
+        let service = DownloadService::new(api.clone(), store.clone());
+        let source = format!("cloud://{provider}/file");
+        let prepared = prepared_cloud_share_task(&store, &source, "original.bin");
+        let original = service
+            .submit_uri_with_options(
+                prepared.id,
+                vec!["https://cdn.example/old".into()],
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        store.fail(original.id, "expired").unwrap();
+        let failed = store.find(original.id).unwrap();
+        let resolved = || ResolvedCloudDownload {
+            url: "https://cdn.example/new".into(),
+            name: "original.bin".into(),
+            headers: vec![("Cookie".into(), "fresh-session".into())],
+        };
+        let recovered =
+            resubmit_current_cloud_download(&service, &failed, resolved(), Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(recovered.id, original.id);
+        assert_eq!(recovered.status, TaskStatus::Downloading);
+        assert_eq!(api.added_options()[1]["header"], "Cookie: fresh-session");
+        assert!(!serde_json::to_string(&store.find(original.id).unwrap())
+            .unwrap()
+            .contains("fresh-session"));
+
+        store.fail(original.id, "expired again").unwrap();
+        let stale = store.find(original.id).unwrap();
+        service
+            .control(original.id, DownloadAction::Cancel)
+            .await
+            .unwrap();
+        assert!(
+            resubmit_current_cloud_download(&service, &stale, resolved(), Default::default(),)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(api.uris.lock().unwrap().len(), 2);
+        assert_eq!(
+            store.find(original.id).unwrap().status,
+            TaskStatus::Cancelled
+        );
+    }
+}
+
+#[tokio::test]
 async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
     use alldownloader_lib::cloud::{
         commands::ResolvedCloudDownload,

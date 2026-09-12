@@ -1,9 +1,10 @@
 use std::{
+    collections::HashSet,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, Row, Transaction};
+use rusqlite::{params, params_from_iter, Connection, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -113,20 +114,22 @@ impl TaskStore {
             remote_directory_id: new_group.remote_directory_id,
             relative_directory: new_group.relative_directory,
             output_directory: new_group.output_directory,
+            status: TaskStatus::Queued,
             created_at: timestamp,
             updated_at: timestamp,
         };
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         transaction.execute(
-            "INSERT INTO cloud_directory_groups (id, provider, remote_directory_id, relative_directory, output_directory, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO cloud_directory_groups (id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 group.id.to_string(),
                 group.provider.key(),
                 group.remote_directory_id,
                 group.relative_directory,
                 group.output_directory.to_string_lossy(),
+                group.status.as_db(),
                 group.created_at,
                 group.updated_at,
             ],
@@ -161,7 +164,7 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, created_at, updated_at
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at
                  FROM cloud_directory_groups WHERE id = ?1",
                 [id.to_string()],
                 cloud_directory_group_from_row,
@@ -173,7 +176,7 @@ impl TaskStore {
     pub fn cloud_directory_groups(&self) -> Result<Vec<CloudDirectoryGroup>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let mut statement = connection.prepare(
-            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, created_at, updated_at
+            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at
              FROM cloud_directory_groups ORDER BY created_at, id",
         )?;
         let groups = statement
@@ -196,6 +199,33 @@ impl TaskStore {
             .query_map([group_id.to_string()], cloud_directory_group_item_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(items)
+    }
+
+    pub fn recycle_cloud_directory_group(
+        &self,
+        group_id: Uuid,
+    ) -> Result<CloudDirectoryGroup, StoreError> {
+        validate_uuid(group_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE cloud_directory_groups SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                TaskStatus::Recycled.as_db(),
+                current_timestamp(),
+                group_id.to_string()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(group_id));
+        }
+        connection
+            .query_row(
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at
+                 FROM cloud_directory_groups WHERE id = ?1",
+                [group_id.to_string()],
+                cloud_directory_group_from_row,
+            )
+            .map_err(StoreError::from)
     }
 
     pub fn link_cloud_directory_group_item_task(
@@ -274,7 +304,7 @@ impl TaskStore {
         connection
             .query_row(
                 "SELECT groups.id, groups.provider, groups.remote_directory_id, groups.relative_directory,
-                        groups.output_directory, groups.created_at, groups.updated_at
+                        groups.output_directory, groups.status, groups.created_at, groups.updated_at
                  FROM cloud_directory_groups AS groups
                  INNER JOIN cloud_directory_group_items AS items ON items.group_id = groups.id
                  WHERE items.task_id = ?1",
@@ -387,6 +417,57 @@ impl TaskStore {
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
+        Ok(())
+    }
+
+    /// Removes a collection of durable task records in one SQLite transaction.
+    /// All IDs are validated before any row is deleted, so a stale selection
+    /// cannot leave a partial purge behind. `task_files` rows cascade, while
+    /// the actual downloaded payload is never touched by this operation.
+    pub fn remove_task_records(&self, ids: &[Uuid]) -> Result<(), StoreError> {
+        const SQLITE_ID_BATCH_SIZE: usize = 900;
+
+        let mut seen = HashSet::with_capacity(ids.len());
+        let ids = ids
+            .iter()
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_strings = ids.iter().map(Uuid::to_string).collect::<Vec<_>>();
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let mut found = HashSet::with_capacity(ids.len());
+
+        for batch in id_strings.chunks(SQLITE_ID_BATCH_SIZE) {
+            let placeholders = std::iter::repeat("?")
+                .take(batch.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("SELECT id FROM tasks WHERE id IN ({placeholders})");
+            let mut statement = transaction.prepare(&sql)?;
+            let rows = statement.query_map(params_from_iter(batch.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                found.insert(row?);
+            }
+        }
+        if let Some(missing) = ids.iter().find(|id| !found.contains(&id.to_string())) {
+            return Err(StoreError::NotFound(*missing));
+        }
+
+        for batch in id_strings.chunks(SQLITE_ID_BATCH_SIZE) {
+            let placeholders = std::iter::repeat("?")
+                .take(batch.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("DELETE FROM tasks WHERE id IN ({placeholders})");
+            transaction.execute(&sql, params_from_iter(batch.iter()))?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -709,36 +790,33 @@ const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, erro
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version >= 7 {
-        return Ok(());
-    }
-
     let transaction = connection.transaction()?;
-    for (name, definition) in [
-        ("aria_gid", "TEXT"),
-        ("followed_by_gid", "TEXT"),
-        ("total_length", "INTEGER"),
-        ("completed_length", "INTEGER NOT NULL DEFAULT 0"),
-        ("download_speed", "INTEGER NOT NULL DEFAULT 0"),
-        ("upload_speed", "INTEGER NOT NULL DEFAULT 0"),
-        ("connections", "INTEGER NOT NULL DEFAULT 0"),
-        ("eta_seconds", "INTEGER"),
-        ("aria_error_code", "TEXT"),
-        ("failure_code", "TEXT"),
-        ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
-        ("completed_at", "INTEGER"),
-        ("selection_confirmed", "INTEGER NOT NULL DEFAULT 0"),
-        ("metadata_gid", "TEXT"),
-        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
-    ] {
-        if !column_exists(&transaction, name)? {
-            transaction.execute_batch(&format!(
-                "ALTER TABLE tasks ADD COLUMN {name} {definition};"
-            ))?;
+    if version < 7 {
+        for (name, definition) in [
+            ("aria_gid", "TEXT"),
+            ("followed_by_gid", "TEXT"),
+            ("total_length", "INTEGER"),
+            ("completed_length", "INTEGER NOT NULL DEFAULT 0"),
+            ("download_speed", "INTEGER NOT NULL DEFAULT 0"),
+            ("upload_speed", "INTEGER NOT NULL DEFAULT 0"),
+            ("connections", "INTEGER NOT NULL DEFAULT 0"),
+            ("eta_seconds", "INTEGER"),
+            ("aria_error_code", "TEXT"),
+            ("failure_code", "TEXT"),
+            ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("completed_at", "INTEGER"),
+            ("selection_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+            ("metadata_gid", "TEXT"),
+            ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !column_exists(&transaction, "tasks", name)? {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE tasks ADD COLUMN {name} {definition};"
+                ))?;
+            }
         }
-    }
-    transaction.execute_batch(
-        "CREATE UNIQUE INDEX IF NOT EXISTS tasks_aria_gid_unique ON tasks(aria_gid) WHERE aria_gid IS NOT NULL;
+        transaction.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS tasks_aria_gid_unique ON tasks(aria_gid) WHERE aria_gid IS NOT NULL;
          CREATE UNIQUE INDEX IF NOT EXISTS tasks_metadata_gid_unique ON tasks(metadata_gid) WHERE metadata_gid IS NOT NULL;
          CREATE TABLE IF NOT EXISTS task_files (
             task_id TEXT NOT NULL,
@@ -756,6 +834,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             remote_directory_id TEXT NOT NULL,
             relative_directory TEXT NOT NULL,
             output_directory TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
          );
@@ -776,15 +855,25 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS cloud_directory_group_items_task_id ON cloud_directory_group_items(task_id) WHERE task_id IS NOT NULL;
          UPDATE tasks SET created_at = updated_at WHERE created_at = 0;
-         UPDATE tasks SET completed_at = updated_at WHERE status = 'completed' AND completed_at IS NULL AND updated_at > 0;
-         PRAGMA user_version = 7;",
-    )?;
+         UPDATE tasks SET completed_at = updated_at WHERE status = 'completed' AND completed_at IS NULL AND updated_at > 0;",
+        )?;
+    }
+    if !column_exists(&transaction, "cloud_directory_groups", "status")? {
+        transaction.execute_batch(
+            "ALTER TABLE cloud_directory_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'queued';",
+        )?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 8;")?;
     transaction.commit()?;
     Ok(())
 }
 
-fn column_exists(transaction: &Transaction<'_>, name: &str) -> Result<bool, StoreError> {
-    let mut statement = transaction.prepare("PRAGMA table_info(tasks)")?;
+fn column_exists(
+    transaction: &Transaction<'_>,
+    table: &str,
+    name: &str,
+) -> Result<bool, StoreError> {
+    let mut statement = transaction.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
     Ok(columns
         .collect::<Result<Vec<_>, _>>()?
@@ -898,14 +987,16 @@ fn required_u64(row: &Row<'_>, index: usize) -> rusqlite::Result<u64> {
 fn cloud_directory_group_from_row(row: &Row<'_>) -> rusqlite::Result<CloudDirectoryGroup> {
     let id: String = row.get(0)?;
     let provider: String = row.get(1)?;
+    let status: String = row.get(5)?;
     Ok(CloudDirectoryGroup {
         id: parse_cloud_directory_uuid(&id)?,
         provider: cloud_provider_from_db(&provider)?,
         remote_directory_id: row.get(2)?,
         relative_directory: row.get(3)?,
         output_directory: std::path::PathBuf::from(row.get::<_, String>(4)?),
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        status: TaskStatus::from_db(&status).ok_or(rusqlite::Error::InvalidQuery)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -1014,6 +1105,26 @@ mod tests {
     };
 
     #[test]
+    fn removing_many_task_records_keeps_every_record_when_one_requested_id_is_missing() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let first = store
+            .create(NewTask::direct("https://example.test/first"))
+            .unwrap();
+        let second = store
+            .create(NewTask::direct("https://example.test/second"))
+            .unwrap();
+        let missing = Uuid::new_v4();
+
+        assert!(matches!(
+            store.remove_task_records(&[first.id, missing, second.id]),
+            Err(StoreError::NotFound(id)) if id == missing
+        ));
+
+        assert!(store.find(first.id).is_ok());
+        assert!(store.find(second.id).is_ok());
+    }
+
+    #[test]
     fn cloud_directory_group_persists_items_across_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("tasks.sqlite");
@@ -1055,6 +1166,42 @@ mod tests {
         assert_eq!(item.remote_file_id, "remote-1");
         assert_eq!(item.relative_directory, vec!["Season 1", "Extras"]);
         assert_eq!(item.output_name, "behind.mkv");
+    }
+
+    #[test]
+    fn legacy_version_eight_directory_groups_gain_the_recycle_status_column() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let group_id = Uuid::new_v4();
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE cloud_directory_groups (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    provider TEXT NOT NULL,
+                    remote_directory_id TEXT NOT NULL,
+                    relative_directory TEXT NOT NULL,
+                    output_directory TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 8;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO cloud_directory_groups (id, provider, remote_directory_id, relative_directory, output_directory, created_at, updated_at)
+                 VALUES (?1, 'quark', 'remote-wallpapers', '夸克精选壁纸', 'C:/Downloads', 1, 1)",
+                [group_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open_path(&database).unwrap();
+        let group = store.cloud_directory_group(group_id).unwrap().unwrap();
+
+        assert_eq!(group.status, TaskStatus::Queued);
+        assert_eq!(group.relative_directory, "夸克精选壁纸");
     }
 
     #[test]

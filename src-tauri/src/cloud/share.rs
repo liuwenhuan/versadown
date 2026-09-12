@@ -637,9 +637,25 @@ pub async fn resubmit_current_share_download(
     service: &crate::DownloadService,
     expected: &crate::DownloadTask,
     resolved: super::commands::ResolvedCloudDownload,
-    mut configured: crate::UriSubmissionOptions,
+    configured: crate::UriSubmissionOptions,
 ) -> Result<Option<crate::DownloadTask>, QuarkError> {
     parse_stable_cloud_share_source(&expected.source)?;
+    resubmit_current_cloud_download(service, expected, resolved, configured).await
+}
+
+/// Compare the durable task again after a potentially interactive login, so
+/// cancellation, recycling and manual retries always win over auto recovery.
+pub async fn resubmit_current_cloud_download(
+    service: &crate::DownloadService,
+    expected: &crate::DownloadTask,
+    resolved: super::commands::ResolvedCloudDownload,
+    mut configured: crate::UriSubmissionOptions,
+) -> Result<Option<crate::DownloadTask>, QuarkError> {
+    if expected.source.starts_with("cloud-share://") {
+        parse_stable_cloud_share_source(&expected.source)?;
+    } else {
+        super::commands::parse_stable_cloud_source(&expected.source)?;
+    }
     if let Some(file) = service
         .store()
         .files(expected.id)
@@ -659,7 +675,7 @@ pub async fn resubmit_current_share_download(
     service
         .compare_and_resubmit_uri_with_options(expected, vec![signed_url], options)
         .await
-        .map_err(|_| QuarkError::Transport("aria2 未能接受网盘分享下载任务".into()))
+        .map_err(|_| QuarkError::Transport("aria2 未能接受网盘下载任务".into()))
 }
 
 fn share_submission_options(
@@ -1406,6 +1422,47 @@ impl CloudSharePlanStore {
         })
     }
 
+    /// Restores many local task links in one encrypted-document update. This
+    /// is the compensating operation when a later SQLite transaction fails.
+    pub fn link_local_tasks(&self, tasks: &[(String, uuid::Uuid)]) -> Result<(), QuarkError> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let links = tasks
+            .iter()
+            .map(|(source, task_id)| {
+                let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+                Ok((plan_key(provider, &share), fingerprint, *task_id))
+            })
+            .collect::<Result<Vec<_>, QuarkError>>()?;
+        self.update(|document, now| {
+            for (key, fingerprint, _) in &links {
+                let plan = &document.plans.get(key).ok_or_else(missing_plan)?.plan;
+                if !plan
+                    .entries
+                    .iter()
+                    .any(|entry| entry.entry_fingerprint == *fingerprint)
+                {
+                    return Err(missing_plan());
+                }
+            }
+
+            let mut touched = BTreeSet::new();
+            for (key, fingerprint, task_id) in &links {
+                let plan = &mut document.plans.get_mut(key).ok_or_else(missing_plan)?.plan;
+                plan.linked_local_tasks
+                    .entry(fingerprint.clone())
+                    .or_default()
+                    .insert(*task_id);
+                touched.insert(key.clone());
+            }
+            for key in touched {
+                document.touch(&key, now)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn reserve_local_task(&self, source: &str, task_id: uuid::Uuid) -> Result<(), QuarkError> {
         let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
         self.update(|document, now| {
@@ -1439,6 +1496,48 @@ impl CloudSharePlanStore {
                 plan.remove_terminal_empty_link(&fingerprint);
             }
             document.touch(&key, now)
+        })
+    }
+
+    /// Removes many local task links while loading and saving the encrypted
+    /// share-plan document only once. Each source is parsed before mutation so
+    /// a malformed or expired plan cannot persist a partial unlink.
+    pub fn unlink_local_tasks(&self, tasks: &[(String, uuid::Uuid)]) -> Result<(), QuarkError> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let links = tasks
+            .iter()
+            .map(|(source, task_id)| {
+                let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+                Ok((plan_key(provider, &share), fingerprint, *task_id))
+            })
+            .collect::<Result<Vec<_>, QuarkError>>()?;
+        self.update(|document, now| {
+            for (key, _, _) in &links {
+                if !document.plans.contains_key(key) {
+                    return Err(missing_plan());
+                }
+            }
+
+            let mut touched = BTreeSet::new();
+            for (key, fingerprint, task_id) in &links {
+                {
+                    let plan = &mut document.plans.get_mut(key).ok_or_else(missing_plan)?.plan;
+                    if plan
+                        .linked_local_tasks
+                        .get_mut(fingerprint)
+                        .is_some_and(|ids| ids.remove(task_id))
+                    {
+                        plan.remove_terminal_empty_link(fingerprint);
+                    }
+                }
+                touched.insert(key.clone());
+            }
+            for key in touched {
+                document.touch(&key, now)?;
+            }
+            Ok(())
         })
     }
 
@@ -3101,6 +3200,99 @@ mod tests {
             .linked_local_tasks
             .contains_key(&parse_stable_cloud_share_source(&first).unwrap().2));
         assert_eq!(terminal.linked_local_tasks.len(), 1);
+    }
+
+    #[test]
+    fn unlinking_many_local_tasks_saves_the_share_document_once() {
+        let credentials = Arc::new(FailNthSaveCredentials {
+            inner: MemoryCredentialStore::default(),
+            saves: AtomicU64::new(0),
+            fail_at: u64::MAX,
+        });
+        let store = CloudSharePlanStore {
+            credentials: credentials.clone(),
+            mutation: Mutex::new(()),
+            now_ms: Arc::new(|| 1_000),
+        };
+        let mut plan = fixture("batched-unlink");
+        plan.entries.push(CloudShareEntry::new(
+            "batched-unlink",
+            "f2".into(),
+            "other.txt".into(),
+            vec![],
+            Some(9),
+        ));
+        let first = plan.source_for("f1");
+        let second = plan.source_for("f2");
+        let first_task = uuid::Uuid::new_v4();
+        let second_task = uuid::Uuid::new_v4();
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(&[first.clone(), second.clone()])
+            .unwrap();
+        store.link_local_task(&first, first_task).unwrap();
+        store.link_local_task(&second, second_task).unwrap();
+        let saves_before_unlink = credentials.saves.load(Ordering::SeqCst);
+
+        store
+            .unlink_local_tasks(&[(first.clone(), first_task), (second.clone(), second_task)])
+            .unwrap();
+
+        assert_eq!(
+            credentials.saves.load(Ordering::SeqCst),
+            saves_before_unlink + 1
+        );
+        let current = store.resolve_entry(&first).unwrap().plan;
+        assert!(current.linked_local_tasks.is_empty());
+    }
+
+    #[test]
+    fn restoring_many_local_task_links_saves_the_share_document_once() {
+        let credentials = Arc::new(FailNthSaveCredentials {
+            inner: MemoryCredentialStore::default(),
+            saves: AtomicU64::new(0),
+            fail_at: u64::MAX,
+        });
+        let store = CloudSharePlanStore {
+            credentials: credentials.clone(),
+            mutation: Mutex::new(()),
+            now_ms: Arc::new(|| 1_000),
+        };
+        let mut plan = fixture("batched-relink");
+        plan.entries.push(CloudShareEntry::new(
+            "batched-relink",
+            "f2".into(),
+            "other.txt".into(),
+            vec![],
+            Some(9),
+        ));
+        let first = plan.source_for("f1");
+        let second = plan.source_for("f2");
+        let first_task = uuid::Uuid::new_v4();
+        let second_task = uuid::Uuid::new_v4();
+        store.upsert(&plan).unwrap();
+        store
+            .link_local_sources(&[first.clone(), second.clone()])
+            .unwrap();
+        let saves_before_restore = credentials.saves.load(Ordering::SeqCst);
+
+        store
+            .link_local_tasks(&[(first.clone(), first_task), (second.clone(), second_task)])
+            .unwrap();
+
+        assert_eq!(
+            credentials.saves.load(Ordering::SeqCst),
+            saves_before_restore + 1
+        );
+        let current = store.resolve_entry(&first).unwrap().plan;
+        assert!(current
+            .linked_local_tasks
+            .values()
+            .any(|ids| ids.contains(&first_task)));
+        assert!(current
+            .linked_local_tasks
+            .values()
+            .any(|ids| ids.contains(&second_task)));
     }
 
     #[test]

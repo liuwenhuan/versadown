@@ -1,5 +1,6 @@
 pub mod aliyun;
 pub mod baidu;
+mod browser_login;
 pub mod commands;
 mod credentials;
 mod http;
@@ -8,6 +9,7 @@ mod quark;
 mod session;
 pub mod share;
 pub mod tianyi;
+mod tianyi_app;
 mod types;
 pub mod uc;
 mod upload;

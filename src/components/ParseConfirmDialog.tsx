@@ -4,6 +4,7 @@ import { formatBytes } from '../lib/downloadEvents';
 
 interface ParseConfirmDialogProps {
   result: ParseResult;
+  placement?: 'modal' | 'header';
   downloadDirectory?: string;
   browseDirectory?(currentDirectory: string): Promise<string | null>;
   onConfirm(selectedIds: string[], destinationDirectory?: string): void;
@@ -71,7 +72,7 @@ function SelectAllCheckbox({ checked, indeterminate, onChange }: { checked: bool
   return <input ref={input} type="checkbox" aria-label="全选文件" checked={checked} onChange={onChange} />;
 }
 
-export function ParseConfirmDialog({ result, downloadDirectory, browseDirectory, onConfirm, onSelectionChange, onClose }: ParseConfirmDialogProps) {
+export function ParseConfirmDialog({ result, placement = 'modal', downloadDirectory, browseDirectory, onConfirm, onSelectionChange, onClose }: ParseConfirmDialogProps) {
   const resources = result.resources;
   const [showPassword, setShowPassword] = useState(false);
   const [showProcessing, setShowProcessing] = useState(false);
@@ -93,7 +94,7 @@ export function ParseConfirmDialog({ result, downloadDirectory, browseDirectory,
     const selectedDirectory = await browseDirectory?.(destination || downloadDirectory || '');
     if (selectedDirectory) setDestinationOverride(selectedDirectory === downloadDirectory ? undefined : selectedDirectory);
   };
-  return <div className="modal-backdrop" role="presentation"><section className="confirm-dialog" role="dialog" aria-modal="true" aria-label="确认下载内容">
+  const dialog = <section className={`confirm-dialog${placement === 'header' ? ' header-confirm-dialog' : ''}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="确认下载内容">
     <header><div className="confirm-dialog-title"><span aria-hidden="true">↓</span><h2>新建任务</h2></div><button aria-label="关闭确认窗口" onClick={onClose}>×</button></header>
     <div className="parse-task-summary"><span className={`parse-task-icon${result.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{result.isBitTorrent ? 'BT' : '↓'}</span><div><strong title={taskTitle}>{taskTitle}</strong><p>{resources.length ? `已选 ${selected.length} / ${resources.length} 个文件` : '正在连接元数据服务…'}</p>{cloudProvider && <p className="cloud-share-summary"><b>{cloudProvider}分享</b><span>必要时会自动转存后下载</span></p>}</div></div>
     <div className="parse-resource-card">
@@ -109,5 +110,6 @@ export function ParseConfirmDialog({ result, downloadDirectory, browseDirectory,
     {(result.processing.length > 0 || result.discoveredPassword) && <button className="disclosure" onClick={() => setShowProcessing(!showProcessing)}>{showProcessing ? '收起' : '查看'}后处理与密码 {showProcessing ? '⌃' : '⌄'}</button>}
     {showProcessing && <div className="processing-summary"><ul>{result.processing.map((step) => <li key={step}>{step}</li>)}</ul>{result.discoveredPassword && <p>解压密码：<code>{showPassword ? result.discoveredPassword : '••••••••'}</code><button onClick={() => setShowPassword(!showPassword)}>{showPassword ? '隐藏密码' : '显示密码'}</button></p>}</div>}
     <footer><button type="button" className="parse-destination" aria-label="选择下载目录" onClick={() => void chooseDestination()}><span>下载到</span><strong title={destination || '本机下载目录'}>{destination || '本机下载目录'}</strong><i aria-hidden="true">更改</i></button><div><button onClick={onClose}>返回</button><button className="primary" disabled={!selected.length} onClick={() => onConfirm(selected, destinationOverride)}>立即下载 <span>{selected.length}</span></button></div></footer>
-  </section></div>;
+  </section>;
+  return placement === 'header' ? dialog : <div className="modal-backdrop" role="presentation">{dialog}</div>;
 }

@@ -26,7 +26,7 @@ export const cloudRecycleBinDirectoryId: Record<CloudProvider, string> = {
 export interface CloudAccount { provider: CloudProvider; id: string; displayName: string; authMethod: CloudAuthMethod; expiresAt?: string; }
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; }
 export interface CloudDirectory { id: string; items: CloudFile[]; }
-export interface CloudAuthorization { provider: CloudProvider; windowLabel: string; instructions: string; }
+export interface CloudAuthorization { provider: CloudProvider; windowLabel: string; instructions: string; completed?: boolean; }
 export type CloudPasswordLoginMode = 'none' | 'rustDirect' | 'officialWebView';
 export interface CloudAuthorizationCapabilities { provider: CloudProvider; web: boolean; password: boolean; passwordLoginMode: CloudPasswordLoginMode; }
 export interface CloudCredentials { username: string; password: string; }

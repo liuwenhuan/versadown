@@ -8,13 +8,14 @@ use std::{
     collections::BTreeMap,
     io::{Read, Write},
     net::TcpListener,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
 };
 
 struct RecordingHttp {
     replies: Mutex<Vec<CloudHttpResponse>>,
     requests: Mutex<Vec<CloudHttpRequest>>,
+    cookie_snapshot: Vec<String>,
 }
 
 impl RecordingHttp {
@@ -32,11 +33,34 @@ impl RecordingHttp {
                     .collect(),
             ),
             requests: Mutex::new(Vec::new()),
+            cookie_snapshot: Vec::new(),
         }
     }
 
     fn requests(&self) -> Vec<CloudHttpRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    fn responses(replies: Vec<CloudHttpResponse>) -> Self {
+        Self {
+            replies: Mutex::new(replies.into_iter().rev().collect()),
+            requests: Mutex::new(Vec::new()),
+            cookie_snapshot: Vec::new(),
+        }
+    }
+
+    fn responses_with_cookie_snapshot(
+        replies: Vec<CloudHttpResponse>,
+        cookie_snapshot: &[&str],
+    ) -> Self {
+        Self {
+            replies: Mutex::new(replies.into_iter().rev().collect()),
+            requests: Mutex::new(Vec::new()),
+            cookie_snapshot: cookie_snapshot
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+        }
     }
 }
 
@@ -48,6 +72,70 @@ impl CloudHttpTransport for RecordingHttp {
             .unwrap()
             .pop()
             .ok_or_else(|| QuarkError::Transport("unexpected request".into()))
+    }
+
+    fn cookies_for_url(&self, _: &str) -> Result<Vec<String>, QuarkError> {
+        if self.requests.lock().unwrap().len() < 7 {
+            return Ok(Vec::new());
+        }
+        Ok(self.cookie_snapshot.clone())
+    }
+}
+
+struct IsolatedState {
+    replies: Mutex<Vec<CloudHttpResponse>>,
+    requests: Mutex<Vec<CloudHttpRequest>>,
+}
+
+struct IsolationRequiredHttp(Arc<IsolatedState>);
+struct IsolatedDelegate(Arc<IsolatedState>);
+
+impl IsolationRequiredHttp {
+    fn new(replies: Vec<CloudHttpResponse>) -> Self {
+        Self(Arc::new(IsolatedState {
+            replies: Mutex::new(replies.into_iter().rev().collect()),
+            requests: Mutex::new(Vec::new()),
+        }))
+    }
+}
+
+impl CloudHttpTransport for IsolationRequiredHttp {
+    fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        Err(QuarkError::Transport(
+            "shared transport must not be used for login".into(),
+        ))
+    }
+
+    fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> {
+        Ok(Some(Box::new(IsolatedDelegate(Arc::clone(&self.0)))))
+    }
+}
+
+impl CloudHttpTransport for IsolatedDelegate {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        self.0.requests.lock().unwrap().push(request);
+        self.0
+            .replies
+            .lock()
+            .unwrap()
+            .pop()
+            .ok_or_else(|| QuarkError::Transport("unexpected isolated request".into()))
+    }
+
+    fn manages_cookie_session(&self) -> bool {
+        true
+    }
+
+    fn cookies_for_url(&self, _: &str) -> Result<Vec<String>, QuarkError> {
+        let request_count = self.0.requests.lock().unwrap().len();
+        if request_count < 5 {
+            return Ok(Vec::new());
+        }
+        let mut cookies = vec!["BDUSS=session".into(), "STOKEN=stoken".into()];
+        if request_count >= 7 {
+            cookies.push("PANPSC=validation-cookie".into());
+        }
+        Ok(cookies)
     }
 }
 
@@ -272,6 +360,96 @@ fn reqwest_transport_reuses_response_cookies_across_cloud_requests() {
 }
 
 #[test]
+fn reqwest_transport_does_not_retain_an_explicit_session_cookie() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (headers_tx, headers_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+            }
+            headers_tx
+                .send(String::from_utf8(request).unwrap())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}")
+                .unwrap();
+        }
+    });
+    let transport = ReqwestTransport::new().unwrap();
+    transport
+        .send(CloudHttpRequest {
+            method: "GET",
+            url: format!("http://{address}/account"),
+            headers: BTreeMap::from([("Cookie".into(), "BDUSS=account-b".into())]),
+            body: None,
+        })
+        .unwrap();
+    transport
+        .send(CloudHttpRequest {
+            method: "GET",
+            url: format!("http://{address}/anonymous"),
+            headers: BTreeMap::new(),
+            body: None,
+        })
+        .unwrap();
+    let first = headers_rx.recv().unwrap().to_ascii_lowercase();
+    let second = headers_rx.recv().unwrap().to_ascii_lowercase();
+    server.join().unwrap();
+
+    assert!(first.contains("cookie: bduss=account-b"));
+    assert!(
+        !second.contains("bduss=account-b"),
+        "an explicit account session must not leak into the shared cookie jar"
+    );
+}
+
+#[test]
+fn reqwest_transport_retains_rotated_cookies_inside_the_explicit_session_only() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (headers_tx, headers_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        for response in [
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nSet-Cookie: PANPSC=rotated-context; Path=/\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+            }
+            headers_tx.send(String::from_utf8(request).unwrap()).unwrap();
+            stream.write_all(response).unwrap();
+        }
+    });
+    let transport = ReqwestTransport::new().unwrap();
+    for path in ["/rest/2.0/xpan/nas", "/api/list"] {
+        transport
+            .send(CloudHttpRequest {
+                method: "GET",
+                url: format!("http://{address}{path}"),
+                headers: BTreeMap::from([("Cookie".into(), "BDUSS=account-b".into())]),
+                body: None,
+            })
+            .unwrap();
+    }
+    let _first = headers_rx.recv().unwrap();
+    let second = headers_rx.recv().unwrap().to_ascii_lowercase();
+    server.join().unwrap();
+
+    assert!(second.contains("bduss=account-b"));
+    assert!(second.contains("panpsc=rotated-context"));
+}
+
+#[test]
 fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     let http = RecordingHttp::sequence(&[
         r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
@@ -301,6 +479,73 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     );
     assert!(!requests[1].headers.contains_key("Origin"));
     assert!(!requests[1].headers.contains_key("Referer"));
+}
+
+#[test]
+fn baidu_download_falls_back_to_signed_locatedownload_and_filters_unsafe_candidates() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"list":[{"fs_id":7,"server_filename":"movie.mkv"}]}"#,
+        r#"{"errno":0,"user":{"uk":"10086","netdisk_name":"fixture"}}"#,
+        r#"{"errno":0,"urls":[{"url":"https://encrypted.example/file","encrypt":1},{"url":"http://plain.example/file","encrypt":0},{"url":"https://nb.cache.baidu.com/file","encrypt":0},{"url":"http://d.pcs.baidu.com/file","encrypt":0},{"url":"https://cdn.example/file","encrypt":0}]}"#,
+    ]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=test_bduss"), &http);
+
+    let download = client.download(&opaque_reference("/movie.mkv")).unwrap();
+
+    assert_eq!(download.url, "https://d.pcs.baidu.com/file");
+    assert_eq!(download.name, "movie.mkv");
+    let requests = http.requests();
+    assert_eq!(requests.len(), 3);
+    let request = &requests[2];
+    assert_eq!(request.method, "POST");
+    let url = url::Url::parse(&request.url).unwrap();
+    assert_eq!(url.scheme(), "https");
+    assert_eq!(url.host_str(), Some("pcs.baidu.com"));
+    assert_eq!(url.path(), "/rest/2.0/pcs/file");
+    let query: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(
+        query.get("method").map(String::as_str),
+        Some("locatedownload")
+    );
+    assert_eq!(query.get("path").map(String::as_str), Some("/movie.mkv"));
+    assert_eq!(query.get("app_id").map(String::as_str), Some("250528"));
+    assert_eq!(query.get("clienttype").map(String::as_str), Some("17"));
+    assert_eq!(query.get("ver").map(String::as_str), Some("4.0"));
+    assert!(query
+        .get("devuid")
+        .is_some_and(|value| value.len() == 34 && value.ends_with("|0")));
+    assert!(query
+        .get("cuid")
+        .is_some_and(|value| query.get("devuid") == Some(value)));
+    assert!(query.get("rand").is_some_and(|value| {
+        value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }));
+}
+
+#[test]
+fn baidu_download_does_not_hide_expired_authorization_with_locatedownload() {
+    let http = RecordingHttp::sequence(&[r#"{"errno":-6}"#]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=expired"), &http);
+
+    assert!(matches!(
+        client.download(&opaque_reference("/movie.mkv")),
+        Err(QuarkError::AuthorizationExpired)
+    ));
+    assert_eq!(http.requests().len(), 1);
+}
+
+#[test]
+fn baidu_locatedownload_uses_nb_cache_when_it_is_the_only_safe_candidate() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"list":[{"fs_id":7,"server_filename":"movie.mkv"}]}"#,
+        r#"{"errno":0,"user":{"uk":"10086","netdisk_name":"fixture"}}"#,
+        r#"{"errno":0,"urls":[{"url":"https://nb.cache.baidu.com/file","encrypt":0}]}"#,
+    ]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=test_bduss"), &http);
+
+    let download = client.download(&opaque_reference("/movie.mkv")).unwrap();
+
+    assert_eq!(download.url, "https://nb.cache.baidu.com/file");
 }
 
 #[test]
@@ -701,23 +946,197 @@ fn baidu_uses_a_fresh_web_token_and_path_payload_for_every_mutation() {
         .contains("%227%22")));
 }
 
+const BAIDU_LOGIN_TEST_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDXN3F7epcT2k2yjuw95Nd3iEDS\nz04mTwPUAOaZIQ+JWtawDWMh6+hpwnT8STs1fa5CZwb1L/nam4zqu/Y4zETCp/uL\nSl8/6jdNsjVtiyq+IlQ0IkmPHiSk022BfBw0RGrSMUGuPPvdjy0eJ5a5pzRYWfK7\nvJ0QdYEdTovg7hm70QIDAQAB\n-----END PUBLIC KEY-----";
+
+fn baidu_login_preflight_responses(login: CloudHttpResponse) -> Vec<CloudHttpResponse> {
+    vec![
+        CloudHttpResponse {
+            status: 200,
+            body: String::new(),
+            set_cookies: vec!["BAIDUID=seed; Path=/; Secure".into()],
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errInfo":{"no":"0"},"data":{"token":"login-token","codeString":""}}"#.into(),
+            set_cookies: vec!["BAIDUID_BFESS=context; Path=/; Secure".into()],
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: serde_json::json!({
+                "errno": "0",
+                "pubkey": BAIDU_LOGIN_TEST_PUBLIC_KEY,
+                "key": "rsa-key-id"
+            })
+            .to_string(),
+            set_cookies: vec!["HISTORY=ready; Path=/".into()],
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errInfo":{"no":"0"},"data":{"codeString":""}}"#.into(),
+            ..Default::default()
+        },
+        login,
+    ]
+}
+
 #[test]
-fn baidu_password_challenge_requires_web_authorization_without_a_session() {
-    let http = RecordingHttp::sequence(&[r#"{"err_no":257,"codeString":"captcha"}"#]);
+fn baidu_password_login_uses_dynamic_v4_handshake_and_validates_the_session() {
+    let mut replies = baidu_login_preflight_responses(CloudHttpResponse {
+        status: 200,
+        body: r#"{"errInfo":{"no":"0"},"data":{"stoken":"body-stoken"}}"#.into(),
+        set_cookies: vec![
+            "BDUSS=session; Domain=.baidu.com; Path=/; HttpOnly".into(),
+            "PTOKEN=ptoken; Domain=.baidu.com; Path=/".into(),
+        ],
+    });
+    replies.extend([
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"user":{"uk":"7","netdisk_name":"Alice"}}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"list":[]}"#.into(),
+            ..Default::default()
+        },
+    ]);
+    let http = RecordingHttp::responses_with_cookie_snapshot(
+        replies,
+        &[
+            "BDUSS=session",
+            "PTOKEN=ptoken",
+            "STOKEN=validated-stoken",
+            "PANPSC=validation-cookie",
+        ],
+    );
+
+    let session = BaiduClient::login_password("alice", "plain-password", &http).unwrap();
+
+    assert!(session.cookie.contains("BDUSS=session"));
+    assert!(session.cookie.contains("PTOKEN=ptoken"));
+    assert!(session.cookie.contains("STOKEN=validated-stoken"));
+    assert!(session.cookie.contains("PANPSC=validation-cookie"));
+    assert!(!session.cookie.contains("Domain="));
+    let requests = http.requests();
+    assert_eq!(requests.len(), 7);
+    assert_eq!(requests[0].url, "https://www.baidu.com/");
+    assert!(requests[1].url.contains("/v2/api/?getapi&"));
+    assert!(requests[2].url.contains("/v2/getpublickey?"));
+    assert!(requests[3].url.contains("/v2/api/?logincheck&"));
+    assert!(requests[4].url.ends_with("/v2/api/?login"));
+    let login_body = requests[4].body.as_deref().unwrap();
+    assert_eq!(form_field(login_body, "username"), "alice");
+    assert_eq!(form_field(login_body, "token"), "login-token");
+    assert_eq!(form_field(login_body, "rsakey"), "rsa-key-id");
+    assert_eq!(form_field(login_body, "crypttype"), "12");
+    assert_eq!(form_field(login_body, "loginVersion"), "v4");
+    let encrypted = form_field(login_body, "password");
+    assert_ne!(encrypted, "plain-password");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(encrypted)
+            .unwrap()
+            .len(),
+        128
+    );
+    assert_eq!(
+        requests[4].headers["Cookie"],
+        "BAIDUID=seed; BAIDUID_BFESS=context; HISTORY=ready"
+    );
+    assert!(requests[5].headers["Cookie"].contains("BDUSS=session"));
+    assert!(requests[6].headers["Cookie"].contains("STOKEN=body-stoken"));
+}
+
+#[test]
+fn baidu_password_login_uses_an_isolated_transport_session() {
+    let mut replies = baidu_login_preflight_responses(CloudHttpResponse {
+        status: 200,
+        body: r#"{"errInfo":{"no":"0"},"data":{"stoken":"stoken"}}"#.into(),
+        set_cookies: vec!["BDUSS=session".into()],
+    });
+    replies.extend([
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"user":{"uk":"7"}}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"list":[]}"#.into(),
+            ..Default::default()
+        },
+    ]);
+    let http = IsolationRequiredHttp::new(replies);
+
+    let session = BaiduClient::login_password("alice", "password", &http).unwrap();
+
+    assert!(session.cookie.contains("BDUSS=session"));
+    assert!(session.cookie.contains("PANPSC=validation-cookie"));
+    let requests = http.0.requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    assert!(!requests[5].headers.contains_key("Cookie"));
+    assert!(!requests[6].headers.contains_key("Cookie"));
+}
+
+#[test]
+fn baidu_password_challenge_requires_web_authorization_without_validating_a_session() {
+    let mut replies = baidu_login_preflight_responses(CloudHttpResponse::default());
+    replies.truncate(4);
+    replies[3] = CloudHttpResponse {
+        status: 200,
+        body: r#"{"errInfo":{"no":"0"},"data":{"codeString":"captcha-token"}}"#.into(),
+        ..Default::default()
+    };
+    let http = RecordingHttp::responses(replies);
 
     assert!(matches!(
         BaiduClient::login_password("alice", "password", &http),
         Err(QuarkError::WebAuthorizationRequired)
     ));
-    assert!(http.requests()[0]
-        .body
-        .as_deref()
-        .unwrap()
-        .contains("username=alice"));
-    assert_eq!(
-        http.requests()[0].headers["Content-Type"],
-        "application/x-www-form-urlencoded"
-    );
+    assert_eq!(http.requests().len(), 4);
+}
+
+#[test]
+fn baidu_password_login_routes_device_fingerprint_risk_to_official_web_authorization() {
+    let http = RecordingHttp::responses(baidu_login_preflight_responses(CloudHttpResponse {
+        status: 200,
+        body: r#"{"errInfo":{"no":"50052","msg":""},"data":{}}"#.into(),
+        ..Default::default()
+    }));
+
+    assert!(matches!(
+        BaiduClient::login_password("alice", "password", &http),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert_eq!(http.requests().len(), 5);
+}
+
+#[test]
+fn baidu_password_login_rejects_a_missing_dynamic_key_before_sending_credentials() {
+    let http = RecordingHttp::responses(vec![
+        CloudHttpResponse {
+            status: 200,
+            body: String::new(),
+            set_cookies: vec!["BAIDUID=seed; Path=/".into()],
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errInfo":{"no":"0"},"data":{"token":"login-token"}}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":"0","key":"rsa-key-id"}"#.into(),
+            ..Default::default()
+        },
+    ]);
+
+    assert!(matches!(
+        BaiduClient::login_password("alice", "password", &http),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert_eq!(http.requests().len(), 3);
 }
 
 #[test]

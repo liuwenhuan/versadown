@@ -1,4 +1,4 @@
-import { MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BatchTaskCommand, displayTaskName, DownloadQueue } from './components/DownloadQueue';
@@ -23,10 +23,11 @@ import type { CloudAuthorization } from './lib/cloudTypes';
 
 type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
 type TaskSortMode = 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
+type HeaderPanelMode = 'search' | 'download' | null;
 
 const defaultTaskSort: TaskSortMode = 'created-desc';
-const backgroundPurgeThreshold = 100;
-const backgroundPurgeBatchSize = 50;
+const backgroundPurgeFrameSize = 24;
+const backgroundPurgeFrameDelayMs = 16;
 const initialTaskSorts: Record<TaskListTab, TaskSortMode> = {
   active: defaultTaskSort,
   completed: defaultTaskSort,
@@ -118,6 +119,26 @@ function TaskSortControl({ value, onChange }: { value: TaskSortMode; onChange(mo
 const inactiveStatuses = new Set<QueueTask['status']>(['completed', 'failed', 'cancelled', 'recycled']);
 const cloudClient: CloudManagerClient = cloudApi;
 
+function hasMultipleLines(value: string): boolean {
+  return /[\r\n]/.test(value);
+}
+
+function isDownloadInput(value: string): boolean {
+  return /(?:https?|ftp):\/\/|magnet:\?|ed2k:\/\/|thunder:\/\/|flashget:\/\/|cloud-share:\/\//i.test(value.trim());
+}
+
+function taskTabForSearchResult(task: QueueTask): TaskListTab {
+  if (task.status === 'completed') return 'completed';
+  if (task.status === 'failed') return 'failed';
+  return 'active';
+}
+
+function searchTaskMatches(task: QueueTask, keyword: string): boolean {
+  const normalizedKeyword = keyword.trim().toLocaleLowerCase();
+  if (!normalizedKeyword || task.status === 'recycled' || task.status === 'cancelled') return false;
+  return [displayTaskName(task), task.source, task.error].some((value) => value?.toLocaleLowerCase().includes(normalizedKeyword));
+}
+
 function isQueueTask(value: unknown): value is QueueTask {
   if (typeof value !== 'object' || value === null) return false;
   const task = value as Partial<QueueTask>;
@@ -177,13 +198,6 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
   </svg>;
 }
 
-function startDraggingFromTitleBar(event: ReactMouseEvent<HTMLElement>) {
-  if (event.button !== 0 || !isTauriRuntime()) return;
-  const target = event.target instanceof Element ? event.target : null;
-  if (target?.closest('button, input, textarea, select, option, a, label, [role="button"], [contenteditable="true"], [data-window-no-drag]')) return;
-  void getCurrentWindow().startDragging().catch(() => undefined);
-}
-
 function NavigationIcon({ kind }: { kind: 'tasks' | 'cloud' | 'settings' }) {
   const svgProps = {
     'aria-hidden': true,
@@ -214,10 +228,13 @@ export function App() {
   const [downloadTab, setDownloadTab] = useState<TaskListTab>('active');
   const [taskSorts, setTaskSorts] = useState<Record<TaskListTab, TaskSortMode>>(initialTaskSorts);
   const [searchInput, setSearchInput] = useState('');
+  const [headerPanel, setHeaderPanel] = useState<HeaderPanelMode>(null);
+  const [headerConfirmation, setHeaderConfirmation] = useState<ParseResult | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
+  const [purgeInProgress, setPurgeInProgress] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [taskReauthorization, setTaskReauthorization] = useState<CloudAuthorization | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -226,6 +243,9 @@ export function App() {
   const completedTasks = useMemo(() => tasks.filter((task) => task.status === 'completed'), [tasks]);
   const failedTasks = useMemo(() => tasks.filter((task) => task.status === 'failed'), [tasks]);
   const recycledTasks = useMemo(() => tasks.filter((task) => task.status === 'recycled' || task.status === 'cancelled'), [tasks]);
+  const taskSearchResults = useMemo(() => headerPanel === 'search' && !isDownloadInput(searchInput)
+    ? tasks.filter((task) => searchTaskMatches(task, searchInput))
+    : [], [headerPanel, searchInput, tasks]);
   const unsortedVisibleTasks = downloadTab === 'active' ? activeTasks
     : downloadTab === 'completed' ? completedTasks
       : downloadTab === 'failed' ? failedTasks : recycledTasks;
@@ -243,10 +263,14 @@ export function App() {
   const [engineState, setEngineState] = useState<DownloadEngineState>({ available: true, retrying: false });
   const taskEventEpoch = useRef(0);
   const taskEventVersions = useRef(new Map<string, number>());
+  const purgingTaskIds = useRef(new Set<string>());
+  const permanentlyPurgedTaskIds = useRef(new Set<string>());
+  const purgeInProgressRef = useRef(false);
   const engineEventEpoch = useRef(0);
   const tasksRef = useRef<QueueTask[]>(tasks);
   const confirmationGeneration = useRef(0);
-  const shareConfirmationsInFlight = useRef(new Set<number>());
+  const headerConfirmationGeneration = useRef(0);
+  const shareConfirmationsInFlight = useRef(new Set<string>());
   const duplicateActionInFlight = useRef(false);
   const duplicateCloseInFlight = useRef(false);
   tasksRef.current = tasks;
@@ -266,6 +290,16 @@ export function App() {
     setConfirmation(null);
   }
 
+  function showHeaderConfirmation(next: ParseResult) {
+    headerConfirmationGeneration.current += 1;
+    setHeaderConfirmation(next);
+  }
+
+  function dismissHeaderConfirmation() {
+    headerConfirmationGeneration.current += 1;
+    setHeaderConfirmation(null);
+  }
+
   function dismissDuplicate(taskId: string) {
     if (duplicateActionInFlight.current || duplicateCloseInFlight.current) return;
     duplicateCloseInFlight.current = true;
@@ -278,13 +312,28 @@ export function App() {
     taskEventVersions.current.set(task.id, taskEventEpoch.current);
   }
 
-  function refreshTaskSnapshot(disposed: () => boolean, scope?: 'active' | 'terminal') {
+  function protectRemovedTasksFromOlderSnapshots(taskIds: readonly string[]) {
+    taskEventEpoch.current += 1;
+    for (const taskId of taskIds) {
+      taskEventVersions.current.set(taskId, taskEventEpoch.current);
+    }
+  }
+
+  function refreshTaskSnapshot(
+    disposed: () => boolean,
+    scope?: 'active' | 'terminal',
+    protectPurgeInProgress = true,
+  ) {
     const requestStartEpoch = taskEventEpoch.current;
     const snapshot = scope ? listPersistedTasks(scope) : listPersistedTasks();
     return snapshot.then((saved) => {
       if (disposed()) return;
       const protectedIds = new Set([...taskEventVersions.current]
         .flatMap(([id, epoch]) => epoch > requestStartEpoch ? [id] : []));
+      for (const id of permanentlyPurgedTaskIds.current) protectedIds.add(id);
+      if (protectPurgeInProgress) {
+        for (const id of purgingTaskIds.current) protectedIds.add(id);
+      }
       setTasks((current) => mergeTaskSnapshot(current, saved, protectedIds));
     }).catch((error: unknown) => {
       if (!disposed()) setNotice({ kind: 'error', message: String(error) });
@@ -305,6 +354,8 @@ export function App() {
       timer = window.setTimeout(async () => {
         try {
           await cloudApi.completeCloudAuthorization(taskReauthorization.provider);
+          await refreshTaskSnapshot(() => cancelled, 'active');
+          await refreshTaskSnapshot(() => cancelled, 'terminal');
           if (!cancelled) {
             setTaskReauthorization(null);
             setNotice({ kind: 'success', message: '授权成功，正在恢复受影响的下载任务' });
@@ -336,10 +387,21 @@ export function App() {
     let terminalLoadTimer: number | undefined;
     subscribeToDownloadEvents({
       onTask: (task) => {
-        if (disposed) return;
+        if (disposed || purgingTaskIds.current.has(task.id) || permanentlyPurgedTaskIds.current.has(task.id)) return;
         recordTaskEvent(task);
         setTasks((current) => upsertTask(current, task));
         setConfirmation((current) => {
+          if (!current || current.taskId !== task.id || !task.files?.length) return current;
+          return {
+            ...current,
+            resources: task.files.map((file) => ({
+              id: String(file.index), index: file.index, name: file.path,
+              size: `${file.completed_length} B / ${file.length} B`,
+              selected: current.resources.find((resource) => resource.index === file.index || resource.id === String(file.index))?.selected ?? file.selected
+            }))
+          };
+        });
+        setHeaderConfirmation((current) => {
           if (!current || current.taskId !== task.id || !task.files?.length) return current;
           return {
             ...current,
@@ -375,19 +437,21 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const pendingMagnet = confirmation?.isBitTorrent && confirmation.resources.length === 0;
+    const activeConfirmation = headerConfirmation ?? confirmation;
+    const setActiveConfirmation = headerConfirmation ? setHeaderConfirmation : setConfirmation;
+    const pendingMagnet = activeConfirmation?.isBitTorrent && activeConfirmation.resources.length === 0;
     if (!pendingMagnet || !isTauriRuntime()) return;
     let disposed = false;
     const refreshMetadata = () => {
       void listPersistedTasks().then((saved) => {
         if (disposed) return;
-        const task = saved.find((item) => item.id === confirmation.taskId);
+        const task = saved.find((item) => item.id === activeConfirmation.taskId);
         if (!task) return;
         recordTaskEvent(task);
         setTasks((current) => upsertTask(current, task));
         const files = task.files;
         if (!files?.length) return;
-        setConfirmation((current) => {
+        setActiveConfirmation((current) => {
           if (!current || current.taskId !== task.id) return current;
           return {
             ...current,
@@ -403,7 +467,7 @@ export function App() {
     refreshMetadata();
     const timer = window.setInterval(refreshMetadata, 500);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [confirmation?.isBitTorrent, confirmation?.resources.length, confirmation?.taskId]);
+  }, [confirmation?.isBitTorrent, confirmation?.resources.length, confirmation?.taskId, headerConfirmation?.isBitTorrent, headerConfirmation?.resources.length, headerConfirmation?.taskId]);
 
   useEffect(() => {
     if (!isTauriRuntime() || !eventsReady) return;
@@ -536,10 +600,13 @@ export function App() {
     return () => { disposed = true; unlisten?.(); };
   }, []);
 
-  async function parse(input: string, accessCode?: string) {
+  async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal') {
     const result = await parseDownload(input, accessCode);
     if (result.task) { recordTaskEvent(result.task); setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
-    if (result.confirmation) showConfirmation(result.confirmation);
+    if (result.confirmation) {
+      if (confirmationPlacement === 'header') showHeaderConfirmation(result.confirmation);
+      else showConfirmation(result.confirmation);
+    }
     if (result.duplicate) {
       recordTaskEvent(result.duplicate.task);
       setTasks((current) => upsertTask(current, result.duplicate!.task));
@@ -584,13 +651,17 @@ export function App() {
     }
   }
 
-  async function confirm(selectedIds: string[], destinationDirectory?: string) {
-    if (!confirmation) return;
-    if (confirmation.taskId.startsWith('cloud-share://')) {
-      const planSource = confirmation.taskId;
-      const requestGeneration = confirmationGeneration.current;
-      if (shareConfirmationsInFlight.current.has(requestGeneration)) return;
-      shareConfirmationsInFlight.current.add(requestGeneration);
+  async function confirm(selectedIds: string[], destinationDirectory?: string, placement: 'modal' | 'header' = 'modal') {
+    const activeConfirmation = placement === 'header' ? headerConfirmation : confirmation;
+    if (!activeConfirmation) return;
+    const activeGeneration = placement === 'header' ? headerConfirmationGeneration : confirmationGeneration;
+    const setActiveConfirmation = placement === 'header' ? setHeaderConfirmation : setConfirmation;
+    const planKey = `${placement}:${activeGeneration.current}`;
+    if (activeConfirmation.taskId.startsWith('cloud-share://')) {
+      const planSource = activeConfirmation.taskId;
+      const requestGeneration = activeGeneration.current;
+      if (shareConfirmationsInFlight.current.has(planKey)) return;
+      shareConfirmationsInFlight.current.add(planKey);
       try {
         const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory);
         const outcomes = result.outcomes;
@@ -602,37 +673,37 @@ export function App() {
         setDuplicateQueue((current) => [...current, ...duplicates]);
         if (result.failures.length > 0) {
           const failedIds = new Set(result.failures.map((failure) => failure.selectedId));
-          setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? {
+          setActiveConfirmation((current) => current?.taskId === planSource && activeGeneration.current === requestGeneration ? {
             ...current,
             resources: current.resources.map((resource) => ({ ...resource, selected: failedIds.has(resource.id) })),
           } : current);
-          if (confirmationGeneration.current === requestGeneration) {
+          if (activeGeneration.current === requestGeneration) {
             const first = result.failures[0];
             const prefix = result.failures.length > 1 ? `${result.failures.length} 个文件未能开始下载：` : '';
             setNotice({ kind: 'error', message: `${prefix}${first.message}` });
           }
         } else {
-          setConfirmation((current) => current?.taskId === planSource && confirmationGeneration.current === requestGeneration ? null : current);
+          setActiveConfirmation((current) => current?.taskId === planSource && activeGeneration.current === requestGeneration ? null : current);
         }
       } catch (error) {
-        if (confirmationGeneration.current === requestGeneration) {
+        if (activeGeneration.current === requestGeneration) {
           setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
         }
       } finally {
-        shareConfirmationsInFlight.current.delete(requestGeneration);
+        shareConfirmationsInFlight.current.delete(planKey);
       }
       return;
     }
     const task: QueueTask = {
-      id: confirmation.taskId, name: '多文件下载任务', kind: 'folder', status: 'queued', progress: 0, speed: '等待开始',
-      children: confirmation.resources.filter((resource) => selectedIds.includes(resource.id)).map((resource) => ({ id: resource.id, name: resource.name, kind: 'file', status: 'queued', progress: 0, size: resource.size }))
+      id: activeConfirmation.taskId, name: '多文件下载任务', kind: 'folder', status: 'queued', progress: 0, speed: '等待开始',
+      children: activeConfirmation.resources.filter((resource) => selectedIds.includes(resource.id)).map((resource) => ({ id: resource.id, name: resource.name, kind: 'file', status: 'queued', progress: 0, size: resource.size }))
     };
     const nativeTask = await (destinationDirectory
-      ? confirmDownload(confirmation.taskId, selectedIds, destinationDirectory)
-      : confirmDownload(confirmation.taskId, selectedIds)).catch(() => undefined);
+      ? confirmDownload(activeConfirmation.taskId, selectedIds, destinationDirectory)
+      : confirmDownload(activeConfirmation.taskId, selectedIds)).catch(() => undefined);
     const confirmed = nativeTask ?? task;
     recordTaskEvent(confirmed);
-    setTasks((current) => upsertTask(current, confirmed)); setSelectedTaskId(confirmed.id); setConfirmation(null);
+    setTasks((current) => upsertTask(current, confirmed)); setSelectedTaskId(confirmed.id); setActiveConfirmation(null);
   }
 
   function reopenTaskConfirmation(task: QueueTask) {
@@ -660,7 +731,11 @@ export function App() {
     try {
       if (command === 'reauthorize') {
         const authorization = await cloudApi.reauthorizeFailedCloudTask(id);
-        setTaskReauthorization(authorization);
+        setTaskReauthorization(authorization.completed ? null : authorization);
+        if (authorization.completed) {
+          await refreshTaskSnapshot(() => false, 'active');
+          await refreshTaskSnapshot(() => false, 'terminal');
+        }
         setNotice({ kind: 'success', message: authorization.instructions });
         return;
       }
@@ -808,7 +883,7 @@ export function App() {
 
   async function confirmTaskRemoval(deleteFiles: boolean) {
     const ids = pendingPurgeTaskIds ?? [];
-    if (!ids.length) return;
+    if (!ids.length || purgeInProgressRef.current) return;
     const removeTasksFromQueue = (taskIds: readonly string[]) => {
       const removed = new Set(taskIds);
       setTasks((current) => current.filter((task) => !removed.has(task.id)));
@@ -816,51 +891,83 @@ export function App() {
       setDetailsTaskId((current) => current && removed.has(current) ? null : current);
     };
     const successMessage = deleteFiles ? '任务和下载文件已彻底删除' : '任务已从回收站彻底删除，下载文件已保留';
-    if (ids.length >= backgroundPurgeThreshold) {
-      setPendingPurgeTaskIds(null);
-      setNotice({ kind: 'success', message: `正在后台删除 0 / ${ids.length} 个任务` });
-      void (async () => {
-        let deleted = 0;
-        for (let start = 0; start < ids.length; start += backgroundPurgeBatchSize) {
-          const batch = ids.slice(start, start + backgroundPurgeBatchSize);
-          try {
-            await purgeRecycledTasks(batch, deleteFiles);
-          } catch (error) {
-            setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
-            void refreshTaskSnapshot(() => false, 'terminal');
-            return;
-          }
-          removeTasksFromQueue(batch);
-          await refreshTaskSnapshot(() => false, 'terminal');
-          deleted += batch.length;
-          setNotice({ kind: 'success', message: `正在后台删除 ${deleted} / ${ids.length} 个任务` });
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    purgeInProgressRef.current = true;
+    setPurgeInProgress(true);
+    for (const id of ids) purgingTaskIds.current.add(id);
+    protectRemovedTasksFromOlderSnapshots(ids);
+    setPendingPurgeTaskIds(null);
+    setNotice({ kind: 'success', message: `正在后台删除 0 / ${ids.length} 个任务` });
+
+    let removed = 0;
+    let timer: number | undefined;
+    const removeVisibleTasks = () => {
+      const batch = ids.slice(removed, removed + backgroundPurgeFrameSize);
+      if (!batch.length) return;
+      removeTasksFromQueue(batch);
+      removed += batch.length;
+      setNotice({ kind: 'success', message: `正在后台删除 ${removed} / ${ids.length} 个任务` });
+      if (removed < ids.length) {
+        timer = window.setTimeout(removeVisibleTasks, backgroundPurgeFrameDelayMs);
+      }
+    };
+    const removeRemainingVisibleTasks = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      if (removed < ids.length) {
+        removeTasksFromQueue(ids.slice(removed));
+        removed = ids.length;
+      }
+    };
+
+    const purge = purgeRecycledTasks(ids, deleteFiles);
+    removeVisibleTasks();
+    void (async () => {
+      try {
+        await purge;
+        removeRemainingVisibleTasks();
+        await refreshTaskSnapshot(() => false, 'terminal');
+        for (const id of ids) {
+          permanentlyPurgedTaskIds.current.add(id);
+          purgingTaskIds.current.delete(id);
         }
+        purgeInProgressRef.current = false;
+        setPurgeInProgress(false);
         setNotice({ kind: 'success', message: successMessage });
-      })();
-      return;
-    }
-    try {
-      await purgeRecycledTasks(ids, deleteFiles);
-      removeTasksFromQueue(ids);
-      setPendingPurgeTaskIds(null);
-      setNotice({ kind: 'success', message: successMessage });
-    } catch (error) {
-      setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
-    }
+      } catch (error) {
+        if (timer !== undefined) window.clearTimeout(timer);
+        timer = undefined;
+        await refreshTaskSnapshot(() => false, 'terminal', false);
+        for (const id of ids) purgingTaskIds.current.delete(id);
+        purgeInProgressRef.current = false;
+        setPurgeInProgress(false);
+        setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+      }
+    })();
   }
 
   function requestRecycleClear() {
-    if (recycledTasks.length) setPendingPurgeTaskIds(recycledTasks.map((task) => task.id));
+    if (!purgeInProgressRef.current && recycledTasks.length) {
+      setPendingPurgeTaskIds(recycledTasks.map((task) => task.id));
+    }
   }
 
-  async function submitDownload() {
+  function submitHeaderInput() {
     const input = searchInput.trim();
-    if (!input) return;
-    await parse(input);
-    setSearchInput('');
+    if (!input) { setHeaderPanel(null); return; }
+    setHeaderPanel(hasMultipleLines(searchInput) || isDownloadInput(input) ? 'download' : 'search');
+  }
+
+  function selectSearchResult(task: QueueTask) {
     setView('downloads');
-    setDownloadTab('active');
+    setDownloadTab(taskTabForSearchResult(task));
+    setSelectedTaskId(task.id);
+    setHeaderPanel(null);
+    setSearchInput('');
+    window.setTimeout(() => {
+      Array.from(document.querySelectorAll<HTMLElement>('[data-task-id]'))
+        .find((element) => element.dataset.taskId === task.id)
+        ?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    }, 0);
   }
 
   function selectDownloadTab(tab: TaskListTab) {
@@ -897,22 +1004,61 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <header className="app-header" onMouseDown={startDraggingFromTitleBar}>
-        <div className="brand">
+      <header className="app-header">
+        <div className="app-header-drag-space" data-tauri-drag-region aria-hidden="true" />
+        <div className="brand" data-tauri-drag-region>
           <div className="brand-mark" data-icon-variant={resolvedTheme} aria-hidden="true"><img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" /></div>
           <h1>万能下载</h1>
         </div>
-        <label className="global-search">
-          <span aria-hidden="true">⌕</span>
-          <input
-            aria-label="搜索任务或粘贴下载链接"
-            placeholder="搜索任务或粘贴下载链接"
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Enter') void submitDownload(); }}
-          />
-        </label>
-        <button className="new-download" onClick={() => setNewDownloadOpen(true)}><span aria-hidden="true">＋</span>新建下载</button>
+        <div className="header-input-shell" data-window-no-drag>
+          <label className="global-search">
+            <span aria-hidden="true">⌕</span>
+            <textarea
+              rows={1}
+              aria-label="搜索任务或粘贴下载链接"
+              placeholder="搜索本地任务，或粘贴下载链接"
+              value={searchInput}
+              onChange={(event) => {
+                const next = event.target.value;
+                setSearchInput(next);
+                if (hasMultipleLines(next)) setHeaderPanel('download');
+                else if (!next.trim()) setHeaderPanel(null);
+              }}
+              onPaste={(event) => {
+                const pasted = event.clipboardData.getData('text');
+                if (!hasMultipleLines(pasted)) return;
+                event.preventDefault();
+                setSearchInput(pasted);
+                setHeaderPanel('download');
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  submitHeaderInput();
+                }
+              }}
+            />
+          </label>
+          {(headerPanel || headerConfirmation) && <div className="header-input-panel" data-window-no-drag>
+            {headerConfirmation ? <ParseConfirmDialog placement="header" result={headerConfirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} onConfirm={(selectedIds, destinationDirectory) => void confirm(selectedIds, destinationDirectory, 'header')} onSelectionChange={(selectedIds) => setHeaderConfirmation((current) => current ? {
+              ...current,
+              resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
+            } : current)} onClose={() => { dismissHeaderConfirmation(); setHeaderPanel(null); }} />
+              : headerPanel === 'download' ? <NewDownloadDialog open placement="header" initialInput={searchInput} onParse={async (input, accessCode) => {
+                const result = await parse(input, accessCode, 'header');
+                setView('downloads');
+                setDownloadTab('active');
+                return result;
+              }} onClose={() => { setHeaderPanel(null); setSearchInput(''); }} />
+                : <section className="header-search-results" role="region" aria-label="搜索结果">
+                  <header><strong>搜索结果</strong><span>{taskSearchResults.length} 个任务</span><button type="button" aria-label="关闭搜索结果" onClick={() => setHeaderPanel(null)}>×</button></header>
+                  {taskSearchResults.length ? <div>{taskSearchResults.map((task) => <button type="button" key={task.id} className="header-search-result" aria-label={`打开任务 ${displayTaskName(task)}`} onClick={() => selectSearchResult(task)}>
+                    <span className={`header-search-status ${taskTabForSearchResult(task)}`}>{taskTabForSearchResult(task) === 'active' ? '下载中' : taskTabForSearchResult(task) === 'completed' ? '已完成' : '失败'}</span>
+                    <strong title={displayTaskName(task)}>{displayTaskName(task)}</strong>
+                  </button>)}</div> : <p>没有匹配的下载任务</p>}
+                </section>}
+          </div>}
+        </div>
         <div className="window-controls" aria-label="窗口控制" style={{ marginLeft: 'auto', flex: '0 0 auto' }}>
           <button aria-label="最小化" onClick={() => void runWindowAction('minimize')}><WindowIcon kind="minimize" /></button>
           <button aria-label="最大化或还原" onClick={() => void runWindowAction('maximize')}><WindowIcon kind="maximize" /></button>
@@ -941,7 +1087,7 @@ export function App() {
             </div>
             <div className="download-tab-actions">
               {downloadTab === 'active' && bulkTaskAction && <button className="bulk-pause" onClick={() => void runLauncherBatchAction(bulkTaskAction)}>{bulkTaskAction === 'resume' ? '▷ 全部开始' : 'Ⅱ 全部暂停'}</button>}
-              {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" onClick={requestRecycleClear}>清空</button>}
+              {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" disabled={purgeInProgress} onClick={requestRecycleClear}>清空</button>}
             </div>
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
             <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} />

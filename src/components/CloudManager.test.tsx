@@ -10,6 +10,7 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     beginCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ provider, windowLabel: '网盘登录', instructions: '请在安全窗口中完成登录。' })),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' as const })),
     loginCloudWithPassword: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'password' as const })),
+    getSavedCloudCredentials: vi.fn().mockResolvedValue(null),
     getCloudAccount: vi.fn().mockRejectedValue(Object.assign(new Error('未授权'), { code: 'unauthorized' })),
     listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === 'folder-1'
       ? { id: 'folder-1', items: [{ id: 'child-1', parentId: 'folder-1', name: '说明.txt', kind: 'file', size: 1024, modifiedAt: '2025-06-07 08:09:10' }] }
@@ -40,6 +41,42 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     ...overrides
   };
 }
+
+it('submits provided credentials once while automatic password login is pending', async () => {
+  let finish!: (value: { id: string; provider: 'baidu'; displayName: string; authMethod: 'password' }) => void;
+  const pending = new Promise<{ id: string; provider: 'baidu'; displayName: string; authMethod: 'password' }>(resolve => { finish = resolve; });
+  const client = createCloudFake({ loginCloudWithPassword: vi.fn().mockReturnValue(pending) });
+  const user = userEvent.setup();
+  render(<CloudManager provider="baidu" client={client} authorizationOnly />);
+  await user.type(screen.getByLabelText('账号'), 'provided-user');
+  await user.type(screen.getByLabelText('密码'), 'provided-password');
+  await user.click(screen.getByRole('button', { name: '登录' }));
+  expect(screen.getByRole('button', { name: '正在自动登录…' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeDisabled();
+  expect(client.loginCloudWithPassword).toHaveBeenCalledWith('baidu', { username: 'provided-user', password: 'provided-password' });
+  fireEvent.submit(screen.getByLabelText('密码').closest('form')!);
+  expect(client.loginCloudWithPassword).toHaveBeenCalledTimes(1);
+  await act(async () => { finish({ id: 'account-1', provider: 'baidu', displayName: 'alice', authMethod: 'password' }); });
+  expect(screen.queryByRole('button', { name: '正在自动登录…' })).not.toBeInTheDocument();
+});
+
+it('restores encrypted login input into masked fields and keeps it after a failed attempt', async () => {
+  const client = createCloudFake({
+    getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', password: 'saved-secret' }),
+    loginCloudWithPassword: vi.fn().mockRejectedValue(Object.assign(new Error('登录失败'), { code: 'provider_error' }))
+  });
+  const user = userEvent.setup();
+  render(<CloudManager provider="tianyi" client={client} authorizationOnly />);
+
+  expect(await screen.findByLabelText('账号')).toHaveValue('saved-user');
+  const passwordInput = screen.getByLabelText('密码');
+  expect(passwordInput).toHaveAttribute('type', 'password');
+  expect(passwordInput).toHaveValue('saved-secret');
+  await user.click(screen.getByRole('button', { name: '登录' }));
+  await screen.findByText('登录失败');
+  expect(screen.getByLabelText('账号')).toHaveValue('saved-user');
+  expect(screen.getByLabelText('密码')).toHaveValue('saved-secret');
+});
 
 it('keeps the unauthenticated provider card focused on the available sign-in action', async () => {
   render(<CloudManager provider="quark" client={createCloudFake()} />);

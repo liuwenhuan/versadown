@@ -339,6 +339,7 @@ pub struct CloudDirectoryGroup {
     pub remote_directory_id: String,
     pub relative_directory: String,
     pub output_directory: PathBuf,
+    pub status: TaskStatus,
     pub created_at: i64,
     pub updated_at: i64,
 }

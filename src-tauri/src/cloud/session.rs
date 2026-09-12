@@ -164,6 +164,62 @@ fn password_credential_key(provider: CloudProvider) -> Result<&'static str, Quar
     }
 }
 
+const BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY: &str = "cloud-password-baidu-browser-preferred";
+const BAIDU_BROWSER_PROFILE_USERNAME_KEY: &str = "cloud-password-baidu-browser-profile-username";
+
+pub fn browser_password_login_preferred(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+) -> Result<bool, QuarkError> {
+    if provider != CloudProvider::Baidu {
+        return Ok(false);
+    }
+    Ok(store
+        .load(BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY)?
+        .is_some_and(|value| value.as_slice() == b"1"))
+}
+
+pub fn set_browser_password_login_preferred(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+    preferred: bool,
+) -> Result<(), QuarkError> {
+    if provider != CloudProvider::Baidu {
+        return Ok(());
+    }
+    if preferred {
+        store.save(BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY, b"1")
+    } else {
+        store.remove(BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY)
+    }
+}
+
+pub fn baidu_browser_profile_username(
+    store: &impl CredentialStore,
+) -> Result<Option<Zeroizing<String>>, QuarkError> {
+    let Some(mut bytes) = store.load(BAIDU_BROWSER_PROFILE_USERNAME_KEY)? else {
+        return Ok(None);
+    };
+    let username = std::str::from_utf8(&bytes)
+        .map(str::to_owned)
+        .map_err(|_| QuarkError::Storage);
+    bytes.zeroize();
+    username.map(|username| Some(Zeroizing::new(username)))
+}
+
+pub fn set_baidu_browser_profile_username(
+    store: &impl CredentialStore,
+    username: Option<&str>,
+) -> Result<(), QuarkError> {
+    match username
+        .map(str::trim)
+        .filter(|username| !username.is_empty())
+    {
+        Some(username) => store.save(BAIDU_BROWSER_PROFILE_USERNAME_KEY, username.as_bytes()),
+        None => store.remove(BAIDU_BROWSER_PROFILE_USERNAME_KEY),
+    }
+}
+
 fn load_password_credentials(
     store: &impl CredentialStore,
     provider: CloudProvider,
@@ -270,29 +326,26 @@ pub fn save_password_credential(
             active_account_id: None,
             credentials: Vec::new(),
         });
-    if let Some(existing) = credentials
-        .credentials
-        .iter_mut()
-        .find(|existing| existing.account_id == account_id)
-    {
-        existing.username.zeroize();
-        existing.password.zeroize();
-        existing.username = username;
-        existing.password = password;
-    } else {
-        credentials.credentials.push(LoadedPasswordCredential {
-            account_id: account_id.clone(),
-            username,
-            password,
-        });
+    for existing in &mut credentials.credentials {
+        existing.zeroize();
     }
+    credentials.credentials.clear();
+    credentials.credentials.push(LoadedPasswordCredential {
+        account_id: account_id.clone(),
+        username,
+        password,
+    });
     if let Some(active_account_id) = credentials.active_account_id.as_mut() {
         active_account_id.zeroize();
     }
     credentials.active_account_id = Some(account_id);
     let result = persist_password_credentials(store, &credentials);
     credentials.zeroize();
-    result
+    if let Err(error) = result {
+        let _ = remove_password_credential(store, provider);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn load_password_credential(
@@ -327,26 +380,91 @@ pub fn remove_password_credential(
     store: &impl CredentialStore,
     provider: CloudProvider,
 ) -> Result<(), QuarkError> {
-    store.remove(password_credential_key(provider)?)
+    let password_result = store.remove(password_credential_key(provider)?);
+    let draft_result = store.remove(password_login_draft_key(provider)?);
+    let preference_result = if provider == CloudProvider::Baidu {
+        store.remove(BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY)
+    } else {
+        Ok(())
+    };
+    let profile_result = if provider == CloudProvider::Baidu {
+        store.remove(BAIDU_BROWSER_PROFILE_USERNAME_KEY)
+    } else {
+        Ok(())
+    };
+    match (
+        password_result,
+        draft_result,
+        preference_result,
+        profile_result,
+    ) {
+        (Ok(()), Ok(()), Ok(()), Ok(())) => Ok(()),
+        (Err(error), _, _, _)
+        | (_, Err(error), _, _)
+        | (_, _, Err(error), _)
+        | (_, _, _, Err(error)) => Err(error),
+    }
 }
 
-/// Records which account owns the current session without deleting password
-/// credentials for the provider's other accounts.
+/// Records which account owns the current session. Every password-capable
+/// provider keeps one credential; selecting another browser account clears the
+/// old password and draft instead of retaining an inactive account.
 pub fn select_password_credential_account(
     store: &impl CredentialStore,
     provider: CloudProvider,
     account_id: &str,
 ) -> Result<(), QuarkError> {
     let Some(mut credentials) = load_password_credentials(store, provider)? else {
-        return Ok(());
+        let draft_result = store.remove(password_login_draft_key(provider)?);
+        let profile_result = if provider == CloudProvider::Baidu {
+            store.remove(BAIDU_BROWSER_PROFILE_USERNAME_KEY)
+        } else {
+            Ok(())
+        };
+        return match (draft_result, profile_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
     };
+    let Some(index) = credentials
+        .credentials
+        .iter()
+        .position(|credential| credential.account_id == account_id)
+    else {
+        credentials.zeroize();
+        let password_result = store.remove(password_credential_key(provider)?);
+        let draft_result = store.remove(password_login_draft_key(provider)?);
+        let profile_result = if provider == CloudProvider::Baidu {
+            store.remove(BAIDU_BROWSER_PROFILE_USERNAME_KEY)
+        } else {
+            Ok(())
+        };
+        return match (password_result, draft_result, profile_result) {
+            (Ok(()), Ok(()), Ok(())) => Ok(()),
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        };
+    };
+    let selected = credentials.credentials.remove(index);
+    for stale in &mut credentials.credentials {
+        stale.zeroize();
+    }
+    credentials.credentials.clear();
+    credentials.credentials.push(selected);
     if let Some(active_account_id) = credentials.active_account_id.as_mut() {
         active_account_id.zeroize();
     }
     credentials.active_account_id = Some(account_id.to_owned());
     let result = persist_password_credentials(store, &credentials);
     credentials.zeroize();
-    result
+    if let Err(error) = result {
+        let _ = remove_password_credential(store, provider);
+        return Err(error);
+    }
+    if let Err(error) = store.remove(password_login_draft_key(provider)?) {
+        let _ = remove_password_credential(store, provider);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn run_with_session_recovery<T>(
@@ -388,34 +506,268 @@ fn is_recoverable_authorization_error(error: &QuarkError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Mutex,
+        },
+    };
+
     use super::{
-        load_password_credential, save_password_credential, select_password_credential_account,
+        baidu_browser_profile_username, browser_password_login_preferred, load_password_credential,
+        load_password_credentials, load_password_login_draft, load_saved_password_login,
+        save_password_credential, save_password_login_draft, select_password_credential_account,
+        set_baidu_browser_profile_username, set_browser_password_login_preferred,
         CloudPasswordCredential,
     };
     use crate::cloud::{CloudProvider, CredentialStore, MemoryCredentialStore};
 
+    #[derive(Default)]
+    struct FailOnceCredentialStore {
+        values: Mutex<BTreeMap<String, Vec<u8>>>,
+        fail_next_save: AtomicBool,
+        fail_next_draft_remove: AtomicBool,
+    }
+
+    impl CredentialStore for FailOnceCredentialStore {
+        fn save(&self, key: &str, value: &[u8]) -> Result<(), crate::cloud::QuarkError> {
+            if self.fail_next_save.swap(false, Ordering::SeqCst) {
+                return Err(crate::cloud::QuarkError::Storage);
+            }
+            self.values
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
+            Ok(())
+        }
+
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, crate::cloud::QuarkError> {
+            Ok(self.values.lock().unwrap().get(key).cloned())
+        }
+
+        fn remove(&self, key: &str) -> Result<(), crate::cloud::QuarkError> {
+            if key.contains("password-draft")
+                && self.fail_next_draft_remove.swap(false, Ordering::SeqCst)
+            {
+                return Err(crate::cloud::QuarkError::Storage);
+            }
+            self.values.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
     #[test]
-    fn preserves_another_accounts_password_after_web_authorization_switches_accounts() {
+    fn baidu_password_login_replaces_the_previous_account_instead_of_retaining_it() {
         let store = MemoryCredentialStore::default();
         save_password_credential(
             &store,
             CloudPasswordCredential::new(CloudProvider::Baidu, "account-a", "alice", "secret-a"),
         )
         .unwrap();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Baidu, "account-b", "bob", "secret-b"),
+        )
+        .unwrap();
 
-        // A web authorization for account B must stop automatic login as A, but it
-        // must not erase A's encrypted password. The user may switch back later.
-        select_password_credential_account(&store, CloudProvider::Baidu, "account-b").unwrap();
+        let stored = load_password_credentials(&store, CloudProvider::Baidu)
+            .unwrap()
+            .expect("the replacement credential is stored");
+        assert_eq!(stored.credentials.len(), 1);
+        assert_eq!(stored.credentials[0].account_id, "account-b");
+        let credential = load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .expect("the replacement is active");
+        assert_eq!(credential.username(), "bob");
+        assert_eq!(credential.password(), "secret-b");
+
+        save_password_login_draft(&store, CloudProvider::Baidu, "bob", "secret-b").unwrap();
+        select_password_credential_account(&store, CloudProvider::Baidu, "account-a").unwrap();
         assert!(load_password_credential(&store, CloudProvider::Baidu)
             .unwrap()
             .is_none());
-
-        select_password_credential_account(&store, CloudProvider::Baidu, "account-a").unwrap();
-        let credential = load_password_credential(&store, CloudProvider::Baidu)
+        assert!(load_saved_password_login(&store, CloudProvider::Baidu)
             .unwrap()
-            .expect("the prior direct-login credential remains available");
-        assert_eq!(credential.username(), "alice");
-        assert_eq!(credential.password(), "secret-a");
+            .is_none());
+    }
+
+    #[test]
+    fn every_password_provider_replaces_the_previous_account() {
+        for provider in [
+            CloudProvider::Pikpak,
+            CloudProvider::Baidu,
+            CloudProvider::Tianyi,
+        ] {
+            let store = MemoryCredentialStore::default();
+            save_password_credential(
+                &store,
+                CloudPasswordCredential::new(provider, "account-a", "alice", "secret-a"),
+            )
+            .unwrap();
+            save_password_credential(
+                &store,
+                CloudPasswordCredential::new(provider, "account-b", "bob", "secret-b"),
+            )
+            .unwrap();
+
+            let stored = load_password_credentials(&store, provider)
+                .unwrap()
+                .expect("the replacement credential is stored");
+            assert_eq!(stored.credentials.len(), 1, "provider: {provider:?}");
+            assert_eq!(stored.credentials[0].account_id, "account-b");
+
+            save_password_login_draft(&store, provider, "bob", "secret-b").unwrap();
+            select_password_credential_account(&store, provider, "account-a").unwrap();
+            assert!(load_password_credential(&store, provider)
+                .unwrap()
+                .is_none());
+            assert!(load_saved_password_login(&store, provider)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn selecting_a_validated_account_discards_an_unbound_login_draft() {
+        for provider in [
+            CloudProvider::Pikpak,
+            CloudProvider::Baidu,
+            CloudProvider::Tianyi,
+        ] {
+            let store = MemoryCredentialStore::default();
+            save_password_credential(
+                &store,
+                CloudPasswordCredential::new(provider, "account-a", "alice", "secret-a"),
+            )
+            .unwrap();
+            save_password_login_draft(&store, provider, "other-user", "other-secret").unwrap();
+
+            select_password_credential_account(&store, provider, "account-a").unwrap();
+
+            let saved = load_saved_password_login(&store, provider)
+                .unwrap()
+                .expect("the validated credential remains available");
+            assert_eq!(saved.username(), "alice", "provider: {provider:?}");
+            assert_eq!(saved.password(), "secret-a", "provider: {provider:?}");
+        }
+    }
+
+    #[test]
+    fn logout_removes_the_single_saved_login_for_every_password_provider() {
+        for provider in [
+            CloudProvider::Pikpak,
+            CloudProvider::Baidu,
+            CloudProvider::Tianyi,
+        ] {
+            let store = MemoryCredentialStore::default();
+            save_password_credential(
+                &store,
+                CloudPasswordCredential::new(provider, "account-a", "alice", "secret-a"),
+            )
+            .unwrap();
+            save_password_login_draft(&store, provider, "alice", "secret-a").unwrap();
+
+            super::remove_password_credential(&store, provider).unwrap();
+
+            assert!(load_saved_password_login(&store, provider)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn failed_account_replacement_removes_the_old_password_and_draft() {
+        let store = FailOnceCredentialStore::default();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Tianyi, "account-a", "alice", "secret-a"),
+        )
+        .unwrap();
+        save_password_login_draft(&store, CloudProvider::Tianyi, "alice", "secret-a").unwrap();
+        store.fail_next_save.store(true, Ordering::SeqCst);
+
+        assert!(save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Tianyi, "account-b", "bob", "secret-b"),
+        )
+        .is_err());
+
+        assert!(load_saved_password_login(&store, CloudProvider::Tianyi)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn failed_draft_cleanup_after_account_selection_removes_the_saved_password_too() {
+        let store = FailOnceCredentialStore::default();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Pikpak, "account-a", "alice", "secret-a"),
+        )
+        .unwrap();
+        save_password_login_draft(&store, CloudProvider::Pikpak, "other", "other-secret").unwrap();
+        store.fail_next_draft_remove.store(true, Ordering::SeqCst);
+
+        assert!(
+            select_password_credential_account(&store, CloudProvider::Pikpak, "account-a",)
+                .is_err()
+        );
+
+        assert!(load_saved_password_login(&store, CloudProvider::Pikpak)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn baidu_remembers_to_use_the_stable_browser_after_native_risk_rejection() {
+        let store = MemoryCredentialStore::default();
+        assert!(!browser_password_login_preferred(&store, CloudProvider::Baidu).unwrap());
+        assert!(!browser_password_login_preferred(&store, CloudProvider::Tianyi).unwrap());
+
+        set_browser_password_login_preferred(&store, CloudProvider::Baidu, true).unwrap();
+        assert!(browser_password_login_preferred(&store, CloudProvider::Baidu).unwrap());
+
+        set_browser_password_login_preferred(&store, CloudProvider::Baidu, false).unwrap();
+        assert!(!browser_password_login_preferred(&store, CloudProvider::Baidu).unwrap());
+    }
+
+    #[test]
+    fn baidu_browser_profile_records_only_one_username() {
+        let store = MemoryCredentialStore::default();
+        assert!(baidu_browser_profile_username(&store).unwrap().is_none());
+
+        set_baidu_browser_profile_username(&store, Some(" alice ")).unwrap();
+        assert_eq!(
+            baidu_browser_profile_username(&store)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("alice")
+        );
+
+        set_baidu_browser_profile_username(&store, Some("bob")).unwrap();
+        assert_eq!(
+            baidu_browser_profile_username(&store)
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("bob")
+        );
+    }
+
+    #[test]
+    fn baidu_web_account_selection_clears_an_unbound_password_draft() {
+        let store = MemoryCredentialStore::default();
+        save_password_login_draft(&store, CloudProvider::Baidu, "alice", "secret").unwrap();
+        set_baidu_browser_profile_username(&store, Some("alice")).unwrap();
+
+        select_password_credential_account(&store, CloudProvider::Baidu, "account-b").unwrap();
+
+        assert!(load_saved_password_login(&store, CloudProvider::Baidu)
+            .unwrap()
+            .is_none());
+        assert!(baidu_browser_profile_username(&store).unwrap().is_none());
     }
 
     #[test]
@@ -434,5 +786,179 @@ mod tests {
         assert_eq!(credential.account_id(), "account-a");
         assert_eq!(credential.username(), "alice");
         assert_eq!(credential.password(), "secret-a");
+    }
+
+    #[test]
+    fn remembers_the_latest_password_login_input_even_before_authorization_succeeds() {
+        let store = MemoryCredentialStore::default();
+        save_password_login_draft(&store, CloudProvider::Tianyi, "first-user", "first-secret")
+            .unwrap();
+        save_password_login_draft(
+            &store,
+            CloudProvider::Tianyi,
+            "latest-user",
+            "latest-secret",
+        )
+        .unwrap();
+
+        let draft = load_password_login_draft(&store, CloudProvider::Tianyi)
+            .unwrap()
+            .expect("the latest submitted login remains available to the login form");
+        assert_eq!(draft.username(), "latest-user");
+        assert_eq!(draft.password(), "latest-secret");
+        assert!(load_password_login_draft(&store, CloudProvider::Quark).is_err());
+    }
+
+    #[test]
+    fn previously_validated_password_is_available_before_a_login_draft_exists() {
+        let store = MemoryCredentialStore::default();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(
+                CloudProvider::Baidu,
+                "account-a",
+                "existing-user",
+                "existing-secret",
+            ),
+        )
+        .unwrap();
+
+        let saved = load_saved_password_login(&store, CloudProvider::Baidu)
+            .unwrap()
+            .expect("existing encrypted credentials remain available to the login form");
+        assert_eq!(saved.username(), "existing-user");
+        assert_eq!(saved.password(), "existing-secret");
+    }
+}
+
+fn password_login_draft_key(provider: CloudProvider) -> Result<&'static str, QuarkError> {
+    if provider_capabilities(provider).password_login_mode != PasswordLoginMode::RustDirect {
+        return Err(QuarkError::InvalidInput(
+            "该网盘不支持账号密码登录".to_owned(),
+        ));
+    }
+    match provider {
+        CloudProvider::Pikpak => Ok("cloud-password-draft-pikpak"),
+        CloudProvider::Baidu => Ok("cloud-password-draft-baidu"),
+        CloudProvider::Tianyi => Ok("cloud-password-draft-tianyi"),
+        CloudProvider::Quark
+        | CloudProvider::Aliyun
+        | CloudProvider::Xunlei
+        | CloudProvider::Uc => unreachable!("RustDirect providers have a login draft key"),
+    }
+}
+
+pub fn save_password_login_draft(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+    username: &str,
+    password: &str,
+) -> Result<(), QuarkError> {
+    let username = username.trim();
+    if username.is_empty() || password.is_empty() {
+        return Err(QuarkError::InvalidInput("请输入账号和密码".into()));
+    }
+    let mut draft = StoredPasswordLoginDraft {
+        version: 1,
+        provider,
+        username: username.into(),
+        password: password.into(),
+    };
+    let mut bytes = serde_json::to_vec(&draft).map_err(|_| QuarkError::Storage)?;
+    let result = store.save(password_login_draft_key(provider)?, &bytes);
+    bytes.zeroize();
+    draft.zeroize();
+    result
+}
+
+pub fn load_password_login_draft(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+) -> Result<Option<CloudPasswordLoginDraft>, QuarkError> {
+    let Some(mut bytes) = store.load(password_login_draft_key(provider)?)? else {
+        return Ok(None);
+    };
+    let mut stored: StoredPasswordLoginDraft = match serde_json::from_slice(&bytes) {
+        Ok(stored) => stored,
+        Err(_) => {
+            bytes.zeroize();
+            return Err(QuarkError::Storage);
+        }
+    };
+    bytes.zeroize();
+    if stored.version != 1
+        || stored.provider != provider
+        || stored.username.trim().is_empty()
+        || stored.password.is_empty()
+    {
+        stored.zeroize();
+        return Err(QuarkError::Storage);
+    }
+    let draft = CloudPasswordLoginDraft {
+        provider,
+        username: Zeroizing::new(std::mem::take(&mut stored.username)),
+        password: Zeroizing::new(std::mem::take(&mut stored.password)),
+    };
+    stored.zeroize();
+    Ok(Some(draft))
+}
+
+pub fn load_saved_password_login(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+) -> Result<Option<CloudPasswordLoginDraft>, QuarkError> {
+    if let Some(draft) = load_password_login_draft(store, provider)? {
+        return Ok(Some(draft));
+    }
+    Ok(
+        load_password_credential(store, provider)?.map(|credential| CloudPasswordLoginDraft {
+            provider,
+            username: Zeroizing::new(credential.username().to_owned()),
+            password: Zeroizing::new(credential.password().to_owned()),
+        }),
+    )
+}
+
+pub struct CloudPasswordLoginDraft {
+    provider: CloudProvider,
+    username: Zeroizing<String>,
+    password: Zeroizing<String>,
+}
+
+impl CloudPasswordLoginDraft {
+    pub fn provider(&self) -> CloudProvider {
+        self.provider
+    }
+    pub fn username(&self) -> &str {
+        self.username.as_str()
+    }
+    pub fn password(&self) -> &str {
+        self.password.as_str()
+    }
+}
+
+impl fmt::Debug for CloudPasswordLoginDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CloudPasswordLoginDraft")
+            .field("provider", &self.provider)
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct StoredPasswordLoginDraft {
+    version: u8,
+    provider: CloudProvider,
+    username: String,
+    password: String,
+}
+
+impl Zeroize for StoredPasswordLoginDraft {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
     }
 }

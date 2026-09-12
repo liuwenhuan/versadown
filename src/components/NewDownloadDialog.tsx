@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ParseDownloadResult } from '../lib/types';
 
-export type NewDownloadDialogPlacement = 'launcher' | 'modal';
+export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
 
 export interface NewDownloadDialogProps {
   open: boolean;
@@ -9,9 +9,10 @@ export interface NewDownloadDialogProps {
   onParse(input: string, accessCode?: string): void | Promise<ParseDownloadResult | void>;
   onClose(): void;
   onOpenTaskList?(): void | Promise<void>;
+  initialInput?: string;
 }
 
-export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClose, onOpenTaskList }: NewDownloadDialogProps) {
+export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClose, onOpenTaskList, initialInput }: NewDownloadDialogProps) {
   const [input, setInput] = useState('');
   const [accessCode, setAccessCode] = useState('');
   const [accessCodePrompt, setAccessCodePrompt] = useState<string | null>(null);
@@ -37,6 +38,10 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
   useEffect(() => {
     if (!open) { setIsSubmitting(false); setError(null); setAccessCode(''); setAccessCodePrompt(null); }
   }, [open]);
+
+  useEffect(() => {
+    if (open) setInput(initialInput ?? '');
+  }, [initialInput, open]);
 
   useEffect(() => {
     if (accessCodePrompt) accessCodeRef.current?.focus();
@@ -103,13 +108,13 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
   if (!open) return null;
 
   const dialog = (
-    <aside ref={dialogRef} className={placement === 'launcher' ? 'launcher-panel new-download-dialog' : 'new-download-dialog modal'} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapModalFocus}>
+    <aside ref={dialogRef} className={placement === 'launcher' ? 'launcher-panel new-download-dialog' : placement === 'header' ? 'new-download-dialog header-download-dialog' : 'new-download-dialog modal'} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapModalFocus}>
       <div className="launcher-title"><span>新建下载</span><button aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={isSubmitting} onClick={requestClose}>×</button></div>
       <form onSubmit={submit} aria-busy={isSubmitting}>
-        {placement === 'modal' && <label htmlFor="download-input">下载内容</label>}
+        {placement !== 'launcher' && <label htmlFor="download-input">下载内容</label>}
         <textarea ref={inputRef} id="download-input" aria-label="下载内容" value={input} disabled={isSubmitting} onChange={(event) => setInput(event.target.value)} placeholder="粘贴链接、分享地址、文本或网页地址" />
         {accessCodePrompt && <label htmlFor="share-access-code">访问码<input ref={accessCodeRef} id="share-access-code" type="password" autoComplete="off" value={accessCode} disabled={isSubmitting} onChange={(event) => setAccessCode(event.target.value)} /></label>}
-        {placement === 'modal' && <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>}
+        {placement !== 'launcher' && <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>}
         {accessCodePrompt && <p role="status">{accessCodePrompt}</p>}
         {error && <p role="alert">{error}</p>}
         <div className="new-download-actions">
@@ -120,6 +125,6 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
     </aside>
   );
 
-  if (placement === 'launcher') return dialog;
+  if (placement === 'launcher' || placement === 'header') return dialog;
   return <div className="modal-backdrop new-download-backdrop" data-testid="new-download-backdrop" onClick={(event) => { if (event.target === event.currentTarget) requestClose(); }}>{dialog}</div>;
 }

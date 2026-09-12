@@ -9,6 +9,7 @@ export interface CloudManagerClient {
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
+  getSavedCloudCredentials?(provider: CloudProvider): Promise<CloudCredentials | null>;
   getCloudAccount(provider: CloudProvider): Promise<CloudAccount>;
   listCloudDirectory(provider: CloudProvider, parentId?: string): Promise<CloudDirectory>;
   createCloudDirectory(provider: CloudProvider, parentId: string, name: string): Promise<CloudFile | void>;
@@ -64,6 +65,7 @@ const unavailableClient: CloudManagerClient = {
   beginCloudAuthorization: () => Promise.reject(new Error('网盘连接器尚未接入')),
   completeCloudAuthorization: () => Promise.reject(new Error('网盘连接器尚未接入')),
   loginCloudWithPassword: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  getSavedCloudCredentials: () => Promise.resolve(null),
   getCloudAccount: () => Promise.reject(new Error('网盘连接器尚未接入')),
   listCloudDirectory: () => Promise.reject(new Error('网盘连接器尚未接入')),
   createCloudDirectory: () => Promise.reject(new Error('网盘连接器尚未接入')),
@@ -437,6 +439,9 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [sort, setSort] = useState<CloudSort | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordLoginBusy, setPasswordLoginBusy] = useState(false);
+  const passwordLoginInFlight = useRef(false);
+  const passwordFieldsEdited = useRef(false);
   const effectiveAuthorizationCapabilities = fixedAuthorizationCapabilities[provider];
   const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
@@ -484,8 +489,16 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     if (!supportsDirectPasswordLogin) {
       setUsername('');
       setPassword('');
+      return;
     }
-  }, [supportsDirectPasswordLogin]);
+    let active = true;
+    client.getSavedCloudCredentials?.(provider).then((credentials) => {
+      if (!active || passwordFieldsEdited.current || !credentials) return;
+      setUsername(credentials.username);
+      setPassword(credentials.password);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [client, provider, supportsDirectPasswordLogin]);
 
   async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
     setDirectoryState('loading');
@@ -544,7 +557,6 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     ensureProviderAccount(account);
     setAccounts((current) => current.some((item) => item.id === account.id) ? current.map((item) => item.id === account.id ? account : item) : [...current, account]);
     setActiveAccountId(account.id);
-    setPassword('');
     setWebAuthorization(null);
     setReauthorizationRequired(false);
     if (reauthorizationRequired) setOperation(null);
@@ -564,15 +576,21 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
   async function submitPasswordLogin(event: FormEvent) {
     event.preventDefault();
-    if (!supportsDirectPasswordLogin) return;
+    if (!supportsDirectPasswordLogin || passwordLoginInFlight.current) return;
     if (!username.trim() || !password) {
       setAuthorizationStatus('请输入账号和密码后再登录。');
       return;
     }
     const credentials = { username: username.trim(), password };
-    setUsername('');
-    setPassword('');
-    await addAccount(() => client.loginCloudWithPassword(provider, credentials));
+    passwordLoginInFlight.current = true;
+    setPasswordLoginBusy(true);
+    try {
+      await addAccount(() => client.loginCloudWithPassword(provider, credentials));
+    } finally {
+      credentials.password = '';
+      passwordLoginInFlight.current = false;
+      setPasswordLoginBusy(false);
+    }
   }
 
   async function beginWebAuthorization() {
@@ -818,11 +836,11 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
       {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsDirectPasswordLogin && <>
-          <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
-          <input aria-label="密码" placeholder="密码" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
-          <button className="primary" type="submit">登录</button>
+          <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; setUsername(event.target.value); }} />
+          <input aria-label="密码" placeholder="密码" type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; setPassword(event.target.value); }} />
+          <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? '正在自动登录…' : '登录'}</button>
         </>}
-        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
+        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
       </form>
       {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${expired ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}

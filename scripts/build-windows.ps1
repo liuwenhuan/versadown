@@ -9,10 +9,13 @@ $nodeBin = Join-Path $projectRoot '.tools\node-v24.20.0-win-x64'
 $installedNodeBin = Join-Path $env:LOCALAPPDATA 'Programs\nodejs'
 $cargoHome = Join-Path $projectRoot '.tools\cargo'
 $rustupHome = Join-Path $projectRoot '.tools\rustup'
+$installedCargoHome = Join-Path $env:USERPROFILE '.cargo'
+$installedCargoBin = Join-Path $installedCargoHome 'bin'
+$installedRustupHome = Join-Path $env:USERPROFILE '.rustup'
+$stableToolchain = 'stable-x86_64-pc-windows-msvc'
 $releaseTargetDir = Join-Path $projectRoot '.tools\release-target'
 $publishedDir = Join-Path $projectRoot 'artifacts'
 $publishedBinary = Join-Path $publishedDir 'alldownloader.exe'
-$installedCargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 
 if (Test-Path -LiteralPath $nodeBin) {
     $env:Path = "$nodeBin;$env:Path"
@@ -23,10 +26,17 @@ if (Test-Path -LiteralPath (Join-Path $cargoHome 'bin\cargo.exe')) {
     $env:CARGO_HOME = $cargoHome
     $env:Path = "$cargoHome\bin;$env:Path"
 } elseif (Test-Path -LiteralPath (Join-Path $installedCargoBin 'cargo.exe')) {
+    $env:CARGO_HOME = $installedCargoHome
     $env:Path = "$installedCargoBin;$env:Path"
 }
-if (Test-Path -LiteralPath $rustupHome) {
+# A project-local rustup directory may exist without a configured toolchain.
+# Prefer it only when it contains the stable MSVC toolchain; otherwise use the
+# already installed per-user toolchain rather than asking rustup to reconfigure.
+if (Test-Path -LiteralPath (Join-Path $rustupHome "toolchains\$stableToolchain")) {
     $env:RUSTUP_HOME = $rustupHome
+} elseif (Test-Path -LiteralPath (Join-Path $installedRustupHome "toolchains\$stableToolchain")) {
+    $env:RUSTUP_HOME = $installedRustupHome
+    $env:RUSTUP_TOOLCHAIN = $stableToolchain
 }
 $env:CARGO_INCREMENTAL = '1'
 

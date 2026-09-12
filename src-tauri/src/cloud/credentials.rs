@@ -72,7 +72,12 @@ impl DpapiCredentialStore {
                 | "cloud-share-plans-v1"
         ) && !matches!(
             key,
-            "cloud-password-pikpak" | "cloud-password-baidu" | "cloud-password-tianyi"
+            "cloud-password-pikpak"
+                | "cloud-password-baidu"
+                | "cloud-password-tianyi"
+                | "cloud-password-draft-pikpak"
+                | "cloud-password-draft-baidu"
+                | "cloud-password-draft-tianyi"
         ) {
             return Err(QuarkError::Storage);
         }
@@ -294,6 +299,24 @@ mod tests {
             store.load("cloud-share-plans-v1").unwrap(),
             Some(b"new-plan-secret".to_vec())
         );
+    }
+
+    #[test]
+    fn dpapi_encrypts_and_restores_password_login_drafts() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DpapiCredentialStore::new(directory.path().into()).unwrap();
+        for provider in ["pikpak", "baidu", "tianyi"] {
+            let key = format!("cloud-password-draft-{provider}");
+            store.save(&key, b"username-and-password").unwrap();
+            assert_eq!(
+                store.load(&key).unwrap(),
+                Some(b"username-and-password".to_vec())
+            );
+            let raw = std::fs::read(directory.path().join(format!("{key}.bin"))).unwrap();
+            assert!(!raw
+                .windows(b"username-and-password".len())
+                .any(|bytes| bytes == b"username-and-password"));
+        }
     }
 
     #[test]

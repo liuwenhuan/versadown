@@ -10,7 +10,7 @@ use crate::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
@@ -114,7 +114,9 @@ pub struct CloudState {
     pub store: DpapiCredentialStore,
     pub share_plans: share::CloudSharePlanStore,
     pub share_refresh_budget: share::CloudShareRefreshBudget,
+    pub(crate) password_download_refresh_budget: browser_login::PasswordDownloadRefreshBudget,
     pending_authorization_retries: Mutex<HashMap<String, PendingCloudAuthorizationRetries>>,
+    password_recovery_attempts: Mutex<HashMap<String, std::time::Instant>>,
     http: ReqwestTransport,
     quark_operation: Mutex<()>,
     pikpak_operation: Mutex<()>,
@@ -179,7 +181,9 @@ impl CloudState {
         Ok(Self {
             share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
             share_refresh_budget: Default::default(),
+            password_download_refresh_budget: Default::default(),
             pending_authorization_retries: Default::default(),
+            password_recovery_attempts: Default::default(),
             store: DpapiCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,
             quark_operation: Mutex::new(()),
@@ -237,6 +241,195 @@ impl CloudState {
         work(&self.store)
     }
 }
+
+struct TianyiBrowserValidationTransport<'a, T: CloudHttpTransport> {
+    window: &'a tauri::WebviewWindow,
+    native: &'a T,
+}
+
+impl<T: CloudHttpTransport> CloudHttpTransport for TianyiBrowserValidationTransport<'_, T> {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        if request.url.starts_with("https://cloud.189.cn/") {
+            tianyi_browser_send(self.window, request)
+        } else {
+            self.native.send(request)
+        }
+    }
+}
+
+fn password_webview_data_directory_from_root(
+    root: &Path,
+    provider: CloudProvider,
+) -> Result<PathBuf, QuarkError> {
+    if !matches!(provider, CloudProvider::Baidu | CloudProvider::Tianyi) {
+        return Err(QuarkError::InvalidInput(
+            "该网盘不支持持久化账号密码登录".into(),
+        ));
+    }
+    Ok(root.join("web-auth").join(provider.key()))
+}
+
+fn password_webview_data_directory(
+    app: &AppHandle,
+    provider: CloudProvider,
+) -> Result<PathBuf, QuarkError> {
+    let root = if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR")
+            .map(PathBuf::from)
+            .ok_or(QuarkError::Storage)?
+    } else {
+        app.path().app_data_dir().map_err(|_| QuarkError::Storage)?
+    };
+    password_webview_data_directory_from_root(&root, provider)
+}
+
+fn prepare_baidu_account_login(
+    store: &impl CredentialStore,
+    submitted_username: &str,
+) -> Result<bool, QuarkError> {
+    let submitted_username = submitted_username.trim();
+    if let Some(owner) = baidu_browser_profile_username(store)? {
+        return Ok(owner.trim() != submitted_username);
+    }
+    // A session captured by manual web authorization proves that a Baidu
+    // profile exists, but not that it belongs to the submitted username. On
+    // the first password login after upgrading, clear that unbound profile
+    // once instead of accepting its already logged-in account.
+    if store.load(CloudProvider::Baidu.key())?.is_some() {
+        return Ok(true);
+    }
+    let previous_username =
+        if let Some(credential) = load_password_credential(store, CloudProvider::Baidu)? {
+            Some(credential.username().to_owned())
+        } else {
+            load_password_login_draft(store, CloudProvider::Baidu)?
+                .map(|draft| draft.username().to_owned())
+        };
+    Ok(previous_username.is_some_and(|username| username.trim() != submitted_username))
+}
+
+fn clear_password_webview_profile(
+    app: &AppHandle,
+    provider: CloudProvider,
+) -> Result<(), QuarkError> {
+    for label in [
+        format!("cloud-auth-{}", provider.key()),
+        format!("cloud-password-{}", provider.key()),
+    ] {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.close();
+        }
+    }
+    let label = format!("cloud-password-reset-{}", provider.key());
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.close();
+    }
+    let window = WebviewWindowBuilder::new(
+        app,
+        label,
+        WebviewUrl::External(
+            "about:blank"
+                .parse()
+                .map_err(|_| QuarkError::InvalidResponse)?,
+        ),
+    )
+    .visible(false)
+    .data_directory(password_webview_data_directory(app, provider)?)
+    .build()
+    .map_err(|_| QuarkError::Storage)?;
+    let result = window
+        .clear_all_browsing_data()
+        .map_err(|_| QuarkError::Storage);
+    let _ = window.close();
+    result
+}
+
+fn tianyi_browser_request_script(request: &CloudHttpRequest) -> Result<String, QuarkError> {
+    let url = validate_tianyi_browser_request(request.method, &request.url)?;
+    let payload = serde_json::json!({
+        "method": request.method,
+        "url": url.as_str(),
+        "headers": tianyi_browser_request_headers(request.headers.clone()),
+        "body": request.body,
+    });
+    Ok(format!(
+        r#"(() => {{
+          if (location.origin !== 'https://cloud.189.cn') return {{done:false}};
+          const key = '__alldownloader_tianyi_request';
+          const current = window[key];
+          if (current?.done) {{
+            delete window[key];
+            return {{done:true, value:current.value}};
+          }}
+          if (!current) {{
+            const input = {payload};
+            const slot = {{done:false}};
+            window[key] = slot;
+            fetch(input.url, {{
+              method: input.method,
+              headers: input.headers,
+              body: input.body == null ? undefined : input.body,
+              credentials: 'include',
+              redirect: 'follow',
+            }}).then(async response => {{
+              slot.value = {{status:response.status, body:await response.text()}};
+              slot.done = true;
+            }}, () => {{
+              slot.value = {{transportError:true}};
+              slot.done = true;
+            }});
+          }}
+          return {{done:false}};
+        }})()"#
+    ))
+}
+
+fn tianyi_browser_send(
+    window: &tauri::WebviewWindow,
+    request: CloudHttpRequest,
+) -> Result<CloudHttpResponse, QuarkError> {
+    let script = tianyi_browser_request_script(&request)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+    while std::time::Instant::now() < deadline {
+        if window
+            .app_handle()
+            .get_webview_window(window.label())
+            .is_none()
+        {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        match web_storage_tokens(window, &script) {
+            Ok(state) if state["done"].as_bool() == Some(true) => {
+                let value = state.get("value").ok_or(QuarkError::InvalidResponse)?;
+                if value["transportError"].as_bool() == Some(true) {
+                    return Err(QuarkError::Transport("天翼官网授权页请求失败".into()));
+                }
+                let status = value["status"]
+                    .as_u64()
+                    .and_then(|status| u16::try_from(status).ok())
+                    .ok_or(QuarkError::InvalidResponse)?;
+                let body = value["body"]
+                    .as_str()
+                    .ok_or(QuarkError::InvalidResponse)?
+                    .to_owned();
+                return Ok(CloudHttpResponse {
+                    status,
+                    body,
+                    set_cookies: Vec::new(),
+                });
+            }
+            Ok(_) | Err(QuarkError::AuthorizationPending) => {}
+            Err(error) => return Err(error),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(QuarkError::WebAuthorizationRequired)
+}
+
 fn cookie(store: &impl CredentialStore) -> Result<String, QuarkError> {
     String::from_utf8(
         store
@@ -299,7 +492,21 @@ async fn run_session_work<T: Send + 'static>(
 ) -> Result<T, QuarkError> {
     let refresh_app = app.clone();
     run(app, provider, move |state, http| {
-        let first = run_cloud_work(provider, kind, &state.store, http, || work(state, http));
+        let first = if browser_login::supports_browser_password(provider)
+            && kind == SessionWorkKind::Read
+        {
+            run_with_browser_session_recovery(
+                &refresh_app,
+                provider,
+                kind,
+                state,
+                http,
+                true,
+                || work(state, http),
+            )
+        } else {
+            run_cloud_work(provider, kind, &state.store, http, || work(state, http))
+        };
         let Err(error) = first else {
             return first;
         };
@@ -328,7 +535,19 @@ async fn run_web_session_read_work<T: Send + 'static>(
 ) -> Result<T, QuarkError> {
     let refresh_app = app.clone();
     run(app, provider, move |state, http| {
-        let first = work(state, http);
+        let first = if browser_login::supports_browser_password(provider) {
+            run_with_browser_session_recovery(
+                &refresh_app,
+                provider,
+                SessionWorkKind::Read,
+                state,
+                http,
+                false,
+                || work(state, http),
+            )
+        } else {
+            work(state, http)
+        };
         let Err(error) = first else {
             return first;
         };
@@ -366,6 +585,337 @@ enum PasswordRecoveredSession {
     Tianyi(tianyi::TianyiSession),
 }
 
+fn should_attempt_native_password_recovery(
+    provider: CloudProvider,
+    kind: SessionWorkKind,
+    error: &QuarkError,
+) -> bool {
+    kind == SessionWorkKind::Read
+        && browser_login::supports_browser_password(provider)
+        && matches!(
+            error,
+            QuarkError::AuthorizationExpired
+                | QuarkError::NotAuthorized
+                | QuarkError::WebAuthorizationRequired
+                | QuarkError::CaptchaRequired
+        )
+}
+
+fn run_with_browser_session_recovery<T>(
+    app: &AppHandle,
+    provider: CloudProvider,
+    kind: SessionWorkKind,
+    state: &CloudState,
+    http: &impl CloudHttpTransport,
+    allow_challenge_recovery: bool,
+    mut work: impl FnMut() -> Result<T, QuarkError>,
+) -> Result<T, QuarkError> {
+    let error = match work() {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    if !should_attempt_native_password_recovery(provider, kind, &error) {
+        return Err(error);
+    }
+    let Some(credential) = load_password_credential(&state.store, provider)? else {
+        return Err(error);
+    };
+    {
+        let mut attempts = state
+            .password_recovery_attempts
+            .lock()
+            .map_err(|_| QuarkError::Storage)?;
+        if attempts
+            .get(provider.key())
+            .is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(300))
+        {
+            return Err(error);
+        }
+        attempts.insert(provider.key().into(), std::time::Instant::now());
+    }
+    let native_error =
+        match recover_provider_password_session(provider, &state.store, http, &credential) {
+            Ok(()) => return work(),
+            Err(error) => error,
+        };
+    if !allow_challenge_recovery {
+        return Err(native_error);
+    }
+    if !browser_login::can_fallback_to_browser(&native_error)
+        && !matches!(native_error, QuarkError::CaptchaRequired)
+    {
+        return Err(native_error);
+    }
+    let challenge = matches!(
+        native_error,
+        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired
+    );
+    browser_password_login(
+        app,
+        provider,
+        &state.store,
+        http,
+        credential.username(),
+        credential.password(),
+        Some(credential.account_id()),
+        challenge,
+    )?;
+    // Exactly one retry with the validated new session; no recursion and no
+    // replay of uploads, deletion, transfers or other mutating operations.
+    work()
+}
+
+/// Runs on a provider's blocking worker. Waiting for the official browser must
+/// never hold up the Windows message loop. The provider lock coalesces renewal
+/// across concurrent downloads: later readers see the newly saved session.
+fn browser_auth_diagnostic_script(stage: &str, reason: &str) -> String {
+    let payload = serde_json::json!({ "stage": stage, "reason": reason });
+    format!("window.__alldownloaderAuthDiagnostic = {payload};")
+}
+
+fn validate_tianyi_browser_request(method: &str, raw_url: &str) -> Result<url::Url, QuarkError> {
+    if !matches!(method, "GET" | "POST") {
+        return Err(QuarkError::InvalidInput(
+            "天翼授权页请求方法不受支持".into(),
+        ));
+    }
+    let url = url::Url::parse(raw_url).map_err(|_| QuarkError::InvalidResponse)?;
+    let allowed_path = url.path().starts_with("/api/")
+        || url.path().starts_with("/v2/")
+        || url.path() == "/main.action";
+    if url.scheme() != "https"
+        || url.host_str() != Some("cloud.189.cn")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || !allowed_path
+    {
+        return Err(QuarkError::InvalidInput(
+            "天翼授权页请求地址不受支持".into(),
+        ));
+    }
+    Ok(url)
+}
+
+fn tianyi_browser_request_headers(headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    headers
+        .into_iter()
+        .filter(|(name, value)| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "accept" | "content-type" | "browser-id"
+            ) && !value.chars().any(char::is_control)
+                && value.len() <= 1024
+        })
+        .collect()
+}
+
+fn browser_password_login(
+    app: &AppHandle,
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+    username: &str,
+    password: &str,
+    expected_account: Option<&str>,
+    challenge: bool,
+) -> Result<CloudAccount, QuarkError> {
+    if !browser_login::supports_browser_password(provider) {
+        return Err(QuarkError::WebAuthorizationRequired);
+    }
+    let label = format!("cloud-password-{}", provider.key());
+    if app.get_webview_window(&label).is_some() {
+        return Err(QuarkError::AuthorizationPending);
+    }
+    let script = Arc::new(browser_login::password_script(
+        provider, username, password,
+    )?);
+    let url = match provider {
+        CloudProvider::Baidu => "https://pan.baidu.com",
+        CloudProvider::Tianyi => "https://cloud.189.cn",
+        _ => return Err(QuarkError::WebAuthorizationRequired),
+    };
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::External(url.parse().map_err(|_| QuarkError::InvalidResponse)?),
+    )
+    .title("网盘登录验证：请按官方页面提示完成")
+    .inner_size(1024.0, 760.0)
+    .visible(challenge)
+    // Keep one provider profile so Baidu/Tianyi can reuse the official page's
+    // stable device context. Explicit account replacement clears this profile
+    // before this window is built; validated sessions and passwords remain
+    // persisted separately with DPAPI.
+    .initialization_script_for_all_frames(script.as_str())
+    .on_new_window(|_, _| NewWindowResponse::Deny)
+    .on_page_load(move |window, payload| {
+        if payload.event() == PageLoadEvent::Finished
+            && browser_login::trusted_login_url(provider, payload.url())
+        {
+            if provider == CloudProvider::Baidu && is_baidu_authorization_page(payload.url()) {
+                let _ = window.eval(BAIDU_AUTO_OPEN_LOGIN_JS);
+            }
+        }
+    });
+    builder = builder.data_directory(password_webview_data_directory(app, provider)?);
+    if provider == CloudProvider::Tianyi {
+        builder = builder.initialization_script(include_str!("tianyi-browser-context.js"));
+    }
+    let window = builder
+        .build()
+        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+    let started = std::time::Instant::now();
+    let result = (|| {
+        let mut shown = challenge;
+        let mut last_notice = String::new();
+        while started.elapsed() < std::time::Duration::from_secs(180) {
+            if app.get_webview_window(&label).is_none() {
+                return Err(QuarkError::WebAuthorizationRequired);
+            }
+            if !shown && started.elapsed() >= std::time::Duration::from_secs(12) {
+                window
+                    .show()
+                    .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+                let _ = window.set_focus();
+                shown = true;
+            }
+            let cookies = browser_cookies(&window, web_session_cookie_urls(provider))?;
+            let browser_context = if provider == CloudProvider::Tianyi {
+                tianyi_browser_context(&window).ok()
+            } else {
+                None
+            };
+            let mut validation_stage = "读取登录凭据";
+            let candidate = if provider == CloudProvider::Tianyi {
+                let validation_http = TianyiBrowserValidationTransport {
+                    window: &window,
+                    native: http,
+                };
+                validate_browser_password_session(
+                    provider,
+                    store,
+                    &validation_http,
+                    &cookies,
+                    browser_context.as_ref(),
+                    expected_account,
+                    |stage| validation_stage = stage,
+                )
+            } else {
+                validate_browser_password_session(
+                    provider,
+                    store,
+                    http,
+                    &cookies,
+                    browser_context.as_ref(),
+                    expected_account,
+                    |stage| validation_stage = stage,
+                )
+            };
+            match candidate {
+                Ok(account) => return Ok(account),
+                Err(QuarkError::Storage) => return Err(QuarkError::Storage),
+                Err(QuarkError::InvalidInput(message)) => {
+                    return Err(QuarkError::InvalidInput(message))
+                }
+                Err(error) => {
+                    // Only fixed stage/error labels are exposed. Never show
+                    // response bodies, account names, passwords or cookies.
+                    let reason = match &error {
+                        QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
+                            "凭据尚未生效"
+                        }
+                        QuarkError::InvalidResponse => "接口返回格式无法识别",
+                        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => {
+                            "接口要求安全验证"
+                        }
+                        QuarkError::Transport(_) => "网络请求失败",
+                        QuarkError::Provider(message) if provider == CloudProvider::Tianyi => {
+                            message.as_str()
+                        }
+                        _ => "接口暂未接受凭据",
+                    };
+                    let notice = format!("自动登录 · {validation_stage}：{reason}");
+                    if notice != last_notice {
+                        let _ = window.set_title(&notice);
+                        if std::env::var_os("ALLDOWNLOADER_BACKGROUND_UI_TEST").is_some() {
+                            let _ = window
+                                .eval(&browser_auth_diagnostic_script(validation_stage, reason));
+                        }
+                        last_notice = notice;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        }
+        Err(QuarkError::WebAuthorizationRequired)
+    })();
+    let _ = window.close();
+    if result.is_ok() && provider == CloudProvider::Baidu {
+        set_baidu_browser_profile_username(store, Some(username))?;
+        set_browser_password_login_preferred(store, provider, true)?;
+    }
+    result
+}
+
+fn validate_browser_password_session(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+    cookies: &[String],
+    browser_context: Option<&serde_json::Value>,
+    expected_account: Option<&str>,
+    mut report_stage: impl FnMut(&'static str),
+) -> Result<CloudAccount, QuarkError> {
+    report_stage("读取登录凭据");
+    let (account, snapshot) = match provider {
+        CloudProvider::Baidu => {
+            let mut session = baidu::parse_baidu_web_session(cookies)?;
+            session.auth_method = CloudAuthMethod::Password;
+            let client = baidu::BaiduClient::new(session.clone(), http);
+            report_stage("账号信息校验");
+            let account = client.account()?;
+            report_stage("目录访问校验");
+            client.directory("/")?;
+            (
+                account,
+                serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
+            )
+        }
+        CloudProvider::Tianyi => {
+            let mut session = tianyi::parse_tianyi_web_session(cookies)?;
+            if let Some(context) = browser_context {
+                session.apply_browser_context(context);
+            }
+            if !session.has_browser_context() {
+                report_stage("等待官网浏览器标识");
+                return Err(QuarkError::AuthorizationPending);
+            }
+            session.auth_method = CloudAuthMethod::Password;
+            let client = tianyi::TianyiClient::new(session.clone(), http);
+            // A generic "tianyi-web" account is not enough for auto-renewal.
+            report_stage("账号信息校验");
+            let account = client.account()?;
+            report_stage("目录访问校验");
+            client.directory("-11")?;
+            (
+                account,
+                serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
+            )
+        }
+        _ => return Err(QuarkError::WebAuthorizationRequired),
+    };
+    if account.id.is_empty() || expected_account.is_some_and(|expected| expected != account.id) {
+        return Err(QuarkError::InvalidInput(
+            "登录账号与原任务账号不一致，已保留原凭据，请使用原账号登录".into(),
+        ));
+    }
+    report_stage("保存登录凭据");
+    store.save(provider.key(), &snapshot)?;
+    Ok(account)
+}
+
 fn recover_provider_password_session(
     provider: CloudProvider,
     store: &impl CredentialStore,
@@ -374,6 +924,9 @@ fn recover_provider_password_session(
 ) -> Result<(), QuarkError> {
     if credential.provider() != provider {
         return Err(QuarkError::Storage);
+    }
+    if browser_password_login_preferred(store, provider)? {
+        return Err(QuarkError::WebAuthorizationRequired);
     }
 
     let (account, session) = match provider {
@@ -389,11 +942,21 @@ fn recover_provider_password_session(
             (account, PasswordRecoveredSession::Pikpak(session))
         }
         CloudProvider::Baidu => {
-            let session = baidu::BaiduClient::login_password(
+            let session = match baidu::BaiduClient::login_password(
                 credential.username(),
                 credential.password(),
                 http,
-            )?;
+            ) {
+                Ok(session) => session,
+                Err(
+                    error @ (QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired),
+                ) => {
+                    set_browser_password_login_preferred(store, provider, true)?;
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
+            set_browser_password_login_preferred(store, provider, false)?;
             let client = baidu::BaiduClient::new(session.clone(), http);
             let account = client.account()?;
             (account, PasswordRecoveredSession::Baidu(session))
@@ -415,10 +978,9 @@ fn recover_provider_password_session(
     };
 
     if account.id.is_empty() || account.id != credential.account_id() {
-        // Keep the encrypted credential. A provider can return a different
-        // account after a risk challenge or an account switch; selecting that
-        // account prevents an unsafe automatic login without losing the prior
-        // account's saved password.
+        // Baidu intentionally has one account slot. Selecting a different
+        // browser account discards the old password instead of retaining an
+        // inactive multi-account credential.
         if !account.id.is_empty() {
             select_password_credential_account(store, provider, &account.id)?;
         }
@@ -539,9 +1101,8 @@ fn can_retry_read_with_web_session(error: &QuarkError) -> bool {
     )
 }
 
-/// Captures only the provider-specific session material from a live official
-/// authorization WebView. The window remains hidden after successful browser
-/// authorization, allowing a safe read/signing retry without another login.
+/// Captures only the provider-specific session material from an official
+/// authorization WebView that is still open during a browser-login flow.
 fn active_web_session_snapshot(
     app: &AppHandle,
     provider: CloudProvider,
@@ -560,8 +1121,11 @@ fn active_web_session_snapshot(
         }
         CloudProvider::Baidu => serde_json::to_vec(&baidu::parse_baidu_web_session(&cookies)?)
             .map_err(|_| QuarkError::Storage)?,
-        CloudProvider::Tianyi => serde_json::to_vec(&tianyi::parse_tianyi_web_session(&cookies)?)
-            .map_err(|_| QuarkError::Storage)?,
+        CloudProvider::Tianyi => {
+            let mut session = tianyi::parse_tianyi_web_session(&cookies)?;
+            session.apply_browser_context(&tianyi_browser_context(&window)?);
+            serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?
+        }
         CloudProvider::Uc => serde_json::to_vec(&uc::parse_uc_web_session(&cookies)?)
             .map_err(|_| QuarkError::Storage)?,
         CloudProvider::Pikpak | CloudProvider::Aliyun | CloudProvider::Xunlei => return Ok(None),
@@ -584,6 +1148,10 @@ fn retry_read_from_active_authorization_window<T>(
 /// The authorization page can visit several hosts, but a captured Cookie
 /// header is replayed to one provider API host.  Do not merge same-named
 /// host-only cookies from the login host into Tianyi's cloud API session.
+fn tianyi_browser_context(window: &tauri::WebviewWindow) -> Result<serde_json::Value, QuarkError> {
+    web_storage_tokens(window, "location.origin === 'https://cloud.189.cn' ? (window.__alldownloaderTianyiContext || {}) : {}")
+}
+
 fn web_session_cookie_urls(provider: CloudProvider) -> &'static [&'static str] {
     match provider {
         CloudProvider::Tianyi => &["https://cloud.189.cn"],
@@ -672,6 +1240,94 @@ fn asynchronous_web_tokens(
 #[tauri::command]
 pub fn cloud_provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapabilities {
     provider_capabilities(provider)
+}
+
+#[tauri::command]
+pub async fn cloud_saved_password_credentials(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<Option<CloudCredentials>, QuarkError> {
+    if !provider_capabilities(provider).password {
+        return Ok(None);
+    }
+    run(app, provider, move |state, _| {
+        let draft = load_saved_password_login(&state.store, provider)?;
+        Ok(draft.map(|draft| CloudCredentials {
+            username: draft.username().to_owned(),
+            password: draft.password().to_owned(),
+        }))
+    })
+    .await
+}
+
+fn tianyi_session_safe_shape(session: &tianyi::TianyiSession) -> serde_json::Value {
+    let mut cookie_names = session
+        .cookie
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('=').map(|(name, _)| name.trim()))
+        .filter(|name| {
+            !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    cookie_names.sort();
+    cookie_names.dedup();
+    serde_json::json!({
+        "authMethod": session.auth_method,
+        "transport": if session.app.is_some() { "nativeApp" } else { "web" },
+        "cookieNames": cookie_names,
+        "browserContext": session.has_browser_context(),
+    })
+}
+
+#[tauri::command]
+pub async fn cloud_tianyi_session_shape_for_test(
+    app: AppHandle,
+) -> Result<serde_json::Value, QuarkError> {
+    if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return Err(QuarkError::InvalidInput("仅后台诊断模式可用".into()));
+    }
+    run(app, CloudProvider::Tianyi, move |state, _| {
+        let session: tianyi::TianyiSession =
+            load_provider_session(CloudProvider::Tianyi, &state.store)?;
+        Ok(tianyi_session_safe_shape(&session))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cloud_tianyi_resolve_download_for_test(
+    app: AppHandle,
+    file_id: String,
+) -> Result<bool, QuarkError> {
+    if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return Err(QuarkError::InvalidInput("仅后台诊断模式可用".into()));
+    }
+    run(app, CloudProvider::Tianyi, move |state, http| {
+        let session: tianyi::TianyiSession =
+            load_provider_session(CloudProvider::Tianyi, &state.store)?;
+        if session.app.is_none() {
+            return Err(QuarkError::InvalidInput("当前不是天翼原生 App 会话".into()));
+        }
+        let download = tianyi::TianyiClient::new(session, http).download(&file_id)?;
+        Ok(download.url.starts_with("https://")
+            && ["Date", "SessionKey", "Signature", "X-Request-ID"]
+                .iter()
+                .all(|name| download.headers.contains_key(*name)))
+    })
+    .await
 }
 
 fn require_connected_provider(provider: CloudProvider) -> Result<(), QuarkError> {
@@ -802,14 +1458,14 @@ pub async fn cloud_begin_authorization(
             CloudProvider::Xunlei => "https://pan.xunlei.com",
             CloudProvider::Uc => "https://drive.uc.cn",
         };
-        WebviewWindowBuilder::new(
+        let mut builder = WebviewWindowBuilder::new(
             &app,
             &label,
             WebviewUrl::External(url.parse().map_err(|_| QuarkError::InvalidResponse)?),
         )
         .title(format!("{} 网页授权", provider.key()))
         .inner_size(1024.0, 760.0)
-        .incognito(true)
+        .incognito(!browser_login::supports_browser_password(provider))
         .on_new_window(|url, _features| {
             if allows_cloud_authorization_popup(&url) {
                 NewWindowResponse::Allow
@@ -824,14 +1480,22 @@ pub async fn cloud_begin_authorization(
                     let _ = window.eval(BAIDU_AUTO_OPEN_LOGIN_JS);
                 }
             }
-        })
-        .build()
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        });
+        if browser_login::supports_browser_password(provider) {
+            builder = builder.data_directory(password_webview_data_directory(&app, provider)?);
+        }
+        if provider == CloudProvider::Tianyi {
+            builder = builder.initialization_script(include_str!("tianyi-browser-context.js"));
+        }
+        builder
+            .build()
+            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
     }
     Ok(CloudAuthorization {
         provider,
         window_label: label,
         instructions: "请在弹出的官方网盘窗口完成登录；验证成功后授权窗口会自动收起。".into(),
+        completed: false,
     })
 }
 
@@ -926,7 +1590,96 @@ pub async fn cloud_reauthorize_failed_task(
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
     cloud.queue_authorization_retries(requested_provider, task_ids, directory_items)?;
+    if browser_login::supports_browser_password(requested_provider) {
+        let browser_app = app.clone();
+        let recovered = run(app.clone(), requested_provider, move |state, http| {
+            let Some(credential) = load_password_credential(&state.store, requested_provider)?
+            else {
+                return Ok(false);
+            };
+            match recover_provider_password_session(
+                requested_provider,
+                &state.store,
+                http,
+                &credential,
+            ) {
+                Ok(()) => Ok(true),
+                Err(error)
+                    if browser_login::can_fallback_to_browser(&error)
+                        || matches!(error, QuarkError::CaptchaRequired) =>
+                {
+                    browser_password_login(
+                        &browser_app,
+                        requested_provider,
+                        &state.store,
+                        http,
+                        credential.username(),
+                        credential.password(),
+                        Some(credential.account_id()),
+                        matches!(error, QuarkError::CaptchaRequired),
+                    )?;
+                    Ok(true)
+                }
+                Err(error) => Err(error),
+            }
+        })
+        .await?;
+        if recovered {
+            resume_pending_authorization_retries(app, requested_provider).await?;
+            return Ok(CloudAuthorization {
+                provider: requested_provider,
+                window_label: String::new(),
+                instructions: "登录已自动恢复，正在继续下载".into(),
+                completed: true,
+            });
+        }
+    }
     cloud_begin_authorization(app, requested_provider).await
+}
+
+fn queue_provider_authorization_failures(
+    app: &AppHandle,
+    provider: CloudProvider,
+) -> Result<(), QuarkError> {
+    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let task_ids = state
+        .store
+        .list()
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .filter(|task| {
+            task.status == TaskStatus::Failed
+                && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+                && cloud_provider_from_download_source(&task.source).ok() == Some(provider)
+        })
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+    let mut directory_items = Vec::new();
+    for group in state
+        .store
+        .cloud_directory_groups()
+        .map_err(|_| QuarkError::Storage)?
+    {
+        if group.provider != provider {
+            continue;
+        }
+        directory_items.extend(
+            state
+                .store
+                .cloud_directory_group_items(group.id)
+                .map_err(|_| QuarkError::Storage)?
+                .into_iter()
+                .filter(|item| {
+                    item.task_id.is_none()
+                        && requires_cloud_reauthorization_failure(item.failure_code.as_deref())
+                })
+                .map(|item| (group.id, item.id)),
+        );
+    }
+    cloud.queue_authorization_retries(provider, task_ids, directory_items)
 }
 
 async fn resume_pending_authorization_retries(
@@ -1660,18 +2413,22 @@ pub async fn cloud_complete_authorization(
                     web_session_cookie_urls(CloudProvider::Baidu),
                 )?)?;
                 let account = finalize_baidu_web_authorization(session, &state.store, http)?;
-                // Keep the authenticated official WebView alive but invisible.
-                // A future expired signing cookie can then refresh silently.
-                let _ = window.hide();
+                let _ = window.close();
                 Ok(account)
             }
             CloudProvider::Tianyi => {
-                let session = tianyi::parse_tianyi_web_session(&browser_cookies(
+                let mut session = tianyi::parse_tianyi_web_session(&browser_cookies(
                     &window,
                     web_session_cookie_urls(CloudProvider::Tianyi),
                 )?)?;
-                let account = finalize_tianyi_web_authorization(session, &state.store, http)?;
-                let _ = window.hide();
+                session.apply_browser_context(&tianyi_browser_context(&window)?);
+                let validation_http = TianyiBrowserValidationTransport {
+                    window: &window,
+                    native: http,
+                };
+                let account =
+                    finalize_tianyi_web_authorization(session, &state.store, &validation_http)?;
+                let _ = window.close();
                 Ok(account)
             }
             CloudProvider::Aliyun => {
@@ -1708,12 +2465,19 @@ pub async fn cloud_complete_authorization(
                     web_session_cookie_urls(CloudProvider::Uc),
                 )?)?;
                 let account = finalize_uc_web_authorization(session, &state.store, http)?;
-                let _ = window.hide();
+                let _ = window.close();
                 Ok(account)
             }
         }?;
         if cloud_session_policy(provider).supports_password_fallback {
             select_password_credential_account(&state.store, provider, &account.id)?;
+        }
+        if provider == CloudProvider::Baidu {
+            let profile_username = load_password_credential(&state.store, provider)?
+                .filter(|credential| credential.account_id() == account.id)
+                .map(|credential| credential.username().to_owned());
+            set_baidu_browser_profile_username(&state.store, profile_username.as_deref())?;
+            set_browser_password_login_preferred(&state.store, provider, true)?;
         }
         Ok(account)
     })
@@ -1736,7 +2500,17 @@ pub async fn cloud_login_password(
     }
     let username = zeroize::Zeroizing::new(username);
     let password = zeroize::Zeroizing::new(password);
-    run(app, provider, move |state, http| {
+    let browser_app = app.clone();
+    let account = run(app.clone(), provider, move |state, http| {
+        if provider == CloudProvider::Baidu && prepare_baidu_account_login(&state.store, &username)?
+        {
+            clear_password_webview_profile(&browser_app, provider)?;
+            set_baidu_browser_profile_username(&state.store, None)?;
+            set_browser_password_login_preferred(&state.store, provider, false)?;
+        }
+        // Remember the latest submitted input before contacting the provider,
+        // so a rejected or interrupted attempt does not force re-entry.
+        save_password_login_draft(&state.store, provider, &username, &password)?;
         let account = match provider {
             CloudProvider::Pikpak => {
                 let temporary = MemoryCredentialStore::default();
@@ -1751,7 +2525,42 @@ pub async fn cloud_login_password(
                 account
             }
             CloudProvider::Baidu => {
-                let session = baidu::BaiduClient::login_password(&username, &password, http)?;
+                let native_result = if browser_password_login_preferred(&state.store, provider)? {
+                    Err(QuarkError::WebAuthorizationRequired)
+                } else {
+                    baidu::BaiduClient::login_password(&username, &password, http)
+                };
+                let session = match native_result {
+                    Ok(session) => session,
+                    Err(error)
+                        if browser_login::can_fallback_to_browser(&error)
+                            || matches!(error, QuarkError::CaptchaRequired) =>
+                    {
+                        set_browser_password_login_preferred(&state.store, provider, true)?;
+                        let account = browser_password_login(
+                            &browser_app,
+                            provider,
+                            &state.store,
+                            http,
+                            &username,
+                            &password,
+                            None,
+                            matches!(error, QuarkError::CaptchaRequired),
+                        )?;
+                        save_password_credential(
+                            &state.store,
+                            CloudPasswordCredential::new(
+                                provider,
+                                account.id.clone(),
+                                username.as_str(),
+                                password.as_str(),
+                            ),
+                        )?;
+                        return Ok(account);
+                    }
+                    Err(error) => return Err(error),
+                };
+                set_browser_password_login_preferred(&state.store, provider, false)?;
                 let client = baidu::BaiduClient::new(session.clone(), http);
                 let account = client.account()?;
                 client.directory("/")?;
@@ -1759,7 +2568,36 @@ pub async fn cloud_login_password(
                 account
             }
             CloudProvider::Tianyi => {
-                let session = tianyi::TianyiClient::login_password(&username, &password, http)?;
+                let session = match tianyi::TianyiClient::login_password(&username, &password, http)
+                {
+                    Ok(session) => session,
+                    Err(error)
+                        if browser_login::can_fallback_to_browser(&error)
+                            || matches!(error, QuarkError::CaptchaRequired) =>
+                    {
+                        let account = browser_password_login(
+                            &browser_app,
+                            provider,
+                            &state.store,
+                            http,
+                            &username,
+                            &password,
+                            None,
+                            matches!(error, QuarkError::CaptchaRequired),
+                        )?;
+                        save_password_credential(
+                            &state.store,
+                            CloudPasswordCredential::new(
+                                provider,
+                                account.id.clone(),
+                                username.as_str(),
+                                password.as_str(),
+                            ),
+                        )?;
+                        return Ok(account);
+                    }
+                    Err(error) => return Err(error),
+                };
                 let client = tianyi::TianyiClient::new(session.clone(), http);
                 let account = client.account()?;
                 client.directory("-11")?;
@@ -1782,7 +2620,10 @@ pub async fn cloud_login_password(
         )?;
         Ok(account)
     })
-    .await
+    .await?;
+    queue_provider_authorization_failures(&app, provider)?;
+    resume_pending_authorization_retries(app, provider).await?;
+    Ok(account)
 }
 #[tauri::command]
 pub async fn cloud_account(
@@ -3535,16 +4376,23 @@ mod startup_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, collections::VecDeque, sync::Mutex};
+    use std::{
+        cell::Cell,
+        collections::{BTreeMap, VecDeque},
+        sync::Mutex,
+    };
 
     use super::{
-        cloud_failure_code, create_cloud_task, requires_cloud_reauthorization_failure,
-        resolve_download, retry_read_with_refreshed_web_session,
+        cloud_failure_code, create_cloud_task, password_webview_data_directory_from_root,
+        prepare_baidu_account_login, recover_provider_password_session,
+        requires_cloud_reauthorization_failure, resolve_download,
+        retry_read_with_refreshed_web_session,
     };
     use crate::cloud::share::{CloudShareDownloadEntry, CloudShareDownloadSelection};
     use crate::cloud::{
         baidu::{parse_baidu_web_session, BaiduSession},
-        save_password_credential,
+        browser_password_login_preferred, save_password_credential, save_password_login_draft,
+        set_baidu_browser_profile_username, set_browser_password_login_preferred,
         tianyi::TianyiSession,
         uc::UcSession,
         xunlei::{XunleiClientProfile, XunleiSession, XunleiWebContext},
@@ -4236,10 +5084,37 @@ mod tests {
 
     impl SessionRecoveryTransport {
         fn baidu_password_relogin(account_id: &str) -> Self {
+            const PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDXN3F7epcT2k2yjuw95Nd3iEDS\nz04mTwPUAOaZIQ+JWtawDWMh6+hpwnT8STs1fa5CZwb1L/nam4zqu/Y4zETCp/uL\nSl8/6jdNsjVtiyq+IlQ0IkmPHiSk022BfBw0RGrSMUGuPPvdjy0eJ5a5pzRYWfK7\nvJ0QdYEdTovg7hm70QIDAQAB\n-----END PUBLIC KEY-----";
             Self(Mutex::new(VecDeque::from([
                 CloudHttpResponse {
                     status: 200,
-                    body: r#"{"err_no":0}"#.into(),
+                    body: String::new(),
+                    set_cookies: vec!["BAIDUID=seed".into()],
+                    ..Default::default()
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: r#"{"errInfo":{"no":"0"},"data":{"token":"login-token"}}"#.into(),
+                    ..Default::default()
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({
+                        "errno": "0",
+                        "pubkey": PUBLIC_KEY,
+                        "key": "rsa-key-id"
+                    })
+                    .to_string(),
+                    ..Default::default()
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: r#"{"errInfo":{"no":"0"},"data":{"codeString":""}}"#.into(),
+                    ..Default::default()
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: r#"{"errInfo":{"no":"0"},"data":{}}"#.into(),
                     set_cookies: vec!["BDUSS=renewed".into()],
                     ..Default::default()
                 },
@@ -4281,6 +5156,126 @@ mod tests {
                 .pop_front()
                 .ok_or(QuarkError::InvalidResponse)
         }
+    }
+
+    #[test]
+    fn baidu_password_webview_uses_one_stable_provider_profile() {
+        let root = std::path::Path::new("C:/fixture/app-data");
+        assert_eq!(
+            password_webview_data_directory_from_root(root, CloudProvider::Baidu).unwrap(),
+            root.join("web-auth").join("baidu")
+        );
+        assert_eq!(
+            password_webview_data_directory_from_root(root, CloudProvider::Tianyi).unwrap(),
+            root.join("web-auth").join("tianyi")
+        );
+        assert!(password_webview_data_directory_from_root(root, CloudProvider::Quark).is_err());
+    }
+
+    #[test]
+    fn baidu_native_risk_rejection_marks_future_recovery_for_the_browser() {
+        let store = MemoryCredentialStore::default();
+        let credential =
+            CloudPasswordCredential::new(CloudProvider::Baidu, "account-1", "user", "secret");
+        let transport = SessionRecoveryTransport(Mutex::new(VecDeque::from([
+            CloudHttpResponse {
+                status: 200,
+                body: String::new(),
+                set_cookies: vec!["BAIDUID=seed".into()],
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"errInfo":{"no":"0"},"data":{"token":"login-token"}}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: serde_json::json!({
+                    "errno": "0",
+                    "pubkey": "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDXN3F7epcT2k2yjuw95Nd3iEDS\nz04mTwPUAOaZIQ+JWtawDWMh6+hpwnT8STs1fa5CZwb1L/nam4zqu/Y4zETCp/uL\nSl8/6jdNsjVtiyq+IlQ0IkmPHiSk022BfBw0RGrSMUGuPPvdjy0eJ5a5pzRYWfK7\nvJ0QdYEdTovg7hm70QIDAQAB\n-----END PUBLIC KEY-----",
+                    "key": "rsa-key-id"
+                }).to_string(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"errInfo":{"no":"0"},"data":{"codeString":""}}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"errInfo":{"no":"50052","msg":""},"data":{}}"#.into(),
+                ..Default::default()
+            },
+        ])));
+
+        assert!(matches!(
+            recover_provider_password_session(
+                CloudProvider::Baidu,
+                &store,
+                &transport,
+                &credential,
+            ),
+            Err(QuarkError::WebAuthorizationRequired)
+        ));
+        assert!(browser_password_login_preferred(&store, CloudProvider::Baidu).unwrap());
+    }
+
+    #[test]
+    fn baidu_browser_preference_skips_repeating_the_native_password_attempt() {
+        let store = MemoryCredentialStore::default();
+        set_browser_password_login_preferred(&store, CloudProvider::Baidu, true).unwrap();
+        let credential =
+            CloudPasswordCredential::new(CloudProvider::Baidu, "account-1", "user", "secret");
+        let transport = SessionRecoveryTransport(Mutex::new(VecDeque::new()));
+
+        assert!(matches!(
+            recover_provider_password_session(
+                CloudProvider::Baidu,
+                &store,
+                &transport,
+                &credential,
+            ),
+            Err(QuarkError::WebAuthorizationRequired)
+        ));
+        assert_eq!(transport.remaining(), 0);
+    }
+
+    #[test]
+    fn changing_the_only_baidu_username_requires_profile_replacement() {
+        let store = MemoryCredentialStore::default();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(CloudProvider::Baidu, "account-1", "old-user", "secret"),
+        )
+        .unwrap();
+        set_baidu_browser_profile_username(&store, Some("old-user")).unwrap();
+        set_browser_password_login_preferred(&store, CloudProvider::Baidu, true).unwrap();
+
+        assert!(!prepare_baidu_account_login(&store, "old-user").unwrap());
+        assert!(browser_password_login_preferred(&store, CloudProvider::Baidu).unwrap());
+
+        assert!(prepare_baidu_account_login(&store, "new-user").unwrap());
+        assert!(browser_password_login_preferred(&store, CloudProvider::Baidu).unwrap());
+    }
+
+    #[test]
+    fn unbound_baidu_web_session_is_reset_before_accepting_a_password_username() {
+        let store = MemoryCredentialStore::default();
+        store
+            .save(CloudProvider::Baidu.key(), b"old-web-session")
+            .unwrap();
+
+        assert!(prepare_baidu_account_login(&store, "new-user").unwrap());
+    }
+
+    #[test]
+    fn changed_baidu_login_draft_resets_a_profile_without_a_validated_credential() {
+        let store = MemoryCredentialStore::default();
+        save_password_login_draft(&store, CloudProvider::Baidu, "old-user", "secret").unwrap();
+
+        assert!(!prepare_baidu_account_login(&store, "old-user").unwrap());
+        assert!(prepare_baidu_account_login(&store, "new-user").unwrap());
     }
 
     #[test]
@@ -4373,6 +5368,28 @@ mod tests {
             super::load_provider_session(CloudProvider::Baidu, &store).unwrap();
         assert!(saved.cookie.contains("BDUSS=renewed"));
         assert_eq!(transport.remaining(), 0);
+    }
+
+    #[test]
+    fn tianyi_recoverable_read_errors_always_try_native_password_login_first() {
+        for error in [
+            QuarkError::AuthorizationExpired,
+            QuarkError::NotAuthorized,
+            QuarkError::WebAuthorizationRequired,
+            QuarkError::CaptchaRequired,
+        ] {
+            assert!(super::should_attempt_native_password_recovery(
+                CloudProvider::Tianyi,
+                SessionWorkKind::Read,
+                &error,
+            ));
+        }
+
+        assert!(!super::should_attempt_native_password_recovery(
+            CloudProvider::Tianyi,
+            SessionWorkKind::Mutation,
+            &QuarkError::AuthorizationExpired,
+        ));
     }
 
     #[test]
@@ -4507,6 +5524,293 @@ mod tests {
         // to complete its official verification flow.
         assert!(matches!(result, Err(QuarkError::AuthorizationPending)));
         assert_eq!(credentials.load("baidu").unwrap(), Some(previous.to_vec()));
+    }
+
+    #[test]
+    fn browser_password_session_never_replaces_a_different_accounts_credentials() {
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("baidu", b"previous-session").unwrap();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"errno":0,"user":{"uk":"other-account","netdisk_name":"baidu"}}"#,
+            r#"{"errno":0,"list":[]}"#,
+        ])));
+        let result = super::validate_browser_password_session(
+            CloudProvider::Baidu,
+            &credentials,
+            &transport,
+            &["BDUSS=new-session".into()],
+            None,
+            Some("original-account"),
+            |_| {},
+        );
+        assert!(matches!(result, Err(QuarkError::InvalidInput(_))));
+        assert_eq!(
+            credentials.load("baidu").unwrap().unwrap(),
+            b"previous-session"
+        );
+    }
+
+    #[test]
+    fn browser_auth_diagnostic_contains_only_safe_status_fields() {
+        let script = super::browser_auth_diagnostic_script(
+            "账号信息校验",
+            "网盘请求失败：天翼云盘拒绝请求（错误码 InvalidDeviceStatus）",
+        );
+
+        assert!(script.contains("__alldownloaderAuthDiagnostic"));
+        assert!(script.contains("账号信息校验"));
+        assert!(script.contains("InvalidDeviceStatus"));
+        assert!(!script.contains("username"));
+        assert!(!script.contains("password"));
+        assert!(!script.contains("cookie"));
+    }
+
+    #[test]
+    fn tianyi_authorization_window_accepts_only_official_read_and_api_urls() {
+        for (method, url) in [
+            (
+                "GET",
+                "https://cloud.189.cn/api/open/user/getUserInfoForPortal.action",
+            ),
+            (
+                "POST",
+                "https://cloud.189.cn/api/open/file/createFolder.action",
+            ),
+            (
+                "GET",
+                "https://cloud.189.cn/v2/deleteFile.action?fileIdList=1",
+            ),
+            ("GET", "https://cloud.189.cn/main.action"),
+        ] {
+            assert!(super::validate_tianyi_browser_request(method, url).is_ok());
+        }
+        for (method, url) in [
+            ("DELETE", "https://cloud.189.cn/api/open/file/item"),
+            ("GET", "http://cloud.189.cn/api/open/file/listFiles.action"),
+            ("GET", "https://evil.example/api/open/file/listFiles.action"),
+            (
+                "GET",
+                "https://cloud.189.cn.evil.example/api/open/file/listFiles.action",
+            ),
+            ("GET", "https://cloud.189.cn/private/account"),
+        ] {
+            assert!(super::validate_tianyi_browser_request(method, url).is_err());
+        }
+    }
+
+    #[test]
+    fn tianyi_authorization_window_strips_native_identity_and_cookie_headers() {
+        let filtered = super::tianyi_browser_request_headers(BTreeMap::from([
+            ("Accept".into(), "application/json".into()),
+            (
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            ),
+            (
+                "Browser-Id".into(),
+                "1234567890abcdef1234567890abcdef".into(),
+            ),
+            ("Cookie".into(), "secret=session".into()),
+            ("User-Agent".into(), "Native".into()),
+            ("Origin".into(), "https://cloud.189.cn".into()),
+            ("Referer".into(), "https://cloud.189.cn/".into()),
+        ]));
+
+        assert_eq!(
+            filtered.get("Accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert!(filtered.contains_key("Content-Type"));
+        assert!(filtered.contains_key("Browser-Id"));
+        assert!(!filtered.contains_key("Cookie"));
+        assert!(!filtered.contains_key("User-Agent"));
+        assert!(!filtered.contains_key("Origin"));
+        assert!(!filtered.contains_key("Referer"));
+        assert!(!filtered.values().any(|value| value.contains("secret")));
+    }
+
+    #[test]
+    fn tianyi_session_diagnostic_exposes_names_but_never_cookie_values() {
+        let mut session = TianyiSession::cookie(
+            "COOKIE_LOGIN_USER=private-login; JSESSIONID=private-session; apm_sid=private-device",
+        );
+        session.auth_method = super::CloudAuthMethod::Password;
+        session.apply_browser_context(&serde_json::json!({
+            "browser_id":"1234567890abcdef1234567890abcdef",
+            "user_agent":"OfficialBrowser/140"
+        }));
+
+        let shape = super::tianyi_session_safe_shape(&session);
+
+        assert_eq!(shape["authMethod"], "password");
+        assert_eq!(
+            shape["cookieNames"],
+            serde_json::json!(["COOKIE_LOGIN_USER", "JSESSIONID", "apm_sid"])
+        );
+        assert_eq!(shape["browserContext"], true);
+        assert_eq!(shape["transport"], "web");
+        let serialized = shape.to_string();
+        assert!(!serialized.contains("private-login"));
+        assert!(!serialized.contains("private-session"));
+        assert!(!serialized.contains("private-device"));
+    }
+
+    #[test]
+    fn tianyi_session_diagnostic_identifies_native_app_without_exposing_tokens() {
+        let session: TianyiSession = serde_json::from_value(serde_json::json!({
+            "cookie": "",
+            "authMethod": "password",
+            "app": {
+                "sessionKey": "private-session-key",
+                "sessionSecret": "private-session-secret",
+                "accessToken": "private-access-token",
+                "loginName": "private-account"
+            }
+        }))
+        .unwrap();
+
+        let shape = super::tianyi_session_safe_shape(&session);
+
+        assert_eq!(shape["transport"], "nativeApp");
+        assert_eq!(shape["cookieNames"], serde_json::json!([]));
+        let serialized = shape.to_string();
+        assert!(!serialized.contains("private-session"));
+        assert!(!serialized.contains("private-access"));
+        assert!(!serialized.contains("private-account"));
+    }
+
+    #[test]
+    fn browser_password_session_preserves_previous_credentials_when_directory_rejects_login() {
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("baidu", b"previous-session").unwrap();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"errno":0,"user":{"uk":"b1","netdisk_name":"baidu"}}"#,
+            r#"{"errno":-9}"#,
+        ])));
+        assert!(super::validate_browser_password_session(
+            CloudProvider::Baidu,
+            &credentials,
+            &transport,
+            &["BDUSS=new-session".into()],
+            None,
+            Some("b1"),
+            |_| {},
+        )
+        .is_err());
+        assert_eq!(
+            credentials.load("baidu").unwrap().unwrap(),
+            b"previous-session"
+        );
+    }
+
+    #[test]
+    fn browser_password_session_persists_real_tianyi_account_after_validation() {
+        let credentials = MemoryCredentialStore::default();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"res_code":0,"userInfo":{"userId":"t1","nickName":"tianyi"}}"#,
+            r#"{"res_code":0,"fileListAO":{"fileList":[]}}"#,
+        ])));
+        let account = super::validate_browser_password_session(
+            CloudProvider::Tianyi,
+            &credentials,
+            &transport,
+            &["SSON=new-session".into()],
+            Some(&serde_json::json!({"browser_id":"1234567890abcdef1234567890abcdef", "user_agent":"OfficialBrowser/140"})),
+            Some("t1"),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(account.id, "t1");
+        let session: TianyiSession =
+            super::load_provider_session(CloudProvider::Tianyi, &credentials).unwrap();
+        assert_eq!(session.auth_method, super::CloudAuthMethod::Password);
+        assert!(session.cookie.contains("SSON=new-session"));
+        assert_eq!(session.browser_id, "1234567890abcdef1234567890abcdef");
+        assert_eq!(session.user_agent, "OfficialBrowser/140");
+    }
+
+    #[test]
+    fn browser_password_session_waits_for_tianyi_browser_identity_before_native_validation() {
+        let credentials = MemoryCredentialStore::default();
+        let transport = SequenceTransport(Mutex::new(VecDeque::from([
+            r#"{"res_code":0,"loginName":"alice@example.org"}"#,
+        ])));
+        let mut stage = "";
+        let result = super::validate_browser_password_session(
+            CloudProvider::Tianyi,
+            &credentials,
+            &transport,
+            &["SSON=new-session".into()],
+            None,
+            None,
+            |current| stage = current,
+        );
+
+        assert!(matches!(result, Err(QuarkError::AuthorizationPending)));
+        assert_eq!(stage, "等待官网浏览器标识");
+    }
+
+    #[test]
+    fn browser_password_session_accepts_tianyi_files_and_profile_containing_challenge_words() {
+        for (profile, directory) in [
+            (
+                r#"{"res_code":0,"loginName":"sms@example.org","nickName":"risk analyst"}"#,
+                r#"{"res_code":0,"fileListAO":{"fileList":[]}}"#,
+            ),
+            (
+                r#"{"res_code":0,"loginName":"alice@example.org"}"#,
+                r#"{"res_code":0,"fileListAO":{"fileList":[{"id":"f1","name":"短信备份-verify.txt","size":10}]}}"#,
+            ),
+        ] {
+            let credentials = MemoryCredentialStore::default();
+            let transport = SequenceTransport(Mutex::new(VecDeque::from([profile, directory])));
+            let account = super::validate_browser_password_session(
+                CloudProvider::Tianyi,
+                &credentials,
+                &transport,
+                &["SSON=new-session".into()],
+                Some(&serde_json::json!({"browser_id":"1234567890abcdef1234567890abcdef", "user_agent":"OfficialBrowser/140"})),
+                None,
+                |_| {},
+            )
+            .expect("valid profile and filenames must finish authorization");
+            assert!(!account.id.is_empty());
+            assert!(credentials.load("tianyi").unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn browser_password_session_reports_tianyi_rejection_without_replacing_credentials() {
+        for (responses, expected_stage) in [
+            (vec![r#"{"res_code":0}"#], "账号信息校验"),
+            (
+                vec![
+                    r#"{"res_code":0,"loginName":"alice@example.org"}"#,
+                    r#"{"res_code":-1,"msg":"需要短信验证码"}"#,
+                ],
+                "目录访问校验",
+            ),
+        ] {
+            let credentials = MemoryCredentialStore::default();
+            credentials.save("tianyi", b"previous-session").unwrap();
+            let transport = SequenceTransport(Mutex::new(VecDeque::from(responses)));
+            let mut stage = "";
+            assert!(super::validate_browser_password_session(
+                CloudProvider::Tianyi,
+                &credentials,
+                &transport,
+                &["SSON=new-session".into()],
+                Some(&serde_json::json!({"browser_id":"1234567890abcdef1234567890abcdef", "user_agent":"OfficialBrowser/140"})),
+                None,
+                |current| stage = current,
+            )
+            .is_err());
+            assert_eq!(stage, expected_stage);
+            assert_eq!(
+                credentials.load("tianyi").unwrap().unwrap(),
+                b"previous-session"
+            );
+        }
     }
 
     #[test]
@@ -5199,6 +6503,30 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
     require_connected_provider(provider)?;
     let copy = app.clone();
     run_session_work(app, provider, SessionWorkKind::Logout, move |s, _| {
+        if browser_login::supports_browser_password(provider) {
+            let profile_window = WebviewWindowBuilder::new(
+                &copy,
+                format!("cloud-logout-{}", provider.key()),
+                WebviewUrl::External(
+                    "about:blank"
+                        .parse()
+                        .map_err(|_| QuarkError::InvalidResponse)?,
+                ),
+            )
+            .visible(false)
+            .data_directory(password_webview_data_directory(&copy, provider)?)
+            .build()
+            .map_err(|_| QuarkError::Storage)?;
+            let cleared = profile_window
+                .clear_all_browsing_data()
+                .map_err(|_| QuarkError::Storage);
+            let _ = profile_window.close();
+            cleared?;
+            s.password_recovery_attempts
+                .lock()
+                .map_err(|_| QuarkError::Storage)?
+                .remove(provider.key());
+        }
         logout_provider(provider, &s.store)?;
         if let Some(w) = copy.get_webview_window(&format!("cloud-auth-{}", provider.key())) {
             let _ = w.close();

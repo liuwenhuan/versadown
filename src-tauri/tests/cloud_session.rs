@@ -122,7 +122,7 @@ fn official_webview_provider_does_not_load_password_or_relogin_on_expired_sessio
 }
 
 #[test]
-fn fallback_password_is_redacted_preserved_across_account_switches_and_removed_on_logout() {
+fn fallback_password_is_redacted_replaced_by_a_new_account_and_removed_on_logout() {
     let store = MemoryCredentialStore::default();
     let credential = CloudPasswordCredential::new(
         CloudProvider::Pikpak,
@@ -134,25 +134,24 @@ fn fallback_password_is_redacted_preserved_across_account_switches_and_removed_o
     assert!(!debug.contains("name@example.com"));
     assert!(!debug.contains("secret-value"));
     save_password_credential(&store, credential).unwrap();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Pikpak, "account-2", "user", "secret"),
+    )
+    .unwrap();
+    let replacement = load_password_credential(&store, CloudProvider::Pikpak)
+        .unwrap()
+        .expect("the latest account remains active");
+    assert_eq!(replacement.account_id(), "account-2");
 
     select_password_credential_account(&store, CloudProvider::Pikpak, "account-1").unwrap();
-    assert!(load_password_credential(&store, CloudProvider::Pikpak)
-        .unwrap()
-        .is_some());
-
-    select_password_credential_account(&store, CloudProvider::Pikpak, "account-2").unwrap();
     assert!(load_password_credential(&store, CloudProvider::Pikpak)
         .unwrap()
         .is_none());
 
-    select_password_credential_account(&store, CloudProvider::Pikpak, "account-1").unwrap();
-    assert!(load_password_credential(&store, CloudProvider::Pikpak)
-        .unwrap()
-        .is_some());
-
     save_password_credential(
         &store,
-        CloudPasswordCredential::new(CloudProvider::Pikpak, "account-1", "user", "secret"),
+        CloudPasswordCredential::new(CloudProvider::Pikpak, "account-2", "user", "secret"),
     )
     .unwrap();
     remove_password_credential(&store, CloudProvider::Pikpak).unwrap();

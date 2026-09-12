@@ -515,26 +515,40 @@ fn unbound_torrent_confirmation_error(task: &DownloadTask) -> Option<&'static st
 }
 
 #[tauri::command]
-pub fn list_tasks(
+pub async fn list_tasks(
     state: State<'_, AppState>,
     app: AppHandle,
     scope: Option<String>,
 ) -> Result<Vec<QueueTaskPayload>, String> {
-    let cloud = app.try_state::<Arc<crate::cloud::commands::CloudState>>();
-    // Restore share-cleanup messages before reading the same projected list that
-    // the command returns. The reusable helper below deliberately has no
-    // application-state dependency, so the durable directory grouping boundary
-    // can be exercised outside a running Tauri webview.
-    if let Some(cloud) = cloud.as_ref() {
-        let _ = cloud
-            .share_plans
-            .restore_cleanup_pending_messages(&state.store);
-    }
-    let mut tasks = list_queue_tasks_for_scope(&state.store, scope.as_deref())?;
-    if let Some(plans) = cloud.as_ref().map(|cloud| &cloud.share_plans) {
-        apply_queue_cleanup_projection(&mut tasks, plans)?;
-    }
-    Ok(tasks)
+    let cloud = app
+        .try_state::<Arc<crate::cloud::commands::CloudState>>()
+        .map(|cloud| Arc::clone(cloud.inner()));
+    list_queue_tasks_in_background(Arc::clone(&state.store), cloud, scope).await
+}
+
+async fn list_queue_tasks_in_background(
+    store: Arc<TaskStore>,
+    cloud: Option<Arc<crate::cloud::commands::CloudState>>,
+    scope: Option<String>,
+) -> Result<Vec<QueueTaskPayload>, String> {
+    // SQLite and the encrypted share journal can block. Keep the complete
+    // projection off the window thread, including focus-triggered refreshes.
+    tauri::async_runtime::spawn_blocking(move || {
+        // Restore share-cleanup messages before reading the same projected list that
+        // the command returns. The reusable helper below deliberately has no
+        // application-state dependency, so the durable directory grouping boundary
+        // can be exercised outside a running Tauri webview.
+        if let Some(cloud) = cloud.as_ref() {
+            let _ = cloud.share_plans.restore_cleanup_pending_messages(&store);
+        }
+        let mut tasks = list_queue_tasks_for_scope(&store, scope.as_deref())?;
+        if let Some(plans) = cloud.as_ref().map(|cloud| &cloud.share_plans) {
+            apply_queue_cleanup_projection(&mut tasks, plans)?;
+        }
+        Ok(tasks)
+    })
+    .await
+    .map_err(|error| format!("后台读取任务失败: {error}"))?
 }
 
 /// Returns the durable queue projection used by [`list_tasks`] for a scope.
@@ -870,7 +884,7 @@ fn aggregate_cloud_directory_root(
         && leaves
             .iter()
             .all(|item| item.status == TaskStatus::Completed);
-    let status = if all_linked_recycled {
+    let status = if group.status == TaskStatus::Recycled || all_linked_recycled {
         TaskStatus::Recycled
     } else if has_active {
         leaves
@@ -1398,16 +1412,12 @@ pub(crate) async fn resubmit_task(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "任务状态已变化，本次重试已跳过".into());
         }
-        let signed_url = resolved.url.clone();
-        let mut cloud_options = resolved.into_uri_submission_options();
-        cloud_options.directory = options.directory.clone();
-        cloud_options.proxy = options.proxy.clone();
-        cloud_options.allow_overwrite = options.allow_overwrite;
-        cloud_options.continue_download = options.continue_download;
-        return service
-            .resubmit_uri_with_options(task.id, vec![signed_url], cloud_options)
-            .await
-            .map_err(|error| error.to_string());
+        return crate::cloud::share::resubmit_current_cloud_download(
+            &service, &task, resolved, options,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "任务状态已变化，本次重试已跳过".into());
     }
     if task.kind == "torrent" {
         return Err("种子任务请重新添加后再选择文件下载".to_string());
@@ -1483,17 +1493,24 @@ fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::
 /// Called after event publication; the task worker never blocks the aria2
 /// synchronization callback. The source gate is released on every return path.
 pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) {
-    if task.status != TaskStatus::Failed || !task.source.starts_with("cloud-share://") {
+    if task.status != TaskStatus::Failed {
         return;
     }
     let Some(cloud) = app.try_state::<Arc<crate::cloud::commands::CloudState>>() else {
         return;
     };
-    if !cloud
-        .share_refresh_budget
-        .claim(&task.source, task.aria_error_code.as_deref())
-        .unwrap_or(false)
-    {
+    let share = task.source.starts_with("cloud-share://");
+    let claimed = if share {
+        cloud
+            .share_refresh_budget
+            .claim(&task.source, task.aria_error_code.as_deref())
+            .unwrap_or(false)
+    } else {
+        cloud
+            .password_download_refresh_budget
+            .claim(&task.source, task.aria_error_code.as_deref())
+    };
+    if !claimed {
         return;
     }
     let failed = task.clone();
@@ -1517,12 +1534,17 @@ pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) 
         // One attempt only. If refresh identifies an expired session or an
         // official verification challenge, preserve that durable reason for
         // the Failed tab instead of leaving the stale aria2 error there.
-        let resolved = match crate::cloud::commands::resolve_stable_cloud_share_download(
-            app.clone(),
-            &current.source,
-        )
-        .await
-        {
+        let resolution = if share {
+            crate::cloud::commands::resolve_stable_cloud_share_download(
+                app.clone(),
+                &current.source,
+            )
+            .await
+        } else {
+            crate::cloud::commands::resolve_stable_cloud_download(app.clone(), &current.source)
+                .await
+        };
+        let resolved = match resolution {
             Ok(resolved) => resolved,
             Err(error) => {
                 let code = crate::cloud::commands::cloud_failure_code(&error);
@@ -1557,7 +1579,7 @@ pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) 
         let Ok(service) = state.runtime.service().await else {
             return;
         };
-        let _ = crate::cloud::share::resubmit_current_share_download(
+        let _ = crate::cloud::share::resubmit_current_cloud_download(
             &service, &failed, resolved, options,
         )
         .await;
@@ -1785,6 +1807,9 @@ fn recycle_cloud_directory_group(
     let mut tasks = Vec::new();
     for member in members {
         let Some(task_id) = member.task_id else {
+            if member.failure_message.is_none() {
+                return Err("请先取消目录中的活动下载任务，再移入回收站".to_string());
+            }
             continue;
         };
         let task = store.find(task_id).map_err(|error| error.to_string())?;
@@ -1799,9 +1824,6 @@ fn recycle_cloud_directory_group(
         }
         tasks.push(task);
     }
-    if tasks.is_empty() {
-        return Err("目录下载任务中没有可移入回收站的文件".to_string());
-    }
     for task in tasks {
         if task.status != TaskStatus::Recycled {
             store
@@ -1809,6 +1831,9 @@ fn recycle_cloud_directory_group(
                 .map_err(|error| error.to_string())?;
         }
     }
+    store
+        .recycle_cloud_directory_group(group.id)
+        .map_err(|error| error.to_string())?;
     cloud_directory_group_queue_task(store, group.id)
 }
 
@@ -1864,27 +1889,41 @@ async fn purge_recycled_task_batch(
     delete_files: bool,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-    let mut ids = Vec::with_capacity(task_ids.len());
-    let mut group_ids = Vec::new();
-    for task_id in task_ids {
-        let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-        if store
-            .cloud_directory_group(id)
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            if !group_ids.contains(&id) {
-                group_ids.push(id);
+        let mut ids = Vec::with_capacity(task_ids.len());
+        let mut group_ids = Vec::new();
+        let mut seen_task_ids = HashSet::with_capacity(task_ids.len());
+        let mut seen_group_ids = HashSet::new();
+        for task_id in task_ids {
+            let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+            if store
+                .cloud_directory_group(id)
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                if seen_group_ids.insert(id) {
+                    group_ids.push(id);
+                }
+            } else if seen_task_ids.insert(id) {
+                ids.push(id);
             }
-        } else if !ids.contains(&id) {
-            ids.push(id);
         }
-    }
-    purge_recycled_task_records(&store, &cloud.share_plans, &ids, delete_files)?;
-    for group_id in group_ids {
-        purge_cloud_directory_group(&store, &cloud.share_plans, group_id, delete_files)?;
-    }
-    Ok(())
+        let mut groups = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            let (group, tasks) = cloud_directory_group_tasks_for_purge(&store, group_id)?;
+            for task in tasks {
+                if seen_task_ids.insert(task.id) {
+                    ids.push(task.id);
+                }
+            }
+            groups.push(group);
+        }
+        purge_recycled_task_records(&store, &cloud.share_plans, &ids, delete_files)?;
+        for group in groups {
+            store
+                .remove_cloud_directory_group(group.id)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     })
     .await
     .map_err(|_| "后台删除任务中断".to_string())?
@@ -1912,12 +1951,13 @@ fn cloud_directory_group_tasks_for_purge(
         }
         tasks.push(task);
     }
-    if tasks.is_empty() {
+    if tasks.is_empty() && group.status != TaskStatus::Recycled {
         return Err("目录下载任务中没有可彻底删除的文件".to_string());
     }
     Ok((group, tasks))
 }
 
+#[cfg(test)]
 fn purge_cloud_directory_group(
     store: &TaskStore,
     plans: &crate::cloud::share::CloudSharePlanStore,
@@ -1954,8 +1994,20 @@ fn purge_recycled_task_records(
             remove_task_payload_files(store, *id)?;
         }
     }
-    for task in tasks {
-        remove_task_record_and_unlink_share(store, plans, &task)?;
+    let linked_cloud_tasks = tasks
+        .iter()
+        .filter(|task| task.source.starts_with("cloud-share://"))
+        .map(|task| (task.source.clone(), task.id))
+        .collect::<Vec<_>>();
+    plans
+        .unlink_local_tasks(&linked_cloud_tasks)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = store.remove_task_records(ids) {
+        let message = error.to_string();
+        if let Err(restore_error) = plans.link_local_tasks(&linked_cloud_tasks) {
+            return Err(format!("{message}；网盘关联恢复失败：{restore_error}"));
+        }
+        return Err(message);
     }
     Ok(())
 }
@@ -2236,6 +2288,54 @@ mod tests {
             serde_json::to_value(&projected[0]).unwrap()["reauthorization_required"],
             true
         );
+    }
+
+    #[tokio::test]
+    async fn background_queue_read_preserves_scopes() {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let active = store
+            .create(NewTask::direct("https://example.test/active.zip"))
+            .unwrap();
+        let completed = store
+            .create(NewTask::direct("https://example.test/done.zip"))
+            .unwrap();
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                ..completed
+            })
+            .unwrap();
+        let active_tasks =
+            list_queue_tasks_in_background(Arc::clone(&store), None, Some("active".into()))
+                .await
+                .unwrap();
+        assert_eq!(active_tasks.len(), 1);
+        assert_eq!(active_tasks[0].id, active.id.to_string());
+        let terminal =
+            list_queue_tasks_in_background(Arc::clone(&store), None, Some("terminal".into()))
+                .await
+                .unwrap();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0].status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn background_queue_read_yields_while_database_is_locked() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tasks.sqlite");
+        let store = Arc::new(TaskStore::open_path(&path).unwrap());
+        let blocker = rusqlite::Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let mut read = Box::pin(list_queue_tasks_in_background(store, None, None));
+        let waiting = tokio::time::timeout(std::time::Duration::from_millis(100), &mut read).await;
+        // The caller can keep servicing events even while SQLite is waiting.
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert!(
+            waiting.is_err(),
+            "database waiting must yield to the caller"
+        );
+        assert!(read.await.unwrap().is_empty());
     }
 
     #[test]
@@ -2739,6 +2839,45 @@ mod tests {
     }
 
     #[test]
+    fn virtual_failed_directory_group_moves_to_recycle_without_local_members() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote-wallpapers",
+                    "夸克精选壁纸",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "remote-wallpaper",
+                    &["夸克精选壁纸"],
+                    "wallpaper.jpg",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
+        store
+            .fail_cloud_directory_group_item(
+                group.id,
+                item.id,
+                "duplicate_active",
+                "已存在下载任务，未重复入队",
+            )
+            .unwrap();
+
+        let recycled = recycle_cloud_directory_group(&store, group.id).unwrap();
+
+        assert_eq!(recycled.status, TaskStatus::Recycled);
+        let (_, local_members) = cloud_directory_group_tasks_for_purge(&store, group.id).unwrap();
+        assert!(local_members.is_empty());
+    }
+
+    #[test]
     fn local_action_outcome_for_a_directory_member_returns_its_group_root() {
         let store = TaskStore::open_in_memory().unwrap();
         let group = store
@@ -3022,17 +3161,39 @@ mod tests {
             .is_empty());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn permanent_purge_keeps_a_task_when_its_cloud_share_plan_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let source = format!("cloud-share://baidu/{}/{}", "a".repeat(64), "b".repeat(64));
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store.create(NewTask::direct(&source)).unwrap();
+        let task = store.fail(task.id, "fixture").unwrap();
+        let task = store.transition(task.id, TaskStatus::Recycled).unwrap();
+
+        assert!(purge_recycled_task_records(&store, &plans, &[task.id], false).is_err());
+
+        assert!(store.find(task.id).is_ok());
+    }
+
     #[test]
     fn background_purge_batch_removes_only_its_supplied_recycled_records() {
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
-        let cloud = Arc::new(crate::cloud::commands::CloudState::new(
-            directory.path().join("cloud"),
-        ).unwrap());
-        let first = store.create(NewTask::direct("https://example.test/first")).unwrap();
+        let cloud = Arc::new(
+            crate::cloud::commands::CloudState::new(directory.path().join("cloud")).unwrap(),
+        );
+        let first = store
+            .create(NewTask::direct("https://example.test/first"))
+            .unwrap();
         let first = store.fail(first.id, "fixture").unwrap();
         let first = store.transition(first.id, TaskStatus::Recycled).unwrap();
-        let second = store.create(NewTask::direct("https://example.test/second")).unwrap();
+        let second = store
+            .create(NewTask::direct("https://example.test/second"))
+            .unwrap();
         let second = store.fail(second.id, "fixture").unwrap();
         let second = store.transition(second.id, TaskStatus::Recycled).unwrap();
 
@@ -3049,7 +3210,10 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(matches!(store.find(first.id), Err(crate::StoreError::NotFound(_))));
+        assert!(matches!(
+            store.find(first.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
         assert!(store.find(second.id).is_ok());
     }
 

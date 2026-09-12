@@ -4,15 +4,20 @@ use super::{
     CloudHttpTransport, CloudProvider, CloudUploadTransport, QuarkError, UploadHttpRequest,
     UploadHttpResponse,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
+use rsa::{pkcs8::DecodePublicKey, Pkcs1v15Encrypt, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha1::{Digest, Sha1};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Read, Seek, SeekFrom},
     path::Path,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(test)]
 mod tests {
@@ -53,6 +58,19 @@ mod tests {
             url: "https://pan.baidu.com/s/1share123".into(),
             access_code: Some("a123".into()),
         }
+    }
+
+    #[test]
+    fn locatedownload_signature_matches_the_known_baidupcs_go_fixture() {
+        assert_eq!(
+            baidu_locatedownload_signature(
+                10086,
+                "test_bduss",
+                1_571_140_066,
+                "O|1E67351CCE80B2CF48DB511CD77ACD9F",
+            ),
+            "b6bb7a6f46899e181baea58798d4fdb889775c2c"
+        );
     }
     fn listing() -> Value {
         json!({"errno":0,"data":{"shareid":22,"uk":33,"seckey":"secret-key","has_more":false,"list":[{"fs_id":11,"server_filename":"movie.mp4","path":"/movie.mp4","isdir":0,"size":123}]}})
@@ -469,6 +487,7 @@ mod tests {
 
 const PAN: &str = "https://pan.baidu.com";
 const PASSPORT: &str = "https://passport.baidu.com";
+const BAIDU_HOME: &str = "https://www.baidu.com/";
 const BAIDU_WEB_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
 const BAIDU_PAN_USER_AGENT: &str =
@@ -478,6 +497,35 @@ pub const BAIDU_RECYCLE_BIN_ID: &str = "__all_downloader_baidu_recycle_bin__";
 const BAIDU_RECYCLE_BIN_NAME: &str = "回收站";
 const BAIDU_UPLOAD_HOST: &str = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2";
 const BAIDU_UPLOAD_BLOCK_SIZE: usize = 4 * 1024 * 1024;
+const BAIDU_LOCATEDOWNLOAD_SIGNING_SALT: &str = "ebrcUYiuxaZv2XGu7KIYKxUrqfnOfpDF";
+
+fn baidu_locatedownload_signature(uid: u64, bduss: &str, timestamp: u64, devuid: &str) -> String {
+    let bduss_sha1 = format!("{:x}", Sha1::digest(bduss.as_bytes()));
+    let mut digest = Sha1::new();
+    digest.update(bduss_sha1.as_bytes());
+    digest.update(uid.to_string().as_bytes());
+    digest.update(BAIDU_LOCATEDOWNLOAD_SIGNING_SALT.as_bytes());
+    digest.update(timestamp.to_string().as_bytes());
+    digest.update(devuid.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn baidu_locatedownload_https_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let normalized = trimmed
+        .strip_prefix("//")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or_else(|| trimmed.to_owned());
+    let mut url = url::Url::parse(&normalized).ok()?;
+    if url.scheme() == "http" {
+        let host = url.host_str()?.to_ascii_lowercase();
+        if !(host.ends_with(".baidu.com") || host.ends_with(".baidupcs.com")) {
+            return None;
+        }
+        url.set_scheme("https").ok()?;
+    }
+    super::https_transfer_url(url.as_str()).ok()
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 struct BaiduFileReference {
@@ -562,6 +610,177 @@ fn valid_cookie_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
+#[derive(Default)]
+struct BaiduLoginCookies(BTreeMap<String, String>);
+
+impl BaiduLoginCookies {
+    fn absorb_set_cookies(&mut self, cookies: &[String]) {
+        for raw in cookies {
+            self.absorb_pair(raw.split(';').next().unwrap_or_default());
+        }
+    }
+
+    fn absorb_cookie_header(&mut self, cookie: &str) {
+        for pair in cookie.split(';') {
+            self.absorb_pair(pair);
+        }
+    }
+
+    fn absorb_pair(&mut self, pair: &str) {
+        let Some((name, value)) = pair.trim().split_once('=') else {
+            return;
+        };
+        if valid_cookie_name(name) && !value.is_empty() && !value.chars().any(char::is_control) {
+            self.0.insert(name.to_owned(), value.to_owned());
+        }
+    }
+
+    fn insert(&mut self, name: &str, value: &str) {
+        if valid_cookie_name(name) && !value.is_empty() && !value.chars().any(char::is_control) {
+            self.0.insert(name.to_owned(), value.to_owned());
+        }
+    }
+
+    fn header(&self) -> String {
+        self.0
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    fn pairs(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect()
+    }
+
+    fn request_headers(&self, form: bool, include_cookie: bool) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::from([
+            ("Accept".into(), "application/json, text/plain, */*".into()),
+            ("Referer".into(), format!("{PAN}/")),
+            ("User-Agent".into(), BAIDU_WEB_USER_AGENT.into()),
+        ]);
+        let cookie = self.header();
+        if include_cookie && !cookie.is_empty() {
+            headers.insert("Cookie".into(), cookie);
+        }
+        if form {
+            headers.insert(
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            );
+            headers.insert("X-Requested-With".into(), "XMLHttpRequest".into());
+        }
+        headers
+    }
+}
+
+fn baidu_login_get<T: CloudHttpTransport + ?Sized>(
+    http: &T,
+    cookies: &mut BaiduLoginCookies,
+    url: String,
+) -> Result<CloudHttpResponse, QuarkError> {
+    let response = http.send(CloudHttpRequest {
+        method: "GET",
+        url,
+        headers: cookies.request_headers(false, !http.manages_cookie_session()),
+        body: None,
+    })?;
+    cookies.absorb_set_cookies(&response.set_cookies);
+    if !(200..300).contains(&response.status) {
+        return Err(QuarkError::WebAuthorizationRequired);
+    }
+    Ok(response)
+}
+
+fn baidu_login_json(body: &str) -> Result<Value, QuarkError> {
+    let body = body.trim();
+    let payload = if body.starts_with('{') {
+        body
+    } else {
+        let start = body.find('(').map(|index| index + 1);
+        let end = body.rfind(')');
+        match (start, end) {
+            (Some(start), Some(end)) if start < end => &body[start..end],
+            _ => return Err(QuarkError::WebAuthorizationRequired),
+        }
+    };
+    serde_json::from_str(payload)
+        .or_else(|_| {
+            // Passport still returns JavaScript object literals with single
+            // quoted scalar fields when no JSONP callback is requested.
+            serde_json::from_str(&payload.replace('\'', "\""))
+        })
+        .map_err(|_| QuarkError::WebAuthorizationRequired)
+}
+
+fn baidu_password_v4(public_key: &str, password: &str) -> Result<Zeroizing<String>, QuarkError> {
+    let public_key = RsaPublicKey::from_public_key_pem(public_key)
+        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+    let mut encrypted = public_key
+        .encrypt(&mut rand::rngs::OsRng, Pkcs1v15Encrypt, password.as_bytes())
+        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+    let result = Zeroizing::new(STANDARD.encode(&encrypted));
+    encrypted.zeroize();
+    Ok(result)
+}
+
+fn unix_millis() -> Result<u128, QuarkError> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| QuarkError::InvalidResponse)?
+        .as_millis())
+}
+
+fn baidu_login_code(value: &Value) -> Option<String> {
+    value
+        .pointer("/errInfo/no")
+        .or_else(|| value.get("err_no"))
+        .and_then(string_or_number)
+}
+
+fn baidu_html_login_code(body: &str) -> Option<String> {
+    let matcher = regex::Regex::new(r#"(?:err_no|errno)=([0-9-]+)"#).ok()?;
+    matcher
+        .captures(body)
+        .and_then(|captures| captures.get(1))
+        .map(|capture| capture.as_str().to_owned())
+}
+
+fn baidu_login_value(value: &Value, name: &str) -> Option<String> {
+    value
+        .get("data")
+        .and_then(|data| data.get(name))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn absorb_baidu_login_result(cookies: &mut BaiduLoginCookies, value: &Value, raw_body: &str) {
+    if let Some(cookie) = baidu_login_value(value, "cookieString") {
+        cookies.absorb_cookie_header(&cookie);
+    }
+    for (json_name, cookie_name) in [
+        ("bduss", "BDUSS"),
+        ("ptoken", "PTOKEN"),
+        ("stoken", "STOKEN"),
+    ] {
+        if let Some(token) = baidu_login_value(value, json_name) {
+            cookies.insert(cookie_name, &token);
+        }
+    }
+    if let Ok(matcher) = regex::Regex::new(r"<stoken>netdisk#([A-Za-z0-9_-]+)<") {
+        if let Some(token) = matcher
+            .captures(raw_body)
+            .and_then(|captures| captures.get(1))
+        {
+            cookies.insert("STOKEN", token.as_str());
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BaiduDownload {
     pub url: String,
@@ -572,6 +791,7 @@ pub struct BaiduDownload {
 pub struct BaiduClient<'a, T: CloudHttpTransport + ?Sized> {
     session: BaiduSession,
     http: &'a T,
+    use_transport_cookie_session: bool,
 }
 
 impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
@@ -581,26 +801,43 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         // key. Keep the secure cookie and add a request-only compatibility
         // alias so sessions saved by earlier releases keep working.
         session.cookie = native_api_cookie(session.cookie);
-        Self { session, http }
+        Self {
+            session,
+            http,
+            use_transport_cookie_session: false,
+        }
+    }
+
+    fn from_managed_cookie_session(mut session: BaiduSession, http: &'a T) -> Self {
+        session.cookie = native_api_cookie(session.cookie);
+        Self {
+            session,
+            http,
+            use_transport_cookie_session: true,
+        }
     }
 
     /// Native Pan endpoints reject a browser origin paired with the Netdisk
     /// client signature. Keep this profile aligned with BaiduPCS-Go: its Pan
     /// requests provide the Netdisk UA and authenticated cookie jar only.
     fn pan_headers(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([
-            ("Cookie".into(), self.session.cookie.clone()),
-            ("User-Agent".into(), BAIDU_PAN_USER_AGENT.into()),
-        ])
+        let mut headers = BTreeMap::from([("User-Agent".into(), BAIDU_PAN_USER_AGENT.into())]);
+        if !self.use_transport_cookie_session {
+            headers.insert("Cookie".into(), self.session.cookie.clone());
+        }
+        headers
     }
 
     fn web_headers(&self) -> BTreeMap<String, String> {
-        BTreeMap::from([
-            ("Cookie".into(), self.session.cookie.clone()),
+        let mut headers = BTreeMap::from([
             ("Origin".into(), PAN.into()),
             ("Referer".into(), format!("{PAN}/")),
             ("User-Agent".into(), BAIDU_WEB_USER_AGENT.into()),
-        ])
+        ]);
+        if !self.use_transport_cookie_session {
+            headers.insert("Cookie".into(), self.session.cookie.clone());
+        }
+        headers
     }
 
     fn request(
@@ -1030,6 +1267,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
 
     pub fn download(&self, id: &str) -> Result<BaiduDownload, QuarkError> {
         let file = parse_file_reference(id)?;
+        match self.filemetas_download(&file) {
+            Ok(download) => Ok(download),
+            Err(
+                error @ (QuarkError::AuthorizationExpired
+                | QuarkError::NotAuthorized
+                | QuarkError::WebAuthorizationRequired
+                | QuarkError::CaptchaRequired),
+            ) => Err(error),
+            Err(_) => self.locatedownload(&file),
+        }
+    }
+
+    fn filemetas_download(&self, file: &BaiduFileReference) -> Result<BaiduDownload, QuarkError> {
         let value = self.request(
             "GET",
             format!(
@@ -1043,10 +1293,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .and_then(Value::as_array)
             .and_then(|list| list.first())
             .ok_or(QuarkError::InvalidResponse)?;
-        let url = required(item, "dlink")?;
-        if !url.starts_with("https://") {
-            return Err(QuarkError::InvalidResponse);
-        }
+        let url = super::https_transfer_url(&required(item, "dlink")?)?;
         Ok(BaiduDownload {
             url,
             name: item
@@ -1054,6 +1301,83 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 .and_then(Value::as_str)
                 .unwrap_or(&file.path)
                 .into(),
+            headers: self.pan_headers(),
+        })
+    }
+
+    fn locatedownload(&self, file: &BaiduFileReference) -> Result<BaiduDownload, QuarkError> {
+        let bduss = self
+            .session
+            .cookie
+            .split(';')
+            .map(str::trim)
+            .filter_map(|pair| pair.split_once('='))
+            .find_map(|(name, value)| (name == "BDUSS" && !value.is_empty()).then_some(value))
+            .ok_or(QuarkError::AuthorizationExpired)?;
+        let uid = self
+            .stable_account_id()?
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(QuarkError::InvalidResponse)?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| QuarkError::InvalidResponse)?
+            .as_secs();
+        let devuid = format!("{:X}|0", md5::compute(bduss.as_bytes()));
+        let signature = baidu_locatedownload_signature(uid, bduss, timestamp, &devuid);
+        let timestamp = timestamp.to_string();
+        let mut endpoint = url::Url::parse("https://pcs.baidu.com/rest/2.0/pcs/file")
+            .map_err(|_| QuarkError::InvalidResponse)?;
+        endpoint.query_pairs_mut().extend_pairs([
+            ("ant", "1"),
+            ("check_blue", "1"),
+            ("es", "1"),
+            ("esl", "1"),
+            ("app_id", "250528"),
+            ("method", "locatedownload"),
+            ("path", file.path.as_str()),
+            ("ver", "4.0"),
+            ("clienttype", "17"),
+            ("channel", "0"),
+            ("apn_id", "1_0"),
+            ("freeisp", "0"),
+            ("queryfree", "0"),
+            ("use", "0"),
+            ("time", timestamp.as_str()),
+            ("rand", signature.as_str()),
+            ("devuid", devuid.as_str()),
+            ("cuid", devuid.as_str()),
+        ]);
+        let value = self.request("POST", endpoint.into(), None)?;
+        let urls = value
+            .get("urls")
+            .and_then(Value::as_array)
+            .ok_or(QuarkError::InvalidResponse)?;
+        let candidates = urls
+            .iter()
+            .filter(|candidate| candidate.get("encrypt").and_then(Value::as_i64) == Some(0))
+            .filter_map(|candidate| candidate.get("url").and_then(Value::as_str))
+            .filter_map(baidu_locatedownload_https_url)
+            .collect::<Vec<_>>();
+        let url = candidates
+            .iter()
+            .find(|candidate| {
+                url::Url::parse(candidate)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+                    .is_some_and(|host| !host.starts_with("nb.cache"))
+            })
+            .or_else(|| candidates.first())
+            .cloned()
+            .ok_or(QuarkError::InvalidResponse)?;
+        let name = file
+            .path
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .ok_or(QuarkError::InvalidResponse)?;
+        Ok(BaiduDownload {
+            url,
+            name: name.into(),
             headers: self.pan_headers(),
         })
     }
@@ -1132,48 +1456,197 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         .map(|_| ())
     }
 
-    /// Password login is deliberately single-shot: CAPTCHA, SMS and risk
-    /// responses are handed back to the official browser rather than guessed.
+    /// Follow the same v4 Passport handshake used by Baidu's current login
+    /// page: initialize a token, fetch the per-attempt RSA key, preflight the
+    /// username and only then submit an encrypted password. CAPTCHA, SMS and
+    /// risk challenges are handed to the existing official browser flow.
     pub fn login_password(
         username: &str,
         password: &str,
         http: &'a T,
     ) -> Result<BaiduSession, QuarkError> {
+        if let Some(isolated) = http.isolated_session()? {
+            return Self::login_password_in_session(username, password, isolated.as_ref());
+        }
+        Self::login_password_in_session(username, password, http)
+    }
+
+    fn login_password_in_session<U: CloudHttpTransport + ?Sized>(
+        username: &str,
+        password: &str,
+        http: &U,
+    ) -> Result<BaiduSession, QuarkError> {
         if username.trim().is_empty() || password.is_empty() {
             return Err(QuarkError::InvalidInput("请输入账号和密码".into()));
         }
         let password = Zeroizing::new(password.to_owned());
-        let body = format!(
-            "username={}&password={}&tpl=netdisk&logintype=basicLogin",
-            encoded(username),
-            encoded(&password)
-        );
+        let mut cookies = BaiduLoginCookies::default();
+        baidu_login_get(http, &mut cookies, BAIDU_HOME.into())?;
+        let gid = uuid::Uuid::new_v4().to_string().to_ascii_uppercase();
+        let timestamp = unix_millis()?;
+        let api = baidu_login_json(
+            &baidu_login_get(
+                http,
+                &mut cookies,
+                format!(
+                    "{PASSPORT}/v2/api/?getapi&tpl=netdisk&apiver=v3&tt={timestamp}&class=login&gid={gid}&loginVersion=v4&logintype=basicLogin"
+                ),
+            )?
+            .body,
+        )?;
+        if baidu_login_code(&api).as_deref() != Some("0") {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let token = baidu_login_value(&api, "token").ok_or(QuarkError::WebAuthorizationRequired)?;
+        let key = baidu_login_json(
+            &baidu_login_get(
+                http,
+                &mut cookies,
+                format!(
+                    "{PASSPORT}/v2/getpublickey?token={}&tpl=netdisk&subpro=&apiver=v3&tt={timestamp}&gid={gid}&loginVersion=v4",
+                    encoded(&token)
+                ),
+            )?
+            .body,
+        )?;
+        let key_code = key
+            .get("errno")
+            .and_then(string_or_number)
+            .or_else(|| baidu_login_code(&key));
+        if key_code.as_deref() != Some("0") {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let public_key = key
+            .get("pubkey")
+            .and_then(Value::as_str)
+            .filter(|value| value.contains("BEGIN PUBLIC KEY"))
+            .ok_or(QuarkError::WebAuthorizationRequired)?;
+        let rsa_key = key
+            .get("key")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(QuarkError::WebAuthorizationRequired)?;
+        let check = baidu_login_json(
+            &baidu_login_get(
+                http,
+                &mut cookies,
+                format!(
+                    "{PASSPORT}/v2/api/?logincheck&token={}&tpl=netdisk&apiver=v3&tt={}&sub_source=leadsetpwd&username={}&isphone=false&loginVersion=v4&gid={gid}&dv=",
+                    encoded(&token),
+                    unix_millis()?,
+                    encoded(username.trim())
+                ),
+            )?
+            .body,
+        )?;
+        if baidu_login_code(&check).as_deref() != Some("0") {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let code_string = baidu_login_value(&check, "codeString").unwrap_or_default();
+        if !code_string.is_empty() {
+            return Err(QuarkError::WebAuthorizationRequired);
+        }
+        let encrypted = baidu_password_v4(public_key, &password)?;
+        let callback = format!("parent.bd__pcbs__{}", uuid::Uuid::new_v4().simple());
+        let body = form(&[
+            (
+                "staticpage",
+                format!("{PASSPORT}/static/passpc-account/html/v3Jump.html"),
+            ),
+            ("charset", "UTF-8".into()),
+            ("token", token),
+            ("tpl", "netdisk".into()),
+            ("subpro", String::new()),
+            ("apiver", "v3".into()),
+            ("tt", unix_millis()?.to_string()),
+            ("codestring", code_string),
+            ("safeflg", "0".into()),
+            ("u", format!("{PAN}/")),
+            ("isPhone", "false".into()),
+            ("quick_user", "0".into()),
+            ("logintype", "basicLogin".into()),
+            ("logLoginType", "pc_loginBasic".into()),
+            ("idc", String::new()),
+            ("loginmerge", "true".into()),
+            ("username", username.trim().to_owned()),
+            ("password", encrypted.to_string()),
+            ("verifycode", String::new()),
+            ("mem_pass", "on".into()),
+            ("rsakey", rsa_key.to_owned()),
+            ("crypttype", "12".into()),
+            ("ppui_logintime", "1000".into()),
+            ("loginVersion", "v4".into()),
+            ("supportdv", "1".into()),
+            ("gid", gid),
+            ("countrycode", String::new()),
+            ("FP_UID", String::new()),
+            ("FP_INFO", String::new()),
+            ("dv", String::new()),
+            ("traceid", String::new()),
+            ("callback", callback),
+        ]);
         let response = http.send(CloudHttpRequest {
             method: "POST",
             url: format!("{PASSPORT}/v2/api/?login"),
-            headers: BTreeMap::from([
-                (
-                    "Content-Type".into(),
-                    "application/x-www-form-urlencoded".into(),
-                ),
-                ("Referer".into(), format!("{PAN}/")),
-                ("User-Agent".into(), BAIDU_WEB_USER_AGENT.into()),
-            ]),
+            headers: cookies.request_headers(true, !http.manages_cookie_session()),
             body: Some(body),
         })?;
-        let value: Value = serde_json::from_str(&response.body)
-            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
-        if challenge(&value) {
+        cookies.absorb_set_cookies(&response.set_cookies);
+        if !(200..300).contains(&response.status) {
             return Err(QuarkError::WebAuthorizationRequired);
         }
-        if value.get("err_no").and_then(Value::as_i64).unwrap_or(-1) != 0 {
-            return Err(QuarkError::Provider("登录被服务拒绝".into()));
+        let value = baidu_login_json(&response.body).ok();
+        let code = value
+            .as_ref()
+            .and_then(baidu_login_code)
+            .or_else(|| baidu_html_login_code(&response.body));
+        match code.as_deref() {
+            Some("0") => {}
+            Some("3" | "6" | "257" | "500001" | "500002") => {
+                return Err(QuarkError::CaptchaRequired)
+            }
+            Some(
+                "5" | "16" | "120016" | "120019" | "120021" | "400023" | "400031" | "400101"
+                | "50000" | "50010" | "50043" | "50045" | "50046" | "50052",
+            ) => return Err(QuarkError::WebAuthorizationRequired),
+            _ if value.as_ref().is_some_and(challenge) => {
+                return Err(QuarkError::WebAuthorizationRequired)
+            }
+            _ => {
+                let message =
+                    if std::env::var("ALLDOWNLOADER_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
+                        format!(
+                            "登录被服务拒绝（code {}）",
+                            code.as_deref().unwrap_or("unparseable")
+                        )
+                    } else {
+                        "登录被服务拒绝".into()
+                    };
+                return Err(QuarkError::Provider(message));
+            }
         }
-        let mut session = parse_baidu_web_session(&response.set_cookies)?;
+        if let Some(value) = value.as_ref() {
+            absorb_baidu_login_result(&mut cookies, value, &response.body);
+        }
+        let authenticated_cookies = http.cookies_for_url(PAN)?;
+        let mut session = if authenticated_cookies.is_empty() {
+            parse_baidu_web_session(&cookies.pairs())?
+        } else {
+            parse_baidu_web_session(&authenticated_cookies)?
+        };
         session.auth_method = CloudAuthMethod::Password;
-        let client = Self::new(session.clone(), http);
+        let client = if http.manages_cookie_session() {
+            BaiduClient::from_managed_cookie_session(session.clone(), http)
+        } else {
+            BaiduClient::new(session.clone(), http)
+        };
         client.account()?;
         client.directory("/")?;
+        let final_cookies = http.cookies_for_url(PAN)?;
+        if !final_cookies.is_empty() {
+            session = parse_baidu_web_session(&final_cookies)?;
+            session.auth_method = CloudAuthMethod::Password;
+        }
         Ok(session)
     }
 }

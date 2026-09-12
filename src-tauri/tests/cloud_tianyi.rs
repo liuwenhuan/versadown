@@ -6,6 +6,21 @@ use alldownloader_lib::cloud::{
 use std::{collections::BTreeMap, io::Write, sync::Mutex};
 use tempfile::NamedTempFile;
 
+const TIANYI_LOGIN_RSA_KEY: &str = concat!(
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDY7mpaUysvgQkbp0iIn2ezoUyh",
+    "i1zPFn0HCXloLFWT7uoNkqtrphpQ/63LEcPz1VYzmDuDIf3iGxQKzeoHTiVMSmW6",
+    "FlhDeqVOG094hFJvZeK4OzA6HVwzwnEW5vIZ7d+u61RV1bsFxmB68+8JXs3ycGcE",
+    "4anY+YzZJcyOcEGKVQIDAQAB",
+);
+
+fn tianyi_app_login_page() -> String {
+    format!(
+        r#"<input id="captchaToken" value="captcha-token">
+        <script>var lt = "login-ticket"; var returnUrl = 'https://m.cloud.189.cn/return'; var paramId = "param-id"; var reqId = "request-id";</script>
+        <input id="j_rsaKey" value="{TIANYI_LOGIN_RSA_KEY}">"#
+    )
+}
+
 struct RecordingHttp {
     replies: Mutex<Vec<CloudHttpResponse>>,
     requests: Mutex<Vec<CloudHttpRequest>>,
@@ -108,6 +123,34 @@ impl CloudUploadTransport for UploadRecordingHttp {
 }
 
 #[test]
+fn tianyi_browser_identity_reaches_account_directory_and_download_requests() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"res_code":0,"loginName":"alice@189.cn"}"#,
+        r#"{"res_code":0,"fileListAO":{"fileList":[]}}"#,
+        r#"{"res_code":0,"fileDownloadUrl":"https://download.example/photo.jpg","fileName":"photo.jpg"}"#,
+    ]);
+    let mut session = TianyiSession::cookie("SSON=local");
+    session.apply_browser_context(&serde_json::json!({
+        "browser_id":"1234567890abcdef1234567890abcdef", "user_agent":"OfficialBrowser/140"
+    }));
+    let client = TianyiClient::new(session, &http);
+    client.account().unwrap();
+    client.directory("-11").unwrap();
+    let download = client.download("f1").unwrap();
+    let requests = http.requests();
+    assert_eq!(requests.len(), 3);
+    for headers in requests
+        .iter()
+        .map(|request| &request.headers)
+        .chain([&download.headers])
+    {
+        assert_eq!(headers["Browser-Id"], "1234567890abcdef1234567890abcdef");
+        assert_eq!(headers["User-Agent"], "OfficialBrowser/140");
+        assert_eq!(headers["Cookie"], "SSON=local");
+    }
+}
+
+#[test]
 fn tianyi_maps_files_and_passes_cookie_to_the_resolved_download() {
     let http = RecordingHttp::sequence(&[
         r#"{"res_code":0,"fileListAO":{"fileList":[{"id":"f1","name":"photo.jpg","isFolder":false,"size":9}]}}"#,
@@ -148,6 +191,21 @@ fn tianyi_maps_the_official_xml_directory_response() {
     assert_eq!(directory.items[0].size, Some(9));
     assert_eq!(directory.items[1].id, TIANYI_RECYCLE_BIN_ID);
     assert_eq!(directory.items[1].kind, "folder");
+}
+
+#[test]
+fn tianyi_preserves_ampersands_in_xml_download_urls() {
+    let http = RecordingHttp::sequence(&[
+        r#"<fileDownloadUrl>https://download.cloud.189.cn/native.txt?token=opaque&amp;part=1</fileDownloadUrl>"#,
+    ]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    let download = client.download("f1").expect("XML download URL");
+
+    assert_eq!(
+        download.url,
+        "https://download.cloud.189.cn/native.txt?token=opaque&part=1"
+    );
 }
 
 #[test]
@@ -457,6 +515,141 @@ fn tianyi_rejects_non_https_dlinks_and_uses_native_mutation_endpoints() {
 }
 
 #[test]
+fn tianyi_password_login_prefers_the_signed_desktop_session_without_a_web_cookie() {
+    // Break caught: treating Tianyi password login as a browser-cookie flow
+    // makes the valid desktop SessionKey unusable whenever ssoLogin no longer
+    // emits COOKIE_LOGIN_USER. The App session must remain sufficient for a
+    // signed root listing, as in the maintained cloudpan189-go fork.
+    let login_page = tianyi_app_login_page();
+    let http = RecordingHttp::sequence(&[
+        &login_page,
+        r#"{"result":0,"msg":"登录成功","toUrl":"https://open.e.189.cn/callback?ticket=opaque"}"#,
+        r#"{"res_code":0,"loginName":"alice@189.cn","sessionKey":"app-session-key","sessionSecret":"app-session-secret","familySessionKey":"family-key","familySessionSecret":"family-secret","accessToken":"access-token","refreshToken":"refresh-token"}"#,
+        "",
+        r#"<listFiles><fileList><file><id>f-app</id><name>native.txt</name><size>12</size></file></fileList></listFiles>"#,
+    ]);
+
+    let login = TianyiClient::login_password("alice@189.cn", "private-password", &http);
+    assert!(
+        login.is_ok(),
+        "desktop login should not require a synthetic web cookie; safe error={:?}, request_count={}",
+        login.as_ref().err(),
+        http.requests().len()
+    );
+    let session = login.unwrap();
+    assert_eq!(
+        session.auth_method,
+        alldownloader_lib::cloud::CloudAuthMethod::Password
+    );
+    let restored: TianyiSession =
+        serde_json::from_slice(&serde_json::to_vec(&session).expect("serialize App session"))
+            .expect("restore App session");
+    assert_eq!(
+        TianyiClient::new(restored, &http)
+            .account()
+            .expect("restored App account")
+            .id,
+        "alice@189.cn"
+    );
+    let requests = http.requests();
+    assert_eq!(requests.len(), 5);
+    assert!(requests[0].url.contains("/unifyLoginForPC.action?"));
+    assert!(requests[0].url.contains("appId=8025431004"));
+    assert!(requests[1]
+        .url
+        .ends_with("/api/logbox/oauth2/loginSubmit.do"));
+    let login_body = requests[1].body.as_deref().unwrap_or_default();
+    assert_eq!(form_field(login_body, "appKey"), "8025431004");
+    assert_eq!(form_field(login_body, "clientType"), "10020");
+    assert!(form_field(login_body, "userName").starts_with("{RSA}"));
+    assert!(form_field(login_body, "password").starts_with("{RSA}"));
+    assert!(!login_body.contains("alice@189.cn"));
+    assert!(!login_body.contains("private-password"));
+    assert!(requests[2]
+        .url
+        .contains("api.cloud.189.cn/getSessionForPC.action?"));
+    assert!(requests[3].url.contains("cloud.189.cn/ssoLogin.action?"));
+    assert!(requests[4]
+        .url
+        .contains("api.cloud.189.cn/listFiles.action?"));
+    for header in ["Date", "SessionKey", "Signature", "X-Request-ID"] {
+        assert!(requests[4].headers.contains_key(header), "missing {header}");
+    }
+    let signature = &requests[4].headers["Signature"];
+    assert_eq!(signature.len(), 40);
+    assert!(signature
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)));
+}
+
+#[test]
+fn tianyi_app_download_signs_the_final_cdn_request() {
+    // AppGetFileDownloadUrl is only half of Tianyi's desktop protocol. The
+    // actual CDN request also needs the desktop client suffix and an HMAC
+    // header set; returning browser Cookie headers makes listing work while
+    // every real download fails.
+    let login_page = tianyi_app_login_page();
+    let http = RecordingHttp::sequence(&[
+        &login_page,
+        r#"{"result":0,"toUrl":"https://open.e.189.cn/callback?ticket=opaque"}"#,
+        r#"{"res_code":0,"loginName":"alice@189.cn","sessionKey":"app-session-key","sessionSecret":"app-session-secret","accessToken":"access-token"}"#,
+        "",
+        r#"<listFiles><fileList><file><id>f-app</id><name>native.txt</name><size>12</size></file></fileList></listFiles>"#,
+        r#"<fileDownloadUrl>https://download.cloud.189.cn/native.txt?token=opaque&amp;part=1</fileDownloadUrl>"#,
+    ]);
+    let session = TianyiClient::login_password("alice@189.cn", "private-password", &http)
+        .expect("native App login");
+
+    let download = TianyiClient::new(session, &http)
+        .download("f-app")
+        .expect("native App download resolution");
+
+    assert!(
+        download.url.starts_with(
+            "https://download.cloud.189.cn/native.txt?token=opaque&part=1&clientType=TELEPC"
+        ),
+        "unexpected fixture URL: {}",
+        download.url
+    );
+    assert!(download.url.contains("version=6.2"));
+    assert!(download.url.contains("channelId=web_cloud.189.cn"));
+    assert!(download.url.contains("rand="));
+    for header in ["Date", "SessionKey", "Signature", "X-Request-ID"] {
+        assert!(download.headers.contains_key(header), "missing {header}");
+    }
+    assert!(!download.headers.contains_key("Cookie"));
+}
+
+#[test]
+fn tianyi_malformed_desktop_login_page_falls_back_without_panicking() {
+    let http = RecordingHttp::sequence(&["<html><body>official login changed</body></html>"]);
+
+    let result = TianyiClient::login_password("alice@189.cn", "private-password", &http);
+
+    assert!(matches!(result, Err(QuarkError::WebAuthorizationRequired)));
+    assert_eq!(http.requests().len(), 1);
+}
+
+#[test]
+fn tianyi_app_xml_expiry_enters_session_recovery() {
+    let login_page = tianyi_app_login_page();
+    let http = RecordingHttp::sequence(&[
+        &login_page,
+        r#"{"result":0,"toUrl":"https://open.e.189.cn/callback?ticket=opaque"}"#,
+        r#"{"res_code":0,"loginName":"alice@189.cn","sessionKey":"app-session-key","sessionSecret":"app-session-secret","accessToken":"access-token"}"#,
+        "",
+        r#"<listFiles><fileList><file><id>f-app</id><name>native.txt</name><size>12</size></file></fileList></listFiles>"#,
+        r#"<error><code>InvalidSessionKey</code><message>session expired</message></error>"#,
+    ]);
+    let session = TianyiClient::login_password("alice@189.cn", "private-password", &http)
+        .expect("native App login");
+
+    let result = TianyiClient::new(session, &http).directory("-11");
+
+    assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
+}
+
+#[test]
 fn tianyi_renames_a_folder_with_the_official_form_endpoint() {
     let http = RecordingHttp::sequence(&[
         r#"{"res_code":0,"fileInfo":{"fileId":"d1","fileName":"old","isFolder":true}}"#,
@@ -527,6 +720,22 @@ fn tianyi_accepts_the_portal_login_name_returned_after_web_authorization() {
     assert!(http.requests()[0]
         .url
         .contains("/api/open/user/getUserInfoForPortal.action"));
+}
+
+#[test]
+fn tianyi_account_rejection_reports_only_the_safe_protocol_code() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"res_code":"InvalidDeviceStatus","message":"private account details must not escape"}"#,
+    ]);
+    let error = TianyiClient::new(TianyiSession::cookie("SSON=local"), &http)
+        .account()
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "网盘请求失败：天翼云盘拒绝请求（错误码 InvalidDeviceStatus）"
+    );
+    assert!(!error.to_string().contains("private account details"));
 }
 
 #[test]

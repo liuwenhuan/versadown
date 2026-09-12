@@ -95,6 +95,13 @@ pub struct CloudAuthorization {
     pub provider: CloudProvider,
     pub window_label: String,
     pub instructions: String,
+    pub completed: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudCredentials {
+    pub username: String,
+    pub password: String,
 }
 #[derive(Debug, Error)]
 pub enum QuarkError {
