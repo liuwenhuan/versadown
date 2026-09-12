@@ -237,6 +237,9 @@ export function App() {
   const [purgeInProgress, setPurgeInProgress] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [taskReauthorization, setTaskReauthorization] = useState<CloudAuthorization | null>(null);
+  const taskAuthorizationActive = useRef(false);
+  const taskAuthorizationGeneration = useRef(0);
+  useEffect(() => () => { taskAuthorizationActive.current = false; taskAuthorizationGeneration.current += 1; }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
   const activeTasks = useMemo(() => tasks.filter((task) => !inactiveStatuses.has(task.status)), [tasks]);
@@ -352,19 +355,32 @@ export function App() {
     let completed = false;
     let unlisten: (() => void) | undefined;
     let timer: number | undefined;
+    const generation = taskAuthorizationGeneration.current;
+    const current = () => !cancelled && generation === taskAuthorizationGeneration.current;
     const finish = async () => {
-      if (cancelled || completed) return;
+      if (!current() || completed) return;
       completed = true;
       if (timer !== undefined) window.clearTimeout(timer);
       await refreshTaskSnapshot(() => cancelled, 'active');
       await refreshTaskSnapshot(() => cancelled, 'terminal');
-      if (!cancelled) {
+      if (current()) {
+        taskAuthorizationActive.current = false;
         setTaskReauthorization(null);
         setNotice({ kind: 'success', message: '授权成功，正在恢复受影响的下载任务' });
       }
     };
+    let querying = false;
+    const wake = async () => {
+      if (!current() || completed || querying) return;
+      querying = true;
+      try {
+        const account = await cloudApi.getCompletedCloudAuthorization(taskReauthorization.provider);
+        if (current() && account?.provider === taskReauthorization.provider) await finish();
+      } catch { /* Watchdog covers missed completion events. */ }
+      finally { querying = false; }
+    };
     void cloudApi.subscribeCloudAuthorization(taskReauthorization.provider, event => {
-      if (event.state === 'Ready' && event.account?.provider === taskReauthorization.provider) void finish();
+      if (event.state === 'Ready') void wake();
     }).then(stop => { if (cancelled) stop(); else unlisten = stop; }).catch(() => {});
     const poll = () => {
       timer = window.setTimeout(async () => {
@@ -375,13 +391,14 @@ export function App() {
           const code = typeof error === 'object' && error !== null && 'code' in error
             ? String((error as { code?: unknown }).code)
             : '';
-          if (!cancelled && !completed && code !== 'authorization_pending') {
+          if (current() && !completed && code !== 'authorization_pending') {
+            taskAuthorizationActive.current = false;
             setTaskReauthorization(null);
             setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
             return;
           }
         }
-        if (!cancelled && !completed) poll();
+        if (current() && !completed) poll();
       }, 10_000);
     };
     poll();
@@ -742,9 +759,20 @@ export function App() {
     if (command === 'remove_record') { setPendingPurgeTaskIds([id]); return; }
     try {
       if (command === 'reauthorize') {
-        const authorization = await cloudApi.reauthorizeFailedCloudTask(id);
+        if (taskAuthorizationActive.current) return;
+        taskAuthorizationActive.current = true;
+        const generation = ++taskAuthorizationGeneration.current;
+        let authorization: CloudAuthorization;
+        try { authorization = await cloudApi.reauthorizeFailedCloudTask(id); }
+        catch (error) {
+          if (generation !== taskAuthorizationGeneration.current) return;
+          taskAuthorizationActive.current = false;
+          throw error;
+        }
+        if (generation !== taskAuthorizationGeneration.current) return;
         setTaskReauthorization(authorization.completed ? null : authorization);
         if (authorization.completed) {
+          taskAuthorizationActive.current = false;
           await refreshTaskSnapshot(() => false, 'active');
           await refreshTaskSnapshot(() => false, 'terminal');
         }

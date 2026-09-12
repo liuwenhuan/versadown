@@ -9,6 +9,7 @@ export const getCloudProviderCatalog = () => invoke<ProviderDescriptor[]>('cloud
 export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
 export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
+export const getCompletedCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount | null>('cloud_completed_authorization', { provider });
 export const resumeReauthorizedProviderTasks = (provider: CloudProvider) => invoke<void>('resume_reauthorized_provider_tasks', { provider });
 const authorizationSubscribers = new Set<{ provider: CloudProvider; receive: (event: CloudAuthorizationStateEvent) => void }>();
 let authorizationListener: Promise<() => void> | null = null;

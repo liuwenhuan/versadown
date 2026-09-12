@@ -1,7 +1,7 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::Path,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -46,9 +46,47 @@ pub struct LegacyPurgeReport {
 
 pub struct TaskStore {
     connection: Mutex<Connection>,
+    leaf_gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl TaskStore {
+    pub fn claim_cloud_directory_leaf_task(
+        &self,
+        group: Uuid,
+        item: Uuid,
+        provider: CloudProvider,
+        account: &str,
+        task: NewTask,
+    ) -> Result<Option<DownloadTask>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        let eligible: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM cloud_directory_groups g JOIN cloud_directory_group_items i ON i.group_id = g.id WHERE g.id = ?1 AND i.id = ?2 AND g.provider = ?3 AND g.status NOT IN ('recycled', 'cancelled', 'completed') AND i.task_id IS NULL AND NOT EXISTS (SELECT 1 FROM cloud_download_accounts a WHERE a.id = g.id AND (a.provider != ?3 OR a.account_id != ?4)))", params![group.to_string(), item.to_string(), provider.key(), account], |row| row.get(0))?;
+        if !eligible {
+            return Ok(None);
+        }
+        let task = Self::create_with_connection(&transaction, task)?;
+        transaction.execute(
+            "INSERT INTO cloud_download_accounts (id, provider, account_id) VALUES (?1, ?2, ?3)",
+            params![task.id.to_string(), provider.key(), account],
+        )?;
+        transaction.execute("UPDATE cloud_directory_group_items SET task_id = ?1, failure_code = NULL, failure_message = NULL WHERE id = ?2 AND group_id = ?3 AND task_id IS NULL", params![task.id.to_string(), item.to_string(), group.to_string()])?;
+        transaction.commit()?;
+        Ok(Some(task))
+    }
+
+    pub async fn lock_cloud_directory_leaf(
+        &self,
+        item: Uuid,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, StoreError> {
+        let gate = self
+            .leaf_gates
+            .lock()
+            .map_err(|_| StoreError::Poisoned)?
+            .entry(item)
+            .or_default()
+            .clone();
+        Ok(gate.lock_owned().await)
+    }
     /// Bind once, before submission. A later account replacement cannot adopt old downloads.
     pub fn bind_cloud_download_account(
         &self,
@@ -154,10 +192,19 @@ impl TaskStore {
         connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
         Ok(Self {
             connection: Mutex::new(connection),
+            leaf_gates: Mutex::new(HashMap::new()),
         })
     }
 
     pub fn create(&self, new_task: NewTask) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Self::create_with_connection(&connection, new_task)
+    }
+
+    fn create_with_connection(
+        connection: &Connection,
+        new_task: NewTask,
+    ) -> Result<DownloadTask, StoreError> {
         let created_at = current_timestamp();
         let task = DownloadTask {
             id: Uuid::new_v4(),
@@ -182,7 +229,6 @@ impl TaskStore {
             updated_at: created_at,
             completed_at: None,
         };
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.created_at, task.updated_at])?;
         Ok(task)
@@ -298,6 +344,14 @@ impl TaskStore {
     ) -> Result<CloudDirectoryGroup, StoreError> {
         validate_uuid(group_id)?;
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        // Shares the connection lock with leaf claim: a committed Parsing task
+        // reserves the parent until engine acceptance/failure has been recorded.
+        let active: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM cloud_directory_group_items i JOIN tasks t ON t.id = i.task_id WHERE i.group_id = ?1 AND t.status NOT IN ('completed', 'failed', 'cancelled', 'recycled'))", [group_id.to_string()], |row| row.get(0))?;
+        if active {
+            return Err(StoreError::InvalidCloudDirectoryGroupData(
+                "directory still has active downloads",
+            ));
+        }
         let changed = connection.execute(
             "UPDATE cloud_directory_groups SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![
@@ -333,7 +387,7 @@ impl TaskStore {
         let changed = transaction.execute(
             "UPDATE cloud_directory_group_items
              SET task_id = ?1, failure_code = NULL, failure_message = NULL
-             WHERE id = ?2 AND group_id = ?3",
+             WHERE id = ?2 AND group_id = ?3 AND (task_id IS NULL OR task_id = ?1)",
             params![
                 task_id.to_string(),
                 item_id.to_string(),
@@ -366,8 +420,8 @@ impl TaskStore {
         let transaction = connection.unchecked_transaction()?;
         let changed = transaction.execute(
             "UPDATE cloud_directory_group_items
-             SET task_id = NULL, failure_code = ?1, failure_message = ?2
-             WHERE id = ?3 AND group_id = ?4",
+             SET failure_code = ?1, failure_message = ?2
+             WHERE id = ?3 AND group_id = ?4 AND task_id IS NULL",
             params![
                 failure_code.as_ref(),
                 failure_message.as_ref(),
@@ -376,7 +430,10 @@ impl TaskStore {
             ],
         )?;
         if changed == 0 {
-            return Err(StoreError::NotFound(item_id));
+            let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM cloud_directory_group_items WHERE id = ?1 AND group_id = ?2)", params![item_id.to_string(), group_id.to_string()], |row| row.get(0))?;
+            if !exists {
+                return Err(StoreError::NotFound(item_id));
+            }
         }
         transaction.execute(
             "UPDATE cloud_directory_groups SET updated_at = ?1 WHERE id = ?2",

@@ -10,6 +10,7 @@ export interface CloudManagerClient {
   getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
+  getCompletedCloudAuthorization?(provider: CloudProvider): Promise<CloudAccount | null>;
   subscribeCloudAuthorization?(provider: CloudProvider, receive: (event: CloudAuthorizationStateEvent) => void): Promise<() => void>;
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
   getSavedCloudCredentials?(provider: CloudProvider): Promise<import('../lib/cloudTypes').SavedCloudCredentialInfo | null>;
@@ -450,8 +451,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const [selectionMenuAnchor, setSelectionMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const [detailsFile, setDetailsFile] = useState<CloudFile | null>(null);
   const [destinationAction, setDestinationAction] = useState<DestinationAction | null>(null);
-  const authorizationCompletionInFlight = useRef(false);
+  const authorizationCompletionInFlight = useRef<number | null>(null);
   const webAuthorizationActive = useRef(false);
+  const authorizationGeneration = useRef(0);
+  const authorizationRegistered = useRef(false);
+  const authorizationWake = useRef<(() => void) | null>(null);
+  const authorizationWakePending = useRef(false);
   const operationInFlight = useRef(false);
   const selectionAnchor = useRef<string | null>(null);
   const selectAllCheckbox = useRef<HTMLInputElement>(null);
@@ -596,15 +601,22 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   async function beginWebAuthorization() {
+    if (webAuthorizationActive.current) return;
+    const generation = ++authorizationGeneration.current;
     webAuthorizationActive.current = true;
+    authorizationRegistered.current = false;
+    authorizationWakePending.current = false;
     setWebAuthorization({ provider, windowLabel: '', instructions: '' });
     setAuthorizationStatus('正在准备网页授权窗口…');
     try {
       const authorization = await client.beginCloudAuthorization(provider);
-      if (!webAuthorizationActive.current) return;
+      if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
+      authorizationRegistered.current = true;
       setWebAuthorization(authorization);
       setAuthorizationStatus(authorization.instructions);
+      if (authorizationWakePending.current) authorizationWake.current?.();
     } catch (error) {
+      if (generation !== authorizationGeneration.current) return;
       webAuthorizationActive.current = false;
       setWebAuthorization(null);
       setAuthorizationStatus(errorMessage(error, '无法打开授权窗口。'));
@@ -612,16 +624,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   async function completeWebAuthorization(fromPolling: boolean) {
-    if (authorizationCompletionInFlight.current) return;
-    authorizationCompletionInFlight.current = true;
+    const generation = authorizationGeneration.current;
+    if (!webAuthorizationActive.current || !authorizationRegistered.current || authorizationCompletionInFlight.current === generation) return;
+    authorizationCompletionInFlight.current = generation;
     try {
       const account = await client.completeCloudAuthorization(provider);
-      if (!webAuthorizationActive.current) return;
+      if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
       ensureProviderAccount(account);
       webAuthorizationActive.current = false;
       await acceptAccount(account);
     } catch (error) {
-      if (!webAuthorizationActive.current) return;
+      if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
       if (isAuthorizationPending(error)) {
         setAuthorizationStatus('正在等待你在授权窗口中完成登录…');
         return;
@@ -632,14 +645,18 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         // A rejected verification must not automatically start another captcha.
         // Keep the account and let the user explicitly reopen authorization.
         setWebAuthorization(null);
+        webAuthorizationActive.current = false;
         if (activeAccount) {
           setReauthorizationRequired(true);
           setOperation({ kind: 'error', message });
         }
       }
-      if (fromPolling && requiresOfficialWebAuthorization(error)) setWebAuthorization(null);
+      if (requiresOfficialWebAuthorization(error)) {
+        webAuthorizationActive.current = false;
+        setWebAuthorization(null);
+      }
     } finally {
-      authorizationCompletionInFlight.current = false;
+      if (authorizationCompletionInFlight.current === generation) authorizationCompletionInFlight.current = null;
     }
   }
 
@@ -653,22 +670,40 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     let timer: number | undefined;
+    const generation = authorizationGeneration.current;
+    let querying = false;
+    const current = () => !cancelled && webAuthorizationActive.current && generation === authorizationGeneration.current;
+    const wake = async () => {
+      if (!current() || querying) return;
+      if (!authorizationRegistered.current) { authorizationWakePending.current = true; return; }
+      querying = true;
+      try {
+        const account = await client.getCompletedCloudAuthorization?.(provider);
+        if (!current() || account?.provider !== provider) return;
+        webAuthorizationActive.current = false;
+        if (timer !== undefined) window.clearTimeout(timer);
+        await acceptAccountRef.current(account);
+      } catch { /* Lost wakeups are covered by the watchdog. */ }
+      finally { querying = false; }
+    };
+    authorizationWake.current = () => { void wake(); };
     void client.subscribeCloudAuthorization?.(provider, event => {
-      if (cancelled || !webAuthorizationActive.current || event.provider !== provider || event.state !== 'Ready' || event.account?.provider !== provider) return;
-      webAuthorizationActive.current = false;
-      if (timer !== undefined) window.clearTimeout(timer);
-      void acceptAccountRef.current(event.account);
+      if (event.provider === provider && event.state === 'Ready') void wake();
     }).then(stop => { if (cancelled) stop(); else unlisten = stop; }).catch(() => { /* The watchdog also covers unavailable event delivery. */ });
     const poll = () => {
       timer = window.setTimeout(async () => {
+        if (!current()) return;
         await completeWebAuthorizationRef.current(true);
-        if (!cancelled && webAuthorizationActive.current) poll();
+        if (current()) poll();
       }, authorizationWatchdogMs);
     };
     poll();
     return () => {
       cancelled = true;
-      webAuthorizationActive.current = false;
+      if (generation === authorizationGeneration.current) {
+        webAuthorizationActive.current = false;
+        authorizationWake.current = null;
+      }
       unlisten?.();
       if (timer !== undefined) window.clearTimeout(timer);
     };

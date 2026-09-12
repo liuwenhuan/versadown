@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
   confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
-  reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn()
+  reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
@@ -37,6 +37,7 @@ vi.mock('./lib/cloudApi', async (importOriginal) => {
     ...actual,
     reauthorizeFailedCloudTask: state.reauthorizeFailedCloudTask,
     completeCloudAuthorization: state.completeCloudAuthorization,
+    getCompletedCloudAuthorization: state.getCompletedCloudAuthorization,
   };
 });
 vi.mock('@tauri-apps/api/event', () => ({ listen: state.listen }));
@@ -82,6 +83,7 @@ beforeEach(() => {
   state.startDragging.mockReset();
   state.startDragging.mockResolvedValue(undefined);
   state.reauthorizeFailedCloudTask.mockReset();
+  state.getCompletedCloudAuthorization.mockReset().mockResolvedValue(null);
   state.completeCloudAuthorization.mockReset();
   state.onTask = undefined;
   state.onFocus = undefined;
@@ -202,6 +204,22 @@ it('requests active tasks for the first paint before loading terminal tabs in th
   expect(state.list.mock.calls.map(([scope]) => scope)).toEqual(['active', 'terminal']);
 });
 
+it('review shares overlapping task reauthorization requests', async () => {
+  const failed = { id: 'overlap', name: '重复授权.mp4', kind: 'cloud', status: 'failed', progress: 0, source: 'cloud://baidu/file', reauthorization_required: true };
+  state.list.mockResolvedValue([failed]);
+  const begin = deferred<any>();
+  state.reauthorizeFailedCloudTask.mockReturnValue(begin.promise);
+  render(<App />);
+  fireEvent.click(screen.getByRole('tab', { name: /失败/ }));
+  const button = await screen.findByRole('button', { name: '重新授权 重复授权.mp4' });
+  fireEvent.click(button);
+  fireEvent.click(button);
+  expect(state.reauthorizeFailedCloudTask).toHaveBeenCalledTimes(1);
+  await act(async () => { begin.resolve({ provider: 'baidu', windowLabel: 'auth', instructions: '等待' }); });
+  fireEvent.click(button);
+  expect(state.reauthorizeFailedCloudTask).toHaveBeenCalledTimes(1);
+});
+
 it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorization via %s', async (delivery) => {
   vi.useFakeTimers();
   try {
@@ -234,6 +252,7 @@ it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorizat
 
     if (delivery === 'event') {
       authorizationCompleted = true;
+      state.getCompletedCloudAuthorization.mockResolvedValue({ provider: 'baidu', id: 'baidu-user', displayName: '百度用户', authMethod: 'web' });
       await act(async () => { state.listeners.get('cloud-authorization-state')?.({ payload: { provider: 'baidu', state: 'Ready', account: { provider: 'baidu', id: 'baidu-user', displayName: '百度用户', authMethod: 'web' } } }); });
       expect(state.completeCloudAuthorization).not.toHaveBeenCalled();
     } else {

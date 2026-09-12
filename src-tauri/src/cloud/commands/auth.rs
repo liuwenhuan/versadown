@@ -275,7 +275,6 @@ pub async fn cloud_begin_authorization(
         .authorization_completion
         .acquire(provider.key())
         .await?;
-    cloud.clear_authorization_completion(provider)?;
     let label = format!("cloud-auth-{}", provider.key());
     if let Some(window) = app.get_webview_window(&label) {
         window
@@ -283,6 +282,7 @@ pub async fn cloud_begin_authorization(
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
         let _ = window.set_focus();
     } else {
+        cloud.clear_authorization_completion(provider)?;
         let url = crate::cloud::ProviderRegistry::global()
             .get(provider)
             .authorization_url;
@@ -552,6 +552,16 @@ pub async fn resume_reauthorized_provider_tasks(
 // The browser page is the only place where these renewable credentials are
 // acquired.  The scripts return a narrowly selected object; they never return
 // a storage dump, DOM content or passwords to Rust.
+
+#[tauri::command]
+pub fn cloud_completed_authorization(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<Option<CloudAccount>, QuarkError> {
+    app.try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?
+        .completed_authorization(provider)
+}
 
 #[tauri::command]
 pub async fn cloud_complete_authorization(

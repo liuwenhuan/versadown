@@ -56,3 +56,44 @@ Rust 命令使用 `C:/Users/deepin/.cargo/bin/cargo.exe`，设置 `CARGO_TARGET_
 - 新增表与任务创建是两个持久操作，进程在绑定前退出可能留下未知 owner；此类任务保守不自动恢复。该行为不会把任务绑定到错误账号。
 - 已测试 provider/账号隔离、普通失败保留、重复 retry 不再次入队、父子目录投影、回收父任务排除，以及旧数据库重开。没有真实服务商账号、真实 WebView 页面或长时间联网 E2E。
 - 完成事件 payload 按规格不含 attempt ID。当前活跃订阅会忽略其他 provider、非 Ready、重复、完成/卸载后的回调；极端跨两个独立授权尝试延迟投递的同 provider 旧事件无法单靠三字段判龄。后端完成缓存由 native 成功路径写入并重新核对当前维护状态，下载恢复另按数据库 owner 核验，事件不授予任务账号权限。
+
+## 审查修复第 1 轮（基线 9423250）
+
+仅修复审查确认的 3 项 P2，没有扩展 Task 7 或进行额外边缘重构。
+
+### RED / GREEN
+
+- 后端 2 项实际行为 RED：oneshot 可控解析返回前回收父目录，旧实现仍创建任务；两个可控 retry 同时观察未关联 leaf，后到 Duplicate 将成功 task_id 清成 None。修复后 2/2 GREEN，额外在同一用例断言迟到 failure 不清关联，以及 Parsing 已认领任务阻止回收。
+- 前端 3 项实际行为 RED：CloudManager begin 延迟返回期间重复点击调用 2 次（预期 1）；旧事件直接接纳账号导致下一步完成按钮消失；App 队列重复重新授权调用 2 次（预期 1）。修复后 3/3 GREEN。CloudManager 用独立可控 completion-cache future 验证上一轮结果在新一轮 begin 后返回，不接纳旧账号、不清理新轮等待；随后当前完成事件只接纳新账号一次。
+- App RED 首次漏切换失败 tab，修正测试 setup 后重新取得上述调用次数行为 RED。Rust 广覆盖首次失败是旧 fixture 直接回收仍有 Parsing 兄弟的目录；改为先将兄弟标为终态，符合真实命令已有的回收前置条件，再次通过。不将这两项 setup 调整计为产品行为 RED。
+
+### 修复
+
+- `claim_cloud_directory_leaf_task` 在同一 SQLite transaction / TaskStore connection lock 下完成父目录状态、provider/owner 和未关联检查，以及 task 创建、owner 写入、leaf 关联。URL 解析期间不持锁；如果回收已提交，认领返回 None，零任务创建、关联和引擎提交。反向顺序中，认领写入的 Parsing 任务是提交预约；回收在同一 connection lock 下拒绝有活跃 linked task 的父目录，不能插入认领与 engine submit 之间。
+- 自动和手工 leaf retry 共用 TaskStore leaf gate，持锁后重新读取父状态与 task_id。link 使用未关联/同 task ID 条件；failure 只更新 task_id IS NULL 的虚拟 leaf，不再清空已有 task_id。稳定 source gate 继续保留。
+- CloudManager 与 App 的活跃 begin 在 await 前同步 single-flight。CloudManager begin/complete/cache query/watchdog 绑定本地 generation，清理只影响匹配代次；App 同样防止 pending 和等待期重入，完成查询及 watchdog 用 generation 与 disposed 检查。
+- 三字段事件现在仅作唤醒，不直接使用 event.account 完成 UI。新增只读 `cloud_completed_authorization` / `getCompletedCloudAuthorization`，读取后台已验证完成缓存，不启动 WebView 验证。CloudManager 在 begin 注册完成后才查缓存，之前事件仅记一次延迟唤醒。原生 listener 仍是 singleton，10 秒串行 watchdog 保留，完成/卸载释放。
+- 缓存生命周期补充：仍是进程内每 provider 非秘密最近成功账号，读取仍校验凭据 / Ready / owner。真正创建新授权窗口时清空，复用已有窗口不清空，logout 清空，进程退出销毁。旧事件只能触发当前缓存查询；旧轮已在途的查询结果受 generation 限制，不能终止新轮。此项取代上文初次实现关于旧事件被直接消费的边界说明。
+- 本轮没有新增表或迁移；初次 owner 附属表兼容规则不变。目录 task 创建、账号绑定和 leaf 关联现在一起提交；个人 task 的已有保守未知 owner 行为不变。
+
+### 最终实际验证
+
+Rust 仍使用 `CARGO_TARGET_DIR=.tools/test-target` 及本地 Cargo 路径。除下列定向范围外，没有运行全量测试。
+
+| 命令 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_directory_download review_` | RED 2 失败 → GREEN 2 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_directory_download --test cloud_session` | 16 + 18 = 34 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib cloud::commands` | 90 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib store::tests` | 4 通过（包含旧数据库启动） |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib commands::tests::cloud_directory_group_` | 4 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib commands::tests::virtual_failed_directory_group_moves_to_recycle_without_local_members` | 1 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib commands::tests::failed_share_directory_stays_one_root_after_moving_to_recycle` | 1 通过 |
+| `pnpm exec vitest run src/components/CloudManager.test.tsx src/components/CloudWorkspace.test.tsx src/lib/cloudApi.test.ts --exclude '.worktrees/**'` | 98 + 16 + 5 = 119 通过 |
+| `pnpm exec vitest run src/components/CloudManager.test.tsx src/components/CloudWorkspace.test.tsx src/App.live.test.tsx --exclude '.worktrees/**' -t 'review \|completion event\|authorization events\|reauthorized Baidu'` | 7 通过 |
+| `pnpm exec vitest run src/App.live.test.tsx --exclude '.worktrees/**' -t 'review shares\|reauthorized Baidu\|automatic password renewal'` | 4 通过 |
+| `pnpm build` | 通过，62 modules |
+| `./scripts/build-windows.ps1` | 通过，release 1m 31s，产出主程序和 aria2 sidecar |
+| `rustfmt --edition 2021 --config skip_children=true`（5 个本轮 Rust 文件）及 `git diff --check` | 通过 |
+
+自审已核对最终 claim/recycle 的共用临界区、leaf gate 后重读、条件 failure/link 和三处 UI 的清理路径。本轮没有真实服务商 / WebView 联网 E2E；仍保留原有编译提示，无新增编译错误。没有其他阻塞项。

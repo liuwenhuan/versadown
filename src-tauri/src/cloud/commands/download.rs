@@ -454,17 +454,30 @@ pub(crate) async fn submit_cloud_file(
     }
     let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     require_download_account(&app, provider, &account_id)?;
-    let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
-    state
-        .store
-        .bind_cloud_download_account(task.id, provider, &account_id)
-        .map_err(|_| QuarkError::Storage)?;
-    if let Some(context) = directory_context {
+    let task = if let Some(context) = directory_context {
         state
             .store
-            .link_cloud_directory_group_item_task(context.group_id, context.item_id, task.id)
+            .claim_cloud_directory_leaf_task(
+                context.group_id,
+                context.item_id,
+                provider,
+                &account_id,
+                NewTask {
+                    source: stable_source,
+                    name: safe_filename(&resolved.name),
+                    kind: "cloud".into(),
+                },
+            )
+            .map_err(|_| QuarkError::Storage)?
+            .ok_or_else(|| QuarkError::InvalidInput("目录已回收或文件已入队".into()))?
+    } else {
+        let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
+        state
+            .store
+            .bind_cloud_download_account(task.id, provider, &account_id)
             .map_err(|_| QuarkError::Storage)?;
-    }
+        task
+    };
     let signed_url = resolved.url.clone();
     let mut options = resolved.into_uri_submission_options();
     options.directory = configured.directory;
@@ -1041,10 +1054,20 @@ where
     F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
     Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
 {
+    let _leaf = store
+        .lock_cloud_directory_leaf(item_id)
+        .await
+        .map_err(|_| QuarkError::Storage)?;
     let group = store
         .cloud_directory_group(group_id)
         .map_err(|_| QuarkError::Storage)?
         .ok_or_else(|| QuarkError::InvalidInput("网盘目录下载任务不存在".into()))?;
+    if matches!(
+        group.status,
+        TaskStatus::Recycled | TaskStatus::Cancelled | TaskStatus::Completed
+    ) {
+        return Err(QuarkError::InvalidInput("网盘目录下载任务已结束".into()));
+    }
     let item = store
         .cloud_directory_group_items(group_id)
         .map_err(|_| QuarkError::Storage)?

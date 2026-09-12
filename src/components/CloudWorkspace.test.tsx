@@ -8,7 +8,7 @@ type TestAccount = { id: string; displayName: string; provider: 'quark' | 'pikpa
 
 it('adds the authorized workspace immediately from the completion event', async () => {
   let receive: ((event: any) => void) | undefined;
-  const client = { ...createClient(), subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return vi.fn(); }) };
+  const client = { ...createClient(), getCompletedCloudAuthorization: vi.fn().mockResolvedValue({ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }), subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return vi.fn(); }) };
   client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0]]);
   client.getCloudAccount.mockRejectedValue(new Error('旧会话错误'));
   render(<CloudWorkspace client={client} />);
@@ -40,9 +40,11 @@ it('renders the backend catalog order and labels', async () => {
 
 function createClient(accounts: Record<string, TestAccount | undefined> = {}) {
   const listeners = new Set<(event: any) => void>();
+  let completedAccount: any = null;
   return {
+    getCompletedCloudAuthorization: vi.fn(async () => completedAccount),
     subscribeCloudAuthorization: vi.fn(async (_provider: string, receive: (event: any) => void) => { listeners.add(receive); return () => { listeners.delete(receive); }; }),
-    emitAuthorization: (account: any) => { listeners.forEach(receive => receive({ provider: account.provider, state: 'Ready', account })); },
+    emitAuthorization: (account: any) => { completedAccount = account; listeners.forEach(receive => receive({ provider: account.provider, state: 'Ready', account })); },
     getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     beginCloudAuthorization: vi.fn().mockResolvedValue({ provider: 'quark', windowLabel: '登录', instructions: '完成登录' }),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => Promise.resolve({ id: `${provider}-1`, displayName: `${provider}-alice`, provider, authMethod: 'web' as const })),

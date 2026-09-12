@@ -10,13 +10,60 @@ function CloudManager(props: Omit<CloudManagerProps, 'descriptor'>) {
   return <NativeCloudManager descriptor={cloudCatalog.find(d => d.provider === props.provider)!} {...props} />;
 }
 
+it('review shares an overlapping begin and does not accept an event before begin registers', async () => {
+  let finishBegin!: (value: any) => void;
+  let receive: ((event: any) => void) | undefined;
+  const onAccountAuthorized = vi.fn();
+  const account = { provider: 'quark', id: 'current', displayName: 'Current', authMethod: 'web' };
+  const client = createCloudFake({
+    beginCloudAuthorization: vi.fn(() => new Promise(resolve => { finishBegin = resolve; })),
+    subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return vi.fn(); }),
+    getCompletedCloudAuthorization: vi.fn().mockResolvedValue(account),
+  });
+  render(<CloudManager provider="quark" client={client} authorizationOnly onAccountAuthorized={onAccountAuthorized} />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+  fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await act(async () => {});
+  expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(1);
+  await act(async () => { receive?.({ provider: 'quark', state: 'Ready', account: { ...account, id: 'old' } }); });
+  expect(onAccountAuthorized).not.toHaveBeenCalled();
+  await act(async () => { finishBegin({ provider: 'quark', windowLabel: 'auth', instructions: '等待' }); });
+  await act(async () => { receive?.({ provider: 'quark', state: 'Ready', account }); });
+  expect(onAccountAuthorized).toHaveBeenCalledWith(account);
+  expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
+});
+
+it('review ignores an old completion query after a newer authorization attempt starts', async () => {
+  let finishOld!: (account: any) => void;
+  const oldQuery = new Promise(resolve => { finishOld = resolve; });
+  const account = { provider: 'xunlei', id: 'new', displayName: 'New', authMethod: 'web' };
+  const client = createCloudFake({ getCompletedCloudAuthorization: vi.fn().mockReturnValueOnce(oldQuery).mockResolvedValue(account), completeCloudAuthorization: vi.fn().mockRejectedValue({ code: 'web_auth_required', message: '需要重新授权' }) });
+  const accepted = vi.fn();
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly onAccountAuthorized={accepted} />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await act(async () => {});
+  await act(async () => { client.emitAuthorization({ ...account, id: 'old' }); });
+  fireEvent.click(screen.getByRole('button', { name: '我已完成授权' }));
+  await act(async () => {});
+  fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await act(async () => {});
+  await act(async () => { finishOld({ ...account, id: 'old' }); });
+  expect(accepted).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: '我已完成授权' })).toBeVisible();
+  await act(async () => { client.emitAuthorization(account); });
+  expect(accepted).toHaveBeenCalledTimes(1);
+  expect(accepted).toHaveBeenCalledWith(account);
+});
+
 it('accepts authorization events immediately and ignores duplicate or unrelated completion', async () => {
   vi.useFakeTimers();
   try {
     let receive: ((event: any) => void) | undefined;
     const unlisten = vi.fn();
     const onAccountAuthorized = vi.fn();
-    const client = createCloudFake({ subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return unlisten; }) });
+    const client = createCloudFake({ getCompletedCloudAuthorization: vi.fn().mockResolvedValue({ id: 'q', provider: 'quark', displayName: 'alice', authMethod: 'web' }), subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return unlisten; }) });
     const view = render(<CloudManager provider="quark" client={client} onAccountAuthorized={onAccountAuthorized} />);
     await act(async () => {});
     fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
@@ -68,9 +115,11 @@ it('uses catalog authorization and directory identifiers instead of provider def
 
 function createCloudFake(overrides: Record<string, unknown> = {}) {
   const listeners = new Set<(event: any) => void>();
+  let completedAccount: any = null;
   return {
+    getCompletedCloudAuthorization: vi.fn(async () => completedAccount),
     subscribeCloudAuthorization: vi.fn(async (_provider: CloudProvider, receive: (event: any) => void) => { listeners.add(receive); return () => { listeners.delete(receive); }; }),
-    emitAuthorization: (account: any) => { listeners.forEach(receive => receive({ provider: account.provider, state: 'Ready', account })); },
+    emitAuthorization: (account: any) => { completedAccount = account; listeners.forEach(receive => receive({ provider: account.provider, state: 'Ready', account })); },
     getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     beginCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ provider, windowLabel: '网盘登录', instructions: '请在安全窗口中完成登录。' })),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' as const })),

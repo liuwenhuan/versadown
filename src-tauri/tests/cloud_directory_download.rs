@@ -136,6 +136,12 @@ async fn authorization_recovery_reopens_directory_leaves_and_retries_each_once()
             .len(),
         1
     );
+    // Recycling is only valid once every linked download is terminal.
+    for task_id in remaining.iter().filter_map(|item| item.task_id) {
+        if task_id != linked {
+            store.fail(task_id, "finished with error").unwrap();
+        }
+    }
     store.recycle_cloud_directory_group(group).unwrap();
     assert!(store
         .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
@@ -164,6 +170,150 @@ fn folder(id: &str, parent_id: &str, name: &str) -> CloudFile {
         size: None,
         modified_at: None,
     }
+}
+
+#[tokio::test]
+async fn review_recycling_during_resolution_prevents_atomic_leaf_claim_and_submission() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "课程", |id| {
+        Ok(directory(id, vec![file("file", id, "一.txt")]))
+    })
+    .unwrap();
+    let group = alldownloader_lib::cloud::commands::create_cloud_directory_group_for_download(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        &plan,
+        destination.path(),
+    )
+    .unwrap();
+    let item = store
+        .cloud_directory_group_items(group.id)
+        .unwrap()
+        .remove(0);
+    store
+        .fail_cloud_directory_group_item(group.id, item.id, "web_auth_required", "expired")
+        .unwrap();
+    let (released, wait) = tokio::sync::oneshot::channel::<()>();
+    let submitted = std::cell::Cell::new(0);
+    let resolution = async {
+        wait.await.unwrap();
+        let claimed = store
+            .claim_cloud_directory_leaf_task(
+                group.id,
+                item.id,
+                CloudProvider::Quark,
+                "alice",
+                NewTask::direct("cloud://quark/file"),
+            )
+            .unwrap();
+        if claimed.is_some() {
+            submitted.set(submitted.get() + 1);
+        }
+    };
+    tokio::pin!(resolution);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(resolution.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    store.recycle_cloud_directory_group(group.id).unwrap();
+    released.send(()).unwrap();
+    resolution.await;
+    assert!(
+        store.list().unwrap().is_empty(),
+        "recycled parent must prevent task creation"
+    );
+    assert!(store.cloud_directory_group_items(group.id).unwrap()[0]
+        .task_id
+        .is_none());
+    assert_eq!(submitted.get(), 0);
+}
+
+#[tokio::test]
+async fn review_late_duplicate_retry_never_erases_the_successful_leaf_link() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "课程", |id| {
+        Ok(directory(id, vec![file("file", id, "一.txt")]))
+    })
+    .unwrap();
+    let group = alldownloader_lib::cloud::commands::create_cloud_directory_group_for_download(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        &plan,
+        destination.path(),
+    )
+    .unwrap();
+    let item = store
+        .cloud_directory_group_items(group.id)
+        .unwrap()
+        .remove(0);
+    store
+        .fail_cloud_directory_group_item(group.id, item.id, "web_auth_required", "expired")
+        .unwrap();
+    let gate = CloudDownloadSourceGate::default();
+    let (released, wait) = tokio::sync::oneshot::channel::<()>();
+    let mut wait = Some(wait);
+    let first = retry_cloud_directory_group_item_with(
+        &store,
+        group.id,
+        item.id,
+        Default::default(),
+        |_, _, _, _| {
+            let wait = wait.take().unwrap();
+            let gate = &gate;
+            let store = &store;
+            async move {
+                let _source = gate.acquire("cloud://quark/file").await.unwrap();
+                wait.await.unwrap();
+                let task = store.create(NewTask::direct("cloud://quark/file")).unwrap();
+                store
+                    .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+                    .unwrap();
+                Ok(DirectoryLeafSubmission::Queued(task.id))
+            }
+        },
+    );
+    tokio::pin!(first);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(first.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let second = retry_cloud_directory_group_item_with(
+        &store,
+        group.id,
+        item.id,
+        Default::default(),
+        |_, _, _, _| async {
+            let _source = gate.acquire("cloud://quark/file").await.unwrap();
+            Ok(DirectoryLeafSubmission::Duplicate)
+        },
+    );
+    tokio::pin!(second);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(second.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    released.send(()).unwrap();
+    let queued = first.await.unwrap().payload.task.id;
+    let _ = second.await;
+    store
+        .fail_cloud_directory_group_item(group.id, item.id, "duplicate", "late failure")
+        .unwrap();
+    assert_eq!(
+        store.cloud_directory_group_items(group.id).unwrap()[0].task_id,
+        Some(queued)
+    );
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert!(
+        store.recycle_cloud_directory_group(group.id).is_err(),
+        "a claimed Parsing task must prevent recycling before submission completes"
+    );
 }
 
 #[test]
