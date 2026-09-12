@@ -108,18 +108,20 @@ impl DownloadOps for QuarkDriver<'_> {
             let cookie = cookie(store)?;
             let r = QuarkClient::new(cookie.clone(), http).download_url(file_id)?;
             let v = response_json(&r)?;
+            let url = parse_quark_download_url(&r.body)?;
+            let download_cookie = cookie_for_download(&cookie, &r.set_cookies);
+            if !r.set_cookies.is_empty() {
+                store.save(CloudProvider::Quark.key(), download_cookie.as_bytes())?;
+            }
             Ok(ResolvedCloudDownload {
-                url: parse_quark_download_url(&r.body)?,
+                url,
                 name: v
                     .pointer("/data/0/file_name")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(file_id)
                     .into(),
                 headers: vec![
-                    (
-                        "Cookie".into(),
-                        cookie_for_download(&cookie, &r.set_cookies),
-                    ),
+                    ("Cookie".into(), download_cookie),
                     ("Referer".into(), "https://pan.quark.cn/".into()),
                     ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
                 ],

@@ -608,6 +608,51 @@ impl CloudHttpTransport for DownloadCookieTransport {
     }
 }
 
+struct RotatingDownloadCookieTransport(Mutex<usize>);
+
+impl CloudHttpTransport for RotatingDownloadCookieTransport {
+    fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        let mut requests = self.0.lock().unwrap();
+        *requests += 1;
+        Ok(CloudHttpResponse {
+            status: 200,
+            body: r#"{"data":[{"download_url":"https://cdn.example.test/fixture","file_name":"fixture.jpg"}]}"#.into(),
+            set_cookies: if *requests == 1 {
+                vec!["__puus=fresh-download-session; Path=/; HttpOnly; Secure".into()]
+            } else {
+                vec![]
+            },
+        })
+    }
+}
+
+#[test]
+fn quark_download_persists_rotated_cookie_for_the_next_file() {
+    let credentials = MemoryCredentialStore::default();
+    credentials
+        .save("quark", b"sid=web-session; __puus=stale-session")
+        .unwrap();
+    let transport = RotatingDownloadCookieTransport(Mutex::new(0));
+
+    resolve_download(CloudProvider::Quark, "first", &credentials, &transport).unwrap();
+    let second =
+        resolve_download(CloudProvider::Quark, "second", &credentials, &transport).unwrap();
+    let cookie = second
+        .headers
+        .iter()
+        .find(|(name, _)| name == "Cookie")
+        .map(|(_, value)| value.as_str());
+
+    assert_eq!(
+        cookie,
+        Some("sid=web-session; __puus=fresh-download-session")
+    );
+    assert_eq!(
+        credentials.load("quark").unwrap().as_deref(),
+        Some(b"sid=web-session; __puus=fresh-download-session".as_slice())
+    );
+}
+
 #[test]
 fn quark_download_passes_the_response_session_cookie_to_aria2() {
     let credentials = MemoryCredentialStore::default();
