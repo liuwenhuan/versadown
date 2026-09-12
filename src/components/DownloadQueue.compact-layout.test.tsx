@@ -85,3 +85,10 @@ it('aligns the borderless sidebar toggle with the task sort control', () => {
     stylesheet.remove();
   }
 });
+
+it('uses stronger text weight for download task tabs', () => {
+  const stylesheet = readFileSync('src/styles.css', 'utf8');
+
+  expect(stylesheet).toMatch(/\.workspace-tab-list button\{[^}]*font-weight:700/);
+  expect(stylesheet).toMatch(/\.workspace-tab-list button\[aria-selected="true"\]\{[^}]*font-weight:800/);
+});
