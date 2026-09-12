@@ -384,6 +384,7 @@ pub async fn confirm_cloud_share_download(
             move |root| {
                 use tauri::Emitter;
                 let _ = root_event_app.emit("download-task-updated", root);
+                Ok(())
             },
             move |_, source, options, context| {
                 let app = submit_app.clone();
@@ -1371,6 +1372,23 @@ pub(crate) async fn resubmit_task(
         options.proxy = configured.proxy;
     }
     if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
+        let owner = state
+            .store
+            .cloud_download_account(task.id)
+            .map_err(|error| error.to_string())?;
+        let provider = if task.source.starts_with("cloud://") {
+            Some(
+                crate::cloud::commands::parse_stable_cloud_source(&task.source)
+                    .map_err(|error| error.to_string())?
+                    .0,
+            )
+        } else {
+            None
+        };
+        if let (Some(provider), Some(owner)) = (provider, owner.as_deref()) {
+            crate::cloud::commands::require_download_account(&app, provider, owner)
+                .map_err(|error| error.to_string())?;
+        }
         let service = state
             .runtime
             .service()
@@ -1406,6 +1424,10 @@ pub(crate) async fn resubmit_task(
                 return Err(message.to_string());
             }
         };
+        if let (Some(provider), Some(owner)) = (provider, owner.as_deref()) {
+            crate::cloud::commands::require_download_account(&app, provider, owner)
+                .map_err(|error| error.to_string())?;
+        }
         if share {
             return crate::cloud::share::resubmit_current_share_download(
                 &service, &task, resolved, options,

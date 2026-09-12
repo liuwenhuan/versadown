@@ -202,7 +202,7 @@ it('requests active tasks for the first paint before loading terminal tabs in th
   expect(state.list.mock.calls.map(([scope]) => scope)).toEqual(['active', 'terminal']);
 });
 
-it('shows a reauthorized Baidu task as downloading after its authorization succeeds', async () => {
+it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorization via %s', async (delivery) => {
   vi.useFakeTimers();
   try {
     const failedTask: QueueTask = {
@@ -232,7 +232,15 @@ it('shows a reauthorized Baidu task as downloading after its authorization succe
     fireEvent.click(screen.getByRole('button', { name: '重新授权 需要验证的文件.mp4' }));
     await act(async () => { await Promise.resolve(); });
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(500); await Promise.resolve(); await Promise.resolve(); });
+    if (delivery === 'event') {
+      authorizationCompleted = true;
+      await act(async () => { state.listeners.get('cloud-authorization-state')?.({ payload: { provider: 'baidu', state: 'Ready', account: { provider: 'baidu', id: 'baidu-user', displayName: '百度用户', authMethod: 'web' } } }); });
+      expect(state.completeCloudAuthorization).not.toHaveBeenCalled();
+    } else {
+      await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+      expect(state.completeCloudAuthorization).not.toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    }
     expect(screen.getByRole('status')).toHaveTextContent('授权成功，正在恢复受影响的下载任务');
 
     fireEvent.click(screen.getByRole('tab', { name: /下载中/ }));

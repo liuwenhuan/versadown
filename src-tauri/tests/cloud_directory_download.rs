@@ -24,6 +24,126 @@ fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
     }
 }
 
+#[tokio::test]
+async fn authorization_recovery_reopens_directory_leaves_and_retries_each_once() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("tasks.db");
+    let store = TaskStore::open_path(&path).unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "课程", |id| {
+        Ok(directory(
+            id,
+            vec![
+                file("not_authorized", id, "一.txt"),
+                file("credentials_expired", id, "二.txt"),
+                file("web_auth_required", id, "三.txt"),
+                file("network_error", id, "四.txt"),
+            ],
+        ))
+    })
+    .unwrap();
+    let outcome = submit_cloud_directory_plan(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        plan,
+        UriSubmissionOptions {
+            directory: Some(root.path().to_owned()),
+            ..Default::default()
+        },
+        |_, id, _| {
+            std::future::ready(Err(match id.as_str() {
+                "not_authorized" => QuarkError::NotAuthorized,
+                "credentials_expired" => QuarkError::AuthorizationExpired,
+                "web_auth_required" => QuarkError::WebAuthorizationRequired,
+                _ => QuarkError::Transport("offline".into()),
+            }))
+        },
+    )
+    .await
+    .unwrap();
+    let group = outcome.task.payload.task.id;
+    assert_eq!(
+        alldownloader_lib::cloud::commands::reauthorization_provider(&store, group).unwrap(),
+        CloudProvider::Quark
+    );
+    store
+        .bind_cloud_download_account(group, CloudProvider::Quark, "alice")
+        .unwrap();
+    drop(store);
+    let store = TaskStore::open_path(&path).unwrap();
+    assert!(store
+        .reauthorized_cloud_downloads(CloudProvider::Uc, "alice")
+        .unwrap()
+        .1
+        .is_empty());
+    assert!(store
+        .reauthorized_cloud_downloads(CloudProvider::Quark, "bob")
+        .unwrap()
+        .1
+        .is_empty());
+    let (_, leaves) = store
+        .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
+        .unwrap();
+    assert_eq!(leaves.len(), 3);
+    let mut submissions = 0;
+    for (group_id, item_id) in leaves {
+        retry_cloud_directory_group_item_with(
+            &store,
+            group_id,
+            item_id,
+            Default::default(),
+            |_, id, _, _| {
+                submissions += 1;
+                let task = store
+                    .create(NewTask::direct(format!("cloud://quark/{id}")))
+                    .unwrap();
+                std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(submissions, 3);
+    assert!(store
+        .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
+        .unwrap()
+        .1
+        .is_empty());
+    let remaining = store.cloud_directory_group_items(group).unwrap();
+    assert_eq!(remaining.iter().filter(|i| i.task_id.is_none()).count(), 1);
+    assert_eq!(
+        remaining
+            .iter()
+            .find(|i| i.task_id.is_none())
+            .unwrap()
+            .failure_code
+            .as_deref(),
+        Some("network_error")
+    );
+    assert!(alldownloader_lib::cloud::commands::reauthorization_provider(&store, group).is_err());
+    let linked = remaining.iter().find_map(|item| item.task_id).unwrap();
+    store
+        .bind_cloud_download_account(linked, CloudProvider::Quark, "alice")
+        .unwrap();
+    store
+        .fail_with_code(linked, Some("credentials_expired"), "expired")
+        .unwrap();
+    assert_eq!(
+        store
+            .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+    store.recycle_cloud_directory_group(group).unwrap();
+    assert!(store
+        .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
+        .unwrap()
+        .0
+        .is_empty());
+}
+
 fn file(id: &str, parent_id: &str, name: &str) -> CloudFile {
     CloudFile {
         id: id.into(),
@@ -308,6 +428,7 @@ async fn publishes_the_directory_root_before_any_leaf_is_created_or_published() 
             assert_eq!(root.status, TaskStatus::Queued);
             assert_eq!(root.children.len(), 1);
             root_order.lock().unwrap().push("root");
+            Ok(())
         },
         |_, _, _, context| {
             assert_eq!(order.lock().unwrap().as_slice(), ["root"]);

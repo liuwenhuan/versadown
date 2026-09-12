@@ -380,6 +380,43 @@ pub(crate) enum CloudFileSubmission {
     Duplicate(TaskActionOutcome),
 }
 
+pub(crate) fn require_download_account(
+    app: &AppHandle,
+    provider: CloudProvider,
+    expected: &str,
+) -> Result<(), QuarkError> {
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let record = cloud.auth_supervisor.record(&cloud.store, provider)?;
+    if record.account_id.as_deref() != Some(expected) {
+        return Err(QuarkError::NotAuthorized);
+    }
+    Ok(())
+}
+
+async fn download_account(app: AppHandle, provider: CloudProvider) -> Result<String, QuarkError> {
+    run(app, provider, move |state, http| {
+        if let Some(id) = state
+            .auth_supervisor
+            .record(&state.store, provider)?
+            .account_id
+        {
+            return Ok(id);
+        }
+        let account = restore_account(provider, &state.store, http)?;
+        state.auth_supervisor.ready_locked(
+            &state.store,
+            provider,
+            Some(account.id.clone()),
+            Some(account.auth_method),
+            auth_supervisor::session_expiry(&state.store, provider)?,
+        )?;
+        Ok(account.id)
+    })
+    .await
+}
+
 pub(crate) async fn submit_cloud_file(
     app: AppHandle,
     state: &AppState,
@@ -408,8 +445,20 @@ pub(crate) async fn submit_cloud_file(
         ));
     }
 
+    let account_id = download_account(app.clone(), provider).await?;
+    if let Some(context) = directory_context {
+        state
+            .store
+            .bind_cloud_download_account(context.group_id, provider, &account_id)
+            .map_err(|_| QuarkError::NotAuthorized)?;
+    }
     let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
+    require_download_account(&app, provider, &account_id)?;
     let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
+    state
+        .store
+        .bind_cloud_download_account(task.id, provider, &account_id)
+        .map_err(|_| QuarkError::Storage)?;
     if let Some(context) = directory_context {
         state
             .store
@@ -626,7 +675,7 @@ where
         directory_id,
         plan,
         configured,
-        |_| {},
+        |_| Ok(()),
         move |provider, file_id, options, _| submit(provider, file_id, options),
     )
     .await
@@ -647,7 +696,7 @@ pub async fn submit_cloud_directory_plan_with_group_event<F, Fut, G>(
 where
     F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
     Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
-    G: FnMut(QueueTaskPayload),
+    G: FnMut(QueueTaskPayload) -> Result<(), QuarkError>,
 {
     let base_directory = configured
         .directory
@@ -662,7 +711,7 @@ where
     )?;
     group_created(
         cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
-    );
+    )?;
     let items = store
         .cloud_directory_group_items(group.id)
         .map_err(|_| QuarkError::Storage)?;
@@ -773,6 +822,7 @@ pub async fn cloud_download_directory(
     directory_id: String,
     directory_name: String,
 ) -> Result<CloudDirectoryDownloadOutcome, QuarkError> {
+    let account_id = download_account(app.clone(), provider).await?;
     let planned_directory_id = directory_id.clone();
     let plan = run_session_work(
         app.clone(),
@@ -785,6 +835,7 @@ pub async fn cloud_download_directory(
         },
     )
     .await?;
+    require_download_account(&app, provider, &account_id)?;
 
     let state = app.state::<AppState>();
     let configured =
@@ -792,6 +843,7 @@ pub async fn cloud_download_directory(
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
     let root_event_app = app.clone();
+    let owner_store = Arc::clone(&store);
     submit_cloud_directory_plan_with_group_event(
         &store,
         provider,
@@ -800,7 +852,13 @@ pub async fn cloud_download_directory(
         configured,
         move |root| {
             use tauri::Emitter;
+            // Binding precedes every leaf submission; failures are checked again by submit_cloud_file.
+            let id = uuid::Uuid::parse_str(&root.id).map_err(|_| QuarkError::Storage)?;
+            owner_store
+                .bind_cloud_download_account(id, provider, &account_id)
+                .map_err(|_| QuarkError::Storage)?;
             let _ = root_event_app.emit("download-task-updated", root);
+            Ok(())
         },
         move |provider, file_id, options, context| {
             let app = submit_app.clone();

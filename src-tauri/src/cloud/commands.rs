@@ -47,18 +47,63 @@ pub struct CloudState {
     pub share_plans: share::CloudSharePlanStore,
     pub share_refresh_budget: share::CloudShareRefreshBudget,
     pub(crate) password_download_refresh_budget: browser_login::PasswordDownloadRefreshBudget,
-    pending_authorization_retries: Mutex<HashMap<String, PendingCloudAuthorizationRetries>>,
+    authorization_resumption: CloudDownloadSourceGate,
+    authorization_completion: CloudDownloadSourceGate,
+    authorization_results: Mutex<HashMap<CloudProvider, CloudAccount>>,
     pub auth_supervisor: auth_supervisor::AuthSupervisor,
     http: ReqwestTransport,
 }
 
 impl CloudState {
+    pub fn remember_authorization_completion(
+        &self,
+        account: &CloudAccount,
+    ) -> Result<(), QuarkError> {
+        authorization_completion_event(&self.auth_supervisor, &self.store, account)?;
+        self.authorization_results
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .insert(account.provider, account.clone());
+        Ok(())
+    }
+    pub fn completed_authorization(
+        &self,
+        provider: CloudProvider,
+    ) -> Result<Option<CloudAccount>, QuarkError> {
+        let account = self
+            .authorization_results
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .get(&provider)
+            .cloned();
+        match account {
+            Some(account)
+                if authorization_completion_event(&self.auth_supervisor, &self.store, &account)
+                    .is_ok() =>
+            {
+                Ok(Some(account))
+            }
+            _ => Ok(None),
+        }
+    }
+    pub fn clear_authorization_completion(
+        &self,
+        provider: CloudProvider,
+    ) -> Result<(), QuarkError> {
+        self.authorization_results
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .remove(&provider);
+        Ok(())
+    }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         let state = Self {
             share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
             share_refresh_budget: Default::default(),
             password_download_refresh_budget: Default::default(),
-            pending_authorization_retries: Default::default(),
+            authorization_resumption: Default::default(),
+            authorization_completion: Default::default(),
+            authorization_results: Default::default(),
             auth_supervisor: Default::default(),
             store: DpapiCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,

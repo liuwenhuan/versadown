@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import type { CloudAuthorizationStateEvent } from './cloudTypes';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from './cloudTypes';
 
@@ -7,6 +9,32 @@ export const getCloudProviderCatalog = () => invoke<ProviderDescriptor[]>('cloud
 export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
 export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
+export const resumeReauthorizedProviderTasks = (provider: CloudProvider) => invoke<void>('resume_reauthorized_provider_tasks', { provider });
+const authorizationSubscribers = new Set<{ provider: CloudProvider; receive: (event: CloudAuthorizationStateEvent) => void }>();
+let authorizationListener: Promise<() => void> | null = null;
+export async function subscribeCloudAuthorization(provider: CloudProvider, receive: (event: CloudAuthorizationStateEvent) => void): Promise<() => void> {
+  const subscriber = { provider, receive };
+  authorizationSubscribers.add(subscriber);
+  const subscription = authorizationListener ??= listen<CloudAuthorizationStateEvent>('cloud-authorization-state', event => {
+    for (const observer of authorizationSubscribers) {
+      if (event.payload.provider === observer.provider) observer.receive(event.payload);
+    }
+  });
+  let unlisten: () => void;
+  try { unlisten = await subscription; }
+  catch (error) {
+    authorizationSubscribers.delete(subscriber);
+    if (authorizationListener === subscription) authorizationListener = null;
+    throw error;
+  }
+  return () => {
+    if (!authorizationSubscribers.delete(subscriber)) return;
+    if (authorizationSubscribers.size === 0 && authorizationListener === subscription) {
+      authorizationListener = null;
+      unlisten();
+    }
+  };
+}
 export const reauthorizeFailedCloudTask = (taskId: string) => invoke<CloudAuthorization>('cloud_reauthorize_failed_task', { taskId });
 export const loginCloudWithPassword = (provider: CloudProvider, credentials: CloudCredentials) => invoke<CloudAccount>('cloud_login_password', { provider, ...credentials });
 export const getSavedCloudCredentials = (provider: CloudProvider) => invoke<import('./cloudTypes').SavedCloudCredentialInfo | null>('cloud_saved_password_credentials', { provider });

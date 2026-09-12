@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import type { CloudAuthorizationStateEvent } from '../lib/cloudTypes';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
@@ -9,6 +10,7 @@ export interface CloudManagerClient {
   getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
+  subscribeCloudAuthorization?(provider: CloudProvider, receive: (event: CloudAuthorizationStateEvent) => void): Promise<() => void>;
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
   getSavedCloudCredentials?(provider: CloudProvider): Promise<import('../lib/cloudTypes').SavedCloudCredentialInfo | null>;
   getCloudAccount(provider: CloudProvider): Promise<CloudAccount>;
@@ -48,8 +50,7 @@ type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'co
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'details';
 
-const authorizationInitialPollMs = 800;
-const authorizationPollMs = 1_800;
+const authorizationWatchdogMs = 10_000;
 
 const unavailableClient: CloudManagerClient = {
   getCloudProviderCatalog: () => Promise.reject(new Error('网盘连接器尚未接入')),
@@ -450,6 +451,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const [detailsFile, setDetailsFile] = useState<CloudFile | null>(null);
   const [destinationAction, setDestinationAction] = useState<DestinationAction | null>(null);
   const authorizationCompletionInFlight = useRef(false);
+  const webAuthorizationActive = useRef(false);
   const operationInFlight = useRef(false);
   const selectionAnchor = useRef<string | null>(null);
   const selectAllCheckbox = useRef<HTMLInputElement>(null);
@@ -594,12 +596,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   async function beginWebAuthorization() {
+    webAuthorizationActive.current = true;
+    setWebAuthorization({ provider, windowLabel: '', instructions: '' });
     setAuthorizationStatus('正在准备网页授权窗口…');
     try {
       const authorization = await client.beginCloudAuthorization(provider);
+      if (!webAuthorizationActive.current) return;
       setWebAuthorization(authorization);
       setAuthorizationStatus(authorization.instructions);
     } catch (error) {
+      webAuthorizationActive.current = false;
+      setWebAuthorization(null);
       setAuthorizationStatus(errorMessage(error, '无法打开授权窗口。'));
     }
   }
@@ -608,8 +615,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (authorizationCompletionInFlight.current) return;
     authorizationCompletionInFlight.current = true;
     try {
-      await acceptAccount(await client.completeCloudAuthorization(provider));
+      const account = await client.completeCloudAuthorization(provider);
+      if (!webAuthorizationActive.current) return;
+      ensureProviderAccount(account);
+      webAuthorizationActive.current = false;
+      await acceptAccount(account);
     } catch (error) {
+      if (!webAuthorizationActive.current) return;
       if (isAuthorizationPending(error)) {
         setAuthorizationStatus('正在等待你在授权窗口中完成登录…');
         return;
@@ -631,22 +643,36 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     }
   }
 
+  const completeWebAuthorizationRef = useRef(completeWebAuthorization);
+  completeWebAuthorizationRef.current = completeWebAuthorization;
+  const acceptAccountRef = useRef(acceptAccount);
+  acceptAccountRef.current = acceptAccount;
+  const waitingForWebAuthorization = webAuthorization !== null;
   useEffect(() => {
-    if (!webAuthorization) return;
+    if (!waitingForWebAuthorization) return;
     let cancelled = false;
+    let unlisten: (() => void) | undefined;
     let timer: number | undefined;
+    void client.subscribeCloudAuthorization?.(provider, event => {
+      if (cancelled || !webAuthorizationActive.current || event.provider !== provider || event.state !== 'Ready' || event.account?.provider !== provider) return;
+      webAuthorizationActive.current = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      void acceptAccountRef.current(event.account);
+    }).then(stop => { if (cancelled) stop(); else unlisten = stop; }).catch(() => { /* The watchdog also covers unavailable event delivery. */ });
     const poll = () => {
       timer = window.setTimeout(async () => {
-        await completeWebAuthorization(true);
-        if (!cancelled) poll();
-      }, timer === undefined ? authorizationInitialPollMs : authorizationPollMs);
+        await completeWebAuthorizationRef.current(true);
+        if (!cancelled && webAuthorizationActive.current) poll();
+      }, authorizationWatchdogMs);
     };
     poll();
     return () => {
       cancelled = true;
+      webAuthorizationActive.current = false;
+      unlisten?.();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [activeAccount, directoryState, webAuthorization]);
+  }, [client, provider, waitingForWebAuthorization]);
 
   async function runOperation(name: string, action: () => Promise<unknown>, refresh = true) {
     if (!activeAccount || operationInFlight.current) return;

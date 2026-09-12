@@ -1,6 +1,102 @@
 use super::*;
 use crate::cloud::driver::{NativeLoginOutcome, ProviderAuth};
 
+#[derive(Clone, Serialize)]
+pub struct CloudAuthorizationStateEvent {
+    pub provider: CloudProvider,
+    pub state: auth_supervisor::AuthHealth,
+    pub account: Option<CloudAccount>,
+}
+
+pub fn authorization_completion_event(
+    supervisor: &auth_supervisor::AuthSupervisor,
+    store: &impl CredentialStore,
+    account: &CloudAccount,
+) -> Result<CloudAuthorizationStateEvent, QuarkError> {
+    let record = supervisor.record(store, account.provider)?;
+    if store.load(account.provider.key())?.is_none()
+        || record.health != auth_supervisor::AuthHealth::Ready
+        || record.account_id.as_deref() != Some(&account.id)
+    {
+        return Err(QuarkError::NotAuthorized);
+    }
+    Ok(CloudAuthorizationStateEvent {
+        provider: account.provider,
+        state: auth_supervisor::AuthHealth::Ready,
+        account: Some(account.clone()),
+    })
+}
+
+pub fn reauthorization_provider(
+    store: &TaskStore,
+    id: uuid::Uuid,
+) -> Result<CloudProvider, QuarkError> {
+    match store.find(id) {
+        Ok(task)
+            if task.status == TaskStatus::Failed
+                && requires_cloud_reauthorization_failure(task.failure_code.as_deref()) =>
+        {
+            return cloud_provider_from_download_source(&task.source)
+        }
+        Ok(_) => return Err(QuarkError::InvalidInput("当前任务不需要重新授权".into())),
+        Err(crate::StoreError::NotFound(_)) => {}
+        Err(_) => return Err(QuarkError::Storage),
+    }
+    for group in store
+        .cloud_directory_groups()
+        .map_err(|_| QuarkError::Storage)?
+    {
+        if matches!(
+            group.status,
+            TaskStatus::Cancelled | TaskStatus::Recycled | TaskStatus::Completed
+        ) {
+            continue;
+        }
+        for item in store
+            .cloud_directory_group_items(group.id)
+            .map_err(|_| QuarkError::Storage)?
+        {
+            if group.id != id && item.id != id {
+                continue;
+            }
+            let eligible = if let Some(task_id) = item.task_id {
+                store.find(task_id).is_ok_and(|task| {
+                    task.status == TaskStatus::Failed
+                        && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+                })
+            } else {
+                requires_cloud_reauthorization_failure(item.failure_code.as_deref())
+            };
+            if eligible {
+                return Ok(group.provider);
+            }
+        }
+    }
+    Err(QuarkError::InvalidInput("当前任务不需要重新授权".into()))
+}
+
+/// Explicit authorization only: background refresh must never close interactive UI.
+fn publish_authorization_completion(
+    app: &AppHandle,
+    state: &CloudState,
+    account: &CloudAccount,
+) -> Result<(), QuarkError> {
+    use tauri::Emitter;
+    let event = authorization_completion_event(&state.auth_supervisor, &state.store, account)?;
+    state.remember_authorization_completion(account)?;
+    let _ = app.emit("cloud-authorization-state", event);
+    if let Some(window) = app.get_webview_window(&format!("cloud-auth-{}", account.provider.key()))
+    {
+        let _ = window.close();
+    }
+    let app = app.clone();
+    let provider = account.provider;
+    tauri::async_runtime::spawn(async move {
+        let _ = resume_reauthorized_provider_tasks(app, provider).await;
+    });
+    Ok(())
+}
+
 /// The host owns browser fallback; the callback keeps this boundary testable without a WebView.
 pub(crate) fn password_login_with_browser(
     provider: CloudProvider,
@@ -172,6 +268,14 @@ pub async fn cloud_begin_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAuthorization, QuarkError> {
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let _completion = cloud
+        .authorization_completion
+        .acquire(provider.key())
+        .await?;
+    cloud.clear_authorization_completion(provider)?;
     let label = format!("cloud-auth-{}", provider.key());
     if let Some(window) = app.get_webview_window(&label) {
         window
@@ -208,6 +312,10 @@ pub async fn cloud_begin_authorization(
                 {
                     let _ = window.eval(BAIDU_AUTO_OPEN_LOGIN_JS);
                 }
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = cloud_complete_authorization(app, provider).await;
+                });
             }
         });
         if browser_login::supports_browser_password(provider) {
@@ -237,10 +345,7 @@ pub(crate) fn cloud_provider_from_download_source(
     parse_stable_cloud_source(source).map(|(provider, _)| provider)
 }
 
-/// Registers every failed task of this provider that is blocked on a fresh
-/// official authorization, then opens exactly one official WebView. The
-/// pending list contains only durable IDs; tokens and signed URLs never enter
-/// it, so a manual login can safely refresh the whole provider batch.
+/// Explicitly recover the provider; durable account-bound failures are discovered after success.
 #[tauri::command]
 pub async fn cloud_reauthorize_failed_task(
     app: AppHandle,
@@ -250,77 +355,8 @@ pub async fn cloud_reauthorize_failed_task(
         .map_err(|_| QuarkError::InvalidInput("任务 ID 无效".into()))?;
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
 
-    let requested_provider = match state.store.find(id) {
-        Ok(task) => {
-            if task.status != TaskStatus::Failed
-                || !requires_cloud_reauthorization_failure(task.failure_code.as_deref())
-            {
-                return Err(QuarkError::InvalidInput("当前任务不需要重新授权".into()));
-            }
-            cloud_provider_from_download_source(&task.source)?
-        }
-        Err(crate::StoreError::NotFound(_)) => {
-            let mut provider = None;
-            for group in state
-                .store
-                .cloud_directory_groups()
-                .map_err(|_| QuarkError::Storage)?
-            {
-                let matches_requested = state
-                    .store
-                    .cloud_directory_group_items(group.id)
-                    .map_err(|_| QuarkError::Storage)?
-                    .into_iter()
-                    .any(|item| {
-                        item.id == id
-                            && item.task_id.is_none()
-                            && requires_cloud_reauthorization_failure(item.failure_code.as_deref())
-                    });
-                if matches_requested {
-                    provider = Some(group.provider);
-                    break;
-                }
-            }
-            provider.ok_or_else(|| QuarkError::InvalidInput("当前任务不需要重新授权".into()))?
-        }
-        Err(_) => return Err(QuarkError::Storage),
-    };
+    let requested_provider = reauthorization_provider(&state.store, id)?;
 
-    let task_ids = state
-        .store
-        .list()
-        .map_err(|_| QuarkError::Storage)?
-        .into_iter()
-        .filter(|task| {
-            task.status == TaskStatus::Failed
-                && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
-                && cloud_provider_from_download_source(&task.source)
-                    .is_ok_and(|provider| provider == requested_provider)
-        })
-        .map(|task| task.id)
-        .collect::<Vec<_>>();
-    let mut directory_items = Vec::new();
-    for group in state
-        .store
-        .cloud_directory_groups()
-        .map_err(|_| QuarkError::Storage)?
-        .into_iter()
-        .filter(|group| group.provider == requested_provider)
-    {
-        let items = state
-            .store
-            .cloud_directory_group_items(group.id)
-            .map_err(|_| QuarkError::Storage)?;
-        directory_items.extend(items.into_iter().filter_map(|item| {
-            (item.task_id.is_none()
-                && requires_cloud_reauthorization_failure(item.failure_code.as_deref()))
-            .then_some((group.id, item.id))
-        }));
-    }
-    let cloud = app
-        .try_state::<Arc<CloudState>>()
-        .ok_or(QuarkError::Storage)?;
-    cloud.queue_authorization_retries(requested_provider, task_ids, directory_items)?;
     if browser_login::supports_browser_password(requested_provider) {
         let browser_app = app.clone();
         let recovered = run(app.clone(), requested_provider, move |state, http| {
@@ -357,12 +393,18 @@ pub async fn cloud_reauthorize_failed_task(
                     Some(CloudAuthMethod::Password),
                     auth_supervisor::session_expiry(&state.store, requested_provider)?,
                 )?;
+                let account = CloudAccount {
+                    provider: requested_provider,
+                    id: credential.account_id().into(),
+                    display_name: credential.username().into(),
+                    auth_method: CloudAuthMethod::Password,
+                };
+                publish_authorization_completion(&browser_app, state, &account)?;
             }
             Ok(recovered)
         })
         .await?;
         if recovered {
-            resume_pending_authorization_retries(app, requested_provider).await?;
             return Ok(CloudAuthorization {
                 provider: requested_provider,
                 window_label: String::new(),
@@ -374,52 +416,8 @@ pub async fn cloud_reauthorize_failed_task(
     cloud_begin_authorization(app, requested_provider).await
 }
 
-pub(crate) fn queue_provider_authorization_failures(
-    app: &AppHandle,
-    provider: CloudProvider,
-) -> Result<(), QuarkError> {
-    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
-    let cloud = app
-        .try_state::<Arc<CloudState>>()
-        .ok_or(QuarkError::Storage)?;
-    let task_ids = state
-        .store
-        .list()
-        .map_err(|_| QuarkError::Storage)?
-        .into_iter()
-        .filter(|task| {
-            task.status == TaskStatus::Failed
-                && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
-                && cloud_provider_from_download_source(&task.source).ok() == Some(provider)
-        })
-        .map(|task| task.id)
-        .collect::<Vec<_>>();
-    let mut directory_items = Vec::new();
-    for group in state
-        .store
-        .cloud_directory_groups()
-        .map_err(|_| QuarkError::Storage)?
-    {
-        if group.provider != provider {
-            continue;
-        }
-        directory_items.extend(
-            state
-                .store
-                .cloud_directory_group_items(group.id)
-                .map_err(|_| QuarkError::Storage)?
-                .into_iter()
-                .filter(|item| {
-                    item.task_id.is_none()
-                        && requires_cloud_reauthorization_failure(item.failure_code.as_deref())
-                })
-                .map(|item| (group.id, item.id)),
-        );
-    }
-    cloud.queue_authorization_retries(provider, task_ids, directory_items)
-}
-
-pub(crate) async fn resume_pending_authorization_retries(
+#[tauri::command]
+pub async fn resume_reauthorized_provider_tasks(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<(), QuarkError> {
@@ -428,12 +426,49 @@ pub(crate) async fn resume_pending_authorization_retries(
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
-    let pending = cloud.take_authorization_retries(provider)?;
+    let _resumption = cloud
+        .authorization_resumption
+        .acquire(provider.key())
+        .await?;
+    let record = cloud.auth_supervisor.record(&cloud.store, provider)?;
+    if record.health != auth_supervisor::AuthHealth::Ready {
+        return Ok(());
+    }
+    let Some(account_id) = record.account_id else {
+        return Ok(());
+    };
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
-    for id in pending.task_ids {
+    let (tasks, directory_items) = state
+        .store
+        .reauthorized_cloud_downloads(provider, &account_id)
+        .map_err(|_| QuarkError::Storage)?;
+    for candidate in tasks {
+        let id = candidate.id;
+        if cloud
+            .auth_supervisor
+            .record(&cloud.store, provider)?
+            .account_id
+            .as_deref()
+            != Some(&account_id)
+        {
+            break;
+        }
         let Ok(task) = state.store.find(id) else {
             continue;
         };
+        if state
+            .store
+            .cloud_directory_group_for_task(id)
+            .map_err(|_| QuarkError::Storage)?
+            .is_some_and(|group| {
+                matches!(
+                    group.status,
+                    TaskStatus::Cancelled | TaskStatus::Recycled | TaskStatus::Completed
+                )
+            })
+        {
+            continue;
+        }
         if task.status != TaskStatus::Failed
             || !requires_cloud_reauthorization_failure(task.failure_code.as_deref())
             || cloud_provider_from_download_source(&task.source).ok() != Some(provider)
@@ -464,7 +499,42 @@ pub(crate) async fn resume_pending_authorization_retries(
             }
         }
     }
-    for (group_id, item_id) in pending.directory_items {
+    for (group_id, item_id) in directory_items {
+        if cloud
+            .auth_supervisor
+            .record(&cloud.store, provider)?
+            .account_id
+            .as_deref()
+            != Some(&account_id)
+        {
+            break;
+        }
+        let Some(group) = state
+            .store
+            .cloud_directory_group(group_id)
+            .map_err(|_| QuarkError::Storage)?
+        else {
+            continue;
+        };
+        if matches!(
+            group.status,
+            TaskStatus::Cancelled | TaskStatus::Recycled | TaskStatus::Completed
+        ) {
+            continue;
+        }
+        if !state
+            .store
+            .cloud_directory_group_items(group_id)
+            .map_err(|_| QuarkError::Storage)?
+            .iter()
+            .any(|item| {
+                item.id == item_id
+                    && item.task_id.is_none()
+                    && requires_cloud_reauthorization_failure(item.failure_code.as_deref())
+            })
+        {
+            continue;
+        }
         if let Ok(outcome) = retry_cloud_directory_group_item(app.clone(), group_id, item_id).await
         {
             if let Some(queue_task) = outcome.queue_task {
@@ -488,9 +558,20 @@ pub async fn cloud_complete_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let _completion = cloud
+        .authorization_completion
+        .acquire(provider.key())
+        .await?;
+    if let Some(account) = cloud.completed_authorization(provider)? {
+        return Ok(account);
+    }
     let window = app
         .get_webview_window(&format!("cloud-auth-{}", provider.key()))
         .ok_or(QuarkError::WebAuthorizationRequired)?;
+    let publish_app = app.clone();
     let account = run(app.clone(), provider, move |state, http| {
         let mut driver = ProviderRegistry::global().driver(provider, &state.store, http);
         let recipe = driver.auth().web_authorization_recipe();
@@ -529,7 +610,6 @@ pub async fn cloud_complete_authorization(
             Some(account.auth_method),
             auth_supervisor::session_expiry(&state.store, provider)?,
         )?;
-        let _ = window.close();
         if ProviderRegistry::global()
             .get(provider)
             .browser_profile_owner
@@ -540,13 +620,13 @@ pub async fn cloud_complete_authorization(
             set_baidu_browser_profile_username(&state.store, profile_username.as_deref())?;
             set_browser_password_login_preferred(&state.store, provider, true)?;
         }
+        publish_authorization_completion(&publish_app, state, &account)?;
         Ok(account)
     })
     .await?;
     // The session is persisted only after the official page has proved it can
     // access the provider. Every queued failed task therefore resolves with
     // the new shared credentials, not a stale per-task snapshot.
-    resume_pending_authorization_retries(app, provider).await?;
     Ok(account)
 }
 
@@ -631,11 +711,10 @@ pub async fn cloud_login_password(
             Some(account.auth_method),
             auth_supervisor::session_expiry(&state.store, provider)?,
         )?;
+        publish_authorization_completion(&browser_app, state, &account)?;
         Ok(account)
     })
     .await?;
-    queue_provider_authorization_failures(&app, provider)?;
-    resume_pending_authorization_retries(app, provider).await?;
     Ok(account)
 }
 
@@ -666,6 +745,7 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
         }
         logout_provider(provider, &s.store)?;
         s.auth_supervisor.disconnect_locked(&s.store, provider)?;
+        s.clear_authorization_completion(provider)?;
         if let Some(w) = copy.get_webview_window(&format!("cloud-auth-{}", provider.key())) {
             let _ = w.close();
         }

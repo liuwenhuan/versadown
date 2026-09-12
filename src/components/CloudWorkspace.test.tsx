@@ -1,10 +1,25 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { CloudWorkspace } from './CloudWorkspace';
 import { cloudCatalog } from '../test/cloudCatalog';
 
 type TestAccount = { id: string; displayName: string; provider: 'quark' | 'pikpak'; authMethod: 'web' | 'password' };
+
+it('adds the authorized workspace immediately from the completion event', async () => {
+  let receive: ((event: any) => void) | undefined;
+  const client = { ...createClient(), subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return vi.fn(); }) };
+  client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0]]);
+  client.getCloudAccount.mockRejectedValue(new Error('旧会话错误'));
+  render(<CloudWorkspace client={client} />);
+  fireEvent.click(await screen.findByRole('button', { name: '使用网页授权' }));
+  await act(async () => {});
+  await act(async () => { receive?.({ provider: 'quark', state: 'Ready', account: { id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' } }); });
+  expect(screen.getByRole('tab', { name: '夸克网盘' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
+  expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
+  expect(screen.queryByText(/旧会话错误/)).not.toBeInTheDocument();
+});
 
 it('keeps each failed recovery visible independently', async () => {
   const client = createClient();
@@ -24,7 +39,10 @@ it('renders the backend catalog order and labels', async () => {
 });
 
 function createClient(accounts: Record<string, TestAccount | undefined> = {}) {
+  const listeners = new Set<(event: any) => void>();
   return {
+    subscribeCloudAuthorization: vi.fn(async (_provider: string, receive: (event: any) => void) => { listeners.add(receive); return () => { listeners.delete(receive); }; }),
+    emitAuthorization: (account: any) => { listeners.forEach(receive => receive({ provider: account.provider, state: 'Ready', account })); },
     getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     beginCloudAuthorization: vi.fn().mockResolvedValue({ provider: 'quark', windowLabel: '登录', instructions: '完成登录' }),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => Promise.resolve({ id: `${provider}-1`, displayName: `${provider}-alice`, provider, authMethod: 'web' as const })),
@@ -197,9 +215,10 @@ it('automatically adds the Aliyun workspace tab after web authorization complete
 
   const aliyunAuthorization = await screen.findByRole('region', { name: '阿里账号授权' });
   await user.click(within(aliyunAuthorization).getByRole('button', { name: '使用网页授权' }));
+  await act(async () => { client.emitAuthorization({ id: 'ali', displayName: 'alice', provider: 'aliyun', authMethod: 'web' }); });
 
   expect(await screen.findByRole('tab', { name: '阿里网盘' }, { timeout: 1_500 })).toHaveAttribute('aria-selected', 'false');
-  expect(client.completeCloudAuthorization).toHaveBeenCalledWith('aliyun');
+  expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
 });
 
 it('recovers accounts into tabs while still opening on cloud management', async () => {

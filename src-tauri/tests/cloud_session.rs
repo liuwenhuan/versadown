@@ -8,6 +8,281 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[tokio::test]
+async fn authorization_recovery_discovers_only_durable_matching_account_failures() {
+    use alldownloader_lib::{NewTask, TaskStatus, TaskStore};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("tasks.db");
+    let store = TaskStore::open_path(&path).unwrap();
+    let mut eligible = Vec::new();
+    for (index, code, provider, owner) in [
+        (0, "not_authorized", CloudProvider::Quark, "alice"),
+        (1, "credentials_expired", CloudProvider::Quark, "alice"),
+        (2, "web_auth_required", CloudProvider::Quark, "alice"),
+        (3, "network_error", CloudProvider::Quark, "alice"),
+        (4, "not_authorized", CloudProvider::Quark, "bob"),
+        (5, "not_authorized", CloudProvider::Uc, "alice"),
+        (6, "not_authorized", CloudProvider::Quark, ""),
+    ] {
+        let task = store
+            .create(NewTask::direct(format!(
+                "cloud://{}/{index}",
+                provider.key()
+            )))
+            .unwrap();
+        if !owner.is_empty() {
+            store
+                .bind_cloud_download_account(task.id, provider, owner)
+                .unwrap();
+        }
+        store
+            .fail_with_code(task.id, Some(code), "fixture")
+            .unwrap();
+        if index < 3 {
+            eligible.push(task.id);
+        }
+    }
+    drop(store); // No CloudState or pending set survives this boundary.
+    let store = std::sync::Arc::new(TaskStore::open_path(&path).unwrap());
+    let engine = std::sync::Arc::new(AuthorizationRetryEngine::default());
+    let service = alldownloader_lib::DownloadService::new(engine.clone(), store.clone());
+    let (tasks, leaves) = store
+        .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
+        .unwrap();
+    assert_eq!(tasks.len(), 3);
+    assert!(leaves.is_empty());
+    for task in tasks {
+        assert!(eligible.contains(&task.id));
+        for attempt in 0..2 {
+            let resolved = alldownloader_lib::cloud::ResolvedCloudDownload {
+                url: "https://download.example/file".into(),
+                name: "file.txt".into(),
+                headers: Default::default(),
+            };
+            let submitted = alldownloader_lib::cloud::share::resubmit_current_cloud_download(
+                &service,
+                &task,
+                resolved,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(submitted.is_some(), attempt == 0);
+        }
+    }
+    assert!(store
+        .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
+        .unwrap()
+        .0
+        .is_empty());
+    assert_eq!(
+        store
+            .list()
+            .unwrap()
+            .iter()
+            .filter(|t| t.status == TaskStatus::Failed)
+            .count(),
+        4
+    );
+    assert_eq!(engine.0.load(Ordering::SeqCst), 3);
+}
+
+#[derive(Default)]
+struct AuthorizationRetryEngine(AtomicUsize);
+
+#[test]
+fn authorization_watchdog_recovers_completion_after_window_closes_but_not_after_new_attempt() {
+    use alldownloader_lib::cloud::{commands::CloudState, CloudAccount, CloudAuthMethod};
+    let root = tempfile::tempdir().unwrap();
+    let state = CloudState::new(root.path().to_owned()).unwrap();
+    state.store.save("quark", b"credential-secret").unwrap();
+    state
+        .auth_supervisor
+        .ready(
+            &state.store,
+            CloudProvider::Quark,
+            Some("alice".into()),
+            Some(CloudAuthMethod::Web),
+            None,
+        )
+        .unwrap();
+    let account = CloudAccount {
+        provider: CloudProvider::Quark,
+        id: "alice".into(),
+        display_name: "Alice".into(),
+        auth_method: CloudAuthMethod::Web,
+    };
+    state.remember_authorization_completion(&account).unwrap();
+    assert_eq!(
+        state
+            .completed_authorization(CloudProvider::Quark)
+            .unwrap()
+            .unwrap()
+            .id,
+        "alice"
+    );
+    state
+        .clear_authorization_completion(CloudProvider::Quark)
+        .unwrap();
+    assert!(state
+        .completed_authorization(CloudProvider::Quark)
+        .unwrap()
+        .is_none());
+    state.remember_authorization_completion(&account).unwrap();
+    state
+        .auth_supervisor
+        .disconnect(&state.store, CloudProvider::Quark)
+        .unwrap();
+    assert!(state
+        .completed_authorization(CloudProvider::Quark)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn authorization_event_requires_persisted_credentials_and_committed_supervisor() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::AuthSupervisor, commands::authorization_completion_event, CloudAccount,
+        CloudAuthMethod,
+    };
+    let store = MemoryCredentialStore::default();
+    let supervisor = AuthSupervisor::default();
+    let account = CloudAccount {
+        provider: CloudProvider::Quark,
+        id: "alice".into(),
+        display_name: "Alice".into(),
+        auth_method: CloudAuthMethod::Web,
+    };
+    assert!(authorization_completion_event(&supervisor, &store, &account).is_err());
+    store.save("quark", b"credential-secret").unwrap();
+    assert!(authorization_completion_event(&supervisor, &store, &account).is_err());
+    supervisor
+        .ready(
+            &store,
+            CloudProvider::Quark,
+            Some("alice".into()),
+            Some(CloudAuthMethod::Web),
+            None,
+        )
+        .unwrap();
+    let event = authorization_completion_event(&supervisor, &store, &account).unwrap();
+    assert_eq!(
+        serde_json::to_value(event).unwrap(),
+        serde_json::json!({ "provider": "quark", "state": "Ready", "account": { "provider": "quark", "id": "alice", "displayName": "Alice", "authMethod": "web" } })
+    );
+    let other = CloudAccount {
+        id: "bob".into(),
+        ..account
+    };
+    assert!(authorization_completion_event(&supervisor, &store, &other).is_err());
+    store.remove("quark").unwrap();
+    assert!(authorization_completion_event(&supervisor, &store, &other).is_err());
+}
+#[async_trait::async_trait]
+impl alldownloader_lib::aria2::Aria2Api for AuthorizationRetryEngine {
+    async fn add_uri(
+        &self,
+        _: Vec<String>,
+        _: alldownloader_lib::aria2::Aria2Options,
+    ) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        Ok(format!("gid-{}", self.0.fetch_add(1, Ordering::SeqCst)))
+    }
+    async fn add_torrent(
+        &self,
+        _: String,
+        _: Vec<String>,
+        _: alldownloader_lib::aria2::Aria2Options,
+    ) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+    async fn tell_status(
+        &self,
+        gid: &str,
+    ) -> Result<alldownloader_lib::aria2::Aria2Status, alldownloader_lib::aria2::Aria2Error> {
+        Ok(alldownloader_lib::aria2::Aria2Status {
+            gid: gid.into(),
+            status: "active".into(),
+            total_length: "10".into(),
+            completed_length: "0".into(),
+            download_speed: "1".into(),
+            upload_speed: "0".into(),
+            connections: "1".into(),
+            files: vec![],
+            followed_by: vec![],
+            error_code: None,
+            error_message: None,
+        })
+    }
+    async fn tell_active(
+        &self,
+    ) -> Result<Vec<alldownloader_lib::aria2::Aria2Status>, alldownloader_lib::aria2::Aria2Error>
+    {
+        unreachable!()
+    }
+    async fn tell_waiting(
+        &self,
+        _: i64,
+        _: u32,
+    ) -> Result<Vec<alldownloader_lib::aria2::Aria2Status>, alldownloader_lib::aria2::Aria2Error>
+    {
+        unreachable!()
+    }
+    async fn tell_stopped(
+        &self,
+        _: i64,
+        _: u32,
+    ) -> Result<Vec<alldownloader_lib::aria2::Aria2Status>, alldownloader_lib::aria2::Aria2Error>
+    {
+        unreachable!()
+    }
+    async fn get_global_stat(
+        &self,
+    ) -> Result<alldownloader_lib::aria2::Aria2GlobalStat, alldownloader_lib::aria2::Aria2Error>
+    {
+        unreachable!()
+    }
+    async fn multicall(
+        &self,
+        _: Vec<alldownloader_lib::aria2::RpcCall>,
+    ) -> Result<
+        Vec<Result<serde_json::Value, alldownloader_lib::aria2::RpcFault>>,
+        alldownloader_lib::aria2::Aria2Error,
+    > {
+        unreachable!()
+    }
+    async fn pause(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+    async fn unpause(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+    async fn remove(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+    async fn force_remove(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+    async fn change_option(
+        &self,
+        _: &str,
+        _: alldownloader_lib::aria2::Aria2Options,
+    ) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+    async fn get_option(
+        &self,
+        _: &str,
+    ) -> Result<alldownloader_lib::aria2::Aria2Options, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+    async fn save_session(&self) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        Ok("OK".into())
+    }
+    async fn shutdown(&self) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        unreachable!()
+    }
+}
+
 #[test]
 fn saved_credential_response_never_serializes_the_saved_password() {
     use alldownloader_lib::cloud::saved_cloud_credential_info;

@@ -1,7 +1,28 @@
 import { vi, expect, it } from 'vitest';
 
 const native = { invoke: vi.fn().mockResolvedValue(undefined) };
+const events = vi.hoisted(() => ({ listen: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: events.listen }));
+
+it('shares one authorization listener and releases it after the last subscriber', async () => {
+  let receive: ((event: { payload: unknown }) => void) | undefined;
+  const stopNative = vi.fn();
+  events.listen.mockImplementation(async (_name, callback) => { receive = callback; return stopNative; });
+  const api = await import('./cloudApi');
+  const first = vi.fn(), second = vi.fn();
+  const stopFirst = await api.subscribeCloudAuthorization('quark', first);
+  const stopSecond = await api.subscribeCloudAuthorization('uc', second);
+  expect(events.listen).toHaveBeenCalledTimes(1);
+  const payload = { provider: 'quark', state: 'Ready', account: { provider: 'quark', id: 'q', displayName: 'alice', authMethod: 'web' } };
+  receive?.({ payload });
+  expect(first).toHaveBeenCalledWith(payload);
+  expect(second).not.toHaveBeenCalled();
+  stopFirst();
+  expect(stopNative).not.toHaveBeenCalled();
+  stopSecond(); stopSecond();
+  expect(stopNative).toHaveBeenCalledTimes(1);
+});
 
 it('keeps saved-password metadata separate from explicit and saved-handle login payloads', async () => {
   const api = await import('./cloudApi');

@@ -227,12 +227,6 @@ pub struct CloudDownloadSourceGate {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-#[derive(Default)]
-pub(crate) struct PendingCloudAuthorizationRetries {
-    pub(crate) task_ids: HashSet<uuid::Uuid>,
-    pub(crate) directory_items: HashSet<(uuid::Uuid, uuid::Uuid)>,
-}
-
 impl CloudDownloadSourceGate {
     pub async fn acquire(
         &self,
@@ -257,32 +251,6 @@ impl CloudDownloadSourceGate {
 }
 
 impl CloudState {
-    pub(crate) fn queue_authorization_retries(
-        &self,
-        provider: CloudProvider,
-        task_ids: impl IntoIterator<Item = uuid::Uuid>,
-        directory_items: impl IntoIterator<Item = (uuid::Uuid, uuid::Uuid)>,
-    ) -> Result<(), QuarkError> {
-        let mut pending = self
-            .pending_authorization_retries
-            .lock()
-            .map_err(|_| QuarkError::Storage)?;
-        let entry = pending.entry(provider.key().to_string()).or_default();
-        entry.task_ids.extend(task_ids);
-        entry.directory_items.extend(directory_items);
-        Ok(())
-    }
-
-    pub(crate) fn take_authorization_retries(
-        &self,
-        provider: CloudProvider,
-    ) -> Result<PendingCloudAuthorizationRetries, QuarkError> {
-        self.pending_authorization_retries
-            .lock()
-            .map_err(|_| QuarkError::Storage)?
-            .remove(provider.key())
-            .map_or_else(|| Ok(PendingCloudAuthorizationRetries::default()), Ok)
-    }
     /// All session consumers, including recovery and logout, share this provider boundary.
     pub fn with_provider<T>(
         &self,

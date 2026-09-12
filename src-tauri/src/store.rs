@@ -49,6 +49,86 @@ pub struct TaskStore {
 }
 
 impl TaskStore {
+    /// Bind once, before submission. A later account replacement cannot adopt old downloads.
+    pub fn bind_cloud_download_account(
+        &self,
+        id: Uuid,
+        provider: CloudProvider,
+        account: &str,
+    ) -> Result<(), StoreError> {
+        if account.is_empty() {
+            return Err(StoreError::InvalidCloudDirectoryGroupData(
+                "missing account",
+            ));
+        }
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.execute("INSERT OR IGNORE INTO cloud_download_accounts (id, provider, account_id) VALUES (?1, ?2, ?3)", params![id.to_string(), provider.key(), account])?;
+        let matches: bool = connection.query_row(
+            "SELECT provider = ?2 AND account_id = ?3 FROM cloud_download_accounts WHERE id = ?1",
+            params![id.to_string(), provider.key(), account],
+            |row| row.get(0),
+        )?;
+        if !matches {
+            return Err(StoreError::InvalidCloudDirectoryGroupData(
+                "download belongs to another account",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn cloud_download_account(&self, id: Uuid) -> Result<Option<String>, StoreError> {
+        use rusqlite::OptionalExtension;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection
+            .query_row(
+                "SELECT account_id FROM cloud_download_accounts WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Discover from durable failure state, never from a process-local pending list.
+    /// Unknown legacy owners are deliberately excluded from automatic recovery.
+    pub fn reauthorized_cloud_downloads(
+        &self,
+        provider: CloudProvider,
+        account: &str,
+    ) -> Result<(Vec<DownloadTask>, Vec<(Uuid, Uuid)>), StoreError> {
+        let (task_ids, leaves) = {
+            let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+            let mut statement = connection.prepare("SELECT t.id FROM tasks t JOIN cloud_download_accounts a ON a.id = t.id WHERE a.provider = ?1 AND a.account_id = ?2 AND t.status = 'failed' AND t.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required') AND t.source LIKE ?3 AND NOT EXISTS (SELECT 1 FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id WHERE i.task_id = t.id AND g.status IN ('cancelled', 'recycled', 'completed'))")?;
+            let task_ids = statement
+                .query_map(
+                    params![
+                        provider.key(),
+                        account,
+                        format!("cloud://{}/%", provider.key())
+                    ],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut statement = connection.prepare("SELECT g.id, i.id FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id JOIN cloud_download_accounts a ON a.id = g.id WHERE a.provider = ?1 AND g.provider = ?1 AND a.account_id = ?2 AND i.task_id IS NULL AND i.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required') AND g.status NOT IN ('cancelled', 'recycled', 'completed')")?;
+            let leaves = statement
+                .query_map(params![provider.key(), account], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            (task_ids, leaves)
+        };
+        let parse = |id: &str| Uuid::parse_str(id).map_err(|_| StoreError::InvalidStoredStatus);
+        Ok((
+            task_ids
+                .iter()
+                .map(|id| self.find(parse(id)?))
+                .collect::<Result<_, _>>()?,
+            leaves
+                .iter()
+                .map(|(group, item)| Ok((parse(group)?, parse(item)?)))
+                .collect::<Result<_, StoreError>>()?,
+        ))
+    }
+
     pub fn open_in_memory() -> Result<Self, StoreError> {
         Self::open(Connection::open_in_memory()?)
     }
@@ -71,6 +151,7 @@ impl TaskStore {
             );",
         )?;
         migrate(&mut connection)?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
         Ok(Self {
             connection: Mutex::new(connection),
         })

@@ -10,6 +10,49 @@ function CloudManager(props: Omit<CloudManagerProps, 'descriptor'>) {
   return <NativeCloudManager descriptor={cloudCatalog.find(d => d.provider === props.provider)!} {...props} />;
 }
 
+it('accepts authorization events immediately and ignores duplicate or unrelated completion', async () => {
+  vi.useFakeTimers();
+  try {
+    let receive: ((event: any) => void) | undefined;
+    const unlisten = vi.fn();
+    const onAccountAuthorized = vi.fn();
+    const client = createCloudFake({ subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return unlisten; }) });
+    const view = render(<CloudManager provider="quark" client={client} onAccountAuthorized={onAccountAuthorized} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+    await act(async () => {});
+    await act(async () => { receive?.({ provider: 'uc', state: 'Ready', account: { id: 'other', provider: 'uc', displayName: 'other', authMethod: 'web' } }); });
+    expect(screen.queryByRole('tree')).not.toBeInTheDocument();
+    const event = { provider: 'quark', state: 'Ready', account: { id: 'q', provider: 'quark', displayName: 'alice', authMethod: 'web' } };
+    await act(async () => { receive?.(event); receive?.(event); });
+    expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
+    expect(onAccountAuthorized).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    view.unmount();
+  } finally { vi.useRealTimers(); }
+});
+
+it('uses a ten second serial watchdog and stops it on unmount when events are lost', async () => {
+  vi.useFakeTimers();
+  try {
+    const client = createCloudFake({ completeCloudAuthorization: vi.fn().mockRejectedValue({ code: 'authorization_pending' }) });
+    const view = render(<CloudManager provider="quark" client={client} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+    expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
+    view.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
 it('uses catalog authorization and directory identifiers instead of provider defaults', async () => {
   const client = createCloudFake();
   const descriptor = { ...cloudCatalog[0], displayName: '目录名称', rootDirectoryId: 'custom-root', recycleBinDirectoryId: 'custom-trash', authorization: { provider: 'quark' as const, web: false, password: true, passwordLoginMode: 'rustDirect' as const } };
@@ -24,7 +67,10 @@ it('uses catalog authorization and directory identifiers instead of provider def
 });
 
 function createCloudFake(overrides: Record<string, unknown> = {}) {
+  const listeners = new Set<(event: any) => void>();
   return {
+    subscribeCloudAuthorization: vi.fn(async (_provider: CloudProvider, receive: (event: any) => void) => { listeners.add(receive); return () => { listeners.delete(receive); }; }),
+    emitAuthorization: (account: any) => { listeners.forEach(receive => receive({ provider: account.provider, state: 'Ready', account })); },
     getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     beginCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ provider, windowLabel: '网盘登录', instructions: '请在安全窗口中完成登录。' })),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' as const })),
@@ -276,7 +322,8 @@ it('replaces the single account during renewed web authorization without retaini
   await user.click(screen.getByText('报告.pdf'));
   await user.click(screen.getByRole('button', { name: '下载' }));
   await user.click(screen.getByRole('button', { name: '重新网页授权' }));
-  await waitFor(() => expect(client.completeCloudAuthorization).toHaveBeenCalled());
+  await act(async () => { client.emitAuthorization({ id: 'second', displayName: 'alice', provider: 'quark', authMethod: 'web' }); });
+  expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
   expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
 });
@@ -287,8 +334,9 @@ it('automatically completes web authorization and loads the authorized account',
   render(<CloudManager provider="quark" client={client} />);
 
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
+  await act(async () => { client.emitAuthorization({ id: 'second', displayName: 'alice', provider: 'quark', authMethod: 'web' }); });
   expect(await screen.findByRole('region', { name: '夸克文件管理器' }, { timeout: 1500 })).toBeVisible();
-  expect(client.completeCloudAuthorization).toHaveBeenCalledWith('quark');
+  expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
   expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
 });
 
@@ -303,7 +351,7 @@ it('keeps web authorization polling serial while a completion request is still p
     await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
     await act(async () => { await Promise.resolve(); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
@@ -325,10 +373,10 @@ it('keeps polling after a transient pre-login response and completes when login 
     await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
     await act(async () => { await Promise.resolve(); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1_800); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(2);
   } finally {
@@ -1138,8 +1186,9 @@ it.each([
   expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
   await user.click(screen.getByRole('button', { name: '重新网页授权' }));
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith(provider);
+  await act(async () => { client.emitAuthorization({ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' }); });
   expect(await screen.findByRole('region', { name: `${label}文件管理器` })).toBeVisible();
-  await waitFor(() => expect(client.completeCloudAuthorization).toHaveBeenCalledWith(provider));
+  expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
 });
 
 it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
@@ -1155,8 +1204,8 @@ it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
       await act(async () => { await Promise.resolve(); });
       fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
       await act(async () => { await Promise.resolve(); });
-      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
-      await act(async () => { await vi.advanceTimersByTimeAsync(5_400); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
 
       expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
       expect(onAccountAuthorized).not.toHaveBeenCalled();
@@ -1164,7 +1213,7 @@ it.each(['provider_error', 'invalid_response', 'credentials_expired'])(
       expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: '使用网页授权' }));
       await act(async () => { await Promise.resolve(); });
-      await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
       expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(2);
       expect(onAccountAuthorized).toHaveBeenCalledWith({ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' });
     } finally {
@@ -1188,8 +1237,8 @@ it('preserves the Xunlei account, directory and rejection when renewed authoriza
     await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByRole('button', { name: '重新网页授权' }));
     await act(async () => { await Promise.resolve(); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_400); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
 
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
@@ -1212,6 +1261,7 @@ it.each(['web_auth_required', 'credentials_expired'])('recovers Xunlei initial d
 
   await user.click(await screen.findByRole('button', { name: '重新网页授权' }));
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
+  await act(async () => { client.emitAuthorization({ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }); });
   expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
   expect(await screen.findByText('恢复后的文件.txt', {}, { timeout: 2_000 })).toBeVisible();
   expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
@@ -1248,14 +1298,14 @@ it.each(['web_auth_required', 'credentials_expired'])('keeps the Xunlei account 
     await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByRole('button', { name: '重新网页授权' }));
     await act(async () => { await Promise.resolve(); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
 
     expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
     expect(screen.getByText('报告.pdf')).toBeVisible();
     expect(client.logoutCloud).not.toHaveBeenCalled();
     expect(onAccountLoggedOut).not.toHaveBeenCalled();
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1_800); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
     expect(screen.getByRole('tree', { name: '迅雷网盘文件' })).toBeVisible();
@@ -1315,7 +1365,8 @@ it('automatically completes a renewed web authorization after credentials expire
 
   expect(await screen.findByText('凭据已过期')).toBeVisible();
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
+  await act(async () => { client.emitAuthorization({ id: 'second', displayName: 'alice', provider: 'quark', authMethod: 'web' }); });
 
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' }, { timeout: 2_000 })).toBeVisible();
-  expect(client.completeCloudAuthorization).toHaveBeenCalledWith('quark');
+  expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
 });

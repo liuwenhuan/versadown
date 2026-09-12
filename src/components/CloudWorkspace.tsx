@@ -34,6 +34,11 @@ export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) 
   const activeAccount = activeTab === 'management' ? null : accounts.find((account) => account.provider === activeTab) ?? null;
 
   function acceptAccount(account: CloudAccount) {
+    setAccountErrors(current => {
+      const next = { ...current };
+      delete next[account.provider];
+      return next;
+    });
     setAccounts((current) => current.some((item) => item.provider === account.provider)
       ? current.map((item) => item.provider === account.provider ? account : item)
       : [...current, account]);
