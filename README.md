@@ -7,7 +7,7 @@
 - Tauri 2 + WebView2 Windows 桌面壳；没有 Electron/Chromium 捆绑包。
 - HTTP/HTTPS、FTP、ED2K、HLS `.m3u8`、MPEG-DASH `.mpd`、magnet、`.torrent`、Thunder 和网盘分享地址的规则分类；直链自动进入下载状态，多文件类型先进入确认窗口。
 - 本地 SQLite 任务状态、恢复时读取的任务列表、暂停/继续/取消状态操作，以及目录父子任务界面。
-- Aria2 Next 2.7.5 Windows sidecar 已随包配置，负责 HTTP、BT、ED2K 及媒体分片传输；HLS/DASH 由进程内 Rust 引擎解析清单、调用 sidecar 下载分片并合并为单个任务，FTP 由进程内纯 Rust 引擎下载并支持断点续传。失败会记录错误状态，不会把清单文件伪装成下载完成的媒体。
+- Aria2 Next Windows sidecar 已随包配置，负责 HTTP、BT、ED2K 以及原生 HLS/DASH 下载；任务状态、续传信息和媒体清单均由 aria2-next 统一持久化。FTP 仍由进程内纯 Rust 引擎下载并支持断点续传。
 - 安全的后处理计划模型：只允许解压、合并、改名、校验；拒绝程序执行和路径穿越。页面中取得的密码仅存为受保护引用，不写入调试对象。
 - 自绘的夸克/PikPak 文件管理界面、连接器能力契约与可测试 mock 连接器。账号登录、文件 API、上传与真实云端目录操作必须经过用户授权并受服务商接口/条款限制。
 - 可选的 Beta 调试报告开关默认关闭；关闭时不应收集详细链路数据。
@@ -24,7 +24,7 @@
 Windows 10/11、WebView2 runtime、Node 24+、Rust stable MSVC、Visual Studio C++ Build Tools。项目构建时会使用 Tauri 的 Windows WiX 打包链。
 
 ```powershell
-# 获取 Aria2 Next sidecar（仓库已包含同版本 sidecar 时可跳过）
+# 验证仓库内置的 Aria2 Next 原生媒体 sidecar
 powershell -ExecutionPolicy Bypass -File scripts/download-sidecars.ps1
 
 # 安装依赖，运行测试与 Web 构建

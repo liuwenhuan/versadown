@@ -51,6 +51,9 @@ pub trait Aria2Api: Send + Sync {
     async fn unpause(&self, gid: &str) -> Result<String, Aria2Error>;
     async fn remove(&self, gid: &str) -> Result<String, Aria2Error>;
     async fn force_remove(&self, gid: &str) -> Result<String, Aria2Error>;
+    async fn remove_download_result(&self, gid: &str) -> Result<String, Aria2Error> {
+        self.force_remove(gid).await
+    }
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error>;
     async fn get_option(&self, gid: &str) -> Result<Aria2Options, Aria2Error>;
     async fn save_session(&self) -> Result<String, Aria2Error>;
@@ -238,6 +241,10 @@ impl Aria2Api for Aria2RpcClient {
     }
     async fn force_remove(&self, gid: &str) -> Result<String, Aria2Error> {
         self.call("aria2.forceRemove", vec![json!(gid)]).await
+    }
+    async fn remove_download_result(&self, gid: &str) -> Result<String, Aria2Error> {
+        self.call("aria2.removeDownloadResult", vec![json!(gid)])
+            .await
     }
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error> {
         self.call("aria2.changeOption", vec![json!(gid), json!(options)])

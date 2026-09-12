@@ -47,6 +47,8 @@ fn launch_arguments_disable_remote_rpc_and_enable_persistence() {
         "--pause-metadata=true",
         "--continue=true",
         "--state-dir=fixture\\data\\aria2-next-state",
+        "--input-file=fixture\\data\\aria2-next.tasks",
+        "--save-session=fixture\\data\\aria2-next.tasks",
         "--no-conf=true",
         "--enable-dht=false",
         "--enable-dht6=false",
@@ -57,7 +59,7 @@ fn launch_arguments_disable_remote_rpc_and_enable_persistence() {
     assert!(args
         .iter()
         .any(|arg| arg == &format!("--stop-with-process={}", std::process::id())));
-    assert!(args.iter().any(|arg| arg.starts_with("--save-session=")));
+    assert!(!args.iter().any(|arg| arg.contains("aria2.session")));
 }
 
 #[test]
@@ -113,13 +115,13 @@ async fn bundled_sidecar_is_authenticated_saves_session_and_exits() {
     assert_eq!(client.shutdown().await.unwrap(), "OK");
     assert!(child.wait_for_exit(Duration::from_secs(5)).await.unwrap());
     assert!(!child.is_running().unwrap());
-    let session = std::fs::read_to_string(root.path().join("data/aria2.session")).unwrap();
+    let session = std::fs::read_to_string(root.path().join("data/aria2-next.tasks")).unwrap();
     assert!(!session.contains("rpc-secret"));
     assert!(!session.contains("token:"));
 }
 
 #[tokio::test]
-async fn startup_releases_stream_identity_already_listed_in_legacy_session() {
+async fn legacy_cutover_removes_conflicting_state_bundle_before_launch() {
     let root = tempfile::tempdir().unwrap();
     let mut launch = config(root.path());
     launch.binary = root.path().join("missing-aria2-next.exe");
@@ -153,25 +155,27 @@ async fn startup_releases_stream_identity_already_listed_in_legacy_session() {
         .unwrap();
     drop(database);
     std::fs::create_dir_all(&launch.data_dir).unwrap();
-    std::fs::write(
-        launch.data_dir.join("aria2.session"),
-        "https://example.test/duplicate\n\t gid=aaaaaaaaaaaaaaaa\n\t header=Cookie: private-fixture\nhttps://example.test/keep\n\t gid=bbbbbbbbbbbbbbbb\n\t pause=true\n",
-    )
-    .unwrap();
+    std::fs::write(launch.data_dir.join("aria2.session"), b"legacy task\n").unwrap();
 
     assert!(Aria2Process::start(launch).await.is_err());
 
-    assert_eq!(
-        std::fs::read_to_string(root.path().join("data/aria2.session")).unwrap(),
-        "https://example.test/duplicate\n\t gid=aaaaaaaaaaaaaaaa\n\t header=Cookie: private-fixture\nhttps://example.test/keep\n\t gid=bbbbbbbbbbbbbbbb\n\t pause=true\n"
-    );
-    let database = rusqlite::Connection::open(stream.join("state.db")).unwrap();
-    let remaining = database
-        .prepare("SELECT gid FROM downloads ORDER BY gid")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(remaining, vec!["cccccccccccccccc"]);
+    assert!(!root.path().join("data/aria2.session").exists());
+    assert!(!stream.exists());
+    assert!(root.path().join("data/aria2-next.tasks").is_file());
+}
+
+#[tokio::test]
+async fn startup_preserves_native_state_when_no_legacy_manifest_exists() {
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = config(root.path());
+    launch.binary = root.path().join("missing-aria2-next.exe");
+    let stream = launch.data_dir.join("aria2-next-state/stream");
+    std::fs::create_dir_all(&stream).unwrap();
+    let state = stream.join("state.db");
+    std::fs::write(&state, b"native-state-fixture").unwrap();
+
+    assert!(Aria2Process::start(launch).await.is_err());
+
+    assert_eq!(std::fs::read(state).unwrap(), b"native-state-fixture");
+    assert!(root.path().join("data/aria2-next.tasks").is_file());
 }

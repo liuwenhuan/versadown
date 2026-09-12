@@ -15,7 +15,7 @@ use crate::{
         Aria2GlobalStat, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, DownloadAction,
         DownloadService, EventSink, TransferSynchronizer, UriSubmissionOptions,
     },
-    DownloadTask, FtpDownloadEngine, MediaDownloadEngine, TaskStatus, TaskStore,
+    DownloadTask, FtpDownloadEngine, TaskStatus, TaskStore,
 };
 
 #[cfg(test)]
@@ -198,7 +198,6 @@ pub struct EngineRuntime {
     store: Arc<TaskStore>,
     download_events: Arc<dyn EventSink>,
     ftp: Arc<FtpDownloadEngine>,
-    media: Arc<MediaDownloadEngine>,
     state_events: Arc<dyn EngineStateSink>,
     state: RwLock<EngineAvailability>,
     slot: Mutex<EngineSlot>,
@@ -219,17 +218,11 @@ impl EngineRuntime {
             Arc::clone(&store),
             Arc::clone(&download_events),
         ));
-        let media = Arc::new(MediaDownloadEngine::new(
-            &launch_config.data_dir,
-            Arc::clone(&store),
-            Arc::clone(&download_events),
-        ));
         Self {
             launch_config: RwLock::new(launch_config),
             store,
             download_events,
             ftp,
-            media,
             state_events,
             state: RwLock::new(EngineAvailability::starting()),
             slot: Mutex::new(EngineSlot {
@@ -271,14 +264,19 @@ impl EngineRuntime {
     async fn retry_locked(&self, slot: &mut EngineSlot) -> EngineAvailability {
         if let Some(service) = slot.service.clone() {
             if service.engine_running().await.ok().flatten() == Some(true) {
-                let recovered = service.recover().await;
+                let download_root = self
+                    .launch_config
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .download_dir
+                    .clone();
+                let recovered = service.recover_native(&download_root).await;
                 if self.exiting.load(Ordering::Acquire) {
                     self.stop_slot_for_exit(slot).await;
                     return self.set_state(EngineAvailability::unavailable("应用正在退出"));
                 }
                 return match recovered {
                     Ok(_) => {
-                        let _ = self.media.recover(Arc::clone(&service)).await;
                         let client = slot.client.clone();
                         Self::start_synchronizer_if_needed(slot, service, client);
                         self.set_state(EngineAvailability::available())
@@ -301,6 +299,7 @@ impl EngineRuntime {
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
+        let download_root = launch_config.download_dir.clone();
         let (process, client) = match Aria2Process::start(launch_config).await {
             Ok(engine) => engine,
             Err(error) => {
@@ -322,14 +321,13 @@ impl EngineRuntime {
         );
         slot.service = Some(Arc::clone(&service));
         slot.client = Some(client.clone());
-        let recovered = service.recover().await;
+        let recovered = service.recover_native(&download_root).await;
         if self.exiting.load(Ordering::Acquire) {
             self.stop_slot_for_exit(slot).await;
             return self.set_state(EngineAvailability::unavailable("应用正在退出"));
         }
         match recovered {
             Ok(_) => {
-                let _ = self.media.recover(Arc::clone(&service)).await;
                 Self::start_synchronizer_if_needed(slot, service, Some(client));
                 self.set_state(EngineAvailability::available())
             }
@@ -414,9 +412,8 @@ impl EngineRuntime {
             .find(task_id)
             .map_err(|error| error.to_string())?;
         if uris.len() == 1 && matches!(task.kind.as_str(), "hls" | "dash") {
-            return self
-                .media
-                .submit_uri(service, task_id, &uris[0], options)
+            return service
+                .submit_native_media_with_options(task_id, uris, options, &task.kind)
                 .await
                 .map_err(|error| error.to_string());
         }
@@ -445,9 +442,8 @@ impl EngineRuntime {
             .find(task_id)
             .map_err(|error| error.to_string())?;
         if uris.len() == 1 && matches!(task.kind.as_str(), "hls" | "dash") {
-            return self
-                .media
-                .submit_uri(service, task_id, &uris[0], options)
+            return service
+                .resubmit_native_media_with_options(task_id, uris, options, &task.kind)
                 .await
                 .map_err(|error| error.to_string());
         }
@@ -474,13 +470,6 @@ impl EngineRuntime {
                 .map_err(|error| error.to_string());
         }
         let service = self.service().await.map_err(|error| error.to_string())?;
-        if matches!(task.kind.as_str(), "hls" | "dash") {
-            return self
-                .media
-                .control(service, task_id, action)
-                .await
-                .map_err(|error| error.to_string());
-        }
         service
             .control(task_id, action)
             .await
@@ -617,7 +606,6 @@ impl EngineRuntime {
         let deadline = tokio::time::Instant::now() + timeout;
         self.exiting.store(true, Ordering::Release);
         self.ftp.shutdown().await;
-        self.media.shutdown().await;
         let mut slot = match tokio::time::timeout_at(deadline, self.slot.lock()).await {
             Ok(slot) => slot,
             Err(_) => {
@@ -684,7 +672,7 @@ impl EngineRuntime {
             return;
         };
         for mut task in tasks {
-            if matches!(task.kind.as_str(), "ftp" | "hls" | "dash") {
+            if task.kind == "ftp" {
                 continue;
             }
             if !matches!(

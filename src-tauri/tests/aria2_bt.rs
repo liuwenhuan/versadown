@@ -318,8 +318,9 @@ async fn failed_cleanup_binds_the_orphan_gid_and_recovery_does_not_import_a_dupl
             other => panic!("unexpected method {other}"),
         })
         .await;
+    let recovery_root = tempfile::tempdir().unwrap();
     let recovery = DownloadService::new(Arc::new(recovery_client), store.clone())
-        .recover()
+        .recover_native(recovery_root.path())
         .await
         .unwrap();
     assert_eq!(recovery.imported, 0);

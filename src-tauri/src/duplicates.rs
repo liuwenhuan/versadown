@@ -43,10 +43,9 @@ fn has_existing_payload(store: &TaskStore, task: &DownloadTask) -> Result<bool, 
 
 fn can_resume(store: &TaskStore, task: &DownloadTask) -> Result<bool, StoreError> {
     let files = store.files(task.id)?;
-    Ok(!files.is_empty()
-        && files.iter().all(|file| {
-            Path::new(&file.path).is_file() && Path::new(&format!("{}.aria2", file.path)).is_file()
-        }))
+    Ok(task.aria_gid.is_some()
+        && !files.is_empty()
+        && files.iter().any(|file| Path::new(&file.path).is_file()))
 }
 
 /// Classifies an existing task without contacting aria2. The caller must show
@@ -156,9 +155,9 @@ mod tests {
         );
 
         let resumable = task_with_status(&store, "https://example.test/resume", TaskStatus::Failed);
+        let resumable = store.bind_gid(resumable.id, "native-resume-gid").unwrap();
         let resumable_file = root.join("resume.bin");
         std::fs::write(&resumable_file, b"a").unwrap();
-        std::fs::write(format!("{}.aria2", resumable_file.to_string_lossy()), []).unwrap();
         store
             .upsert_files(
                 resumable.id,

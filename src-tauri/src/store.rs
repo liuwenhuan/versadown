@@ -38,7 +38,7 @@ pub enum StoreError {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LegacyPurgeReport {
+pub struct IncompatibleTaskPurgeReport {
     pub removed_tasks: usize,
     pub removed_files: usize,
     pub skipped_outside_files: usize,
@@ -678,34 +678,42 @@ impl TaskStore {
         self.fail_with_code(id, None, message)
     }
 
-    /// Removes unfinished records created by the retired aria2 engine and only
-    /// deletes payloads whose resolved path stays inside the configured download root.
-    pub fn purge_incompatible_engine_tasks(
+    /// Removes explicitly identified nonterminal tasks and their payloads. Paths
+    /// outside the configured download root are never touched.
+    pub fn purge_incompatible_tasks(
         &self,
+        ids: &[Uuid],
         download_root: &Path,
-    ) -> Result<LegacyPurgeReport, StoreError> {
+    ) -> Result<IncompatibleTaskPurgeReport, StoreError> {
         let root = std::fs::canonicalize(download_root)?;
-        let tasks = self
-            .list()?
-            .into_iter()
-            .filter(|task| !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled))
-            .collect::<Vec<_>>();
-        let mut report = LegacyPurgeReport::default();
+        let mut tasks = Vec::new();
+        for id in ids {
+            match self.find(*id) {
+                Ok(task)
+                    if !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled) =>
+                {
+                    tasks.push(task)
+                }
+                Ok(_) | Err(StoreError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let mut report = IncompatibleTaskPurgeReport::default();
 
         for task in &tasks {
             for file in self.files(task.id)? {
                 let path = std::path::PathBuf::from(file.path);
-                match remove_legacy_payload_file(&root, &path)? {
-                    LegacyFileRemoval::Removed => report.removed_files += 1,
-                    LegacyFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
-                    LegacyFileRemoval::Missing => {}
+                match remove_managed_payload_file(&root, &path)? {
+                    ManagedFileRemoval::Removed => report.removed_files += 1,
+                    ManagedFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
+                    ManagedFileRemoval::Missing => {}
                 }
                 let mut sidecar = path.into_os_string();
                 sidecar.push(".aria2");
-                match remove_legacy_payload_file(&root, Path::new(&sidecar))? {
-                    LegacyFileRemoval::Removed => report.removed_files += 1,
-                    LegacyFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
-                    LegacyFileRemoval::Missing => {}
+                match remove_managed_payload_file(&root, Path::new(&sidecar))? {
+                    ManagedFileRemoval::Removed => report.removed_files += 1,
+                    ManagedFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
+                    ManagedFileRemoval::Missing => {}
                 }
             }
         }
@@ -717,6 +725,29 @@ impl TaskStore {
         }
         transaction.commit()?;
         report.removed_tasks = tasks.len();
+        Ok(report)
+    }
+
+    pub fn purge_incompatible_payload_paths(
+        &self,
+        paths: &[String],
+        download_root: &Path,
+    ) -> Result<IncompatibleTaskPurgeReport, StoreError> {
+        let root = std::fs::canonicalize(download_root)?;
+        let mut report = IncompatibleTaskPurgeReport::default();
+        for value in paths {
+            let path = std::path::PathBuf::from(value);
+            for candidate in [
+                path.clone(),
+                std::path::PathBuf::from(format!("{value}.aria2")),
+            ] {
+                match remove_managed_payload_file(&root, &candidate)? {
+                    ManagedFileRemoval::Removed => report.removed_files += 1,
+                    ManagedFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
+                    ManagedFileRemoval::Missing => {}
+                }
+            }
+        }
         Ok(report)
     }
 
@@ -1031,29 +1062,29 @@ impl TaskStore {
     }
 }
 
-enum LegacyFileRemoval {
+enum ManagedFileRemoval {
     Removed,
     OutsideRoot,
     Missing,
 }
 
-fn remove_legacy_payload_file(
+fn remove_managed_payload_file(
     download_root: &Path,
     candidate: &Path,
-) -> Result<LegacyFileRemoval, StoreError> {
+) -> Result<ManagedFileRemoval, StoreError> {
     if !candidate.is_absolute() {
-        return Ok(LegacyFileRemoval::OutsideRoot);
+        return Ok(ManagedFileRemoval::OutsideRoot);
     }
     let metadata = match std::fs::symlink_metadata(candidate) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LegacyFileRemoval::Missing)
+            return Ok(ManagedFileRemoval::Missing)
         }
         Err(error) => return Err(error.into()),
     };
     let resolved = std::fs::canonicalize(candidate)?;
     if !resolved.starts_with(download_root) {
-        return Ok(LegacyFileRemoval::OutsideRoot);
+        return Ok(ManagedFileRemoval::OutsideRoot);
     }
     if !(metadata.is_file() || metadata.file_type().is_symlink()) {
         return Err(std::io::Error::new(
@@ -1066,7 +1097,7 @@ fn remove_legacy_payload_file(
         .into());
     }
     std::fs::remove_file(candidate)?;
-    Ok(LegacyFileRemoval::Removed)
+    Ok(ManagedFileRemoval::Removed)
 }
 
 const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private FROM tasks";

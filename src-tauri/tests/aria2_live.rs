@@ -3,10 +3,7 @@
 use alldownloader_lib::aria2::{
     Aria2Api, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, Aria2Status,
 };
-use alldownloader_lib::{
-    Aria2GlobalStat, DownloadService, DownloadTask, EventSink, MediaDownloadEngine, NewTask,
-    TaskStatus, TaskStore, UriSubmissionOptions,
-};
+use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
 use axum::{
     body::{Body, Bytes},
     extract::{OriginalUri, State},
@@ -32,14 +29,6 @@ const PAYLOAD_BYTES: usize = 1024 * 1024;
 const HOLD_AFTER_BYTES: usize = 256 * 1024;
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const POLL: Duration = Duration::from_millis(50);
-
-struct NoMediaEvents;
-
-impl EventSink for NoMediaEvents {
-    fn task_updated(&self, _: &DownloadTask) {}
-
-    fn global_stat_updated(&self, _: &Aria2GlobalStat) {}
-}
 
 #[tokio::test]
 async fn transfer_gate_blocks_until_the_test_releases_it() {
@@ -211,6 +200,72 @@ async fn serve_payload(
     response.body(Body::from_stream(stream)).unwrap()
 }
 
+fn serve_static_media(headers: HeaderMap, payload: &[u8], content_type: &str) -> Response {
+    let length = payload.len();
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok());
+    let (start, end, partial) = match range {
+        Some(value) => match value
+            .strip_prefix("bytes=")
+            .and_then(|value| value.split_once('-'))
+            .and_then(|(start, end)| {
+                Some((
+                    start.parse::<usize>().ok()?,
+                    if end.is_empty() {
+                        length - 1
+                    } else {
+                        end.parse::<usize>().ok()?.min(length - 1)
+                    },
+                ))
+            }) {
+            Some((start, end)) if start <= end && start < length => (start, end, true),
+            _ => {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{length}"))
+                    .body(Body::empty())
+                    .unwrap()
+            }
+        },
+        None => (0, length - 1, false),
+    };
+    let mut response = Response::builder()
+        .status(if partial {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, end - start + 1);
+    if partial {
+        response = response.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{length}"),
+        );
+    }
+    response
+        .body(Body::from(Bytes::copy_from_slice(&payload[start..=end])))
+        .unwrap()
+}
+
+async fn serve_dash_init(headers: HeaderMap) -> Response {
+    serve_static_media(
+        headers,
+        include_bytes!("fixtures/silence-init.mp4"),
+        "audio/mp4",
+    )
+}
+
+async fn serve_dash_segment(headers: HeaderMap) -> Response {
+    serve_static_media(
+        headers,
+        include_bytes!("fixtures/silence-segment.m4s"),
+        "audio/iso.segment",
+    )
+}
+
 struct LiveAria2Fixture {
     process: Option<Aria2Process>,
     client: Aria2RpcClient,
@@ -239,10 +294,21 @@ impl LiveAria2Fixture {
                 get(|| async {
                     (
                         [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
-                        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\npayload.bin\n#EXT-X-ENDLIST\n",
+                        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.02,\nsilence.ts\n#EXT-X-ENDLIST\n",
                     )
                 }),
             )
+            .route(
+                "/silence.ts",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "video/mp2t")],
+                        include_bytes!("fixtures/silence.ts").as_slice(),
+                    )
+                }),
+            )
+            .route("/silence-init.mp4", get(serve_dash_init))
+            .route("/silence-segment.m4s", get(serve_dash_segment))
             .route(
                 "/manifest.mpd",
                 get(|| async {
@@ -251,10 +317,13 @@ impl LiveAria2Fixture {
                         r#"<?xml version="1.0" encoding="UTF-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT1S" minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
   <Period duration="PT1S">
-    <AdaptationSet mimeType="video/mp4">
-      <Representation id="1" bandwidth="1000">
-        <BaseURL>payload.bin</BaseURL>
-        <SegmentBase />
+    <AdaptationSet mimeType="audio/mp4" segmentAlignment="true">
+      <Representation id="1" bandwidth="64000" codecs="mp4a.40.2" audioSamplingRate="44100">
+        <AudioChannelConfiguration schemeIdUri="urn:mpeg:dash:23003:3:audio_channel_configuration:2011" value="2" />
+        <SegmentList timescale="44100" duration="45056">
+          <Initialization sourceURL="silence-init.mp4" />
+          <SegmentURL media="silence-segment.m4s" />
+        </SegmentList>
       </Representation>
     </AdaptationSet>
   </Period>
@@ -398,7 +467,8 @@ impl LiveAria2Fixture {
                 .unwrap(),
             "OK"
         );
-        let session = std::fs::read_to_string(self.config.data_dir.join("aria2.session")).unwrap();
+        let session =
+            std::fs::read_to_string(self.config.data_dir.join("aria2-next.tasks")).unwrap();
         assert!(!session.contains("rpc-secret") && !session.contains("token:"));
         assert_eq!(
             timeout_at(deadline, self.client.shutdown())
@@ -458,14 +528,9 @@ async fn bundled_aria2_next_accepts_ed2k_and_downloads_hls_and_dash_manifests() 
         Arc::new(fixture.client.clone()),
         Arc::clone(&store),
     ));
-    let media = Arc::new(MediaDownloadEngine::new(
-        fixture.config.data_dir.clone(),
-        Arc::clone(&store),
-        Arc::new(NoMediaEvents),
-    ));
     for (kind, name, manifest) in [
-        ("hls", "fixture-hls.bin", "playlist.m3u8"),
-        ("dash", "fixture-dash.bin", "manifest.mpd"),
+        ("hls", "fixture-hls.mp4", "playlist.m3u8"),
+        ("dash", "fixture-dash.mp4", "manifest.mpd"),
     ] {
         let source = format!("{}/{}", fixture.origin, manifest);
         let task = store
@@ -476,21 +541,22 @@ async fn bundled_aria2_next_accepts_ed2k_and_downloads_hls_and_dash_manifests() 
                 is_private: false,
             })
             .unwrap();
-        media
-            .submit_uri(
-                Arc::clone(&service),
+        service
+            .submit_native_media_with_options(
                 task.id,
-                &source,
+                vec![source],
                 UriSubmissionOptions {
                     directory: Some(fixture.config.download_dir.clone()),
                     output_name: Some(name.into()),
                     ..Default::default()
                 },
+                kind,
             )
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
+                service.reconcile_task(task.id).await.unwrap();
                 let task = store.find(task.id).unwrap();
                 assert_ne!(
                     task.status,
@@ -508,11 +574,10 @@ async fn bundled_aria2_next_accepts_ed2k_and_downloads_hls_and_dash_manifests() 
         .expect("media task did not complete");
         let output = fixture.config.download_dir.join(name);
         assert!(output.is_file(), "{manifest} did not produce {name}");
-        assert_eq!(
-            std::fs::metadata(output).unwrap().len(),
-            PAYLOAD_BYTES as u64
+        assert!(
+            std::fs::metadata(output).unwrap().len() > 0,
+            "{manifest} produced an empty media container"
         );
-        fixture.assert_download_sha256(name);
     }
 
     fixture.save_and_shutdown().await;

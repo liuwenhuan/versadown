@@ -200,6 +200,21 @@ impl DownloadService {
             .await
     }
 
+    pub async fn submit_native_media_with_options(
+        &self,
+        task_id: Uuid,
+        uris: Vec<String>,
+        options: UriSubmissionOptions,
+        media: &str,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        if !matches!(media, "hls" | "dash") {
+            return Err(DownloadServiceError::InvalidUriOption("media"));
+        }
+        let mut options = options.into_aria2_options()?;
+        options.insert("media".into(), media.into());
+        self.submit_uri(task_id, uris, options).await
+    }
+
     /// Re-submits the same durable local task after the caller has completed
     /// duplicate-file preflight and obtained any required consent. The old GID
     /// remains durable until aria2 accepts the replacement URI, avoiding a
@@ -211,6 +226,28 @@ impl DownloadService {
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let options = options.into_aria2_options()?;
+        let _guard = self.operation.lock().await;
+        self.ensure_accepting()?;
+        let gid = self.api().add_uri(uris, options).await?;
+        if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
+            let _ = self.api().remove(&gid).await;
+            return Err(error.into());
+        }
+        self.reconcile_task_unlocked(task_id).await
+    }
+
+    pub async fn resubmit_native_media_with_options(
+        &self,
+        task_id: Uuid,
+        uris: Vec<String>,
+        options: UriSubmissionOptions,
+        media: &str,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        if !matches!(media, "hls" | "dash") {
+            return Err(DownloadServiceError::InvalidUriOption("media"));
+        }
+        let mut options = options.into_aria2_options()?;
+        options.insert("media".into(), media.into());
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         let gid = self.api().add_uri(uris, options).await?;
@@ -866,6 +903,7 @@ impl DownloadService {
             return Ok(None);
         }
         self.mark_engine_unavailable().await?;
+        let download_root = config.download_dir.clone();
         self.restart_budget
             .run_once(|| async {
                 let client = {
@@ -881,7 +919,7 @@ impl DownloadService {
                     *self.api.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(client.clone());
                     client
                 };
-                let recovery = self.recover().await;
+                let recovery = self.recover_native(&download_root).await;
                 Ok::<_, DownloadServiceError>(super::recovery::RestartReport { client, recovery })
             })
             .await
