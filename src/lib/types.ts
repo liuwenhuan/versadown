@@ -184,3 +184,9 @@ export interface PrivacyTaskVisibility {
   enabled: boolean;
   unlocked: boolean;
 }
+
+export interface AppUpdate {
+  version: string;
+  notes: string;
+  downloadUrl: string;
+}

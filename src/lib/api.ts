@@ -1,5 +1,6 @@
-import { AiSettings, AiSettingsInput, AppSettings, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './types';
+import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './types';
 import { invoke } from '@tauri-apps/api/core';
+import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 
 function fileNameFrom(value: string) {
   if (/^ed2k:\/\/\|file\|/i.test(value)) {
@@ -228,6 +229,52 @@ export async function unlockPrivacyTasks(password: string): Promise<PrivacyTaskV
 
 export async function lockPrivacyTasks(): Promise<PrivacyTaskVisibility> {
   return isTauriRuntime() ? invoke<PrivacyTaskVisibility>('lock_privacy_tasks') : { enabled: false, unlocked: false };
+}
+
+const appUpdateCacheKey = 'versadown.app-update.v1';
+const appUpdateCacheLifetimeMs = 12 * 60 * 60 * 1000;
+
+function readCachedAppUpdate(): AppUpdate | null | undefined {
+  try {
+    const cached = JSON.parse(window.localStorage.getItem(appUpdateCacheKey) ?? 'null') as { appVersion?: unknown; checkedAt?: unknown; update?: unknown } | null;
+    if (!cached || cached.appVersion !== appVersion || typeof cached.checkedAt !== 'number' || Date.now() - cached.checkedAt >= appUpdateCacheLifetimeMs) return undefined;
+    if (cached.update === null) return null;
+    if (typeof cached.update !== 'object' || cached.update === null) return undefined;
+    const update = cached.update as Partial<AppUpdate>;
+    return typeof update.version === 'string' && typeof update.notes === 'string' && typeof update.downloadUrl === 'string'
+      ? { version: update.version, notes: update.notes, downloadUrl: update.downloadUrl }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function cacheAppUpdate(update: AppUpdate | null) {
+  try {
+    window.localStorage.setItem(appUpdateCacheKey, JSON.stringify({ appVersion, checkedAt: Date.now(), update }));
+  } catch {
+    // Update checks remain functional when browser storage is unavailable.
+  }
+}
+
+export async function checkForAppUpdate(): Promise<AppUpdate | null> {
+  if (!isTauriRuntime()) return null;
+  const cached = readCachedAppUpdate();
+  if (cached !== undefined) return cached;
+  const update = await invoke<AppUpdate | null>('check_for_app_update');
+  cacheAppUpdate(update);
+  return update;
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  const destination = new URL(url);
+  if (destination.protocol !== 'https:' || destination.hostname !== 'versadown.aigutta.com') throw new Error('更新地址无效');
+  if (isTauriRuntime()) {
+    const { openUrl } = await import('@tauri-apps/plugin-opener');
+    await openUrl(destination);
+    return;
+  }
+  window.open(destination, '_blank', 'noopener,noreferrer');
 }
 
 export async function updateAiSettings(settings: AiSettingsInput): Promise<AiSettings> {

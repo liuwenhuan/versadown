@@ -20,6 +20,7 @@ mod policy;
 mod privacy;
 mod processing;
 mod store;
+mod update;
 mod window_lifecycle;
 
 pub use aria2::*;
@@ -111,6 +112,14 @@ impl EngineStateSink for TauriDownloadEvents {
 #[tauri::command]
 fn app_version_command() -> String {
     app_version()
+}
+
+#[tauri::command]
+async fn check_for_app_update() -> Result<Option<update::AppUpdate>, String> {
+    let current_version = app_version();
+    tauri::async_runtime::spawn_blocking(move || update::fetch_app_update(&current_version))
+        .await
+        .map_err(|error| format!("版本检测任务失败：{error}"))?
 }
 
 pub fn run() {
@@ -250,6 +259,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_version_command,
+            check_for_app_update,
             commands::parse_download,
             commands::confirm_cloud_share_download,
             commands::confirm_download_command,

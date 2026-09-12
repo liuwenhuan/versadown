@@ -10,11 +10,12 @@ import { TaskDetailsDialog } from './components/TaskDetailsDialog';
 import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace } from './components/CloudWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
+import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { cancelDownloadFile, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
-import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
+import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import darkMintIcon from './assets/launcher/dark_mint_128.png';
 import mintWhiteIcon from './assets/launcher/mint_white_128.png';
@@ -219,7 +220,7 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
   </svg>;
 }
 
-function NavigationIcon({ kind }: { kind: 'tasks' | 'cloud' | 'settings' }) {
+function NavigationIcon({ kind }: { kind: 'tasks' | 'cloud' | 'settings' | 'about' }) {
   const svgProps = {
     'aria-hidden': true,
     viewBox: '0 0 24 24',
@@ -236,6 +237,9 @@ function NavigationIcon({ kind }: { kind: 'tasks' | 'cloud' | 'settings' }) {
   if (kind === 'cloud') {
     return <svg {...svgProps}><path d="M7.1 18.5h9.55a3.35 3.35 0 0 0 .48-6.66A5.7 5.7 0 0 0 6.42 10.2 4.2 4.2 0 0 0 7.1 18.5Z" /><path d="M8.5 20h7" /></svg>;
   }
+  if (kind === 'about') {
+    return <svg {...svgProps}><circle cx="12" cy="12" r="8.5" /><path d="M12 11v5M12 7.5v.25" /></svg>;
+  }
   return <svg {...svgProps}><path d="m12 3.1 1.62 1.7 2.3-.27.92 2.12 2.1.98-.52 2.24 1.48 1.62-1.48 1.62.52 2.24-2.1.98-.92 2.12-2.3-.27L12 20.9l-1.62-1.7-2.3.27-.92-2.12-2.1-.98.52-2.24-1.48-1.62 1.48-1.62-.52-2.24 2.1-.98.92-2.12 2.3.27L12 3.1Z" /><circle cx="12" cy="12" r="2.8" /></svg>;
 }
 
@@ -245,13 +249,14 @@ export function App() {
   const [confirmation, setConfirmation] = useState<ParseResult | null>(null);
   const [duplicateQueue, setDuplicateQueue] = useState<DuplicateDownload[]>([]);
   const [resolvingDuplicateId, setResolvingDuplicateId] = useState<string | null>(null);
-  const [view, setView] = useState<ManagerView>('downloads');
+  const [view, setView] = useState<ManagerView | 'about'>('downloads');
   const [downloadTab, setDownloadTab] = useState<TaskListTab>('active');
   const [taskSorts, setTaskSorts] = useState<Record<TaskListTab, TaskSortMode>>(initialTaskSorts);
   const [searchInput, setSearchInput] = useState('');
   const [headerPanel, setHeaderPanel] = useState<HeaderPanelMode>(null);
   const [headerConfirmation, setHeaderConfirmation] = useState<ParseResult | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null);
   const [privacyVisibility, setPrivacyVisibility] = useState<PrivacyTaskVisibility>({ enabled: false, unlocked: false });
   const [privacyTaskFilter, setPrivacyTaskFilter] = useState<PrivacyTaskFilter>('all');
   const [privacyUnlockOpen, setPrivacyUnlockOpen] = useState(false);
@@ -554,6 +559,12 @@ export function App() {
     let active = true;
     getSettings().then((loaded) => { if (active) setSettings(loaded); }).catch(() => undefined);
     getPrivacyTaskVisibility().then((visibility) => { if (active) setPrivacyVisibility(visibility); }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    checkForAppUpdate().then((update) => { if (active) setAppUpdate(update); }).catch(() => undefined);
     return () => { active = false; };
   }, []);
 
@@ -1169,7 +1180,7 @@ export function App() {
         <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="tasks" /></span><span>任务</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
         <button className={view === 'cloud' ? 'nav-active' : ''} onClick={() => setView('cloud')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="cloud" /></span><span>我的网盘</span></button>
         <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="settings" /></span><span>设置</span></button>
-        <small>Windows Beta</small>
+        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{appUpdate ? '有新版本' : '关于'}</span></button>
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
@@ -1196,6 +1207,7 @@ export function App() {
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
+        {view === 'about' && <section className="view-panel" aria-label="关于"><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
       </div>
       {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,
