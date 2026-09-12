@@ -12,14 +12,14 @@ const state = vi.hoisted(() => ({
   confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
-  reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn()
+  reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), privacyVisibility: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
-  getPrivacyTaskVisibility: vi.fn().mockResolvedValue({ enabled: false, unlocked: false }),
+  getPrivacyTaskVisibility: state.privacyVisibility,
   defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } },
   getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } }),
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
@@ -84,6 +84,8 @@ beforeEach(() => {
   state.startDragging.mockResolvedValue(undefined);
   state.reauthorizeFailedCloudTask.mockReset();
   state.completeCloudAuthorization.mockReset();
+  state.privacyVisibility.mockReset();
+  state.privacyVisibility.mockResolvedValue({ enabled: false, unlocked: false });
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -360,6 +362,39 @@ it('sorts only the active task tab from the menu beside total speed', async () =
 
   await user.click(screen.getByRole('tab', { name: /已完成/ }));
   expect(visibleNames()).toEqual(['delta.zip', 'beta.zip']);
+});
+
+it('filters unlocked private tasks from the task sort menu', async () => {
+  const ordinaryTask: QueueTask = { ...oldTask, id: 'ordinary-task', name: 'ordinary.zip' };
+  const privateTask: QueueTask = { ...oldTask, id: 'private-task', name: 'private.zip', is_private: true };
+  state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: true });
+  state.list.mockResolvedValue([ordinaryTask, privateTask]);
+  const user = userEvent.setup();
+  render(<App />);
+
+  const queue = await screen.findByRole('region', { name: '下载队列' });
+  expect(await screen.findByRole('button', { name: '锁定隐私任务' })).toBeVisible();
+  expect(screen.queryByRole('combobox', { name: '筛选任务' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '仅隐私任务' }));
+
+  await waitFor(() => expect(within(queue).getByTitle('private.zip')).toBeVisible());
+  expect(within(queue).queryByTitle('ordinary.zip')).not.toBeInTheDocument();
+});
+
+it('uses the shared line icon and input treatment when unlocking private tasks', async () => {
+  state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: false });
+  const user = userEvent.setup();
+  render(<App />);
+
+  const unlockButton = await screen.findByRole('button', { name: '解锁隐私任务' });
+  expect(unlockButton.querySelector('svg')).not.toBeNull();
+  expect(unlockButton).not.toHaveTextContent('🔒');
+  await user.click(unlockButton);
+
+  const passwordInput = await screen.findByLabelText('隐私模式密码');
+  expect(passwordInput.closest('.cloud-operation-editor')).not.toBeNull();
 });
 
 it('shows all start for paused tasks and resumes every paused task from the active tab', async () => {

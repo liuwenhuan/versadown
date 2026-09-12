@@ -94,7 +94,21 @@ const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mo
   ] },
 ];
 
-function TaskSortControl({ value, onChange }: { value: TaskSortMode; onChange(mode: TaskSortMode): void }) {
+const privacyTaskFilterOptions: ReadonlyArray<{ value: PrivacyTaskFilter; label: string }> = [
+  { value: 'all', label: '全部任务' },
+  { value: 'private', label: '仅隐私任务' },
+  { value: 'ordinary', label: '仅普通任务' },
+];
+
+function PrivacyLockIcon({ unlocked }: { unlocked: boolean }) {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="5" y="10" width="14" height="10" rx="2" />
+    {unlocked ? <path d="M8 10V8a4 4 0 0 1 7.4-2.1" /> : <path d="M8 10V8a4 4 0 0 1 8 0v2" />}
+    <path d="M12 14v2" />
+  </svg>;
+}
+
+function TaskSortControl({ value, onChange, privacyFilter, onPrivacyFilterChange, showPrivacyFilter }: { value: TaskSortMode; onChange(mode: TaskSortMode): void; privacyFilter: PrivacyTaskFilter; onPrivacyFilterChange(filter: PrivacyTaskFilter): void; showPrivacyFilter: boolean }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -118,6 +132,7 @@ function TaskSortControl({ value, onChange }: { value: TaskSortMode; onChange(mo
     </button>
     {open && <div className="task-sort-menu" role="menu" aria-label="任务排序">
       {taskSortGroups.map((group) => <section key={group.label}><p>{group.label}</p><div>{group.options.map((option) => <button type="button" key={option.mode} role="menuitemradio" aria-checked={value === option.mode} aria-label={option.ariaLabel} className={value === option.mode ? 'selected' : ''} onClick={() => { onChange(option.mode); setOpen(false); }}>{option.label}</button>)}</div></section>)}
+      {showPrivacyFilter && <section><p>显示任务</p><div>{privacyTaskFilterOptions.map((option) => <button type="button" key={option.value} role="menuitemradio" aria-checked={privacyFilter === option.value} className={privacyFilter === option.value ? 'selected' : ''} onClick={() => { onPrivacyFilterChange(option.value); setOpen(false); }}>{option.label}</button>)}</div></section>}
     </div>}
   </div>;
 }
@@ -1171,9 +1186,8 @@ export function App() {
             </div>
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
             <div className="task-privacy-actions">
-              {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}>{privacyVisibility.unlocked ? '🔓' : '🔒'}</button>}
-              {privacyVisibility.unlocked && <label className="task-privacy-filter"><span>筛选</span><select aria-label="筛选任务" value={privacyTaskFilter} onChange={(event) => setPrivacyTaskFilter(event.target.value as PrivacyTaskFilter)}><option value="all">全部任务</option><option value="private">仅隐私任务</option><option value="ordinary">仅普通任务</option></select></label>}
-              <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} />
+              {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}><PrivacyLockIcon unlocked={privacyVisibility.unlocked} /></button>}
+              <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} privacyFilter={privacyTaskFilter} onPrivacyFilterChange={setPrivacyTaskFilter} showPrivacyFilter={privacyVisibility.unlocked} />
             </div>
           </header>
           <section className="queue-area">
@@ -1187,7 +1201,7 @@ export function App() {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
       } : current)} onClose={dismissConfirmation} />}
-      {privacyUnlockOpen && <div className="modal-backdrop" role="presentation"><section className="confirm-dialog" role="dialog" aria-modal="true" aria-label="解锁隐私任务"><header><div className="confirm-dialog-title"><span aria-hidden="true">🔒</span><h2>解锁隐私任务</h2></div><button aria-label="关闭隐私解锁窗口" onClick={() => setPrivacyUnlockOpen(false)}>×</button></header><form onSubmit={(event) => { event.preventDefault(); void unlockPrivateTasks(); }}><div className="parse-resource-card"><label className="settings-field">隐私模式密码<input ref={privacyUnlockPassword} type="password" autoComplete="current-password" aria-label="隐私模式密码" disabled={privacyUnlocking} /></label>{privacyUnlockError && <p className="cloud-operation-status error" role="alert">{privacyUnlockError}</p>}</div><footer><span /><div><button type="button" onClick={() => setPrivacyUnlockOpen(false)} disabled={privacyUnlocking}>取消</button><button className="primary" type="submit" disabled={privacyUnlocking}>{privacyUnlocking ? '正在解锁…' : '解锁'}</button></div></footer></form></section></div>}
+      {privacyUnlockOpen && <div className="modal-backdrop" role="presentation"><section className="cloud-trash-confirm" role="dialog" aria-modal="true" aria-label="解锁隐私任务"><h3>解锁隐私任务</h3><form onSubmit={(event) => { event.preventDefault(); void unlockPrivateTasks(); }}><div className="cloud-operation-editor"><label>隐私模式密码<input ref={privacyUnlockPassword} type="password" autoComplete="current-password" aria-label="隐私模式密码" disabled={privacyUnlocking} /></label></div>{privacyUnlockError && <p className="cloud-operation-status error" role="alert">{privacyUnlockError}</p>}<div className="new-download-actions"><button type="button" onClick={() => setPrivacyUnlockOpen(false)} disabled={privacyUnlocking}>取消</button><button className="primary" type="submit" disabled={privacyUnlocking}>{privacyUnlocking ? '正在解锁…' : '解锁'}</button></div></form></section></div>}
       {duplicate && <DuplicateDownloadDialog
         task={duplicate.task}
         state={duplicate.state}

@@ -112,6 +112,13 @@ it('requires a confirmed password before saving enabled private downloads', asyn
   expect(await screen.findByRole('status')).toHaveTextContent('隐私下载已开启');
 });
 
+it('uses the shared settings form treatment for privacy password inputs', () => {
+  render(<SettingsPanel initial={{ ...initial, privacyDownloadEnabled: true }} onChange={() => {}} />);
+
+  expect(screen.getByLabelText('隐私模式密码').closest('form')).toHaveClass('proxy-settings');
+  expect(screen.getByLabelText('确认隐私模式密码').closest('form')).toHaveClass('proxy-settings');
+});
+
 it('saves the preferred magnet metadata service from advanced settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
