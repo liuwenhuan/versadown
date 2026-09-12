@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum CloudProvider {
     Quark,
@@ -12,6 +12,15 @@ pub enum CloudProvider {
     Uc,
 }
 impl CloudProvider {
+    pub const ALL: [Self; 7] = [
+        Self::Quark,
+        Self::Pikpak,
+        Self::Baidu,
+        Self::Tianyi,
+        Self::Aliyun,
+        Self::Xunlei,
+        Self::Uc,
+    ];
     pub fn key(self) -> &'static str {
         match self {
             Self::Quark => "quark",
@@ -43,21 +52,9 @@ pub enum PasswordLoginMode {
 }
 
 pub fn provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapabilities {
-    let password_login_mode = match provider {
-        CloudProvider::Pikpak | CloudProvider::Baidu | CloudProvider::Tianyi => {
-            PasswordLoginMode::RustDirect
-        }
-        CloudProvider::Aliyun | CloudProvider::Xunlei | CloudProvider::Uc => {
-            PasswordLoginMode::OfficialWebView
-        }
-        CloudProvider::Quark => PasswordLoginMode::None,
-    };
-    CloudAuthorizationCapabilities {
-        provider,
-        web: true,
-        password: password_login_mode == PasswordLoginMode::RustDirect,
-        password_login_mode,
-    }
+    super::ProviderRegistry::global()
+        .get(provider)
+        .authorization
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

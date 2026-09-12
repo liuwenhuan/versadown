@@ -3,6 +3,15 @@ import { vi, expect, it } from 'vitest';
 const native = { invoke: vi.fn().mockResolvedValue(undefined) };
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 
+it('loads the catalog and uses its root when listing without a parent', async () => {
+  const api = await import('./cloudApi');
+  native.invoke.mockResolvedValueOnce([{ provider: 'baidu', rootDirectoryId: '/dynamic-root' }]);
+  native.invoke.mockResolvedValueOnce({ id: '/dynamic-root', items: [] });
+  expect(await api.listCloudDirectory('baidu')).toEqual({ id: '/dynamic-root', items: [] });
+  expect(native.invoke).toHaveBeenCalledWith('cloud_provider_catalog');
+  expect(native.invoke).toHaveBeenCalledWith('cloud_list_directory', { provider: 'baidu', parentId: '/dynamic-root' });
+});
+
 it('permanently deletes only the selected cloud recycle-bin files', async () => {
   const api = await import('./cloudApi');
 

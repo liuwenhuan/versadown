@@ -3,6 +3,48 @@ use alldownloader_lib::{
 };
 
 #[test]
+fn cloud_share_classification_requires_a_registered_host_and_path() {
+    assert_eq!(
+        classify_input("https://pan.quark.cn.evil.test/s/abc").kind,
+        CandidateKind::Direct
+    );
+    assert_eq!(
+        classify_input("https://example.test/?url=https://mypikpak.com/s/abc").kind,
+        CandidateKind::Direct
+    );
+    assert_eq!(
+        classify_input("https://pan.quark.cn/s/abc").kind,
+        CandidateKind::QuarkShare
+    );
+    assert_eq!(
+        classify_input("https://www.mypikpak.com/s/abc").kind,
+        CandidateKind::PikPakShare
+    );
+}
+
+#[test]
+fn preserves_legacy_quark_and_pikpak_candidate_links_without_trusting_substrings() {
+    for value in ["https://pan.quark.cn", "https://quark.cn/s/legacy"] {
+        assert_eq!(
+            classify_input(value).kind,
+            CandidateKind::QuarkShare,
+            "{value}"
+        );
+    }
+    for value in ["https://mypikpak.com", "https://pikpak.me/legacy"] {
+        assert_eq!(
+            classify_input(value).kind,
+            CandidateKind::PikPakShare,
+            "{value}"
+        );
+    }
+    assert_eq!(
+        classify_input("https://pikpak.me.evil.test/legacy").kind,
+        CandidateKind::Direct
+    );
+}
+
+#[test]
 fn recognizes_direct_http_magnet_and_thunder() {
     assert_eq!(
         classify_input("magnet:?xt=urn:btih:abc").kind,

@@ -32,21 +32,16 @@ impl PasswordDownloadRefreshBudget {
 }
 
 pub(super) fn supports_browser_password(provider: CloudProvider) -> bool {
-    matches!(provider, CloudProvider::Baidu | CloudProvider::Tianyi)
+    !super::ProviderRegistry::global()
+        .get(provider)
+        .password_login_hosts
+        .is_empty()
 }
 
 pub(super) fn trusted_login_url(provider: CloudProvider, url: &url::Url) -> bool {
-    url.scheme() == "https"
-        && url.port_or_known_default() == Some(443)
-        && match provider {
-            CloudProvider::Baidu => {
-                matches!(url.host_str(), Some("pan.baidu.com" | "passport.baidu.com"))
-            }
-            CloudProvider::Tianyi => {
-                matches!(url.host_str(), Some("cloud.189.cn" | "open.e.189.cn"))
-            }
-            _ => false,
-        }
+    super::ProviderRegistry::global()
+        .get(provider)
+        .accepts_password_login_url(url)
 }
 
 pub(super) fn password_script(

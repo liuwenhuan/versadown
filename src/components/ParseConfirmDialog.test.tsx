@@ -2,6 +2,15 @@ import { render, screen } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { ParseConfirmDialog } from './ParseConfirmDialog';
+import { cloudCatalog } from '../test/cloudCatalog';
+const catalogApi = vi.hoisted(() => ({ getCloudProviderCatalog: vi.fn() }));
+vi.mock('../lib/cloudApi', () => catalogApi);
+
+it('uses the catalog share label instead of a fixed provider label', async () => {
+  catalogApi.getCloudProviderCatalog.mockResolvedValue([{ ...cloudCatalog[0], shareDisplayName: '动态分享名称' }]);
+  render(<ParseConfirmDialog result={{ ...result, taskId: 'cloud-share://quark/plan/entry' }} onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
+  expect(await screen.findByText('动态分享名称分享')).toBeVisible();
+});
 
 const result = {
   taskId: 'task-1', requiresConfirmation: true,
@@ -65,7 +74,8 @@ it('keeps selection controls hidden while BitTorrent metadata is loading', () =>
   expect(screen.queryByRole('checkbox', { name: '全选文件' })).not.toBeInTheDocument();
 });
 
-it('identifies an opaque cloud share and explains that transfer happens automatically without exposing credentials', () => {
+it('identifies an opaque cloud share and explains that transfer happens automatically without exposing credentials', async () => {
+  catalogApi.getCloudProviderCatalog.mockResolvedValue([{ ...cloudCatalog[2], shareDisplayName: '百度网盘' }]);
   render(<ParseConfirmDialog
     result={{ ...result, taskId: `cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}` }}
     onConfirm={() => {}}
@@ -73,7 +83,7 @@ it('identifies an opaque cloud share and explains that transfer happens automati
     onClose={() => {}}
   />);
 
-  expect(screen.getByText('百度网盘分享')).toBeVisible();
+  expect(await screen.findByText('百度网盘分享')).toBeVisible();
   expect(screen.getByText('必要时会自动转存后下载')).toBeVisible();
   expect(screen.queryByText('pass-123')).not.toBeInTheDocument();
 });

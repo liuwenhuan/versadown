@@ -731,11 +731,7 @@ fn browser_password_login(
     let script = Arc::new(browser_login::password_script(
         provider, username, password,
     )?);
-    let url = match provider {
-        CloudProvider::Baidu => "https://pan.baidu.com",
-        CloudProvider::Tianyi => "https://cloud.189.cn",
-        _ => return Err(QuarkError::WebAuthorizationRequired),
-    };
+    let url = super::ProviderRegistry::global().get(provider).authorization_url;
     let mut builder = WebviewWindowBuilder::new(
         app,
         &label,
@@ -1243,6 +1239,11 @@ pub fn cloud_provider_capabilities(provider: CloudProvider) -> CloudAuthorizatio
 }
 
 #[tauri::command]
+pub fn cloud_provider_catalog() -> Vec<super::ProviderDescriptorDto> {
+    super::ProviderRegistry::global().catalog()
+}
+
+#[tauri::command]
 pub async fn cloud_saved_password_credentials(
     app: AppHandle,
     provider: CloudProvider,
@@ -1449,15 +1450,7 @@ pub async fn cloud_begin_authorization(
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
         let _ = window.set_focus();
     } else {
-        let url = match provider {
-            CloudProvider::Quark => "https://pan.quark.cn",
-            CloudProvider::Pikpak => "https://mypikpak.com/drive",
-            CloudProvider::Baidu => "https://pan.baidu.com",
-            CloudProvider::Tianyi => "https://cloud.189.cn",
-            CloudProvider::Aliyun => "https://www.aliyundrive.com/drive",
-            CloudProvider::Xunlei => "https://pan.xunlei.com",
-            CloudProvider::Uc => "https://drive.uc.cn",
-        };
+        let url = super::ProviderRegistry::global().get(provider).authorization_url;
         let mut builder = WebviewWindowBuilder::new(
             &app,
             &label,
@@ -2028,15 +2021,7 @@ fn list_cloud_directory(
 }
 
 fn is_provider_recycle_bin(provider: CloudProvider, directory_id: &str) -> bool {
-    match provider {
-        CloudProvider::Quark => directory_id == QUARK_RECYCLE_BIN_ID,
-        CloudProvider::Pikpak => directory_id == PIKPAK_RECYCLE_BIN_ID,
-        CloudProvider::Baidu => directory_id == baidu::BAIDU_RECYCLE_BIN_ID,
-        CloudProvider::Tianyi => directory_id == tianyi::TIANYI_RECYCLE_BIN_ID,
-        CloudProvider::Aliyun => directory_id == aliyun::ALIYUN_RECYCLE_BIN_ID,
-        CloudProvider::Xunlei => directory_id == xunlei::XUNLEI_RECYCLE_BIN_ID,
-        CloudProvider::Uc => directory_id == uc::UC_RECYCLE_BIN_ID,
-    }
+    directory_id == super::ProviderRegistry::global().get(provider).recycle_bin_directory_id
 }
 
 fn list_provider_recycle_bin(
@@ -2951,16 +2936,7 @@ pub fn parse_stable_cloud_source(source: &str) -> Result<(CloudProvider, String)
         .strip_prefix("cloud://")
         .and_then(|value| value.split_once('/'))
         .ok_or_else(invalid)?;
-    let provider = match provider {
-        "quark" => CloudProvider::Quark,
-        "pikpak" => CloudProvider::Pikpak,
-        "baidu" => CloudProvider::Baidu,
-        "tianyi" => CloudProvider::Tianyi,
-        "aliyun" => CloudProvider::Aliyun,
-        "xunlei" => CloudProvider::Xunlei,
-        "uc" => CloudProvider::Uc,
-        _ => return Err(invalid()),
-    };
+    let provider = super::ProviderRegistry::global().by_key(provider).ok_or_else(invalid)?.provider;
     if encoded.is_empty() || encoded.contains(['/', '?', '#', '&', '=']) || !encoded.is_ascii() {
         return Err(invalid());
     }

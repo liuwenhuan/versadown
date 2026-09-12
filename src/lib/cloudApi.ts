@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
-import { cloudRootDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudDirectoryDownloadFailure, type CloudDirectoryDownloadOutcome, type CloudFile, type CloudProvider } from './cloudTypes';
+import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from './cloudTypes';
+
+export const getCloudProviderCatalog = () => invoke<ProviderDescriptor[]>('cloud_provider_catalog');
 
 export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
 export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
@@ -9,7 +11,14 @@ export const reauthorizeFailedCloudTask = (taskId: string) => invoke<CloudAuthor
 export const loginCloudWithPassword = (provider: CloudProvider, credentials: CloudCredentials) => invoke<CloudAccount>('cloud_login_password', { provider, ...credentials });
 export const getSavedCloudCredentials = (provider: CloudProvider) => invoke<CloudCredentials | null>('cloud_saved_password_credentials', { provider });
 export const getCloudAccount = (provider: CloudProvider) => invoke<CloudAccount>('cloud_account', { provider });
-export const listCloudDirectory = (provider: CloudProvider, parentId = cloudRootDirectoryId[provider]) => invoke<CloudDirectory>('cloud_list_directory', { provider, parentId });
+export async function listCloudDirectory(provider: CloudProvider, parentId?: string): Promise<CloudDirectory> {
+  if (parentId === undefined) {
+    const descriptor = (await getCloudProviderCatalog()).find(item => item.provider === provider);
+    if (!descriptor) throw { code: 'provider_unsupported', message: '网盘目录中没有此服务商' };
+    parentId = descriptor.rootDirectoryId;
+  }
+  return invoke<CloudDirectory>('cloud_list_directory', { provider, parentId });
+}
 export const createCloudDirectory = (provider: CloudProvider, parentId: string, name: string) => invoke<CloudFile>('cloud_create_directory', { provider, parentId, name });
 export const renameCloudFile = (provider: CloudProvider, fileId: string, name: string) => invoke<void>('cloud_rename', { provider, fileId, name });
 export const moveCloudFiles = (provider: CloudProvider, fileIds: string[], targetParentId: string) => invoke<void>('cloud_move', { provider, fileIds, targetParentId });

@@ -84,24 +84,9 @@ pub fn extract_cloud_share_candidate(
 }
 
 fn cloud_provider_for_url(url: &Url) -> Option<CloudProvider> {
-    let host = url.host_str()?.to_ascii_lowercase();
-    let path = url.path();
-    match (host.as_str(), path) {
-        ("pan.quark.cn", path) if path.starts_with("/s/") => Some(CloudProvider::Quark),
-        ("mypikpak.com" | "www.mypikpak.com", path) if path.starts_with("/s/") => {
-            Some(CloudProvider::Pikpak)
-        }
-        ("pan.baidu.com", path) if path.starts_with("/s/") => Some(CloudProvider::Baidu),
-        ("cloud.189.cn", path) if path.starts_with("/t/") => Some(CloudProvider::Tianyi),
-        ("alipan.com" | "www.alipan.com" | "aliyundrive.com" | "www.aliyundrive.com", path)
-            if path.starts_with("/s/") =>
-        {
-            Some(CloudProvider::Aliyun)
-        }
-        ("pan.xunlei.com", path) if path.starts_with("/s/") => Some(CloudProvider::Xunlei),
-        ("drive.uc.cn", path) if path.starts_with("/s/") => Some(CloudProvider::Uc),
-        _ => None,
-    }
+    crate::cloud::ProviderRegistry::global()
+        .for_share_url(url)
+        .map(|descriptor| descriptor.provider)
 }
 
 fn access_code_from_query(url: &Url) -> Option<String> {
@@ -162,6 +147,11 @@ pub fn classify_input(input: &str) -> Candidate {
     let uri = input.trim().to_string();
     let lower = uri.to_lowercase();
     let path_without_query = lower.split(['?', '#']).next().unwrap_or(&lower);
+    let share_provider = Url::parse(&uri)
+        .ok()
+        .as_ref()
+        .and_then(|url| crate::cloud::ProviderRegistry::global().for_candidate_url(url))
+        .map(|d| d.provider);
     let kind = if valid_ed2k_file_link(&uri) {
         CandidateKind::Ed2k
     } else if lower.starts_with("ed2k:") {
@@ -172,9 +162,9 @@ pub fn classify_input(input: &str) -> Candidate {
         CandidateKind::Thunder
     } else if lower.starts_with("ftp://") {
         CandidateKind::Ftp
-    } else if lower.contains("pan.quark.cn") || lower.contains("quark.cn/s/") {
+    } else if share_provider == Some(CloudProvider::Quark) {
         CandidateKind::QuarkShare
-    } else if lower.contains("mypikpak.com") || lower.contains("pikpak.me") {
+    } else if share_provider == Some(CloudProvider::Pikpak) {
         CandidateKind::PikPakShare
     } else if path_without_query.ends_with(".torrent") {
         CandidateKind::Torrent

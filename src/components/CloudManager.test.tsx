@@ -2,11 +2,30 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { vi } from 'vitest';
-import { CloudManager } from './CloudManager';
-import { cloudRecycleBinDirectoryId, cloudRootDirectoryId, type CloudProvider } from '../lib/cloudTypes';
+import { CloudManager as NativeCloudManager, type CloudManagerProps } from './CloudManager';
+import type { CloudProvider } from '../lib/cloudTypes';
+import { cloudCatalog, cloudRecycleBinDirectoryId, cloudRootDirectoryId } from '../test/cloudCatalog';
+
+function CloudManager(props: Omit<CloudManagerProps, 'descriptor'>) {
+  return <NativeCloudManager descriptor={cloudCatalog.find(d => d.provider === props.provider)!} {...props} />;
+}
+
+it('uses catalog authorization and directory identifiers instead of provider defaults', async () => {
+  const client = createCloudFake();
+  const descriptor = { ...cloudCatalog[0], displayName: '目录名称', rootDirectoryId: 'custom-root', recycleBinDirectoryId: 'custom-trash', authorization: { provider: 'quark' as const, web: false, password: true, passwordLoginMode: 'rustDirect' as const } };
+  const { rerender } = render(<NativeCloudManager descriptor={descriptor} provider="quark" client={client} authorizationOnly />);
+  expect(screen.getByRole('region', { name: '目录名称账号授权' })).toBeVisible();
+  expect(screen.getByLabelText('账号')).toBeVisible();
+  expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
+  rerender(<NativeCloudManager key="files" descriptor={descriptor} provider="quark" client={client} initialAccounts={[{ id: 'q1', provider: 'quark', displayName: 'q', authMethod: 'web' }]} restoreOnMount={false} />);
+  await screen.findByRole('tree', { name: '目录名称网盘文件' });
+  expect(client.listCloudDirectory).toHaveBeenCalledWith('quark', 'custom-root');
+  expect(screen.getByRole('treeitem', { name: /回收站/ })).toBeVisible();
+});
 
 function createCloudFake(overrides: Record<string, unknown> = {}) {
   return {
+    getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     beginCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ provider, windowLabel: '网盘登录', instructions: '请在安全窗口中完成登录。' })),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' as const })),
     loginCloudWithPassword: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'password' as const })),

@@ -1,10 +1,11 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { cloudRecycleBinDirectoryId, cloudRootDirectoryId, type CloudAccount, type CloudAuthorization, type CloudAuthorizationCapabilities, type CloudCredentials, type CloudDirectory, type CloudDirectoryDownloadFailure, type CloudDirectoryDownloadOutcome, type CloudFile, type CloudProvider } from '../lib/cloudTypes';
+import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
 export interface CloudManagerClient {
+  getCloudProviderCatalog(): Promise<readonly ProviderDescriptor[]>;
   getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
@@ -26,6 +27,7 @@ export interface CloudManagerClient {
 }
 
 export interface CloudManagerProps {
+  descriptor: ProviderDescriptor;
   provider: CloudProvider;
   client?: CloudManagerClient;
   initialAccounts?: readonly CloudAccount[];
@@ -47,20 +49,11 @@ type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'co
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'details';
 
-const providerLabel: Record<CloudProvider, string> = { quark: '夸克', pikpak: 'PikPak', baidu: '百度', tianyi: '天翼', aliyun: '阿里', xunlei: '迅雷', uc: 'UC' };
-const fixedAuthorizationCapabilities: Record<CloudProvider, CloudAuthorizationCapabilities> = {
-  quark: { provider: 'quark', web: true, password: false, passwordLoginMode: 'none' },
-  pikpak: { provider: 'pikpak', web: true, password: true, passwordLoginMode: 'rustDirect' },
-  baidu: { provider: 'baidu', web: true, password: true, passwordLoginMode: 'rustDirect' },
-  tianyi: { provider: 'tianyi', web: true, password: true, passwordLoginMode: 'rustDirect' },
-  aliyun: { provider: 'aliyun', web: true, password: false, passwordLoginMode: 'officialWebView' },
-  xunlei: { provider: 'xunlei', web: true, password: false, passwordLoginMode: 'officialWebView' },
-  uc: { provider: 'uc', web: true, password: false, passwordLoginMode: 'officialWebView' }
-};
 const authorizationInitialPollMs = 800;
 const authorizationPollMs = 1_800;
 
 const unavailableClient: CloudManagerClient = {
+  getCloudProviderCatalog: () => Promise.reject(new Error('网盘连接器尚未接入')),
   getCloudAuthorizationCapabilities: () => Promise.reject(new Error('网盘连接器尚未接入')),
   beginCloudAuthorization: () => Promise.reject(new Error('网盘连接器尚未接入')),
   completeCloudAuthorization: () => Promise.reject(new Error('网盘连接器尚未接入')),
@@ -367,8 +360,8 @@ function CloudFileDetails({ file, path, onClose }: { file: CloudFile; path: stri
   </div>, document.body);
 }
 
-function CloudDestinationPicker({ action, provider, client, excludedIds, onChoose, onOfficialWebAuthorizationRequired, onClose }: { action: DestinationAction; provider: CloudProvider; client: CloudManagerClient; excludedIds: readonly string[]; onChoose(parentId: string): void; onOfficialWebAuthorizationRequired(error: unknown): void; onClose(): void }) {
-  const rootId = cloudRootDirectoryId[provider];
+function CloudDestinationPicker({ action, provider, descriptor, client, excludedIds, onChoose, onOfficialWebAuthorizationRequired, onClose }: { action: DestinationAction; provider: CloudProvider; descriptor: ProviderDescriptor; client: CloudManagerClient; excludedIds: readonly string[]; onChoose(parentId: string): void; onOfficialWebAuthorizationRequired(error: unknown): void; onClose(): void }) {
+  const rootId = descriptor.rootDirectoryId;
   const [directory, setDirectory] = useState<CloudDirectory | null>(null);
   const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -407,7 +400,7 @@ function CloudDestinationPicker({ action, provider, client, excludedIds, onChoos
     void load(rootId, [{ id: rootId, name: '根目录' }]);
     return () => { requestSequence.current += 1; };
   }, [client, provider]);
-  const recycleBinId = cloudRecycleBinDirectoryId[provider];
+  const recycleBinId = descriptor.recycleBinDirectoryId;
   const folders = directory?.items.filter((item) => item.kind === 'folder' && !excludedIds.includes(item.id) && item.id !== recycleBinId) ?? [];
   return createPortal(<div className="cloud-confirm-backdrop">
     <section ref={dialogRef} className="cloud-destination-picker" role="dialog" aria-modal="true" aria-label={`选择${actionLabel}位置`}>
@@ -426,9 +419,9 @@ function CloudDestinationPicker({ action, provider, client, excludedIds, onChoos
   </div>, document.body);
 }
 
-export function CloudManager({ provider, client = unavailableClient, initialAccounts = [], onDownloadTask, authorizationOnly = false, restoreOnMount = true, showAccountTabs = true, showSessionActions = true, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
-  const label = providerLabel[provider];
-  const rootId = cloudRootDirectoryId[provider];
+export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccounts = [], onDownloadTask, authorizationOnly = false, restoreOnMount = true, showAccountTabs = true, showSessionActions = true, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+  const label = descriptor.displayName;
+  const rootId = descriptor.rootDirectoryId;
   const providerAccounts = initialAccounts.filter((account) => account.provider === provider);
   const [accounts, setAccounts] = useState<readonly CloudAccount[]>(providerAccounts);
   const [activeAccountId, setActiveAccountId] = useState<string | null>(providerAccounts[0]?.id ?? null);
@@ -442,7 +435,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [passwordLoginBusy, setPasswordLoginBusy] = useState(false);
   const passwordLoginInFlight = useRef(false);
   const passwordFieldsEdited = useRef(false);
-  const effectiveAuthorizationCapabilities = fixedAuthorizationCapabilities[provider];
+  const effectiveAuthorizationCapabilities = descriptor.authorization;
   const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
@@ -466,7 +459,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const sortedItems = sortedCloudFiles(directory?.items ?? [], sort);
   const selected = sortedItems.filter((item) => selectedIds.includes(item.id));
   const currentDirectoryId = directory?.id ?? breadcrumbs.at(-1)?.id ?? rootId;
-  const recycleBinId = cloudRecycleBinDirectoryId[provider];
+  const recycleBinId = descriptor.recycleBinDirectoryId;
   const isRecycleBin = currentDirectoryId === recycleBinId;
   const isVirtualRecycleBinItem = (item: CloudFile | undefined) => item?.id === recycleBinId;
   const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
@@ -507,7 +500,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     selectionAnchor.current = null;
     try {
       const next = await client.listCloudDirectory(provider, parentId);
-      const recycleBinId = cloudRecycleBinDirectoryId[provider];
+      const recycleBinId = descriptor.recycleBinDirectoryId;
       const items = parentId === rootId && !next.items.some((item) => item.id === recycleBinId)
         ? [...next.items, { id: recycleBinId, parentId: rootId, name: '回收站', kind: 'folder' as const }]
         : next.items;
@@ -927,6 +920,6 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
     {detailsFile && <CloudFileDetails file={detailsFile} path={`/${breadcrumbs.slice(1).map((crumb) => crumb.name).join('/') || ''}`} onClose={() => setDetailsFile(null)} />}
-    {destinationAction && <CloudDestinationPicker action={destinationAction} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { setDestinationAction(null); setReauthorizationRequired(true); setAuthorizationStatus(errorMessage(error, '读取目标目录需要网页验证。')); setOperation({ kind: 'error', message: `读取${destinationAction === 'copy' ? '复制' : '移动'}目标目录需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重新执行本次操作。` }); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
+    {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { setDestinationAction(null); setReauthorizationRequired(true); setAuthorizationStatus(errorMessage(error, '读取目标目录需要网页验证。')); setOperation({ kind: 'error', message: `读取${destinationAction === 'copy' ? '复制' : '移动'}目标目录需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重新执行本次操作。` }); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
   </section>;
 }

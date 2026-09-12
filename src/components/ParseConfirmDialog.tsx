@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ConfirmResource, ParseResult } from '../lib/types';
 import { formatBytes } from '../lib/downloadEvents';
+import { getCloudProviderCatalog } from '../lib/cloudApi';
 
 interface ParseConfirmDialogProps {
   result: ParseResult;
@@ -14,13 +15,9 @@ interface ParseConfirmDialogProps {
 
 type ResourceFilter = 'all' | 'video' | 'other';
 
-const cloudProviderLabels: Record<string, string> = {
-  quark: '夸克网盘', pikpak: 'PikPak', baidu: '百度网盘', tianyi: '天翼云盘', aliyun: '阿里云盘', xunlei: '迅雷网盘', uc: 'UC 网盘'
-};
-
 function cloudShareProvider(planSource: string): string | undefined {
   if (!planSource.startsWith('cloud-share://')) return undefined;
-  return cloudProviderLabels[planSource.slice('cloud-share://'.length).split('/', 1)[0]];
+  return planSource.slice('cloud-share://'.length).split('/', 1)[0];
 }
 
 function pathParts(value: string): string[] {
@@ -84,7 +81,18 @@ export function ParseConfirmDialog({ result, placement = 'modal', downloadDirect
   const visibleResources = filter === 'all' ? resources : resources.filter((resource) => resourceCategory(resource) === filter);
   const allSelected = resources.length > 0 && selected.length === resources.length;
   const root = result.isBitTorrent ? torrentRoot(resources, downloadDirectory) : undefined;
-  const cloudProvider = cloudShareProvider(result.taskId);
+  const providerKey = cloudShareProvider(result.taskId);
+  const [shareLabel, setShareLabel] = useState<{ provider: string; label: string }>();
+  const cloudProvider = providerKey ? (shareLabel?.provider === providerKey ? shareLabel.label : '网盘') : undefined;
+  useEffect(() => {
+    if (!providerKey) return;
+    let active = true;
+    void getCloudProviderCatalog().then(catalog => {
+      const descriptor = catalog.find(item => item.provider === providerKey);
+      if (active && descriptor) setShareLabel({ provider: providerKey, label: descriptor.shareDisplayName });
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [providerKey]);
   const taskTitle = root || (result.title && !result.title.startsWith('magnet:') ? result.title : (result.isBitTorrent ? 'BT 下载任务' : '下载内容'));
   const changeSelection = (resourceId: string) => {
     onSelectionChange(resources.map((item) => item.id === resourceId ? { ...item, selected: !item.selected } : item).filter((item) => item.selected).map((item) => item.id));

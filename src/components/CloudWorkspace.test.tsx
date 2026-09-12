@@ -2,11 +2,30 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { CloudWorkspace } from './CloudWorkspace';
+import { cloudCatalog } from '../test/cloudCatalog';
 
 type TestAccount = { id: string; displayName: string; provider: 'quark' | 'pikpak'; authMethod: 'web' | 'password' };
 
+it('keeps each failed recovery visible independently', async () => {
+  const client = createClient();
+  client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0], cloudCatalog[1]]);
+  client.getCloudAccount.mockImplementation((provider) => Promise.reject(new Error(provider === 'quark' ? '连接错误甲' : '连接错误乙')));
+  render(<CloudWorkspace client={client as never} />);
+  expect(await screen.findByText('夸克恢复账号失败：连接错误甲')).toBeVisible();
+  expect(await screen.findByText('PikPak恢复账号失败：连接错误乙')).toBeVisible();
+});
+
+it('renders the backend catalog order and labels', async () => {
+  const client = createClient();
+  client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[6], { ...cloudCatalog[0], displayName: '目录名称' }, cloudCatalog[2]]);
+  render(<CloudWorkspace client={client as never} />);
+  await screen.findByRole('region', { name: '目录名称账号授权' });
+  expect(screen.getAllByRole('region').filter(region => region.getAttribute('aria-label')?.endsWith('账号授权')).map(region => region.getAttribute('aria-label'))).toEqual(['UC账号授权', '目录名称账号授权', '百度账号授权']);
+});
+
 function createClient(accounts: Record<string, TestAccount | undefined> = {}) {
   return {
+    getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     beginCloudAuthorization: vi.fn().mockResolvedValue({ provider: 'quark', windowLabel: '登录', instructions: '完成登录' }),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => Promise.resolve({ id: `${provider}-1`, displayName: `${provider}-alice`, provider, authMethod: 'web' as const })),
     loginCloudWithPassword: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => Promise.resolve({ id: `${provider}-1`, displayName: `${provider}-alice`, provider, authMethod: 'password' as const })),
@@ -87,7 +106,7 @@ it('ignores a recovered account when the provider does not match the request', a
   expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument();
 });
 
-it('never renders logged-out controls before persisted account recovery finishes', async () => {
+it('shows the management shell and completed recoveries while a provider remains pending', async () => {
   let resolveQuark!: (account: TestAccount) => void;
   let resolvePikpak!: (account: TestAccount) => void;
   const quark = new Promise<TestAccount>((resolve) => { resolveQuark = resolve; });
@@ -97,14 +116,16 @@ it('never renders logged-out controls before persisted account recovery finishes
 
   render(<CloudWorkspace client={client} />);
 
+  expect(screen.getByRole('tab', { name: '网盘管理' })).toBeVisible();
   expect(screen.getByRole('status', { name: '正在读取网盘账号状态' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '登录PikPak账号' })).not.toBeInTheDocument();
 
   resolveQuark({ id: 'q-1', displayName: 'q-alice', provider: 'quark', authMethod: 'web' });
-  resolvePikpak({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' });
-
   expect(await screen.findByRole('tab', { name: '夸克网盘' })).toBeVisible();
+  expect(screen.queryByRole('tab', { name: 'PikPak网盘' })).not.toBeInTheDocument();
+  resolvePikpak({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' });
+  await screen.findByRole('tab', { name: 'PikPak网盘' });
   expect(screen.getByRole('tab', { name: 'PikPak网盘' })).toBeVisible();
   expect(screen.queryByRole('status', { name: '正在读取网盘账号状态' })).not.toBeInTheDocument();
 });

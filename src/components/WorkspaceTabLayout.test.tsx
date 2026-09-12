@@ -1,9 +1,11 @@
 import { render, screen } from '@testing-library/react';
 import { vi } from 'vitest';
 import { CloudWorkspace } from './CloudWorkspace';
+import { cloudCatalog } from '../test/cloudCatalog';
 
 it('marks cloud workspace tabs for the shared top-level tab layout', async () => {
   const client = {
+    getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     getCloudAccount: vi.fn().mockRejectedValue({ code: 'unauthorized' }),
     getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: false, passwordLoginMode: 'none' }))
   };

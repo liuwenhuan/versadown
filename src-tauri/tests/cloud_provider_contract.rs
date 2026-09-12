@@ -14,6 +14,114 @@ use std::{
     sync::Mutex,
 };
 
+#[test]
+fn registry_catalog_is_complete_unique_and_routes_each_share() {
+    use alldownloader_lib::cloud::ProviderRegistry;
+    use std::collections::HashSet;
+    let registry = ProviderRegistry::global();
+    let descriptors = registry.all();
+    assert_eq!(descriptors.len(), 7);
+    assert_eq!(
+        descriptors
+            .iter()
+            .map(|d| d.provider)
+            .collect::<HashSet<_>>()
+            .len(),
+        7
+    );
+    assert_eq!(
+        descriptors
+            .iter()
+            .map(|d| d.provider.key())
+            .collect::<HashSet<_>>()
+            .len(),
+        7
+    );
+    for descriptor in descriptors {
+        assert!(!descriptor.root_directory_id.is_empty());
+        assert!(!descriptor.recycle_bin_directory_id.is_empty());
+        assert_ne!(
+            descriptor.root_directory_id,
+            descriptor.recycle_bin_directory_id
+        );
+        assert_eq!(
+            registry.get(descriptor.provider).provider,
+            descriptor.provider
+        );
+        let auth = url::Url::parse(descriptor.authorization_url).unwrap();
+        assert_eq!(auth.scheme(), "https");
+        for host in descriptor.share_hosts {
+            let url = url::Url::parse(&format!(
+                "https://{host}{}example",
+                descriptor.share_patterns[0]
+            ))
+            .unwrap();
+            assert_eq!(
+                registry.for_share_url(&url).unwrap().provider,
+                descriptor.provider
+            );
+            let spoof = url::Url::parse(&format!(
+                "https://{host}.evil.test{}example",
+                descriptor.share_patterns[0]
+            ))
+            .unwrap();
+            assert!(registry.for_share_url(&spoof).is_none());
+        }
+    }
+    assert_eq!(
+        serde_json::to_value(registry.catalog()).unwrap()[0]["rootDirectoryId"],
+        "0"
+    );
+}
+
+#[test]
+fn registry_only_advertises_implemented_share_transfer_capabilities() {
+    use alldownloader_lib::cloud::ProviderRegistry;
+    for (provider, supports_transfer) in [
+        (CloudProvider::Quark, true),
+        (CloudProvider::Baidu, true),
+        (CloudProvider::Uc, true),
+        (CloudProvider::Xunlei, true),
+        (CloudProvider::Pikpak, false),
+        (CloudProvider::Tianyi, false),
+        (CloudProvider::Aliyun, false),
+    ] {
+        let capabilities = &ProviderRegistry::global().get(provider).capabilities;
+        assert!(capabilities.share_inspect);
+        assert_eq!(
+            capabilities.share_transfer, supports_transfer,
+            "{provider:?}"
+        );
+        assert_eq!(
+            capabilities.recorded_transfer_resolve, supports_transfer,
+            "{provider:?}"
+        );
+    }
+}
+
+#[test]
+fn registry_keeps_password_browser_hosts_https_and_provider_scoped() {
+    use alldownloader_lib::cloud::ProviderRegistry;
+    let baidu = ProviderRegistry::global().get(CloudProvider::Baidu);
+    assert!(baidu
+        .accepts_password_login_url(&url::Url::parse("https://passport.baidu.com/login").unwrap()));
+    for value in [
+        "http://passport.baidu.com/login",
+        "https://passport.baidu.com:444/login",
+        "https://passport.baidu.com.evil.test/login",
+        "https://open.e.189.cn/login",
+    ] {
+        assert!(!baidu.accepts_password_login_url(&url::Url::parse(value).unwrap()));
+    }
+    let tianyi = ProviderRegistry::global().get(CloudProvider::Tianyi);
+    assert!(
+        tianyi.accepts_password_login_url(&url::Url::parse("https://open.e.189.cn/login").unwrap())
+    );
+    assert!(!ProviderRegistry::global()
+        .get(CloudProvider::Quark)
+        .accepts_password_login_url(&url::Url::parse("https://pan.quark.cn").unwrap()));
+}
+
 struct RecordingHttp(Mutex<VecDeque<&'static str>>);
 
 impl RecordingHttp {

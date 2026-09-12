@@ -312,15 +312,9 @@ pub struct CloudShareDownloadSelection {
 }
 
 pub(crate) fn provider_share_directory_name(provider: CloudProvider) -> &'static str {
-    match provider {
-        CloudProvider::Quark => "夸克分享目录",
-        CloudProvider::Pikpak => "PikPak分享目录",
-        CloudProvider::Baidu => "百度网盘分享目录",
-        CloudProvider::Tianyi => "天翼云盘分享目录",
-        CloudProvider::Aliyun => "阿里云盘分享目录",
-        CloudProvider::Xunlei => "迅雷云盘分享目录",
-        CloudProvider::Uc => "UC网盘分享目录",
-    }
+    super::ProviderRegistry::global()
+        .get(provider)
+        .share_directory_name
 }
 
 fn parsed_share_directory_name(entries: &[CloudShareDownloadEntry]) -> Option<String> {
@@ -508,32 +502,14 @@ pub(super) fn share_id(
         return Err(QuarkError::InvalidResponse);
     }
     let url = url::Url::parse(&candidate.url).map_err(|_| QuarkError::InvalidResponse)?;
-    let expected: &[&str] = match provider {
-        CloudProvider::Quark => &["pan.quark.cn"],
-        CloudProvider::Uc => &["drive.uc.cn"],
-        CloudProvider::Xunlei => &["pan.xunlei.com"],
-        CloudProvider::Baidu => &["pan.baidu.com"],
-        CloudProvider::Pikpak => &["mypikpak.com", "www.mypikpak.com"],
-        CloudProvider::Tianyi => &["cloud.189.cn"],
-        CloudProvider::Aliyun => &[
-            "alipan.com",
-            "www.alipan.com",
-            "aliyundrive.com",
-            "www.aliyundrive.com",
-        ],
-    };
-    if !url.host_str().is_some_and(|host| expected.contains(&host))
-        || !matches!(url.scheme(), "https" | "http")
-    {
+    let descriptor = super::ProviderRegistry::global().get(provider);
+    if !descriptor.accepts_share_url(&url) {
         return Err(QuarkError::InvalidResponse);
     }
-    let id = url
-        .path()
-        .strip_prefix(if provider == CloudProvider::Tianyi {
-            "/t/"
-        } else {
-            "/s/"
-        })
+    let id = descriptor
+        .share_patterns
+        .iter()
+        .find_map(|prefix| url.path().strip_prefix(prefix))
         .filter(|id| {
             !id.is_empty()
                 && id
@@ -756,16 +732,11 @@ pub fn parse_stable_cloud_share_source(
         .strip_prefix("cloud-share://")
         .ok_or_else(invalid)?
         .split('/');
-    let provider = match parts.next() {
-        Some("quark") => CloudProvider::Quark,
-        Some("pikpak") => CloudProvider::Pikpak,
-        Some("baidu") => CloudProvider::Baidu,
-        Some("tianyi") => CloudProvider::Tianyi,
-        Some("aliyun") => CloudProvider::Aliyun,
-        Some("xunlei") => CloudProvider::Xunlei,
-        Some("uc") => CloudProvider::Uc,
-        _ => return Err(invalid()),
-    };
+    let provider = parts
+        .next()
+        .and_then(|key| super::ProviderRegistry::global().by_key(key))
+        .ok_or_else(invalid)?
+        .provider;
     let share = parts.next().ok_or_else(invalid)?;
     let entry = parts.next().ok_or_else(invalid)?;
     let valid_hash = |value: &str| {

@@ -262,6 +262,7 @@ pub fn run() {
             commands::update_ai_settings,
             commands::list_ai_models,
             cloud::commands::cloud_provider_capabilities,
+            cloud::commands::cloud_provider_catalog,
             cloud::commands::cloud_begin_authorization,
             cloud::commands::cloud_complete_authorization,
             cloud::commands::cloud_reauthorize_failed_task,

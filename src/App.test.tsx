@@ -5,6 +5,7 @@ import { App } from './App';
 import './styles.css';
 
 const cloudApiMocks = vi.hoisted(() => ({
+  getCloudProviderCatalog: vi.fn().mockImplementation(async () => (await import('./test/cloudCatalog')).cloudCatalog),
   getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: false })),
   beginCloudAuthorization: vi.fn(),
   completeCloudAuthorization: vi.fn(),
