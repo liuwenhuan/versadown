@@ -10,6 +10,7 @@ const cloudApiMocks = vi.hoisted(() => ({
   completeCloudAuthorization: vi.fn(),
   reauthorizeFailedCloudTask: vi.fn(),
   loginCloudWithPassword: vi.fn(),
+  getSavedCloudCredentials: vi.fn().mockResolvedValue(null),
   getCloudAccount: vi.fn().mockRejectedValue({ code: 'not_authorized', message: '未授权' }),
   listCloudDirectory: vi.fn(),
   createCloudDirectory: vi.fn(),
