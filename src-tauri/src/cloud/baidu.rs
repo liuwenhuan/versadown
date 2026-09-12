@@ -1945,8 +1945,9 @@ fn write_query(token: &str, operation: &str) -> String {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, ShareInspection, ShareOperationResult,
-    ShareResolution, TransferRequest,
+    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
+    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
+    TransferRequest,
 };
 
 pub struct BaiduShareAdapter<'a> {
@@ -2036,7 +2037,7 @@ fn numeric_field(value: &Value, field: &str) -> Result<String, QuarkError> {
         .filter(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit()))
         .ok_or(QuarkError::InvalidResponse)
 }
-impl CloudShareAdapter for BaiduShareAdapter<'_> {
+impl ShareInspect for BaiduShareAdapter<'_> {
     fn inspect(
         &self,
         candidate: &crate::parser::CloudShareCandidate,
@@ -2147,9 +2148,13 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
             context,
         )))
     }
+}
+impl ShareResolve for BaiduShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_baidu_share(self.credentials, self.http, entry)
     }
+}
+impl ShareTransfer for BaiduShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
@@ -2158,54 +2163,6 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
             .stable_account_id()?
             .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Baidu, &id))
             .transpose()
-    }
-    fn refresh_recorded_transfer(
-        &self,
-        entry: &CloudShareResolvedEntry,
-        created_file_id: &str,
-    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
-        if entry.provider != CloudProvider::Baidu
-            || entry.plan.provider != CloudProvider::Baidu
-            || created_file_id.is_empty()
-            || !created_file_id.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let client = self.client()?;
-        let response = client.share_http(
-            "GET",
-            &format!(
-                "/rest/2.0/xpan/multimedia?method=filemetas&web=1&dlink=1&fsids={}",
-                encoded(&format!("[{created_file_id}]"))
-            ),
-            None,
-            "",
-        )?;
-        let value = share_json(&response)?;
-        let files = value["list"]
-            .as_array()
-            .filter(|files| files.len() == 1)
-            .ok_or(QuarkError::InvalidResponse)?;
-        if numeric_field(&files[0], "fs_id")? != created_file_id {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let url = required(&files[0], "dlink")?;
-        super::share::validate_direct_url(&url)?;
-        Ok(ShareOperationResult {
-            result: Ok(RecordedTransferDownload::Available(
-                super::commands::ResolvedCloudDownload {
-                    url,
-                    name: entry.entry.name.clone(),
-                    headers: super::share::download_headers(
-                        &client.session.cookie,
-                        &response.set_cookies,
-                        BAIDU_PAN_USER_AGENT,
-                        None,
-                    ),
-                },
-            )),
-            updated_context: None,
-        })
     }
     fn transfer(
         &self,
@@ -2288,6 +2245,64 @@ impl CloudShareAdapter for BaiduShareAdapter<'_> {
                 None,
             ),
         })
+    }
+}
+impl RecordedTransferResolver for BaiduShareAdapter<'_> {
+    fn refresh_recorded_transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        created_file_id: &str,
+    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
+        if entry.provider != CloudProvider::Baidu
+            || entry.plan.provider != CloudProvider::Baidu
+            || created_file_id.is_empty()
+            || !created_file_id.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let client = self.client()?;
+        let response = client.share_http(
+            "GET",
+            &format!(
+                "/rest/2.0/xpan/multimedia?method=filemetas&web=1&dlink=1&fsids={}",
+                encoded(&format!("[{created_file_id}]"))
+            ),
+            None,
+            "",
+        )?;
+        let value = share_json(&response)?;
+        let files = value["list"]
+            .as_array()
+            .filter(|files| files.len() == 1)
+            .ok_or(QuarkError::InvalidResponse)?;
+        if numeric_field(&files[0], "fs_id")? != created_file_id {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let url = required(&files[0], "dlink")?;
+        super::share::validate_direct_url(&url)?;
+        Ok(ShareOperationResult {
+            result: Ok(RecordedTransferDownload::Available(
+                super::commands::ResolvedCloudDownload {
+                    url,
+                    name: entry.entry.name.clone(),
+                    headers: super::share::download_headers(
+                        &client.session.cookie,
+                        &response.set_cookies,
+                        BAIDU_PAN_USER_AGENT,
+                        None,
+                    ),
+                },
+            )),
+            updated_context: None,
+        })
+    }
+}
+impl CloudShareAdapter for BaiduShareAdapter<'_> {
+    fn transfer_capability(&self) -> Option<&dyn ShareTransfer> {
+        Some(self)
+    }
+    fn recorded_capability(&self) -> Option<&dyn RecordedTransferResolver> {
+        Some(self)
     }
 }
 pub fn resolve_baidu_share(

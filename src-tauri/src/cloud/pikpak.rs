@@ -893,8 +893,8 @@ fn root(p: &str) -> &str {
 }
 
 use super::share::{
-    CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspection,
-    ShareResolution,
+    CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspect,
+    ShareInspection, ShareResolution, ShareResolve,
 };
 const SHARE_DRIVE: &str = "https://api-drive.mypikpak.net";
 const SHARE_AUTH: &str = "https://user.mypikpak.net";
@@ -1051,7 +1051,7 @@ fn pikpak_share_status(value: &Value) -> Result<(), QuarkError> {
         None => Err(QuarkError::InvalidResponse),
     }
 }
-impl CloudShareAdapter for PikPakShareAdapter<'_> {
+impl ShareInspect for PikPakShareAdapter<'_> {
     fn inspect(
         &self,
         candidate: &crate::parser::CloudShareCandidate,
@@ -1136,10 +1136,13 @@ impl CloudShareAdapter for PikPakShareAdapter<'_> {
             json!({"pass_code_token":token}),
         )))
     }
+}
+impl ShareResolve for PikPakShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_pikpak_share(self.credentials, self.http, entry)
     }
 }
+impl CloudShareAdapter for PikPakShareAdapter<'_> {}
 pub fn resolve_pikpak_share(
     credentials: &dyn CredentialStore,
     http: &dyn CloudHttpTransport,

@@ -89,6 +89,9 @@ pub fn credential_key_is_supported(key: &str) -> bool {
 }
 
 impl DpapiCredentialStore {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
         Ok(Self {
@@ -181,7 +184,7 @@ impl CredentialStore for DpapiCredentialStore {
     }
 }
 #[cfg(windows)]
-fn protect(input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
+pub(crate) fn protect(input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
     use windows::Win32::{
         Foundation::{LocalFree, HLOCAL},
         Security::Cryptography::{
@@ -223,7 +226,7 @@ fn protect(input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
     }
 }
 #[cfg(not(windows))]
-fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, QuarkError> {
+pub(crate) fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, QuarkError> {
     Err(QuarkError::Storage)
 }
 

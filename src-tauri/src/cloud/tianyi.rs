@@ -1141,7 +1141,7 @@ fn challenge(value: &Value) -> bool {
 use super::{
     share::{
         CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry,
-        CloudShareRootKind, ShareInspection, ShareResolution,
+        CloudShareRootKind, ShareInspect, ShareInspection, ShareResolution, ShareResolve,
     },
     CredentialStore,
 };
@@ -1277,7 +1277,7 @@ fn tianyi_share_flag(value: &Value) -> Result<bool, QuarkError> {
         },
     }
 }
-impl CloudShareAdapter for TianyiShareAdapter<'_> {
+impl ShareInspect for TianyiShareAdapter<'_> {
     fn inspect(
         &self,
         candidate: &crate::parser::CloudShareCandidate,
@@ -1407,10 +1407,13 @@ impl CloudShareAdapter for TianyiShareAdapter<'_> {
         plan.root_kind = root_kind;
         Ok(ShareInspection::Plan(plan))
     }
+}
+impl ShareResolve for TianyiShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_tianyi_share(self.credentials, self.http, entry)
     }
 }
+impl CloudShareAdapter for TianyiShareAdapter<'_> {}
 pub fn resolve_tianyi_share(
     credentials: &dyn CredentialStore,
     http: &dyn CloudHttpTransport,

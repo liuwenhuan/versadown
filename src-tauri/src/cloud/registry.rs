@@ -82,6 +82,54 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
+    pub fn share_capabilities<'a>(
+        &self,
+        provider: CloudProvider,
+        credentials: &'a dyn super::CredentialStore,
+        http: &'a dyn super::CloudHttpTransport,
+    ) -> super::share::ShareCapabilities<'a> {
+        use super::share::ShareCapabilities;
+        macro_rules! read_only {
+            ($adapter:expr) => {{
+                let adapter = Arc::new($adapter);
+                ShareCapabilities {
+                    inspect: Some(adapter.clone()),
+                    resolve: Some(adapter),
+                    ..Default::default()
+                }
+            }};
+        }
+        macro_rules! transferable {
+            ($adapter:expr) => {{
+                let adapter = Arc::new($adapter);
+                ShareCapabilities {
+                    inspect: Some(adapter.clone()),
+                    resolve: Some(adapter.clone()),
+                    transfer: Some(adapter.clone()),
+                    recorded: Some(adapter),
+                }
+            }};
+        }
+        match provider {
+            CloudProvider::Quark => {
+                transferable!(super::quark::QuarkShareAdapter { credentials, http })
+            }
+            CloudProvider::Baidu => {
+                transferable!(super::baidu::BaiduShareAdapter { credentials, http })
+            }
+            CloudProvider::Uc => transferable!(super::uc::UcShareAdapter { credentials, http }),
+            CloudProvider::Xunlei => {
+                transferable!(super::xunlei::XunleiShareAdapter { credentials, http })
+            }
+            CloudProvider::Aliyun => read_only!(super::aliyun::AliyunShareAdapter { http }),
+            CloudProvider::Pikpak => {
+                read_only!(super::pikpak::PikPakShareAdapter { credentials, http })
+            }
+            CloudProvider::Tianyi => {
+                read_only!(super::tianyi::TianyiShareAdapter { credentials, http })
+            }
+        }
+    }
     pub fn global() -> &'static Self {
         static REGISTRY: OnceLock<ProviderRegistry> = OnceLock::new();
         REGISTRY.get_or_init(|| Self {

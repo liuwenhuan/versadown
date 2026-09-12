@@ -14,6 +14,71 @@ use std::{
     sync::Mutex,
 };
 
+#[test]
+fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before_io() {
+    use alldownloader_lib::cloud::{share::*, ProviderRegistry};
+    struct NoIo;
+    impl CloudHttpTransport for NoIo {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            panic!("absent capability must be rejected before protocol IO")
+        }
+    }
+    let credentials = MemoryCredentialStore::default();
+    let directory = tempfile::tempdir().unwrap();
+    let plans = CloudSharePlanStore::new(
+        alldownloader_lib::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+    );
+    for (provider, transfer) in [
+        (CloudProvider::Quark, true),
+        (CloudProvider::Pikpak, false),
+        (CloudProvider::Baidu, true),
+        (CloudProvider::Tianyi, false),
+        (CloudProvider::Aliyun, false),
+        (CloudProvider::Xunlei, true),
+        (CloudProvider::Uc, true),
+    ] {
+        let capabilities =
+            ProviderRegistry::global().share_capabilities(provider, &credentials, &NoIo);
+        assert!(capabilities.inspect.is_some());
+        assert!(capabilities.resolve.is_some());
+        assert_eq!(capabilities.transfer.is_some(), transfer, "{provider:?}");
+        assert_eq!(capabilities.recorded.is_some(), transfer, "{provider:?}");
+        if !transfer {
+            let plan = CloudSharePlan::new(
+                provider,
+                "share".into(),
+                None,
+                vec![CloudShareEntry::new(
+                    "share",
+                    "file".into(),
+                    "file.txt".into(),
+                    vec![],
+                    None,
+                )],
+                serde_json::json!({}),
+            );
+            let entry = CloudShareResolvedEntry {
+                provider,
+                entry: plan.entries[0].clone(),
+                plan,
+            };
+            assert!(matches!(
+                capabilities.transfer_owner_fingerprint(&entry),
+                Err(QuarkError::ProviderUnsupported)
+            ));
+            assert!(matches!(
+                capabilities.transfer(&entry, &plans),
+                Err(QuarkError::ProviderUnsupported)
+            ));
+            assert!(matches!(
+                capabilities.refresh_recorded_transfer(&entry, "recorded"),
+                Err(QuarkError::ProviderUnsupported)
+            ));
+        }
+    }
+    assert!(!directory.path().join("cloud-share-plans.sqlite").exists());
+}
+
 // A wrong provider selection, dropped argument, or capability bypass must be observable here.
 #[test]
 fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
@@ -251,7 +316,10 @@ fn native_capability_drivers_work_in_a_consumer_without_a_tauri_host() {
         let directory_error = driver
             .list_directory(ProviderRegistry::global().get(provider).root_directory_id)
             .unwrap_err();
-        let expected_code = if matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak | CloudProvider::Aliyun) {
+        let expected_code = if matches!(
+            provider,
+            CloudProvider::Quark | CloudProvider::Pikpak | CloudProvider::Aliyun
+        ) {
             "credentials_expired"
         } else {
             "not_authorized"
@@ -274,8 +342,12 @@ fn native_password_auth_outcome_is_usable_without_a_tauri_host() {
     let http = RecordingHttp::sequence([]);
     let mut driver = ProviderRegistry::global().driver(CloudProvider::Baidu, &store, &http);
     assert!(matches!(
-        driver.auth().login_password("fixture-user", "fixture-password"),
-        Ok(NativeLoginOutcome::NeedBrowserFallback(QuarkError::WebAuthorizationRequired)),
+        driver
+            .auth()
+            .login_password("fixture-user", "fixture-password"),
+        Ok(NativeLoginOutcome::NeedBrowserFallback(
+            QuarkError::WebAuthorizationRequired
+        )),
     ));
     assert!(store.load("baidu").unwrap().is_none());
 }

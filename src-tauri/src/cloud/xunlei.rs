@@ -501,8 +501,9 @@ mod tests {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, ShareInspection, ShareOperationResult,
-    ShareResolution, TransferRequest,
+    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
+    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
+    TransferRequest,
 };
 
 pub struct XunleiShareAdapter<'a> {
@@ -715,7 +716,7 @@ fn xunlei_content_link(file: &Value) -> Result<Option<&str>, QuarkError> {
     Ok(None)
 }
 
-impl CloudShareAdapter for XunleiShareAdapter<'_> {
+impl ShareInspect for XunleiShareAdapter<'_> {
     fn inspect(
         &self,
         candidate: &crate::parser::CloudShareCandidate,
@@ -795,9 +796,13 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
             json!({"pass_code_token":token}),
         )))
     }
+}
+impl ShareResolve for XunleiShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_xunlei_share(self.credentials, self.http, entry)
     }
+}
+impl ShareTransfer for XunleiShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
@@ -814,24 +819,6 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
             super::share::stable_owner_fingerprint(CloudProvider::Xunlei, &session.user_id)
                 .map(Some)
         }
-    }
-    fn refresh_recorded_transfer(
-        &self,
-        entry: &CloudShareResolvedEntry,
-        created_file_id: &str,
-    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
-        if entry.provider != CloudProvider::Xunlei
-            || entry.plan.provider != CloudProvider::Xunlei
-            || created_file_id.is_empty()
-        {
-            return Err(QuarkError::InvalidResponse);
-        }
-        Ok(ShareOperationResult {
-            result: Ok(RecordedTransferDownload::Available(
-                self.personal_download(created_file_id, entry.entry.name.clone())?,
-            )),
-            updated_context: None,
-        })
     }
     fn transfer(
         &self,
@@ -888,6 +875,34 @@ impl CloudShareAdapter for XunleiShareAdapter<'_> {
             }
         }
         Err(QuarkError::Provider("迅雷分享转存尚未完成".into()))
+    }
+}
+impl RecordedTransferResolver for XunleiShareAdapter<'_> {
+    fn refresh_recorded_transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        created_file_id: &str,
+    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
+        if entry.provider != CloudProvider::Xunlei
+            || entry.plan.provider != CloudProvider::Xunlei
+            || created_file_id.is_empty()
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        Ok(ShareOperationResult {
+            result: Ok(RecordedTransferDownload::Available(
+                self.personal_download(created_file_id, entry.entry.name.clone())?,
+            )),
+            updated_context: None,
+        })
+    }
+}
+impl CloudShareAdapter for XunleiShareAdapter<'_> {
+    fn transfer_capability(&self) -> Option<&dyn ShareTransfer> {
+        Some(self)
+    }
+    fn recorded_capability(&self) -> Option<&dyn RecordedTransferResolver> {
+        Some(self)
     }
 }
 pub fn resolve_xunlei_share(

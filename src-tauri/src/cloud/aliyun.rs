@@ -946,8 +946,8 @@ fn parse_file(value: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
 }
 
 use super::share::{
-    CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspection,
-    ShareResolution,
+    CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspect,
+    ShareInspection, ShareResolution, ShareResolve,
 };
 
 /// Share-token authorization is deliberately separate from personal-drive sessions.
@@ -1047,7 +1047,7 @@ fn aliyun_share_rate_limited(response: &CloudHttpResponse) -> bool {
             == Some("BlockException")
 }
 
-impl CloudShareAdapter for AliyunShareAdapter<'_> {
+impl ShareInspect for AliyunShareAdapter<'_> {
     fn inspect(
         &self,
         candidate: &crate::parser::CloudShareCandidate,
@@ -1136,10 +1136,13 @@ impl CloudShareAdapter for AliyunShareAdapter<'_> {
             json!({"share_token":token}),
         )))
     }
+}
+impl ShareResolve for AliyunShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_aliyun_share(self.http, entry)
     }
 }
+impl CloudShareAdapter for AliyunShareAdapter<'_> {}
 pub fn resolve_aliyun_share(
     http: &dyn CloudHttpTransport,
     entry: &CloudShareResolvedEntry,

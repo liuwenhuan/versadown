@@ -826,8 +826,9 @@ fn validate_recycle_record_ids(record_ids: &[String]) -> Result<(), QuarkError> 
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, ShareInspection, ShareOperationResult,
-    ShareResolution, TransferRequest,
+    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
+    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
+    TransferRequest,
 };
 
 pub struct QuarkShareAdapter<'a> {
@@ -962,7 +963,7 @@ fn validate_share_codes(value: &Value) -> Result<i64, QuarkError> {
     Ok(code)
 }
 
-impl CloudShareAdapter for QuarkShareAdapter<'_> {
+impl ShareInspect for QuarkShareAdapter<'_> {
     fn inspect(
         &self,
         candidate: &crate::parser::CloudShareCandidate,
@@ -1054,9 +1055,13 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
             context,
         )))
     }
+}
+impl ShareResolve for QuarkShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_quark_share(self.credentials, self.http, entry)
     }
+}
+impl ShareTransfer for QuarkShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
@@ -1065,37 +1070,6 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
             .stable_account_id()?
             .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Quark, &id))
             .transpose()
-    }
-    fn refresh_recorded_transfer(
-        &self,
-        entry: &CloudShareResolvedEntry,
-        created_file_id: &str,
-    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
-        if entry.provider != CloudProvider::Quark
-            || entry.plan.provider != CloudProvider::Quark
-            || created_file_id.is_empty()
-        {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let client = self.client()?;
-        let response = client.share_raw(
-            "POST",
-            "file/download",
-            Some(json!({"fids":[created_file_id]})),
-        )?;
-        let value: Value =
-            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        validate_share_codes(&value)?;
-        response_json(&response).map_err(|error| match error {
-            QuarkError::Provider(_) => QuarkError::Provider("夸克个人盘文件请求失败".into()),
-            error => error,
-        })?;
-        Ok(ShareOperationResult {
-            result: persist_quark_download_cookies(self.credentials, &client.cookie, &response)
-                .and_then(|_| client.share_download(&response, &entry.entry.name))
-                .map(RecordedTransferDownload::Available),
-            updated_context: None,
-        })
     }
     fn transfer(
         &self,
@@ -1149,6 +1123,47 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
             }
         }
         Err(QuarkError::Provider("夸克转存尚未完成，请稍后重试".into()))
+    }
+}
+impl RecordedTransferResolver for QuarkShareAdapter<'_> {
+    fn refresh_recorded_transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        created_file_id: &str,
+    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
+        if entry.provider != CloudProvider::Quark
+            || entry.plan.provider != CloudProvider::Quark
+            || created_file_id.is_empty()
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let client = self.client()?;
+        let response = client.share_raw(
+            "POST",
+            "file/download",
+            Some(json!({"fids":[created_file_id]})),
+        )?;
+        let value: Value =
+            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        validate_share_codes(&value)?;
+        response_json(&response).map_err(|error| match error {
+            QuarkError::Provider(_) => QuarkError::Provider("夸克个人盘文件请求失败".into()),
+            error => error,
+        })?;
+        Ok(ShareOperationResult {
+            result: persist_quark_download_cookies(self.credentials, &client.cookie, &response)
+                .and_then(|_| client.share_download(&response, &entry.entry.name))
+                .map(RecordedTransferDownload::Available),
+            updated_context: None,
+        })
+    }
+}
+impl CloudShareAdapter for QuarkShareAdapter<'_> {
+    fn transfer_capability(&self) -> Option<&dyn ShareTransfer> {
+        Some(self)
+    }
+    fn recorded_capability(&self) -> Option<&dyn RecordedTransferResolver> {
+        Some(self)
     }
 }
 

@@ -622,8 +622,9 @@ fn https_download_url(value: &str) -> Result<String, QuarkError> {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, ShareInspection, ShareOperationResult,
-    ShareResolution, TransferRequest,
+    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
+    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
+    TransferRequest,
 };
 
 pub struct UcShareAdapter<'a> {
@@ -886,7 +887,7 @@ impl UcShareSession<'_> {
         }
     }
 }
-impl CloudShareAdapter for UcShareAdapter<'_> {
+impl ShareInspect for UcShareAdapter<'_> {
     fn inspect(
         &self,
         candidate: &crate::parser::CloudShareCandidate,
@@ -960,6 +961,8 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
             context,
         )))
     }
+}
+impl ShareResolve for UcShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_uc_share(self.credentials, self.http, entry)
     }
@@ -969,6 +972,8 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
     ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
         resolve_uc_share_with_context(self.credentials, self.http, entry)
     }
+}
+impl ShareTransfer for UcShareAdapter<'_> {
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
@@ -977,36 +982,6 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
             .stable_account_id()?
             .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Uc, &id))
             .transpose()
-    }
-    fn refresh_recorded_transfer(
-        &self,
-        entry: &CloudShareResolvedEntry,
-        created_file_id: &str,
-    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
-        if entry.provider != CloudProvider::Uc
-            || entry.plan.provider != CloudProvider::Uc
-            || created_file_id.is_empty()
-        {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let mut session = self.session(Some(&entry.plan.provider_context))?;
-        let context = entry.plan.provider_context.clone();
-        let result = session
-            .request(
-                "POST",
-                "file/download",
-                Some(json!({"fids":[created_file_id]})),
-            )
-            .and_then(|value| {
-                uc_share_download(
-                    &value,
-                    created_file_id,
-                    &entry.entry.name,
-                    session.headers.clone(),
-                )
-                .map(RecordedTransferDownload::Available)
-            });
-        session.updated(result, context)
     }
     fn transfer(
         &self,
@@ -1075,6 +1050,46 @@ impl CloudShareAdapter for UcShareAdapter<'_> {
             Err(QuarkError::Provider("UC 分享转存尚未完成".into()))
         })();
         session.updated(result, context)
+    }
+}
+impl RecordedTransferResolver for UcShareAdapter<'_> {
+    fn refresh_recorded_transfer(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        created_file_id: &str,
+    ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
+        if entry.provider != CloudProvider::Uc
+            || entry.plan.provider != CloudProvider::Uc
+            || created_file_id.is_empty()
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let mut session = self.session(Some(&entry.plan.provider_context))?;
+        let context = entry.plan.provider_context.clone();
+        let result = session
+            .request(
+                "POST",
+                "file/download",
+                Some(json!({"fids":[created_file_id]})),
+            )
+            .and_then(|value| {
+                uc_share_download(
+                    &value,
+                    created_file_id,
+                    &entry.entry.name,
+                    session.headers.clone(),
+                )
+                .map(RecordedTransferDownload::Available)
+            });
+        session.updated(result, context)
+    }
+}
+impl CloudShareAdapter for UcShareAdapter<'_> {
+    fn transfer_capability(&self) -> Option<&dyn ShareTransfer> {
+        Some(self)
+    }
+    fn recorded_capability(&self) -> Option<&dyn RecordedTransferResolver> {
+        Some(self)
     }
 }
 fn uc_share_download(
