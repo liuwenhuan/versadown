@@ -404,6 +404,12 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         })
     }
 
+    fn refresh_and_persist(&self, previous: &AliyunSession) -> Result<AliyunSession, QuarkError> {
+        let refreshed = self.refresh(previous)?;
+        self.save(&refreshed)?;
+        Ok(refreshed)
+    }
+
     fn bearer_headers(session: &AliyunSession) -> BTreeMap<String, String> {
         BTreeMap::from([
             (
@@ -571,11 +577,14 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         if parent == ALIYUN_RECYCLE_BIN_ID {
             return self.list_recycle_bin();
         }
-        let (session, _, root) = self.refreshed_validated_session()?;
-        if parent == "root" {
-            Ok(root)
-        } else {
-            self.directory_with(&session, parent)
+        let session = self.stored()?;
+        let first = self.directory_with(&session, parent);
+        match first {
+            Err(QuarkError::AuthorizationExpired) => {
+                let refreshed = self.refresh_and_persist(&session)?;
+                self.directory_with(&refreshed, parent)
+            }
+            result => result,
         }
     }
 

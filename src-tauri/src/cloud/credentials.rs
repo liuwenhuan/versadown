@@ -38,6 +38,42 @@ pub struct DpapiCredentialStore {
     #[cfg(test)]
     publish_failpoint: Option<fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>>,
 }
+
+pub(crate) const BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY: &str =
+    "cloud-password-baidu-browser-preferred";
+pub(crate) const BAIDU_BROWSER_PROFILE_USERNAME_KEY: &str =
+    "cloud-password-baidu-browser-profile-username";
+
+pub fn credential_key_is_supported(key: &str) -> bool {
+    matches!(
+        key,
+        "quark"
+            | "pikpak"
+            | "baidu"
+            | "tianyi"
+            | "aliyun"
+            | "xunlei"
+            | "uc"
+            | "ai-api-key"
+            | "cloud-share-plans-v1"
+            | "cloud-password-pikpak"
+            | "cloud-password-baidu"
+            | "cloud-password-tianyi"
+            | "cloud-password-draft-pikpak"
+            | "cloud-password-draft-baidu"
+            | "cloud-password-draft-tianyi"
+            | BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY
+            | BAIDU_BROWSER_PROFILE_USERNAME_KEY
+            | "cloud-auth-maintenance-quark"
+            | "cloud-auth-maintenance-pikpak"
+            | "cloud-auth-maintenance-baidu"
+            | "cloud-auth-maintenance-tianyi"
+            | "cloud-auth-maintenance-aliyun"
+            | "cloud-auth-maintenance-xunlei"
+            | "cloud-auth-maintenance-uc"
+    )
+}
+
 impl DpapiCredentialStore {
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
@@ -59,26 +95,7 @@ impl DpapiCredentialStore {
         })
     }
     fn path(&self, key: &str) -> Result<PathBuf, QuarkError> {
-        if !matches!(
-            key,
-            "quark"
-                | "pikpak"
-                | "baidu"
-                | "tianyi"
-                | "aliyun"
-                | "xunlei"
-                | "uc"
-                | "ai-api-key"
-                | "cloud-share-plans-v1"
-        ) && !matches!(
-            key,
-            "cloud-password-pikpak"
-                | "cloud-password-baidu"
-                | "cloud-password-tianyi"
-                | "cloud-password-draft-pikpak"
-                | "cloud-password-draft-baidu"
-                | "cloud-password-draft-tianyi"
-        ) {
+        if !credential_key_is_supported(key) {
             return Err(QuarkError::Storage);
         }
         Ok(self.root.join(format!("{key}.bin")))

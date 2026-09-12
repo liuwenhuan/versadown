@@ -175,10 +175,7 @@ fn aliyun_root_exposes_a_reserved_recycle_bin_folder() {
             br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive-42","browser_access_ready":true}"#,
         )
         .unwrap();
-    let http = RecordingHttp::sequence([
-        r#"{"user_id":"u1","nick_name":"alice"}"#,
-        r#"{"items":[],"next_marker":""}"#,
-    ]);
+    let http = RecordingHttp::sequence([r#"{"items":[],"next_marker":""}"#]);
 
     let root = AliyunClient::new(&store, &http).directory("root").unwrap();
 
@@ -253,7 +250,6 @@ fn aliyun_browser_session_lists_the_root_with_the_same_current_bearer() {
     let store = MemoryCredentialStore::default();
     let http = RecordingHttp::sequence([
         r#"{"user_id":"u1","nick_name":"alice"}"#,
-        r#"{"user_id":"u1","nick_name":"alice"}"#,
         r#"{"items":[{"file_id":"f1","parent_file_id":"root","name":"from-web.txt","type":"file"}]}"#,
     ]);
     let client = AliyunClient::new(&store, &http);
@@ -273,7 +269,63 @@ fn aliyun_browser_session_lists_the_root_with_the_same_current_bearer() {
     assert!(requests
         .iter()
         .all(|request| !request.url.ends_with("/token/refresh")));
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
+    let lists = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/adrive/v3/file/list"))
+        .collect::<Vec<_>>();
+    assert_eq!(lists.len(), 1);
+    assert_eq!(lists[0].headers["Authorization"], "Bearer browser-access");
+}
+
+#[test]
+fn aliyun_root_listing_refreshes_once_after_an_authentication_failure() {
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"expired","drive_id":"drive","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::responses([
+        CloudHttpResponse {
+            status: 401,
+            body: r#"{"code":"AccessTokenInvalid"}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"access_token":"fresh","refresh_token":"rotated","default_drive_id":"drive"}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"items":[{"file_id":"f1","parent_file_id":"root","name":"after-refresh.txt","type":"file"}],"next_marker":""}"#.into(),
+            ..Default::default()
+        },
+    ]);
+
+    let directory = AliyunClient::new(&store, &http).directory("root").unwrap();
+
+    assert_eq!(directory.items[0].name, "after-refresh.txt");
+    let requests = http.requests.lock().unwrap();
+    let lists = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/adrive/v3/file/list"))
+        .collect::<Vec<_>>();
+    assert_eq!(lists.len(), 2);
+    assert_eq!(lists[0].headers["Authorization"], "Bearer expired");
+    assert_eq!(lists[1].headers["Authorization"], "Bearer fresh");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.ends_with("/token/refresh"))
+            .count(),
+        1
+    );
+    drop(requests);
+    let persisted = String::from_utf8(store.load("aliyun").unwrap().unwrap()).unwrap();
+    assert!(persisted.contains("rotated"));
 }
 
 #[test]
@@ -315,8 +367,8 @@ fn aliyun_refreshes_bearer_token_lists_root_and_persists_only_session_fields() {
         )
         .unwrap();
     let http = RecordingHttp::sequence([
+        r#"{"code":"AccessTokenInvalid","message":"expired"}"#,
         r#"{"access_token":"fresh","refresh_token":"next","default_drive_id":"d1"}"#,
-        r#"{"user_id":"u1","nick_name":"alice"}"#,
         r#"{"items":[{"file_id":"f1","parent_file_id":"root","name":"book.pdf","type":"file","size":5,"updated_at":"2026-09-09T00:00:00.000Z"}]}"#,
     ]);
 
@@ -325,16 +377,17 @@ fn aliyun_refreshes_bearer_token_lists_root_and_persists_only_session_fields() {
     assert_eq!(directory.items[0].name, "book.pdf");
     let requests = http.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].url, "https://api.aliyundrive.com/token/refresh");
-    assert_eq!(requests[0].headers["X-Requested-With"], "XMLHttpRequest");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(requests[0].body.as_deref().unwrap()).unwrap(),
-        serde_json::json!({"grant_type":"refresh_token","refresh_token":"refresh"})
+        requests[0].url,
+        "https://api.aliyundrive.com/adrive/v3/file/list"
     );
+    assert_eq!(requests[0].headers["Authorization"], "Bearer expired");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].url, "https://api.aliyundrive.com/token/refresh");
+    assert_eq!(requests[1].headers["X-Requested-With"], "XMLHttpRequest");
     assert_eq!(
-        requests[1].url,
-        "https://api.aliyundrive.com/adrive/v2/user/get"
+        serde_json::from_str::<serde_json::Value>(requests[1].body.as_deref().unwrap()).unwrap(),
+        serde_json::json!({"grant_type":"refresh_token","refresh_token":"refresh"})
     );
     assert_eq!(requests[2].method, "POST");
     assert_eq!(
@@ -434,11 +487,18 @@ fn aliyun_refresh_400_codes_require_reauthorization_without_replacing_the_sessio
         let store = MemoryCredentialStore::default();
         let original = br#"{"refresh_token":"old","access_token":"old-access","drive_id":"d1"}"#;
         store.save("aliyun", original).unwrap();
-        let http = RecordingHttp::responses([CloudHttpResponse {
-            status: 400,
-            body: serde_json::json!({"code":code}).to_string(),
-            ..Default::default()
-        }]);
+        let http = RecordingHttp::responses([
+            CloudHttpResponse {
+                status: 401,
+                body: r#"{"code":"AccessTokenInvalid"}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 400,
+                body: serde_json::json!({"code":code}).to_string(),
+                ..Default::default()
+            },
+        ]);
 
         assert!(matches!(
             AliyunClient::new(&store, &http).directory("root"),

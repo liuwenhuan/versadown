@@ -1,4 +1,7 @@
-use super::{provider_capabilities, CloudProvider, CredentialStore, PasswordLoginMode, QuarkError};
+use super::{
+    credentials::{BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY, BAIDU_BROWSER_PROFILE_USERNAME_KEY},
+    provider_capabilities, CloudProvider, CredentialStore, PasswordLoginMode, QuarkError,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
@@ -163,9 +166,6 @@ fn password_credential_key(provider: CloudProvider) -> Result<&'static str, Quar
         }
     }
 }
-
-const BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY: &str = "cloud-password-baidu-browser-preferred";
-const BAIDU_BROWSER_PROFILE_USERNAME_KEY: &str = "cloud-password-baidu-browser-profile-username";
 
 pub fn browser_password_login_preferred(
     store: &impl CredentialStore,

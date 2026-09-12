@@ -1,8 +1,42 @@
 use alldownloader_lib::cloud::{
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CredentialStore, DpapiCredentialStore,
-    MemoryCredentialStore, PikPakClient, QuarkError,
+    credential_key_is_supported, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
+    CredentialStore, DpapiCredentialStore, MemoryCredentialStore, PikPakClient, QuarkError,
 };
 use std::sync::Mutex;
+
+#[test]
+fn credential_store_supports_every_persisted_cloud_key() {
+    for key in [
+        "quark",
+        "pikpak",
+        "baidu",
+        "tianyi",
+        "aliyun",
+        "xunlei",
+        "uc",
+        "cloud-password-pikpak",
+        "cloud-password-baidu",
+        "cloud-password-tianyi",
+        "cloud-password-draft-pikpak",
+        "cloud-password-draft-baidu",
+        "cloud-password-draft-tianyi",
+        "cloud-password-baidu-browser-preferred",
+        "cloud-password-baidu-browser-profile-username",
+        "cloud-share-plans-v1",
+        "cloud-auth-maintenance-quark",
+        "cloud-auth-maintenance-pikpak",
+        "cloud-auth-maintenance-baidu",
+        "cloud-auth-maintenance-tianyi",
+        "cloud-auth-maintenance-aliyun",
+        "cloud-auth-maintenance-xunlei",
+        "cloud-auth-maintenance-uc",
+    ] {
+        assert!(
+            credential_key_is_supported(key),
+            "missing credential key {key}"
+        );
+    }
+}
 
 #[test]
 fn legacy_pikpak_password_session_recovers_its_login_method() {

@@ -84,6 +84,22 @@ fn tianyi_recycle_page(first_id: u64) -> String {
     .to_string()
 }
 
+fn tianyi_directory_page(first_id: u64, count: usize) -> String {
+    serde_json::json!({
+        "res_code": 0,
+        "fileListAO": {
+            "fileList": (first_id..first_id + count as u64)
+                .map(|id| serde_json::json!({
+                    "id": format!("file-{id}"),
+                    "name": format!("file-{id}.txt"),
+                    "isFolder": false,
+                }))
+                .collect::<Vec<_>>(),
+        },
+    })
+    .to_string()
+}
+
 struct UploadRecordingHttp {
     replies: Mutex<Vec<UploadHttpResponse>>,
     requests: Mutex<Vec<UploadHttpRequest>>,
@@ -170,6 +186,65 @@ fn tianyi_maps_files_and_passes_cookie_to_the_resolved_download() {
         .url
         .contains("/api/open/file/getFileDownloadUrl.action"));
     assert_eq!(requests[1].headers["Referer"], "https://cloud.189.cn/");
+}
+
+#[test]
+fn tianyi_browser_directory_collects_following_pages() {
+    let first = tianyi_directory_page(0, 100);
+    let second = tianyi_directory_page(100, 1);
+    let http = RecordingHttp::sequence(&[&first, &second]);
+    let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=local"), &http);
+
+    let directory = client.directory("folder-browser").unwrap();
+
+    assert_eq!(directory.items.len(), 101);
+    assert_eq!(
+        directory
+            .items
+            .iter()
+            .map(|item| &item.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        101
+    );
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].url.contains("pageNum=2"));
+}
+
+#[test]
+fn tianyi_app_directory_collects_following_pages() {
+    let first = tianyi_directory_page(0, 100);
+    let second = tianyi_directory_page(100, 1);
+    let http = RecordingHttp::sequence(&[&first, &second]);
+    let session: TianyiSession = serde_json::from_value(serde_json::json!({
+        "cookie": "",
+        "auth_method": "password",
+        "app": {
+            "sessionKey": "app-session-key",
+            "sessionSecret": "app-session-secret",
+            "accessToken": "access-token",
+            "loginName": "alice@189.cn"
+        }
+    }))
+    .unwrap();
+    let client = TianyiClient::new(session, &http);
+
+    let directory = client.directory("folder-app").unwrap();
+
+    assert_eq!(directory.items.len(), 101);
+    assert_eq!(
+        directory
+            .items
+            .iter()
+            .map(|item| &item.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        101
+    );
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].url.contains("pageNum=2"));
 }
 
 #[test]

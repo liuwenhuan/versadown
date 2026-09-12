@@ -601,46 +601,53 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         })
     }
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
-        let value = if self.session.app.is_some() {
-            self.app_request(
-                "GET",
-                "/listFiles.action",
-                &[
-                    ("folderId", parent),
-                    ("recursive", "0"),
-                    ("fileType", "0"),
-                    ("iconOption", "10"),
-                    ("mediaAttr", "0"),
-                    ("orderBy", "filename"),
-                    ("descending", "false"),
-                    ("pageNum", "1"),
-                    ("pageSize", "100"),
-                ],
-            )?
-        } else {
-            self.request(
-                "GET",
-                "/api/open/file/listFiles.action",
-                &format!(
-                    "folderId={}&pageNum=1&pageSize=100&orderBy=1&order=ASC",
-                    encoded(parent)
-                ),
-                None,
-            )?
-        };
-        let files = tianyi_file_list(&value)?;
-        let mut items = files
-            .iter()
-            .map(|(file, listed_as_folder)| {
-                Ok(CloudFile {
-                    id: file
-                        .get("id")
-                        .or_else(|| file.get("fileId"))
-                        .and_then(string_or_number)
-                        .ok_or(QuarkError::InvalidResponse)?,
+        let mut items = Vec::new();
+        let mut seen = BTreeSet::new();
+        for page_number in 1..=10_000 {
+            let page_number_text = page_number.to_string();
+            let value = if self.session.app.is_some() {
+                self.app_request(
+                    "GET",
+                    "/listFiles.action",
+                    &[
+                        ("folderId", parent),
+                        ("recursive", "0"),
+                        ("fileType", "0"),
+                        ("iconOption", "10"),
+                        ("mediaAttr", "0"),
+                        ("orderBy", "filename"),
+                        ("descending", "false"),
+                        ("pageNum", &page_number_text),
+                        ("pageSize", "100"),
+                    ],
+                )?
+            } else {
+                self.request(
+                    "GET",
+                    "/api/open/file/listFiles.action",
+                    &format!(
+                        "folderId={}&pageNum={page_number_text}&pageSize=100&orderBy=1&order=ASC",
+                        encoded(parent)
+                    ),
+                    None,
+                )?
+            };
+            let files = tianyi_file_list(&value)?;
+            let page_length = files.len();
+            for (file, listed_as_folder) in files {
+                let id = file
+                    .get("id")
+                    .or_else(|| file.get("fileId"))
+                    .and_then(string_or_number)
+                    .ok_or(QuarkError::InvalidResponse)?;
+                if !seen.insert(id.clone()) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                items.push(CloudFile {
+                    id,
                     parent_id: parent.into(),
                     name: required(file, "name").or_else(|_| required(file, "fileName"))?,
-                    kind: if *listed_as_folder
+                    kind: if listed_as_folder
                         || bool_value(file.get("isFolder").or_else(|| file.get("folder")))
                     {
                         "folder"
@@ -650,9 +657,15 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                     .into(),
                     size: u64_value(file.get("size").or_else(|| file.get("fileSize"))),
                     modified_at: file.get("lastOpTime").and_then(string_or_number),
-                })
-            })
-            .collect::<Result<Vec<_>, QuarkError>>()?;
+                });
+            }
+            if page_length < 100 {
+                break;
+            }
+            if page_number == 10_000 {
+                return Err(QuarkError::InvalidResponse);
+            }
+        }
         if parent == "-11" {
             items.push(CloudFile {
                 id: TIANYI_RECYCLE_BIN_ID.into(),
