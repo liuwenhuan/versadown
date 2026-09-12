@@ -419,9 +419,24 @@ impl AuthSupervisor {
         store: &impl CredentialStore,
         provider: CloudProvider,
         kind: SessionWorkKind,
+        work: impl FnMut(&dyn CredentialStore) -> Result<T, CloudError>,
+        recover: impl FnMut(RecoveryPhase) -> Result<(), CloudError>,
+    ) -> Result<T, CloudError> {
+        self.run_checked(store, provider, kind, work, recover, || Ok(()))
+    }
+
+    /// A cancelled or timed-out worker cannot persist private credentials or
+    /// enter recovery. Ordinary provider errors may still carry valid rotation.
+    pub fn run_checked<T>(
+        &self,
+        store: &impl CredentialStore,
+        provider: CloudProvider,
+        kind: SessionWorkKind,
         mut work: impl FnMut(&dyn CredentialStore) -> Result<T, CloudError>,
         mut recover: impl FnMut(RecoveryPhase) -> Result<(), CloudError>,
+        check: impl Fn() -> Result<(), CloudError>,
     ) -> Result<T, CloudError> {
+        check()?;
         if kind == SessionWorkKind::Logout {
             return self.with_provider(provider, || work(store));
         }
@@ -430,6 +445,7 @@ impl AuthSupervisor {
             let revision = self.record(store, provider)?.session_revision;
             // A proactive refresh failure must not stop still-valid ordinary reads.
             let _ = self.maintain(store, provider, Some(revision), false, || {
+                check()?;
                 let record = self.record(store, provider)?;
                 let binding = self.snapshot(store, provider)?.binding;
                 let result = recover(RecoveryPhase::Proactive);
@@ -446,8 +462,10 @@ impl AuthSupervisor {
         }
         let snapshot = self.snapshot(store, provider)?;
         let revision = snapshot.revision;
+        check()?;
         let result = work(&snapshot);
-        self.persist_snapshot(store, provider, revision, &snapshot)?;
+        check()?;
+        let revision = self.persist_snapshot(store, provider, revision, &snapshot, &check)?;
         match result {
             Err(error @ CloudError::CaptchaRequired) => {
                 self.with_provider(provider, || {
@@ -485,6 +503,7 @@ impl AuthSupervisor {
                         {
                             return Err(CloudError::WebAuthorizationRequired);
                         }
+                        check()?;
                         match recover(RecoveryPhase::ProfileOnly) {
                             Ok(()) => {
                                 self.mark_ready(&mut record, session_expiry(store, provider)?);
@@ -502,6 +521,7 @@ impl AuthSupervisor {
                     })?;
                 } else {
                     self.maintain(store, provider, Some(revision), true, || {
+                        check()?;
                         recover(RecoveryPhase::AuthFailure)
                     })?;
                 }
@@ -516,8 +536,10 @@ impl AuthSupervisor {
                     return Err(CloudError::SessionRenewedRetryOperation);
                 }
                 let revision = next.revision;
+                check()?;
                 let result = work(&next);
-                self.persist_snapshot(store, provider, revision, &next)?;
+                check()?;
+                let revision = self.persist_snapshot(store, provider, revision, &next, &check)?;
                 if matches!(result, Err(CloudError::CaptchaRequired)) {
                     self.with_provider(provider, || {
                         let mut record = self.record(store, provider)?;
@@ -539,22 +561,42 @@ impl AuthSupervisor {
         provider: CloudProvider,
         revision: u64,
         snapshot: &SessionSnapshot,
-    ) -> Result<(), CloudError> {
+        check: &impl Fn() -> Result<(), CloudError>,
+    ) -> Result<u64, CloudError> {
         let current = snapshot.load(provider.key())?;
         if current == snapshot.initial {
-            return Ok(());
+            return Ok(revision);
         }
         self.with_provider(provider, || {
-            if self.record(store, provider)?.session_revision != revision
+            check()?;
+            let record = self.record(store, provider)?;
+            let published = self
+                .published
+                .lock()
+                .map_err(|_| CloudError::Storage)?
+                .get(&provider)
+                .cloned()
+                .ok_or(CloudError::Storage)?;
+            if record.session_revision != revision
+                || record.account_id != snapshot.account_id
+                || published.binding != snapshot.binding
+                || published.revision != revision
+                || published.account_id != snapshot.account_id
                 || store.load(provider.key())? != snapshot.initial
             {
-                return Ok(());
+                return Ok(revision);
             }
             if let Some(bytes) = current {
                 store.save(provider.key(), &bytes)?;
-                self.publish_locked(store, &self.record(store, provider)?, false)?;
+                let mut record = record;
+                // A changed action ticket/cookie is a new credential revision,
+                // not proof of a successful login. Preserve recovery backoff.
+                record.session_revision = record.session_revision.saturating_add(1);
+                self.save(store, &record)?;
+                self.publish_locked(store, &record, false)?;
+                return Ok(record.session_revision);
             }
-            Ok(())
+            Ok(revision)
         })
     }
 }

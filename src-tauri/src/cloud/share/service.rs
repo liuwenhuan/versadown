@@ -1,4 +1,78 @@
 use super::*;
+
+/// Cooperatively stops blocking share work between provider requests. A reply
+/// already received is still processed so created file IDs reach the journal.
+pub struct ShareWorkControl {
+    cancelled: std::sync::atomic::AtomicBool,
+    deadline: std::time::Instant,
+}
+impl ShareWorkControl {
+    pub fn new(timeout: std::time::Duration) -> Self {
+        Self {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+            deadline: std::time::Instant::now() + timeout,
+        }
+    }
+    pub fn cancel(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    pub fn check(&self) -> Result<(), QuarkError> {
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(QuarkError::Transport("分享下载准备已取消".into()));
+        }
+        if std::time::Instant::now() >= self.deadline {
+            return Err(QuarkError::Transport("分享下载准备超时".into()));
+        }
+        Ok(())
+    }
+    pub fn transport<'a>(
+        &'a self,
+        http: &'a dyn crate::cloud::CloudHttpTransport,
+    ) -> impl crate::cloud::CloudHttpTransport + 'a {
+        ControlledShareTransport {
+            control: self,
+            http,
+        }
+    }
+}
+
+pub fn resolve_current_share_download_cancellable(
+    plans: &CloudSharePlanStore,
+    credentials: &dyn CredentialStore,
+    http: &dyn crate::cloud::CloudHttpTransport,
+    source: &str,
+    control: &ShareWorkControl,
+) -> Result<crate::cloud::commands::ResolvedCloudDownload, QuarkError> {
+    control.check()?;
+    let (provider, _, _) = parse_stable_cloud_share_source(source)?;
+    let http = control.transport(http);
+    let adapter = provider_share_adapter(provider, credentials, &http)?;
+    let result = resolve_current_share_download(plans, adapter.as_ref(), source);
+    // Do not commit this operation's private session after caller cancellation
+    // or timeout. Completed transfer IDs have already reached the journal.
+    control.check()?;
+    result
+}
+struct ControlledShareTransport<'a> {
+    control: &'a ShareWorkControl,
+    http: &'a dyn crate::cloud::CloudHttpTransport,
+}
+impl crate::cloud::CloudHttpTransport for ControlledShareTransport<'_> {
+    fn send(
+        &self,
+        request: crate::cloud::CloudHttpRequest,
+    ) -> Result<crate::cloud::CloudHttpResponse, QuarkError> {
+        self.control.check()?;
+        self.http.send(request)
+    }
+    fn manages_cookie_session(&self) -> bool {
+        self.http.manages_cookie_session()
+    }
+    fn cookies_for_url(&self, url: &str) -> Result<Vec<String>, QuarkError> {
+        self.http.cookies_for_url(url)
+    }
+}
 /// The only cloud-share plan projection permitted across the IPC boundary.
 /// Its source is an opaque, validated `cloud-share://` reference; credentials,
 /// provider session context, and canonical share identifiers remain DPAPI-only.

@@ -971,3 +971,36 @@ async fn source_gate_serializes_matching_sources_without_blocking_other_sources(
         .expect("matching source must proceed after the first submission completes")
         .expect("source gate task must not panic");
 }
+
+#[tokio::test]
+async fn source_gate_cleanup_reclaims_finished_sources_and_preserves_holders_and_waiters() {
+    use std::future::Future;
+    let gate = Arc::new(CloudDownloadSourceGate::default());
+    for index in 0..1000 {
+        drop(
+            gate.acquire(&format!("cloud://quark/file-{index}"))
+                .await
+                .unwrap(),
+        );
+    }
+    assert_eq!(gate.cleanup().unwrap(), 0);
+    let held = gate.acquire("cloud://quark/held").await.unwrap();
+    assert_eq!(gate.cleanup().unwrap(), 1);
+    let mut waiting = Box::pin(gate.acquire("cloud://quark/held"));
+    // Poll the actual acquire until Pending, so its strong owner is established.
+    std::future::poll_fn(|cx| {
+        assert!(waiting.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(held);
+    assert_eq!(
+        gate.cleanup().unwrap(),
+        1,
+        "a waiting caller owns the same mutex"
+    );
+    let next = waiting.await.unwrap();
+    assert_eq!(gate.cleanup().unwrap(), 1);
+    drop(next);
+    assert_eq!(gate.cleanup().unwrap(), 0);
+}

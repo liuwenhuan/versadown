@@ -76,6 +76,30 @@ mod tests {
             .unwrap();
         store
     }
+    #[test]
+    fn supervised_recorded_xunlei_download_defers_expired_session_refresh_to_supervisor() {
+        let credentials = credentials();
+        let mut session: XunleiSession =
+            serde_json::from_slice(&credentials.load("xunlei").unwrap().unwrap()).unwrap();
+        session.expires_at = 1;
+        credentials
+            .save("xunlei", &serde_json::to_vec(&session).unwrap())
+            .unwrap();
+        let snapshot =
+            auth_supervisor::SessionSnapshot::new(&credentials, CloudProvider::Xunlei).unwrap();
+        let http = Http::new(vec![cap(), json!({"error_code":16,"error":"unauthenticated"})]);
+        let adapter = provider_share_adapter(CloudProvider::Xunlei, &snapshot, &http).unwrap();
+        let result = adapter.refresh_recorded_transfer(&selected(), "recorded-file");
+        assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
+        assert!(
+            http.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| !request.url.ends_with("/v1/auth/token")),
+            "snapshot must not independently refresh credentials"
+        );
+    }
     fn selected() -> CloudShareResolvedEntry {
         entry(CloudSharePlan::new(
             CloudProvider::Xunlei,
@@ -597,6 +621,11 @@ impl XunleiShareAdapter<'_> {
             serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
         let transport = XunleiShareTransport(self.http);
         let client = XunleiClient::new(session, &transport);
+        let client = if self.credentials.automatic_session_recovery() {
+            client
+        } else {
+            client.supervised()
+        };
         let result = client.download(file_id);
         let refreshed = serde_json::to_vec(&client.session()).map_err(|_| QuarkError::Storage)?;
         self.credentials.save("xunlei", &refreshed)?;

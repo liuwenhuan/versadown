@@ -1,5 +1,12 @@
 use super::*;
 
+struct CancelShareOnDrop(Arc<share::ShareWorkControl>);
+impl Drop for CancelShareOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 pub async fn inspect_cloud_share(
     app: AppHandle,
     candidate: crate::parser::CloudShareCandidate,
@@ -20,10 +27,28 @@ pub async fn resolve_stable_cloud_share_download(
 ) -> Result<ResolvedCloudDownload, QuarkError> {
     let (provider, _, _) = share::parse_stable_cloud_share_source(source)?;
     let source = source.to_owned();
-    run_web_session_read_work(app, provider, move |state, http| {
-        let adapter = share::provider_share_adapter(provider, &state.store, http)?;
-        share::resolve_current_share_download(&state.share_plans, adapter.as_ref(), &source)
-    })
+    let control = Arc::new(share::ShareWorkControl::new(
+        std::time::Duration::from_secs(300),
+    ));
+    let _cancel_on_drop = CancelShareOnDrop(Arc::clone(&control));
+    let completion_control = Arc::clone(&control);
+    // Resolution can create personal files. Recovery may renew authorization,
+    // but it must never replay this combined operation after a transfer starts.
+    run_session_work_checked(
+        app,
+        provider,
+        SessionWorkKind::Mutation,
+        move |state, http| {
+            share::resolve_current_share_download_cancellable(
+                &state.share_plans,
+                &state.store,
+                http,
+                &source,
+                &control,
+            )
+        },
+        move || completion_control.check(),
+    )
     .await
 }
 
@@ -402,32 +427,37 @@ pub(crate) async fn cleanup_cloud_share_task_inner(
     let tasks = Arc::clone(&state.store);
     let worker_app = app.clone();
     // No automatic session-recovery replay around a destructive action.
-    let updated = run(app.clone(), provider, move |cloud, http| {
-        let state = worker_app
-            .try_state::<AppState>()
-            .ok_or(QuarkError::Storage)?;
-        let enabled = state
-            .settings
-            .lock()
-            .map_err(|_| QuarkError::Storage)?
-            .delete_transferred_share_files_after_download;
-        let entry = cloud.share_plans.resolve_entry(&task.source)?;
-        let adapter = share::provider_share_adapter(provider, &cloud.store, http)?;
-        let owner = adapter.transfer_owner_fingerprint(&entry)?;
-        crate::engine_runtime::cleanup_completed_share_for_owner(
-            &cloud.share_plans,
-            &tasks,
-            &task,
-            enabled,
-            retry,
-            owner.as_deref(),
-            |provider, ids| {
-                ProviderRegistry::global()
-                    .driver(provider, &cloud.store, http)
-                    .trash_transferred_files(ids)
-            },
-        )
-    })
+    let updated = run_session_work(
+        app.clone(),
+        provider,
+        SessionWorkKind::Mutation,
+        move |cloud, http| {
+            let state = worker_app
+                .try_state::<AppState>()
+                .ok_or(QuarkError::Storage)?;
+            let enabled = state
+                .settings
+                .lock()
+                .map_err(|_| QuarkError::Storage)?
+                .delete_transferred_share_files_after_download;
+            let entry = cloud.share_plans.resolve_entry(&task.source)?;
+            let adapter = share::provider_share_adapter(provider, &cloud.store, http)?;
+            let owner = adapter.transfer_owner_fingerprint(&entry)?;
+            crate::engine_runtime::cleanup_completed_share_for_owner(
+                &cloud.share_plans,
+                &tasks,
+                &task,
+                enabled,
+                retry,
+                owner.as_deref(),
+                |provider, ids| {
+                    ProviderRegistry::global()
+                        .driver(provider, &cloud.store, http)
+                        .trash_transferred_files(ids)
+                },
+            )
+        },
+    )
     .await?;
     if let Some(updated) = updated {
         if let Ok(payload) = crate::commands::task_update_payload(

@@ -126,9 +126,21 @@ pub(crate) async fn run_session_work<T: Send + 'static>(
     app: AppHandle,
     provider: CloudProvider,
     kind: SessionWorkKind,
+    work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
+        + Send
+        + 'static,
+) -> Result<T, QuarkError> {
+    run_session_work_checked(app, provider, kind, work, || Ok(())).await
+}
+
+pub(crate) async fn run_session_work_checked<T: Send + 'static>(
+    app: AppHandle,
+    provider: CloudProvider,
+    kind: SessionWorkKind,
     mut work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
         + Send
         + 'static,
+    check: impl Fn() -> Result<(), QuarkError> + Send + 'static,
 ) -> Result<T, QuarkError> {
     let refresh_app = app.clone();
     run_initialized(
@@ -138,7 +150,7 @@ pub(crate) async fn run_session_work<T: Send + 'static>(
         },
         provider,
         move |state, http| {
-            state.auth_supervisor.run(
+            state.auth_supervisor.run_checked(
                 &state.store,
                 provider,
                 kind,
@@ -154,6 +166,7 @@ pub(crate) async fn run_session_work<T: Send + 'static>(
                 |genuine_auth_error| {
                     recover_authorization(&refresh_app, state, provider, http, genuine_auth_error)
                 },
+                check,
             )
         },
         std::time::Duration::from_secs(10),
@@ -224,10 +237,17 @@ pub(crate) fn is_windows_device_name(name: &str) -> bool {
 /// aria2 rebinding, or cleanup claiming through the provider mutation.
 #[derive(Default)]
 pub struct CloudDownloadSourceGate {
-    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    locks: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl CloudDownloadSourceGate {
+    /// Reclaim unowned source gates and return the number still in use.
+    pub fn cleanup(&self) -> Result<usize, QuarkError> {
+        let mut locks = self.locks.lock().map_err(|_| QuarkError::Storage)?;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        Ok(locks.len())
+    }
+
     pub async fn acquire(
         &self,
         source: &str,
@@ -240,11 +260,18 @@ impl CloudDownloadSourceGate {
         };
         let lock = {
             let mut locks = self.locks.lock().map_err(|_| QuarkError::Storage)?;
-            Arc::clone(
-                locks
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            // Upgrade/create while holding the map lock. Both holders and
+            // waiting acquires own an Arc, so cleanup cannot split one source
+            // into two live mutexes. Never await the source under this lock.
+            match locks.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(key, Arc::downgrade(&lock));
+                    lock
+                }
+            }
         };
         Ok(lock.lock_owned().await)
     }

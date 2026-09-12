@@ -4,6 +4,124 @@ use alldownloader_lib::cloud::{
 };
 use std::sync::Mutex;
 
+// A session that leaves and returns to identical bytes still has a new lineage.
+#[test]
+fn snapshot_rotation_cannot_write_back_after_unversioned_account_round_trip() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
+    };
+    let supervisor = AuthSupervisor::new(|| 1000, || 30);
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", b"original").unwrap();
+    supervisor
+        .run(
+            &store,
+            CloudProvider::Pikpak,
+            SessionWorkKind::Mutation,
+            |old| {
+                for bytes in [b"replacement".as_slice(), b"original".as_slice()] {
+                    store.save("pikpak", bytes)?;
+                    supervisor.run(
+                        &store,
+                        CloudProvider::Pikpak,
+                        SessionWorkKind::Read,
+                        |current| current.load("pikpak"),
+                        |_| panic!("no recovery"),
+                    )?;
+                }
+                old.save("pikpak", b"obsolete-rotation")
+            },
+            |_| panic!("no recovery"),
+        )
+        .unwrap();
+    assert_eq!(store.load("pikpak").unwrap().unwrap(), b"original");
+}
+
+#[test]
+fn failed_transfer_does_not_commit_its_private_session_rotation() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
+    };
+    for message in ["share polling cancelled", "share polling timed out"] {
+        let supervisor = AuthSupervisor::new(|| 1000, || 30);
+        let store = MemoryCredentialStore::default();
+        store.save("pikpak", b"current").unwrap();
+        let stopped = std::cell::Cell::new(false);
+        let result: Result<(), QuarkError> = supervisor.run_checked(
+            &store,
+            CloudProvider::Pikpak,
+            SessionWorkKind::Mutation,
+            |snapshot| {
+                snapshot.save("pikpak", b"abandoned-rotation")?;
+                stopped.set(true);
+                Err(QuarkError::Transport(message.into()))
+            },
+            |_| panic!("transport errors must not recover"),
+            || {
+                if stopped.get() {
+                    Err(QuarkError::Transport(message.into()))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(matches!(result, Err(QuarkError::Transport(_))));
+        assert_eq!(store.load("pikpak").unwrap().unwrap(), b"current");
+    }
+}
+
+#[test]
+fn ordinary_provider_failure_keeps_a_successfully_rotated_session() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
+    };
+    let supervisor = AuthSupervisor::new(|| 1000, || 30);
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", b"old").unwrap();
+    let result: Result<(), QuarkError> = supervisor.run(
+        &store,
+        CloudProvider::Pikpak,
+        SessionWorkKind::Mutation,
+        |snapshot| {
+            snapshot.save("pikpak", b"valid-rotation")?;
+            Err(QuarkError::Provider("file unavailable".into()))
+        },
+        |_| panic!("provider failures do not recover"),
+    );
+    assert!(matches!(result, Err(QuarkError::Provider(_))));
+    assert_eq!(store.load("pikpak").unwrap().unwrap(), b"valid-rotation");
+}
+
+#[test]
+fn action_ticket_rotation_does_not_hide_a_failed_mutations_auth_recovery() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
+    };
+    let supervisor = AuthSupervisor::new(|| 1000, || 30);
+    let store = MemoryCredentialStore::default();
+    let refreshes = std::cell::Cell::new(0);
+    store.save("pikpak", b"old").unwrap();
+    let result: Result<(), QuarkError> = supervisor.run(
+        &store,
+        CloudProvider::Pikpak,
+        SessionWorkKind::Mutation,
+        |snapshot| {
+            snapshot.save("pikpak", b"new-ticket-expired-session")?;
+            Err(QuarkError::AuthorizationExpired)
+        },
+        |_| {
+            refreshes.set(refreshes.get() + 1);
+            store.save("pikpak", b"renewed")
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(QuarkError::SessionRenewedRetryOperation)
+    ));
+    assert_eq!(refreshes.get(), 1);
+    assert_eq!(store.load("pikpak").unwrap().unwrap(), b"renewed");
+}
+
 #[test]
 fn credential_store_supports_every_persisted_cloud_key() {
     for key in [
