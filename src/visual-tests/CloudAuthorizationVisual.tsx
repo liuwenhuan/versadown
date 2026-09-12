@@ -36,6 +36,6 @@ const client = {
 document.documentElement.dataset.theme = 'dark';
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <main className="view-panel" style={{ minHeight: '100vh' }}>
-    <CloudManager descriptor={cloudCatalog[0]} provider="quark" client={client} initialAccounts={[account]} restoreOnMount={false} showAccountTabs={false} showSessionActions={false} />
+    <CloudManager descriptor={cloudCatalog[0]} provider="quark" client={client} initialAccount={account} restoreOnMount={false} showSessionActions={false} />
   </main>,
 );

@@ -17,7 +17,7 @@ it('uses catalog authorization and directory identifiers instead of provider def
   expect(screen.getByRole('region', { name: '目录名称账号授权' })).toBeVisible();
   expect(screen.getByLabelText('账号')).toBeVisible();
   expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
-  rerender(<NativeCloudManager key="files" descriptor={descriptor} provider="quark" client={client} initialAccounts={[{ id: 'q1', provider: 'quark', displayName: 'q', authMethod: 'web' }]} restoreOnMount={false} />);
+  rerender(<NativeCloudManager key="files" descriptor={descriptor} provider="quark" client={client} initialAccount={{ id: 'q1', provider: 'quark', displayName: 'q', authMethod: 'web' }} restoreOnMount={false} />);
   await screen.findByRole('tree', { name: '目录名称网盘文件' });
   expect(client.listCloudDirectory).toHaveBeenCalledWith('quark', 'custom-root');
   expect(screen.getByRole('treeitem', { name: /回收站/ })).toBeVisible();
@@ -81,7 +81,7 @@ it('submits provided credentials once while automatic password login is pending'
 
 it('restores encrypted login input into masked fields and keeps it after a failed attempt', async () => {
   const client = createCloudFake({
-    getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', password: 'saved-secret' }),
+    getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', hasSavedPassword: true }),
     loginCloudWithPassword: vi.fn().mockRejectedValue(Object.assign(new Error('登录失败'), { code: 'provider_error' }))
   });
   const user = userEvent.setup();
@@ -90,11 +90,29 @@ it('restores encrypted login input into masked fields and keeps it after a faile
   expect(await screen.findByLabelText('账号')).toHaveValue('saved-user');
   const passwordInput = screen.getByLabelText('密码');
   expect(passwordInput).toHaveAttribute('type', 'password');
-  expect(passwordInput).toHaveValue('saved-secret');
+  expect(passwordInput).toHaveValue('');
+  expect(passwordInput).toHaveAttribute('placeholder', '****');
   await user.click(screen.getByRole('button', { name: '登录' }));
   await screen.findByText('登录失败');
   expect(screen.getByLabelText('账号')).toHaveValue('saved-user');
-  expect(screen.getByLabelText('密码')).toHaveValue('saved-secret');
+  expect(client.loginCloudWithPassword).toHaveBeenCalledWith('tianyi', { username: 'saved-user', useSavedPassword: true });
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '****');
+});
+
+it('sends only the edited password and never the saved-password handle', async () => {
+  const client = createCloudFake({ getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', hasSavedPassword: true }) });
+  render(<CloudManager provider="tianyi" client={client} authorizationOnly />);
+  await waitFor(() => expect(screen.getByLabelText('账号')).toHaveValue('saved-user'));
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'new-secret' } });
+  await act(async () => { fireEvent.submit(screen.getByLabelText('密码').closest('form')!); });
+  expect(client.loginCloudWithPassword).toHaveBeenCalledWith('tianyi', { username: 'saved-user', password: 'new-secret' });
+});
+
+it('never creates account switching tabs inside one provider manager', async () => {
+  const client = createCloudFake({ getCloudAccount: vi.fn().mockResolvedValue({ id: 'only', displayName: 'alice', provider: 'quark', authMethod: 'web' }) });
+  render(<CloudManager provider="quark" client={client} />);
+  await screen.findByRole('tree', { name: '夸克网盘文件' });
+  expect(screen.queryByRole('tablist', { name: '夸克账号' })).not.toBeInTheDocument();
 });
 
 it('keeps the unauthenticated provider card focused on the available sign-in action', async () => {
@@ -142,12 +160,10 @@ it.each([
   ['uc', 'UC']
 ] as const)('keeps the account and offers official WebView recovery for %s', async (provider, label) => {
   const client = createCloudFake({ listCloudDirectory: vi.fn().mockRejectedValue({ code: 'web_auth_required', message: 'verification required' }) });
-  render(<CloudManager provider={provider} client={client} initialAccounts={[
-    { id: `${provider}-account`, displayName: 'alice', provider, authMethod: 'web' }
-  ]} restoreOnMount={false} />);
+  render(<CloudManager provider={provider} client={client} initialAccount={{ id: `${provider}-account`, displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
 
   expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
-  expect(screen.getByRole('tab', { name: `alice · ${label}` })).toBeVisible();
+  expect(screen.getByRole('region', { name: `${label}文件管理器` })).toBeVisible();
 });
 
 it('asks to repeat a mutation after the session was automatically restored', async () => {
@@ -158,9 +174,7 @@ it('asks to repeat a mutation after the session was automatically restored', asy
       message: 'this provider response must not be shown'
     })
   });
-  render(<CloudManager provider="baidu" client={client} initialAccounts={[
-    { id: 'account-1', displayName: 'alice', provider: 'baidu', authMethod: 'password' }
-  ]} restoreOnMount={false} />);
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'account-1', displayName: 'alice', provider: 'baidu', authMethod: 'password' }} restoreOnMount={false} />);
 
   await screen.findByRole('tree', { name: '百度网盘文件' });
   await user.click(screen.getByRole('button', { name: '上传' }));
@@ -187,7 +201,7 @@ it('recovers an existing account on mount before loading its root directory', as
   const client = createCloudFake({ getCloudAccount: vi.fn().mockResolvedValue({ id: 'saved-1', displayName: 'saved-alice', provider: 'quark', authMethod: 'web' }) });
   render(<CloudManager provider="quark" client={client} />);
 
-  expect(await screen.findByRole('tab', { name: 'saved-alice · 夸克' })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByRole('region', { name: '夸克文件管理器' })).toBeVisible();
   expect(client.listCloudDirectory).toHaveBeenCalledWith('quark', '0');
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
 });
@@ -207,19 +221,21 @@ it.each([
   expect(client.listCloudDirectory).toHaveBeenCalledWith(provider, root);
 });
 
-it('switches an account tab and reloads that account view from the root directory', async () => {
+it('replaces the single account during renewed web authorization without retaining a previous tab', async () => {
   const user = userEvent.setup();
-  const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[
-    { id: 'first', displayName: 'first-alice', provider: 'quark', authMethod: 'web' },
-    { id: 'second', displayName: 'second-alice', provider: 'quark', authMethod: 'web' }
-  ]} />);
-
+  const client = createCloudFake({
+    getCloudAccount: vi.fn().mockResolvedValue({ id: 'first', displayName: 'first-alice', provider: 'quark', authMethod: 'web' }),
+    downloadCloudFile: vi.fn().mockRejectedValue({ code: 'web_auth_required', message: '需要网页验证' }),
+    completeCloudAuthorization: vi.fn().mockResolvedValue({ id: 'second', displayName: 'second-alice', provider: 'quark', authMethod: 'web' })
+  });
+  render(<CloudManager provider="quark" client={client} />);
   await screen.findByRole('tree', { name: '夸克网盘文件' });
-  await user.click(screen.getByRole('tab', { name: 'second-alice · 夸克' }));
-  expect(screen.getByRole('tab', { name: 'second-alice · 夸克' })).toHaveAttribute('aria-selected', 'true');
+  await user.click(screen.getByText('报告.pdf'));
+  await user.click(screen.getByRole('button', { name: '下载' }));
+  await user.click(screen.getByRole('button', { name: '重新网页授权' }));
+  await waitFor(() => expect(client.completeCloudAuthorization).toHaveBeenCalled());
+  expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
-  expect(client.listCloudDirectory).toHaveBeenLastCalledWith('quark', '0');
 });
 
 it('automatically completes web authorization and loads the authorized account', async () => {
@@ -228,7 +244,7 @@ it('automatically completes web authorization and loads the authorized account',
   render(<CloudManager provider="quark" client={client} />);
 
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
-  expect(await screen.findByRole('tab', { name: 'alice · 夸克' }, { timeout: 1500 })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByRole('region', { name: '夸克文件管理器' }, { timeout: 1500 })).toBeVisible();
   expect(client.completeCloudAuthorization).toHaveBeenCalledWith('quark');
   expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
 });
@@ -292,7 +308,7 @@ it('reports a successful authorization to an authorization-center host without r
 
 it('renders an authorized account-management card without loading its directory', async () => {
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} authorizationOnly initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} authorizationOnly initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await act(async () => { await Promise.resolve(); });
 
@@ -307,7 +323,7 @@ it('renders an authorized account-management card without loading its directory'
 
 it('can hide session actions in a file-only manager', async () => {
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} showSessionActions={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} showSessionActions={false} />);
 
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '已经完成授权' })).not.toBeInTheDocument();
@@ -331,7 +347,7 @@ it('logs out only after confirmation and returns to the authorization boundary',
   expect(screen.queryByRole('tree', { name: '夸克网盘文件' })).not.toBeInTheDocument();
 });
 
-it('adds the authorized account tab and drives the injected directory operations', async () => {
+it('accepts the authorized single account and drives the injected directory operations', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} />);
@@ -339,7 +355,7 @@ it('adds the authorized account tab and drives the injected directory operations
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
 
-  expect(await screen.findByRole('tab', { name: 'alice · 夸克' })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByRole('region', { name: '夸克文件管理器' })).toBeVisible();
   expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
   expect(screen.getByText('报告.pdf')).toBeVisible();
 
@@ -357,7 +373,7 @@ it('adds the authorized account tab and drives the injected directory operations
 it('uses real checkboxes for row selection and supports select all', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  const { container } = render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  const { container } = render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   const folderCheckbox = screen.getByRole('checkbox', { name: '选择 归档' });
@@ -377,7 +393,7 @@ it('uses real checkboxes for row selection and supports select all', async () =>
 
 it('keeps file controls on one line and preserves full breadcrumb names in tooltips', async () => {
   const user = userEvent.setup();
-  render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('归档');
   expect(screen.getByLabelText('文件操作')).toHaveClass('cloud-toolbar--single-line');
@@ -389,7 +405,7 @@ it('keeps file controls on one line and preserves full breadcrumb names in toolt
 
 it('keeps only download and delete visible in the selected-file header', async () => {
   const user = userEvent.setup();
-  render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   await user.click(screen.getByRole('checkbox', { name: '选择 报告.pdf' }));
@@ -413,7 +429,7 @@ it('keeps only download and delete visible in the selected-file header', async (
 
 it('formats large cloud files in practical size units', async () => {
   const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [{ id: 'large-file', parentId: '0', name: '镜像文件.iso', kind: 'file', size: 3 * 1024 * 1024 * 1024 }] }) });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('镜像文件.iso');
   expect(screen.getByText('3.0 GB')).toBeVisible();
@@ -427,7 +443,7 @@ it('sorts cloud files by name, size, and modified time from their column headers
     { id: 'smallest', parentId: '0', name: 'alpha.txt', kind: 'file', size: 10, modifiedAt: '2025-06-01 08:00:00' },
     { id: 'medium', parentId: '0', name: 'beta.txt', kind: 'file', size: 200, modifiedAt: '2025-06-02 08:00:00' }
   ] }) });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
   const listedNames = () => Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"] b[title]'))
@@ -459,7 +475,7 @@ it('keeps unavailable cloud file sizes after known sizes in either sort directio
     { id: 'missing-size', parentId: '0', name: 'missing-size.txt', kind: 'file' },
     { id: 'small', parentId: '0', name: 'small.txt', kind: 'file', size: 1 }
   ] }) });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
   const listedNames = () => Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"] b[title]'))
@@ -480,7 +496,7 @@ it('keeps Shift range selection anchored to the same file after sorting', async 
     { id: 'alpha', parentId: '0', name: 'alpha.txt', kind: 'file', size: 10 },
     { id: 'beta', parentId: '0', name: 'beta.txt', kind: 'file', size: 200 }
   ] }) });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await user.click(await screen.findByText('zeta.txt'));
   await user.click(screen.getByRole('button', { name: '按大小排序' }));
@@ -495,7 +511,7 @@ it('keeps Shift range selection anchored to the same file after sorting', async 
 it('activates sort headers by keyboard without opening the selected folder', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await user.click(await screen.findByText('归档'));
   const sizeHeader = screen.getByRole('button', { name: '按大小排序' });
@@ -514,7 +530,7 @@ it('activates sort headers by keyboard without opening the selected folder', asy
 
 it('keeps file-list keyboard shortcuts available from selection checkboxes', async () => {
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   const fileCheckbox = screen.getByRole('checkbox', { name: '选择 报告.pdf' });
@@ -530,7 +546,7 @@ it('keeps file-list keyboard shortcuts available from selection checkboxes', asy
 it('opens folders by double click without rendering an enter button', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('归档');
   expect(screen.queryByRole('button', { name: '进入 归档' })).not.toBeInTheDocument();
@@ -541,7 +557,7 @@ it('opens folders by double click without rendering an enter button', async () =
 
 it('shows normal file commands in the row context menu and opens a folder from it', async () => {
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('归档');
   fireEvent.contextMenu(screen.getByText('归档'), { clientX: 300, clientY: 240 });
@@ -567,7 +583,7 @@ it('uses smaller cloud-card typography while preserving the signed-in account na
   document.head.appendChild(stylesheet);
   try {
     const client = createCloudFake();
-    render(<div className="cloud-provider-auths"><CloudManager provider="quark" client={client} authorizationOnly initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} /></div>);
+    render(<div className="cloud-provider-auths"><CloudManager provider="quark" client={client} authorizationOnly initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} /></div>);
 
     await act(async () => { await Promise.resolve(); });
     const heading = screen.getByRole('heading', { name: '夸克网盘 · alice' });
@@ -595,7 +611,7 @@ it('repositions a bottom file context menu using its rendered height', async () 
   });
 
   try {
-    render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+    render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
     await screen.findByText('报告.pdf');
     fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 480 });
@@ -611,7 +627,7 @@ it('repositions a bottom file context menu using its rendered height', async () 
 it('copies selected files through a browsable destination picker', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 240 });
@@ -640,7 +656,7 @@ it('retries the destination directory that actually failed to load', async () =>
       return Promise.resolve({ id: '0', items: [{ id: 'folder-1', parentId: '0', name: '归档', kind: 'folder' }, { id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file' }] });
     })
   });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 240 });
@@ -663,7 +679,7 @@ it('closes the destination picker and requires official web authorization when i
       .mockResolvedValueOnce({ id: '0', items: [{ id: 'folder-1', parentId: '0', name: '归档', kind: 'folder' }, { id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file' }] })
       .mockRejectedValueOnce({ code: 'web_auth_required', message: '需要网页验证' })
   });
-  render(<CloudManager provider="xunlei" client={client} initialAccounts={[{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 240 });
@@ -671,7 +687,7 @@ it('closes the destination picker and requires official web authorization when i
 
   expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
   expect(screen.queryByRole('dialog', { name: '选择移动位置' })).not.toBeInTheDocument();
-  expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
   expect(client.moveCloudFiles).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: '重新网页授权' }));
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
@@ -700,7 +716,7 @@ it('normalizes provider modified times in the list and details while preserving 
       { id: 'missing', parentId: '0', name: 'missing.txt', kind: 'file', size: 1024 }
     ] })
   });
-  render(<CloudManager provider="tianyi" client={client} initialAccounts={[{ id: 't-1', displayName: 'alice', provider: 'tianyi', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="tianyi" client={client} initialAccount={{ id: 't-1', displayName: 'alice', provider: 'tianyi', authMethod: 'web' }} restoreOnMount={false} />);
 
   const tree = await screen.findByRole('tree', { name: '天翼网盘文件' });
   expect(within(tree).getByText('seconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
@@ -740,7 +756,7 @@ it('normalizes provider modified times in the list and details while preserving 
 
 it('shows concise file details in a separate dialog', async () => {
   const user = userEvent.setup();
-  render(<CloudManager provider="quark" client={createCloudFake()} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('报告.pdf');
   await user.click(screen.getByText('报告.pdf'));
@@ -765,7 +781,7 @@ it('shows concise file details in a separate dialog', async () => {
 it('keeps multi-selection context actions valid for every selected item', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('归档');
   await user.click(screen.getByRole('checkbox', { name: '全选当前目录' }));
@@ -779,7 +795,7 @@ it('keeps multi-selection context actions valid for every selected item', async 
 
 it('shows create, upload and refresh commands when right-clicking file-list whitespace', async () => {
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
   fireEvent.click(screen.getByText('报告.pdf'));
@@ -795,7 +811,7 @@ it('shows create, upload and refresh commands when right-clicking file-list whit
 it('supports common file-manager keyboard shortcuts', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
   tree.focus();
@@ -821,7 +837,7 @@ it('renders an explicit credential-expired state instead of a file list', async 
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
   expect(await screen.findByText('凭据已过期')).toBeVisible();
   expect(screen.getByRole('region', { name: 'PikPak账号授权' })).toBeVisible();
-  expect(screen.getByRole('tab', { name: 'alice · PikPak' })).toBeVisible();
+  expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
   expect(screen.queryByRole('tree', { name: 'PikPak网盘文件' })).not.toBeInTheDocument();
   expect(await screen.findByRole('button', { name: '使用网页授权' })).toBeVisible();
 });
@@ -851,7 +867,7 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
       { id: 'ordinary-file', parentId: cloudRootDirectoryId[provider], name: '普通文件.txt', kind: 'file' }
     ] })
   });
-  render(<CloudManager provider={provider} client={client} initialAccounts={[{ id: `${provider}-1`, displayName: 'alice', provider, authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider={provider} client={client} initialAccount={{ id: `${provider}-1`, displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
 
   const recycleBinName = await screen.findByTitle('回收站');
   expect(recycleBinName.previousElementSibling).toHaveClass('recycle-bin');
@@ -867,7 +883,7 @@ it.each(['quark', 'uc', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'pikpak'] as cons
       ? { id: recycleBinId, items: [{ id: 'deleted-file', parentId: recycleBinId, name: '已删除文件.txt', kind: 'file', size: 12 }] }
       : { id: parentId, items: [{ id: 'live-file', parentId, name: '仍在网盘的文件.txt', kind: 'file', size: 10 }] }))
   });
-  render(<CloudManager provider={provider} client={client} initialAccounts={[{ id: `${provider}-1`, displayName: 'alice', provider, authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider={provider} client={client} initialAccount={{ id: `${provider}-1`, displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
 
   await user.dblClick(await screen.findByText('回收站'));
   await screen.findByText('已删除文件.txt');
@@ -890,7 +906,7 @@ it('restores and permanently deletes non-PikPak recycle records after confirmati
       ? { id: recycleBinId, items: [{ id: 'quark-recycle-record', parentId: recycleBinId, name: '已删除文件.txt', kind: 'file', size: 12 }] }
       : { id: parentId, items: [] }))
   });
-  render(<CloudManager provider={provider} client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider, authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider={provider} client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
 
   await user.dblClick(await screen.findByText('回收站'));
   await user.click(await screen.findByText('已删除文件.txt'));
@@ -921,7 +937,7 @@ it('limits PikPak recycle-bin items to restore and permanent deletion without fo
         { id: 'live-file', parentId: '0', name: '仍在网盘的文件.txt', kind: 'file', size: 10 }
       ] }))
   });
-  render(<CloudManager provider="pikpak" client={client} initialAccounts={[{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('回收站');
   fireEvent.doubleClick(screen.getByText('回收站'));
@@ -969,7 +985,7 @@ it('excludes the PikPak recycle-bin virtual folder from move destinations', asyn
       { id: 'live-file', parentId: '0', name: '仍在网盘的文件.txt', kind: 'file', size: 10 }
     ] })
   });
-  render(<CloudManager provider="pikpak" client={client} initialAccounts={[{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('仍在网盘的文件.txt');
   await user.click(screen.getByText('仍在网盘的文件.txt'));
@@ -989,7 +1005,7 @@ it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
       ? { id: recycleBinId, items: [] }
       : { id: '0', items: [{ id: recycleBinId, parentId: '0', name: '回收站', kind: 'folder' }] }))
   });
-  render(<CloudManager provider="pikpak" client={client} initialAccounts={[{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
 
   const recycleBin = await screen.findByText('回收站');
   await user.click(recycleBin);
@@ -1012,7 +1028,7 @@ it('queues a selected cloud folder as one directory parent task', async () => {
   const root = { id: 'group-root', name: '归档', kind: 'folder' as const, status: 'queued' as const, progress: 0, children: [queuedTask] };
   const downloadCloudDirectory = vi.fn().mockResolvedValue({ task: { task: queuedTask, queueTask: root }, queuedCount: 1, failures: [] });
   const client = createCloudFake({ downloadCloudDirectory });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} onDownloadTask={onDownloadTask} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} onDownloadTask={onDownloadTask} />);
 
   await screen.findByText('归档');
   await user.click(screen.getByRole('checkbox', { name: '选择 归档' }));
@@ -1034,7 +1050,7 @@ it('reports queued count and redacted per-file directory download failures inste
       failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
     })
   });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByText('归档');
   await user.click(screen.getByRole('checkbox', { name: '选择 归档' }));
@@ -1070,9 +1086,7 @@ it.each([
       message: '此登录方式需要网页验证，请点击网页授权完成登录'
     })
   });
-  render(<CloudManager provider={provider} client={client} initialAccounts={[
-    { id: 'account-1', displayName: 'alice', provider, authMethod: 'web' }
-  ]} restoreOnMount={false} />);
+  render(<CloudManager provider={provider} client={client} initialAccount={{ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByRole('tree', { name: `${label}网盘文件` });
   await user.click(screen.getByText('报告.pdf'));
@@ -1081,7 +1095,7 @@ it.each([
   expect(await screen.findByRole('button', { name: '重新网页授权' })).toBeVisible();
   await user.click(screen.getByRole('button', { name: '重新网页授权' }));
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith(provider);
-  expect(await screen.findByRole('tab', { name: `alice · ${label}` })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByRole('region', { name: `${label}文件管理器` })).toBeVisible();
   await waitFor(() => expect(client.completeCloudAuthorization).toHaveBeenCalledWith(provider));
 });
 
@@ -1124,9 +1138,7 @@ it('preserves the Xunlei account, directory and rejection when renewed authoriza
       completeCloudAuthorization: vi.fn().mockRejectedValue({ code: 'provider_error', message: '迅雷拒绝了本次授权验证。' })
     });
     const onAccountLoggedOut = vi.fn();
-    render(<CloudManager provider="xunlei" client={client} initialAccounts={[
-      { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
-    ]} restoreOnMount={false} showSessionActions={false} onAccountLoggedOut={onAccountLoggedOut} />);
+    render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} showSessionActions={false} onAccountLoggedOut={onAccountLoggedOut} />);
     await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByText('报告.pdf'));
     fireEvent.click(screen.getByRole('button', { name: '下载' }));
@@ -1137,7 +1149,7 @@ it('preserves the Xunlei account, directory and rejection when renewed authoriza
     await act(async () => { await vi.advanceTimersByTimeAsync(5_400); });
 
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
     expect(screen.getByText('报告.pdf')).toBeVisible();
     expect(screen.getByRole('alert')).toHaveTextContent('迅雷拒绝了本次授权验证。');
     expect(screen.getByRole('button', { name: '重新网页授权' })).toBeVisible();
@@ -1153,13 +1165,11 @@ it.each(['web_auth_required', 'credentials_expired'])('recovers Xunlei initial d
   const client = createCloudFake({ listCloudDirectory: vi.fn()
     .mockRejectedValueOnce({ code, message: '网盘需要重新授权' })
     .mockResolvedValue({ id: '0', items: [{ id: 'file-2', parentId: '0', name: '恢复后的文件.txt', kind: 'file' }] }) });
-  render(<CloudManager provider="xunlei" client={client} initialAccounts={[
-    { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
-  ]} restoreOnMount={false} showSessionActions={false} />);
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} showSessionActions={false} />);
 
   await user.click(await screen.findByRole('button', { name: '重新网页授权' }));
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
-  expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
   expect(await screen.findByText('恢复后的文件.txt', {}, { timeout: 2_000 })).toBeVisible();
   expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
 });
@@ -1167,9 +1177,7 @@ it.each(['web_auth_required', 'credentials_expired'])('recovers Xunlei initial d
 it.each(['web_auth_required', 'credentials_expired'])('preserves the Xunlei directory after refresh returns %s', async (code) => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  render(<CloudManager provider="xunlei" client={client} initialAccounts={[
-    { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
-  ]} restoreOnMount={false} showSessionActions={false} />);
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} showSessionActions={false} />);
 
   await screen.findByText('报告.pdf');
   client.listCloudDirectory.mockRejectedValueOnce({ code, message: '网盘需要重新授权' });
@@ -1190,9 +1198,7 @@ it.each(['web_auth_required', 'credentials_expired'])('keeps the Xunlei account 
         .mockResolvedValue({ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' })
     });
     const onAccountLoggedOut = vi.fn();
-    render(<CloudManager provider="xunlei" client={client} initialAccounts={[
-      { id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }
-    ]} restoreOnMount={false} showSessionActions={false} onAccountLoggedOut={onAccountLoggedOut} />);
+    render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} showSessionActions={false} onAccountLoggedOut={onAccountLoggedOut} />);
     await act(async () => { await Promise.resolve(); });
     fireEvent.click(screen.getByText('报告.pdf'));
     fireEvent.click(screen.getByRole('button', { name: '下载' }));
@@ -1201,7 +1207,7 @@ it.each(['web_auth_required', 'credentials_expired'])('keeps the Xunlei account 
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(800); });
 
-    expect(screen.getByRole('tab', { name: 'alice · 迅雷' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
     expect(screen.getByText('报告.pdf')).toBeVisible();
     expect(client.logoutCloud).not.toHaveBeenCalled();
     expect(onAccountLoggedOut).not.toHaveBeenCalled();
@@ -1231,7 +1237,7 @@ it('prevents duplicate directory submissions while the first operation is pendin
   let finish: (() => void) | undefined;
   const pending = new Promise<void>((resolve) => { finish = resolve; });
   const client = createCloudFake({ createCloudDirectory: vi.fn().mockReturnValue(pending) });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByRole('tree', { name: '夸克网盘文件' });
   await user.click(screen.getByRole('button', { name: '新建目录' }));
@@ -1249,7 +1255,7 @@ it('prevents duplicate directory submissions while the first operation is pendin
 it('treats closing the upload picker as a cancellation instead of a success', async () => {
   const user = userEvent.setup();
   const client = createCloudFake({ pickAndUploadFiles: vi.fn().mockResolvedValue([]) });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   await screen.findByRole('tree', { name: '夸克网盘文件' });
   await user.click(screen.getByRole('button', { name: '上传' }));
@@ -1262,7 +1268,7 @@ it('automatically completes a renewed web authorization after credentials expire
   const client = createCloudFake({ listCloudDirectory: vi.fn()
     .mockRejectedValueOnce(Object.assign(new Error('会话失效'), { code: 'credentials_expired' }))
     .mockResolvedValue({ id: '0', items: [{ id: 'file-1', parentId: '0', name: '恢复后的文件.txt', kind: 'file', size: 12 }] }) });
-  render(<CloudManager provider="quark" client={client} initialAccounts={[{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }]} restoreOnMount={false} />);
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   expect(await screen.findByText('凭据已过期')).toBeVisible();
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));

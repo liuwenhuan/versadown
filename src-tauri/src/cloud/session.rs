@@ -316,16 +316,20 @@ pub fn save_password_credential(
     credential: CloudPasswordCredential,
 ) -> Result<(), QuarkError> {
     let provider = credential.provider();
-    let account_id = credential.account_id().to_owned();
-    let username = credential.username().to_owned();
-    let password = credential.password().to_owned();
-    let mut credentials =
-        load_password_credentials(store, provider)?.unwrap_or(LoadedPasswordCredentials {
+    let mut credentials = load_password_credentials(store, provider)
+        .map_err(|error| {
+            let _ = clear_password_account(store, provider);
+            error
+        })?
+        .unwrap_or(LoadedPasswordCredentials {
             version: 2,
             provider,
             active_account_id: None,
             credentials: Vec::new(),
         });
+    let account_id = credential.account_id().to_owned();
+    let username = credential.username().to_owned();
+    let password = credential.password().to_owned();
     for existing in &mut credentials.credentials {
         existing.zeroize();
     }
@@ -342,7 +346,7 @@ pub fn save_password_credential(
     let result = persist_password_credentials(store, &credentials);
     credentials.zeroize();
     if let Err(error) = result {
-        let _ = remove_password_credential(store, provider);
+        let _ = clear_password_account(store, provider);
         return Err(error);
     }
     Ok(())
@@ -415,16 +419,7 @@ pub fn select_password_credential_account(
     account_id: &str,
 ) -> Result<(), QuarkError> {
     let Some(mut credentials) = load_password_credentials(store, provider)? else {
-        let draft_result = store.remove(password_login_draft_key(provider)?);
-        let profile_result = if provider == CloudProvider::Baidu {
-            store.remove(BAIDU_BROWSER_PROFILE_USERNAME_KEY)
-        } else {
-            Ok(())
-        };
-        return match (draft_result, profile_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), _) | (_, Err(error)) => Err(error),
-        };
+        return clear_password_account(store, provider);
     };
     let Some(index) = credentials
         .credentials
@@ -432,17 +427,7 @@ pub fn select_password_credential_account(
         .position(|credential| credential.account_id == account_id)
     else {
         credentials.zeroize();
-        let password_result = store.remove(password_credential_key(provider)?);
-        let draft_result = store.remove(password_login_draft_key(provider)?);
-        let profile_result = if provider == CloudProvider::Baidu {
-            store.remove(BAIDU_BROWSER_PROFILE_USERNAME_KEY)
-        } else {
-            Ok(())
-        };
-        return match (password_result, draft_result, profile_result) {
-            (Ok(()), Ok(()), Ok(())) => Ok(()),
-            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
-        };
+        return clear_password_account(store, provider);
     };
     let selected = credentials.credentials.remove(index);
     for stale in &mut credentials.credentials {
@@ -457,14 +442,101 @@ pub fn select_password_credential_account(
     let result = persist_password_credentials(store, &credentials);
     credentials.zeroize();
     if let Err(error) = result {
-        let _ = remove_password_credential(store, provider);
+        let _ = clear_password_account(store, provider);
         return Err(error);
     }
     if let Err(error) = store.remove(password_login_draft_key(provider)?) {
-        let _ = remove_password_credential(store, provider);
+        let _ = clear_password_account(store, provider);
         return Err(error);
     }
     Ok(())
+}
+
+/// Clear every local owner before accepting a different account. Attempt all
+/// removals even if one fails, and never allow persistence after an error.
+pub fn clear_password_account(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+) -> Result<(), QuarkError> {
+    let session = store.remove(provider.key());
+    let credential = remove_password_credential(store, provider);
+    session.and(credential)
+}
+
+pub fn saved_cloud_credential_info(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+) -> Result<Option<super::SavedCloudCredentialInfo>, QuarkError> {
+    if !cloud_session_policy(provider).supports_password_fallback {
+        return Ok(None);
+    }
+    Ok(
+        load_saved_password_login(store, provider)?.map(|saved| super::SavedCloudCredentialInfo {
+            username: saved.username().to_owned(),
+            has_saved_password: !saved.password().is_empty(),
+        }),
+    )
+}
+
+pub fn resolve_password_login(
+    store: &impl CredentialStore,
+    mut request: super::PasswordLoginRequest,
+) -> Result<(Zeroizing<String>, Zeroizing<String>), QuarkError> {
+    let raw_username = Zeroizing::new(std::mem::take(&mut request.username));
+    let username = Zeroizing::new(raw_username.trim().to_owned());
+    let supplied = request
+        .password
+        .take()
+        .map(Zeroizing::new)
+        .filter(|password| !password.is_empty());
+    if username.is_empty() {
+        return Err(QuarkError::InvalidInput("请输入账号和密码".into()));
+    }
+    let password = match (supplied, request.use_saved_password) {
+        (Some(password), false) if !password.is_empty() => password,
+        (None, true) => {
+            let saved = load_saved_password_login(store, request.provider)?
+                .filter(|saved| saved.username() == username.as_str())
+                .ok_or_else(|| QuarkError::InvalidInput("请输入密码".into()))?;
+            Zeroizing::new(saved.password().to_owned())
+        }
+        _ => return Err(QuarkError::InvalidInput("请输入密码".into())),
+    };
+    Ok((username, password))
+}
+
+pub(crate) fn uses_password_browser_profile(provider: CloudProvider) -> bool {
+    matches!(provider, CloudProvider::Baidu | CloudProvider::Tianyi)
+}
+
+/// Clears a previous account and returns whether its password WebView profile
+/// also needs resetting. Direct-only providers have no such profile.
+pub fn prepare_password_account_login(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+    username: &str,
+) -> Result<bool, QuarkError> {
+    let credential = load_password_credential(store, provider)?;
+    let draft = load_password_login_draft(store, provider)?;
+    let owner = if provider == CloudProvider::Baidu {
+        baidu_browser_profile_username(store)?
+    } else {
+        None
+    };
+    let changed = credential
+        .as_ref()
+        .is_some_and(|value| value.username() != username)
+        || draft
+            .as_ref()
+            .is_some_and(|value| value.username() != username)
+        || owner
+            .as_ref()
+            .is_some_and(|value| value.as_str() != username)
+        || (credential.is_none() && store.load(provider.key())?.is_some());
+    if changed {
+        clear_password_account(store, provider)?;
+    }
+    Ok(changed && uses_password_browser_profile(provider))
 }
 
 pub fn run_with_session_recovery<T>(

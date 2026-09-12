@@ -3,6 +3,16 @@ import { vi, expect, it } from 'vitest';
 const native = { invoke: vi.fn().mockResolvedValue(undefined) };
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 
+it('keeps saved-password metadata separate from explicit and saved-handle login payloads', async () => {
+  const api = await import('./cloudApi');
+  native.invoke.mockResolvedValueOnce({ username: 'alice', hasSavedPassword: true });
+  expect(await api.getSavedCloudCredentials('baidu')).toEqual({ username: 'alice', hasSavedPassword: true });
+  await api.loginCloudWithPassword('baidu', { username: 'alice', useSavedPassword: true });
+  expect(native.invoke).toHaveBeenLastCalledWith('cloud_login_password', { provider: 'baidu', username: 'alice', useSavedPassword: true });
+  await api.loginCloudWithPassword('baidu', { username: 'bob', password: 'new-secret' });
+  expect(native.invoke).toHaveBeenLastCalledWith('cloud_login_password', { provider: 'baidu', username: 'bob', password: 'new-secret' });
+});
+
 it('loads the catalog and uses its root when listing without a parent', async () => {
   const api = await import('./cloudApi');
   native.invoke.mockResolvedValueOnce([{ provider: 'baidu', rootDirectoryId: '/dynamic-root' }]);

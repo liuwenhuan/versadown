@@ -261,7 +261,7 @@ fn password_webview_data_directory_from_root(
     root: &Path,
     provider: CloudProvider,
 ) -> Result<PathBuf, QuarkError> {
-    if !matches!(provider, CloudProvider::Baidu | CloudProvider::Tianyi) {
+    if !uses_password_browser_profile(provider) {
         return Err(QuarkError::InvalidInput(
             "该网盘不支持持久化账号密码登录".into(),
         ));
@@ -1249,16 +1249,12 @@ pub fn cloud_provider_catalog() -> Vec<super::ProviderDescriptorDto> {
 pub async fn cloud_saved_password_credentials(
     app: AppHandle,
     provider: CloudProvider,
-) -> Result<Option<CloudCredentials>, QuarkError> {
+) -> Result<Option<SavedCloudCredentialInfo>, QuarkError> {
     if !provider_capabilities(provider).password {
         return Ok(None);
     }
     run(app, provider, move |state, _| {
-        let draft = load_saved_password_login(&state.store, provider)?;
-        Ok(draft.map(|draft| CloudCredentials {
-            username: draft.username().to_owned(),
-            password: draft.password().to_owned(),
-        }))
+        saved_cloud_credential_info(&state.store, provider)
     })
     .await
 }
@@ -2312,6 +2308,7 @@ fn finalize_baidu_web_authorization(
     // so frontend polling keeps the window open for the user to finish the
     // official flow instead of creating an immediately-expired tab.
     authorization_result(client.directory(descriptor.root_directory_id))?;
+    select_password_credential_account(store, CloudProvider::Baidu, &account.id)?;
     save_provider_session(CloudProvider::Baidu, store, &session)?;
     Ok(account)
 }
@@ -2335,6 +2332,7 @@ fn finalize_tianyi_web_authorization(
             other => other,
         })?;
     let account = client.web_account()?;
+    select_password_credential_account(store, CloudProvider::Tianyi, &account.id)?;
     save_provider_session(CloudProvider::Tianyi, store, &session)?;
     Ok(account)
 }
@@ -2422,6 +2420,7 @@ pub async fn cloud_complete_authorization(
                 let client = PikPakClient::new(http, &temporary);
                 client.save_session(&session)?;
                 let account = authorization_result(client.account())?;
+                select_password_credential_account(&state.store, provider, &account.id)?;
                 state.store.save(
                     "pikpak",
                     &temporary.load("pikpak")?.ok_or(QuarkError::Storage)?,
@@ -2506,9 +2505,6 @@ pub async fn cloud_complete_authorization(
                 Ok(account)
             }
         }?;
-        if cloud_session_policy(provider).supports_password_fallback {
-            select_password_credential_account(&state.store, provider, &account.id)?;
-        }
         if provider == CloudProvider::Baidu {
             let profile_username = load_password_credential(&state.store, provider)?
                 .filter(|credential| credential.account_id() == account.id)
@@ -2530,19 +2526,29 @@ pub async fn cloud_login_password(
     app: AppHandle,
     provider: CloudProvider,
     username: String,
-    password: String,
+    password: Option<String>,
+    use_saved_password: Option<bool>,
 ) -> Result<CloudAccount, QuarkError> {
+    let request = PasswordLoginRequest {
+        provider,
+        username,
+        password,
+        use_saved_password: use_saved_password.unwrap_or(false),
+    };
     if !provider_capabilities(provider).password {
         return Err(QuarkError::WebAuthorizationRequired);
     }
-    let username = zeroize::Zeroizing::new(username);
-    let password = zeroize::Zeroizing::new(password);
     let browser_app = app.clone();
     let account = run(app.clone(), provider, move |state, http| {
-        if provider == CloudProvider::Baidu && prepare_baidu_account_login(&state.store, &username)?
-        {
+        let (username, password) = resolve_password_login(&state.store, request)?;
+        let reset_baidu_profile = provider == CloudProvider::Baidu
+            && prepare_baidu_account_login(&state.store, &username)?;
+        let reset_password_profile = prepare_password_account_login(&state.store, provider, &username)?;
+        if reset_baidu_profile || reset_password_profile {
             clear_password_webview_profile(&browser_app, provider)?;
-            set_baidu_browser_profile_username(&state.store, None)?;
+            if provider == CloudProvider::Baidu {
+                set_baidu_browser_profile_username(&state.store, None)?;
+            }
             set_browser_password_login_preferred(&state.store, provider, false)?;
         }
         // Remember the latest submitted input before contacting the provider,

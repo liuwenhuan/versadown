@@ -31,7 +31,12 @@ export interface CloudDirectory { id: string; items: CloudFile[]; }
 export interface CloudAuthorization { provider: CloudProvider; windowLabel: string; instructions: string; completed?: boolean; }
 export type CloudPasswordLoginMode = 'none' | 'rustDirect' | 'officialWebView';
 export interface CloudAuthorizationCapabilities { provider: CloudProvider; web: boolean; password: boolean; passwordLoginMode: CloudPasswordLoginMode; }
-export interface CloudCredentials { username: string; password: string; }
+export interface SavedCloudCredentialInfo { username: string; hasSavedPassword: boolean; }
+export type CloudCredentials = { username: string } & (
+  | { password: string; useSavedPassword?: false }
+  | { password?: never; useSavedPassword: true }
+);
+export type PasswordLoginRequest = CloudCredentials & { provider: CloudProvider };
 export interface CloudError { code: 'not_authorized' | 'credentials_expired' | 'web_auth_required' | 'authorization_pending' | 'credential_storage_error' | 'invalid_response' | 'network_error' | 'provider_error' | 'invalid_input' | 'provider_unsupported' | 'pikpak_regional_membership_restricted' | 'session_renewed_retry_operation'; message: string; }
 export interface CloudDirectoryDownloadFailure { relativePath: string; code: string; message: string; }
 export interface CloudDirectoryDownloadOutcome {

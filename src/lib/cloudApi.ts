@@ -9,7 +9,7 @@ export const beginCloudAuthorization = (provider: CloudProvider) => invoke<Cloud
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
 export const reauthorizeFailedCloudTask = (taskId: string) => invoke<CloudAuthorization>('cloud_reauthorize_failed_task', { taskId });
 export const loginCloudWithPassword = (provider: CloudProvider, credentials: CloudCredentials) => invoke<CloudAccount>('cloud_login_password', { provider, ...credentials });
-export const getSavedCloudCredentials = (provider: CloudProvider) => invoke<CloudCredentials | null>('cloud_saved_password_credentials', { provider });
+export const getSavedCloudCredentials = (provider: CloudProvider) => invoke<import('./cloudTypes').SavedCloudCredentialInfo | null>('cloud_saved_password_credentials', { provider });
 export const getCloudAccount = (provider: CloudProvider) => invoke<CloudAccount>('cloud_account', { provider });
 export async function listCloudDirectory(provider: CloudProvider, parentId?: string): Promise<CloudDirectory> {
   if (parentId === undefined) {

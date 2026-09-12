@@ -61,6 +61,26 @@ it('defaults to the cloud management tab and lists every supported provider ther
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
+it('keeps one provider workspace tab after logout and login as a different account', async () => {
+  const user = userEvent.setup();
+  const client = createClient({ quark: { id: 'old', displayName: 'old-alice', provider: 'quark', authMethod: 'web' } });
+  client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0]]);
+  client.completeCloudAuthorization.mockResolvedValue({ id: 'new', displayName: 'new-bob', provider: 'quark', authMethod: 'web' });
+  render(<CloudWorkspace client={client} />);
+  await screen.findByText('· old-alice');
+  await user.click(screen.getByRole('button', { name: '退出授权' }));
+  await user.click(screen.getByRole('button', { name: '确认退出授权' }));
+  await waitFor(() => expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument());
+  await user.click(screen.getByRole('button', { name: '使用网页授权' }));
+  await user.click(screen.getByRole('button', { name: '我已完成授权' }));
+  expect(await screen.findByText('· new-bob')).toBeVisible();
+  expect(screen.queryByText('· old-alice')).not.toBeInTheDocument();
+  expect(screen.getAllByRole('tab', { name: '夸克网盘' })).toHaveLength(1);
+  await user.click(screen.getByRole('tab', { name: '夸克网盘' }));
+  expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
+  expect(screen.queryByRole('tablist', { name: '夸克账号' })).not.toBeInTheDocument();
+});
+
 it('renders authorization cards for every newly supported cloud service', async () => {
   const client = createClient();
   render(<CloudWorkspace client={client as never} />);

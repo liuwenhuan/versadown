@@ -10,7 +10,7 @@ export interface CloudManagerClient {
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
-  getSavedCloudCredentials?(provider: CloudProvider): Promise<CloudCredentials | null>;
+  getSavedCloudCredentials?(provider: CloudProvider): Promise<import('../lib/cloudTypes').SavedCloudCredentialInfo | null>;
   getCloudAccount(provider: CloudProvider): Promise<CloudAccount>;
   listCloudDirectory(provider: CloudProvider, parentId?: string): Promise<CloudDirectory>;
   createCloudDirectory(provider: CloudProvider, parentId: string, name: string): Promise<CloudFile | void>;
@@ -30,11 +30,10 @@ export interface CloudManagerProps {
   descriptor: ProviderDescriptor;
   provider: CloudProvider;
   client?: CloudManagerClient;
-  initialAccounts?: readonly CloudAccount[];
+  initialAccount?: CloudAccount | null;
   onDownloadTask?(task: unknown): void;
   authorizationOnly?: boolean;
   restoreOnMount?: boolean;
-  showAccountTabs?: boolean;
   showSessionActions?: boolean;
   onAccountAuthorized?(account: CloudAccount): void;
   onAccountLoggedOut?(provider: CloudProvider): void;
@@ -419,12 +418,10 @@ function CloudDestinationPicker({ action, provider, descriptor, client, excluded
   </div>, document.body);
 }
 
-export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccounts = [], onDownloadTask, authorizationOnly = false, restoreOnMount = true, showAccountTabs = true, showSessionActions = true, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const label = descriptor.displayName;
   const rootId = descriptor.rootDirectoryId;
-  const providerAccounts = initialAccounts.filter((account) => account.provider === provider);
-  const [accounts, setAccounts] = useState<readonly CloudAccount[]>(providerAccounts);
-  const [activeAccountId, setActiveAccountId] = useState<string | null>(providerAccounts[0]?.id ?? null);
+  const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
   const [directory, setDirectory] = useState<CloudDirectory | null>(null);
   const [directoryState, setDirectoryState] = useState<DirectoryState>('idle');
   const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
@@ -432,6 +429,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const [sort, setSort] = useState<CloudSort | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [savedUsername, setSavedUsername] = useState<string | null>(null);
+  const useSavedPassword = savedUsername === username.trim() && !password;
   const [passwordLoginBusy, setPasswordLoginBusy] = useState(false);
   const passwordLoginInFlight = useRef(false);
   const passwordFieldsEdited = useRef(false);
@@ -455,7 +454,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const selectAllCheckbox = useRef<HTMLInputElement>(null);
   const selectionMenuTrigger = useRef<HTMLButtonElement>(null);
 
-  const activeAccount = accounts.find((account) => account.id === activeAccountId) ?? null;
   const sortedItems = sortedCloudFiles(directory?.items ?? [], sort);
   const selected = sortedItems.filter((item) => selectedIds.includes(item.id));
   const currentDirectoryId = directory?.id ?? breadcrumbs.at(-1)?.id ?? rootId;
@@ -488,7 +486,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     client.getSavedCloudCredentials?.(provider).then((credentials) => {
       if (!active || passwordFieldsEdited.current || !credentials) return;
       setUsername(credentials.username);
-      setPassword(credentials.password);
+      setSavedUsername(credentials.hasSavedPassword ? credentials.username : null);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [client, provider, supportsDirectPasswordLogin]);
@@ -531,8 +529,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     client.getCloudAccount(provider).then((account) => {
       if (!active) return;
       ensureProviderAccount(account);
-      setAccounts((current) => current.some((item) => item.id === account.id) ? current : [...current, account]);
-      setActiveAccountId(account.id);
+      setActiveAccount(account);
     }).catch((error) => {
       if (active && !isUnauthorized(error)) setAuthorizationStatus(errorMessage(error, '无法恢复网盘会话。'));
     });
@@ -548,8 +545,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   async function acceptAccount(account: CloudAccount) {
     ensureProviderAccount(account);
-    setAccounts((current) => current.some((item) => item.id === account.id) ? current.map((item) => item.id === account.id ? account : item) : [...current, account]);
-    setActiveAccountId(account.id);
+    setActiveAccount(account);
     setWebAuthorization(null);
     setReauthorizationRequired(false);
     if (reauthorizationRequired) setOperation(null);
@@ -570,17 +566,24 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   async function submitPasswordLogin(event: FormEvent) {
     event.preventDefault();
     if (!supportsDirectPasswordLogin || passwordLoginInFlight.current) return;
-    if (!username.trim() || !password) {
+    if (!username.trim() || (!password && !useSavedPassword)) {
       setAuthorizationStatus('请输入账号和密码后再登录。');
       return;
     }
-    const credentials = { username: username.trim(), password };
+    const credentials: CloudCredentials = useSavedPassword
+      ? { username: username.trim(), useSavedPassword: true }
+      : { username: username.trim(), password };
     passwordLoginInFlight.current = true;
     setPasswordLoginBusy(true);
     try {
       await addAccount(() => client.loginCloudWithPassword(provider, credentials));
     } finally {
-      credentials.password = '';
+      // Submitted plaintext is released from component state after the attempt.
+      if (credentials.password) {
+        setPassword('');
+        const saved = await client.getSavedCloudCredentials?.(provider).catch(() => null);
+        setSavedUsername(saved?.hasSavedPassword ? saved.username : null);
+      }
       passwordLoginInFlight.current = false;
       setPasswordLoginBusy(false);
     }
@@ -826,11 +829,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const showAuthorizationFeedback = authorizationStatus !== initialAuthorizationStatus;
     return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
       <header className="cloud-heading"><h2>{label}网盘</h2></header>
-      {showAccountTabs && accounts.length > 0 && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId}>{account.displayName} · {label}</button>)}</div>}
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsDirectPasswordLogin && <>
           <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; setUsername(event.target.value); }} />
-          <input aria-label="密码" placeholder="密码" type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; setPassword(event.target.value); }} />
+          <input aria-label="密码" placeholder={useSavedPassword ? "****" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; setSavedUsername(null); setPassword(event.target.value); }} />
           <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? '正在自动登录…' : '登录'}</button>
         </>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
@@ -845,7 +847,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function logoutConfirmation() {
-    return pendingLogout && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={`确认${logoutLabel}`}><h3>确认{logoutLabel}</h3><p>这只会清除本机授权会话，不会删除网盘中的任何文件。</p><button className="secondary" onClick={() => setPendingLogout(false)}>取消</button><button className="danger-button" onClick={() => { setPendingLogout(false); void runOperation(logoutLabel, async () => { await client.logoutCloud(provider); setAccounts([]); setActiveAccountId(null); setDirectory(null); setDirectoryState('idle'); setAuthorizationStatus('未授权。请登录或在网页授权窗口中完成验证。'); onAccountLoggedOut?.(provider); }, false); }}>确认{logoutLabel}</button></section></div>;
+    return pendingLogout && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={`确认${logoutLabel}`}><h3>确认{logoutLabel}</h3><p>这只会清除本机授权会话，不会删除网盘中的任何文件。</p><button className="secondary" onClick={() => setPendingLogout(false)}>取消</button><button className="danger-button" onClick={() => { setPendingLogout(false); void runOperation(logoutLabel, async () => { await client.logoutCloud(provider); setActiveAccount(null); setSavedUsername(null); setPassword(''); setDirectory(null); setDirectoryState('idle'); setAuthorizationStatus('未授权。请登录或在网页授权窗口中完成验证。'); onAccountLoggedOut?.(provider); }, false); }}>确认{logoutLabel}</button></section></div>;
   }
 
   function accountManagementView() {
@@ -864,8 +866,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   const parent = breadcrumbs.at(-2);
   return <section className="cloud-manager cloud-file-manager" aria-label={`${label}文件管理器`}>
-    {(showAccountTabs || showSessionActions) && <div className="cloud-file-sessionbar">
-      {showAccountTabs && <div className="cloud-account-tabs" role="tablist" aria-label={`${label}账号`}>{accounts.map((account) => <button key={account.id} role="tab" aria-selected={account.id === activeAccountId} disabled={operationBusy} onClick={() => { setActiveAccountId(account.id); setDirectoryState('idle'); setDirectory(null); }}>{account.displayName} · {label}</button>)}</div>}
+    {showSessionActions && <div className="cloud-file-sessionbar">
       {showSessionActions && sessionActions()}
     </div>}
 

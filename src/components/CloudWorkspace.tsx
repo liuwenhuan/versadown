@@ -95,10 +95,9 @@ export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) 
           descriptor={descriptor}
           provider={provider}
           client={client}
-          initialAccounts={account ? [account] : []}
+          initialAccount={account ?? null}
           authorizationOnly
           restoreOnMount={false}
-          showAccountTabs={false}
           onAccountAuthorized={acceptAccount}
           onAccountLoggedOut={removeAccount}
         />;
@@ -110,9 +109,8 @@ export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) 
       descriptor={catalog.find(d => d.provider === activeAccount.provider)!}
       provider={activeAccount.provider}
       client={client}
-      initialAccounts={[activeAccount]}
+      initialAccount={activeAccount}
       restoreOnMount={false}
-      showAccountTabs={false}
       showSessionActions={false}
       onDownloadTask={onDownloadTask}
       onAccountAuthorized={acceptAccount}

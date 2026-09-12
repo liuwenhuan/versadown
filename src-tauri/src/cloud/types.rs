@@ -96,9 +96,27 @@ pub struct CloudAuthorization {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CloudCredentials {
+pub struct SavedCloudCredentialInfo {
     pub username: String,
-    pub password: String,
+    pub has_saved_password: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordLoginRequest {
+    pub provider: CloudProvider,
+    pub username: String,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub use_saved_password: bool,
+}
+
+impl Drop for PasswordLoginRequest {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.username.zeroize();
+        self.password.zeroize();
+    }
 }
 #[derive(Debug, Error)]
 pub enum QuarkError {

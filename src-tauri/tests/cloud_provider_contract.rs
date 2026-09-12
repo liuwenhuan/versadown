@@ -15,6 +15,87 @@ use std::{
 };
 
 #[test]
+fn browser_account_replacement_fails_closed_and_attempts_all_owner_cleanup() {
+    use alldownloader_lib::cloud::{
+        baidu_browser_profile_username, select_password_credential_account,
+        set_baidu_browser_profile_username,
+    };
+    struct FailingSessionRemoval {
+        inner: MemoryCredentialStore,
+        removed: Mutex<Vec<String>>,
+    }
+    impl CredentialStore for FailingSessionRemoval {
+        fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+            self.inner.save(key, bytes)
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+            self.inner.load(key)
+        }
+        fn remove(&self, key: &str) -> Result<(), QuarkError> {
+            self.removed.lock().unwrap().push(key.into());
+            if key == "baidu" {
+                return Err(QuarkError::Storage);
+            }
+            self.inner.remove(key)
+        }
+    }
+    let store = FailingSessionRemoval {
+        inner: MemoryCredentialStore::default(),
+        removed: Mutex::new(Vec::new()),
+    };
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "a", "alice", "secret-a"),
+    )
+    .unwrap();
+    set_baidu_browser_profile_username(&store, Some("alice")).unwrap();
+    store.save("baidu", b"old-session").unwrap();
+    assert!(matches!(
+        select_password_credential_account(&store, CloudProvider::Baidu, "b"),
+        Err(QuarkError::Storage)
+    ));
+    assert!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap()
+        .is_none());
+    assert!(baidu_browser_profile_username(&store).unwrap().is_none());
+    assert!(store
+        .removed
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|key| key == "cloud-password-draft-baidu"));
+}
+
+#[test]
+fn saved_credential_metadata_only_exists_for_catalog_direct_password_providers() {
+    use alldownloader_lib::cloud::{saved_cloud_credential_info, ProviderRegistry};
+    let store = MemoryCredentialStore::default();
+    for descriptor in ProviderRegistry::global().catalog() {
+        if descriptor.authorization.password_login_mode == PasswordLoginMode::RustDirect {
+            save_password_credential(
+                &store,
+                CloudPasswordCredential::new(descriptor.provider, "only", "alice", "secret"),
+            )
+            .unwrap();
+            let json = serde_json::to_value(
+                saved_cloud_credential_info(&store, descriptor.provider)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({"username": "alice", "hasSavedPassword": true})
+            );
+        } else {
+            assert!(saved_cloud_credential_info(&store, descriptor.provider)
+                .unwrap()
+                .is_none());
+        }
+    }
+}
+
+#[test]
 fn registry_catalog_is_complete_unique_and_routes_each_share() {
     use alldownloader_lib::cloud::ProviderRegistry;
     use std::collections::HashSet;

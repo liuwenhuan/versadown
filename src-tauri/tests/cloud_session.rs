@@ -8,6 +8,210 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[test]
+fn saved_credential_response_never_serializes_the_saved_password() {
+    use alldownloader_lib::cloud::saved_cloud_credential_info;
+    let store = MemoryCredentialStore::default();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "a", "alice", "stored-secret"),
+    )
+    .unwrap();
+    let response = saved_cloud_credential_info(&store, CloudProvider::Baidu)
+        .unwrap()
+        .unwrap();
+    let json = serde_json::to_value(response).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"username": "alice", "hasSavedPassword": true})
+    );
+}
+
+#[test]
+fn replacing_browser_account_clears_previous_session_password_and_profile_owner() {
+    use alldownloader_lib::cloud::{
+        baidu_browser_profile_username, set_baidu_browser_profile_username,
+    };
+    let store = MemoryCredentialStore::default();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "a", "alice", "secret-a"),
+    )
+    .unwrap();
+    store.save("baidu", b"session-a").unwrap();
+    set_baidu_browser_profile_username(&store, Some("alice")).unwrap();
+    select_password_credential_account(&store, CloudProvider::Baidu, "b").unwrap();
+    assert!(store.load("baidu").unwrap().is_none());
+    assert!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap()
+        .is_none());
+    assert!(baidu_browser_profile_username(&store).unwrap().is_none());
+}
+
+#[test]
+fn saved_password_handle_is_bound_to_username_and_rejects_ambiguous_inputs() {
+    use alldownloader_lib::cloud::{resolve_password_login, PasswordLoginRequest};
+    let store = MemoryCredentialStore::default();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "a", "alice", "saved-secret"),
+    )
+    .unwrap();
+    let resolve = |username: &str, password: Option<&str>, use_saved_password| {
+        resolve_password_login(
+            &store,
+            PasswordLoginRequest {
+                provider: CloudProvider::Baidu,
+                username: username.into(),
+                password: password.map(str::to_owned),
+                use_saved_password,
+            },
+        )
+    };
+    assert_eq!(
+        resolve("alice", None, true).unwrap().1.as_str(),
+        "saved-secret"
+    );
+    assert_eq!(
+        resolve("alice", Some(""), true).unwrap().1.as_str(),
+        "saved-secret"
+    );
+    assert_eq!(
+        resolve("bob", Some("new-secret"), false)
+            .unwrap()
+            .1
+            .as_str(),
+        "new-secret"
+    );
+    assert!(resolve("bob", None, true).is_err());
+    assert!(resolve("alice", Some("new-secret"), true).is_err());
+    assert!(resolve("alice", None, false).is_err());
+    assert!(resolve("alice", Some(""), false).is_err());
+}
+
+#[test]
+fn replacement_removes_old_session_even_when_password_persistence_fails() {
+    use std::sync::atomic::AtomicBool;
+    struct FailingStore {
+        inner: MemoryCredentialStore,
+        fail_save: AtomicBool,
+    }
+    impl CredentialStore for FailingStore {
+        fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+            if self.fail_save.load(Ordering::Relaxed) {
+                return Err(QuarkError::Storage);
+            }
+            self.inner.save(key, bytes)
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+            self.inner.load(key)
+        }
+        fn remove(&self, key: &str) -> Result<(), QuarkError> {
+            self.inner.remove(key)
+        }
+    }
+    let store = FailingStore {
+        inner: MemoryCredentialStore::default(),
+        fail_save: AtomicBool::new(false),
+    };
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "a", "alice", "secret-a"),
+    )
+    .unwrap();
+    store.save("baidu", b"session-a").unwrap();
+    store.fail_save.store(true, Ordering::Relaxed);
+    assert!(save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "b", "bob", "secret-b")
+    )
+    .is_err());
+    assert!(store.load("baidu").unwrap().is_none());
+    assert!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn password_replacement_clears_all_old_owners_before_saving_the_new_draft() {
+    use alldownloader_lib::cloud::{
+        baidu_browser_profile_username, prepare_password_account_login, save_password_login_draft,
+        saved_cloud_credential_info, set_baidu_browser_profile_username,
+    };
+    let store = MemoryCredentialStore::default();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "a", "alice", "secret-a"),
+    )
+    .unwrap();
+    store.save("baidu", b"session-a").unwrap();
+    set_baidu_browser_profile_username(&store, Some("alice")).unwrap();
+    assert!(prepare_password_account_login(&store, CloudProvider::Baidu, "bob").unwrap());
+    assert!(store.load("baidu").unwrap().is_none());
+    assert!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap()
+        .is_none());
+    assert!(baidu_browser_profile_username(&store).unwrap().is_none());
+    save_password_login_draft(&store, CloudProvider::Baidu, "bob", "secret-b").unwrap();
+    assert_eq!(
+        saved_cloud_credential_info(&store, CloudProvider::Baidu)
+            .unwrap()
+            .unwrap()
+            .username,
+        "bob"
+    );
+}
+
+#[test]
+fn unreadable_old_credentials_abort_persistence_and_clear_the_session() {
+    struct UnreadablePassword {
+        inner: MemoryCredentialStore,
+    }
+    impl CredentialStore for UnreadablePassword {
+        fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+            self.inner.save(key, bytes)
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+            if key == "cloud-password-baidu" {
+                return Err(QuarkError::Storage);
+            }
+            self.inner.load(key)
+        }
+        fn remove(&self, key: &str) -> Result<(), QuarkError> {
+            self.inner.remove(key)
+        }
+    }
+    let store = UnreadablePassword {
+        inner: MemoryCredentialStore::default(),
+    };
+    store.save("baidu", b"session").unwrap();
+    assert!(save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Baidu, "b", "bob", "secret-b")
+    )
+    .is_err());
+    assert!(store.load("baidu").unwrap().is_none());
+}
+
+#[test]
+fn replacing_pikpak_clears_credentials_without_requesting_an_unsupported_browser_profile() {
+    use alldownloader_lib::cloud::prepare_password_account_login;
+    let store = MemoryCredentialStore::default();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Pikpak, "a", "alice", "secret-a"),
+    )
+    .unwrap();
+    store.save("pikpak", b"session-a").unwrap();
+    let reset_password_profile =
+        prepare_password_account_login(&store, CloudProvider::Pikpak, "bob").unwrap();
+    assert!(!reset_password_profile);
+    assert!(store.load("pikpak").unwrap().is_none());
+    assert!(load_password_credential(&store, CloudProvider::Pikpak)
+        .unwrap()
+        .is_none());
+}
+
 #[derive(Default)]
 struct LoadRecordingStore {
     load_calls: AtomicUsize,
