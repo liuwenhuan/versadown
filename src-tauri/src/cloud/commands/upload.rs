@@ -59,6 +59,30 @@ pub async fn cloud_upload_files(
 }
 
 impl CloudState {
+    pub(crate) fn with_upload_session<T>(
+        &self,
+        provider: CloudProvider,
+        http: &impl CloudHttpTransport,
+        mut work: impl FnMut(&crate::cloud::driver::StoreRef<'_>) -> Result<T, CloudError>,
+    ) -> Result<T, CloudError> {
+        self.auth_supervisor.run(
+            &self.store,
+            provider,
+            SessionWorkKind::Mutation,
+            |snapshot| work(&crate::cloud::driver::StoreRef(snapshot)),
+            |genuine| {
+                auth_supervisor::recover_in_order(
+                    provider,
+                    &self.store,
+                    ProviderRegistry::global()
+                        .driver(provider, &self.store, http)
+                        .auth(),
+                    genuine,
+                    || Ok(false),
+                )
+            },
+        )
+    }
     pub fn upload_pikpak_file(
         &self,
         http: &(impl CloudHttpTransport + CloudUploadTransport),
@@ -75,38 +99,8 @@ impl CloudState {
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, QuarkError> {
         const URL: &str = "https://api-drive.mypikpak.com/drive/v1/files";
-        let mut session = self.with_provider(CloudProvider::Pikpak, |store| {
-            PikPakClient::new(http, store).session_snapshot()
-        })?;
-        let mut access_retried = false;
-        let mut captcha_retried = false;
-        loop {
-            // Both upload-init HTTPS and the subsequent OSS transfers are outside the session lock.
-            let result = PikPakClient::new(http, &self.store).send_snapshot(
-                "POST",
-                URL,
-                payload.clone(),
-                &session,
-            );
-            match result {
-                Err(QuarkError::AuthorizationExpired) if !access_retried => {
-                    session = self.with_provider(CloudProvider::Pikpak, |store| {
-                        PikPakClient::new(http, store)
-                            .recover_snapshot(&session, false, "POST", URL)
-                    })?;
-                    access_retried = true;
-                }
-                Err(QuarkError::CaptchaRequired) if !captcha_retried => {
-                    session = self.with_provider(CloudProvider::Pikpak, |store| {
-                        PikPakClient::new(http, store).recover_snapshot(&session, true, "POST", URL)
-                    })?;
-                    captcha_retried = true;
-                }
-                Err(QuarkError::CaptchaRequired) => {
-                    return Err(QuarkError::WebAuthorizationRequired)
-                }
-                other => return other,
-            }
-        }
+        self.with_upload_session(CloudProvider::Pikpak, http, |store| {
+            PikPakClient::new(http, store).request("POST", URL.into(), Some(payload.clone()))
+        })
     }
 }

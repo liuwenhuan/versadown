@@ -23,7 +23,7 @@ pub(crate) fn list_cloud_directory(
 
 pub(crate) fn restore_provider_recycle_entries(
     provider: CloudProvider,
-    store: &DpapiCredentialStore,
+    store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
     file_ids: &[String],
 ) -> Result<(), QuarkError> {
@@ -34,7 +34,7 @@ pub(crate) fn restore_provider_recycle_entries(
 
 pub(crate) fn delete_provider_recycle_entries(
     provider: CloudProvider,
-    store: &DpapiCredentialStore,
+    store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
     file_ids: &[String],
 ) -> Result<(), QuarkError> {
@@ -142,7 +142,7 @@ pub async fn cloud_trash(
 
 pub(crate) fn trash_provider_files(
     provider: CloudProvider,
-    store: &DpapiCredentialStore,
+    store: &impl CredentialStore,
     h: &impl CloudHttpTransport,
     file_ids: &[String],
 ) -> Result<(), QuarkError> {

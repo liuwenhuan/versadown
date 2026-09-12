@@ -206,68 +206,139 @@ pub(crate) fn should_attempt_native_password_recovery(
         )
 }
 
-pub(crate) fn run_with_browser_session_recovery<T>(
+pub(crate) fn recover_authorization(
     app: &AppHandle,
-    provider: CloudProvider,
-    kind: SessionWorkKind,
     state: &CloudState,
+    provider: CloudProvider,
     http: &impl CloudHttpTransport,
-    allow_challenge_recovery: bool,
-    mut work: impl FnMut() -> Result<T, QuarkError>,
-) -> Result<T, QuarkError> {
-    let error = match work() {
-        Ok(value) => return Ok(value),
-        Err(error) => error,
-    };
-    if !should_attempt_native_password_recovery(provider, kind, &error) {
-        return Err(error);
-    }
-    let Some(credential) = load_password_credential(&state.store, provider)? else {
-        return Err(error);
-    };
-    {
-        let mut attempts = state
-            .password_recovery_attempts
-            .lock()
-            .map_err(|_| QuarkError::Storage)?;
-        if attempts
-            .get(provider.key())
-            .is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(300))
-        {
-            return Err(error);
-        }
-        attempts.insert(provider.key().into(), std::time::Instant::now());
-    }
-    let native_error =
-        match recover_provider_password_session(provider, &state.store, http, &credential) {
-            Ok(()) => return work(),
-            Err(error) => error,
-        };
-    if !allow_challenge_recovery {
-        return Err(native_error);
-    }
-    if !browser_login::can_fallback_to_browser(&native_error)
-        && !matches!(native_error, QuarkError::CaptchaRequired)
-    {
-        return Err(native_error);
-    }
-    let challenge = matches!(
-        native_error,
-        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired
-    );
-    browser_password_login(
-        app,
+    genuine_auth_error: bool,
+) -> Result<(), QuarkError> {
+    auth_supervisor::recover_in_order(
         provider,
         &state.store,
-        http,
-        credential.username(),
-        credential.password(),
-        Some(credential.account_id()),
-        challenge,
-    )?;
-    // Exactly one retry with the validated new session; no recursion and no
-    // replay of uploads, deletion, transfers or other mutating operations.
-    work()
+        ProviderRegistry::global()
+            .driver(provider, &state.store, http)
+            .auth(),
+        genuine_auth_error,
+        || capture_persistent_authorization(app, state, provider, http),
+    )
+}
+
+pub(crate) fn authorization_profile_directory(
+    app: &AppHandle,
+    provider: CloudProvider,
+) -> Result<PathBuf, CloudError> {
+    if browser_login::supports_browser_password(provider) {
+        return password_webview_data_directory(app, provider);
+    }
+    let root = if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR")
+            .map(PathBuf::from)
+            .ok_or(CloudError::Storage)?
+    } else {
+        app.path().app_data_dir().map_err(|_| CloudError::Storage)?
+    };
+    Ok(root.join("web-auth").join(provider.key()))
+}
+
+/// A single bounded capture from the stable profile, only after an auth error.
+/// Candidate validation takes place in an isolated store before replacing secrets.
+fn capture_persistent_authorization(
+    app: &AppHandle,
+    state: &CloudState,
+    provider: CloudProvider,
+    http: &impl CloudHttpTransport,
+) -> Result<bool, CloudError> {
+    let record = state.auth_supervisor.record(&state.store, provider)?;
+    let expected = record.account_id.or(
+        if cloud_session_policy(provider).supports_password_fallback {
+            load_password_credential(&state.store, provider)?
+                .map(|credential| credential.account_id().to_owned())
+        } else {
+            None
+        },
+    );
+    let Some(expected) = expected.filter(|id| !id.is_empty()) else {
+        return Ok(false);
+    };
+    let label = format!("cloud-maintenance-{}", provider.key());
+    let (loaded, ready) = std::sync::mpsc::sync_channel(1);
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::External(
+            ProviderRegistry::global()
+                .get(provider)
+                .authorization_url
+                .parse()
+                .map_err(|_| CloudError::InvalidResponse)?,
+        ),
+    )
+    .visible(false)
+    .data_directory(authorization_profile_directory(app, provider)?)
+    .on_page_load(move |_, payload| {
+        if payload.event() == PageLoadEvent::Finished {
+            let _ = loaded.try_send(());
+        }
+    });
+    if ProviderRegistry::global().get(provider).browser_context {
+        builder = builder.initialization_script(include_str!("../tianyi-browser-context.js"));
+    }
+    let window = builder
+        .build()
+        .map_err(|_| CloudError::WebAuthorizationRequired)?;
+    let result = (|| {
+        ready
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .map_err(|_| CloudError::WebAuthorizationRequired)?;
+        let temporary = MemoryCredentialStore::default();
+        let mut driver = ProviderRegistry::global().driver(provider, &temporary, http);
+        let recipe = driver.auth().web_authorization_recipe();
+        let input = crate::cloud::driver::WebAuthorizationInput {
+            cookies: browser_cookies(&window, web_session_cookie_urls(provider))?,
+            storage: match recipe.token_script {
+                Some(script) if recipe.asynchronous_tokens => {
+                    asynchronous_web_tokens(&window, script)?
+                }
+                Some(script) => web_storage_tokens(&window, script)?,
+                None => serde_json::Value::Null,
+            },
+            browser_context: if recipe.browser_context {
+                Some(tianyi_browser_context(&window)?)
+            } else {
+                None
+            },
+        };
+        let account = if recipe.browser_context {
+            ProviderRegistry::global()
+                .driver(
+                    provider,
+                    &temporary,
+                    &TianyiBrowserValidationTransport {
+                        window: &window,
+                        native: http,
+                    },
+                )
+                .auth()
+                .complete_web(&input)?
+        } else {
+            driver.auth().complete_web(&input)?
+        };
+        if account.id != expected {
+            return Err(CloudError::WebAuthorizationRequired);
+        }
+        state.store.save(
+            provider.key(),
+            &temporary.load(provider.key())?.ok_or(CloudError::Storage)?,
+        )?;
+        Ok(true)
+    })();
+    let _ = window.close();
+    result
 }
 
 /// Runs on a provider's blocking worker. Waiting for the official browser must
@@ -509,45 +580,6 @@ pub(crate) fn can_retry_read_with_web_session(error: &QuarkError) -> bool {
         error,
         QuarkError::AuthorizationExpired | QuarkError::WebAuthorizationRequired
     )
-}
-
-/// Captures only the provider-specific session material from an official
-/// authorization WebView that is still open during a browser-login flow.
-pub(crate) fn active_web_session_snapshot(
-    app: &AppHandle,
-    provider: CloudProvider,
-) -> Result<Option<Vec<u8>>, QuarkError> {
-    let Some(window) = app.get_webview_window(&format!("cloud-auth-{}", provider.key())) else {
-        return Ok(None);
-    };
-    let cookies = browser_cookies(&window, web_session_cookie_urls(provider))?;
-    let store = MemoryCredentialStore::default();
-    let http = ReqwestTransport::new()?;
-    let mut driver = ProviderRegistry::global().driver(provider, &store, &http);
-    let context = if driver.auth().web_authorization_recipe().browser_context {
-        Some(tianyi_browser_context(&window)?)
-    } else {
-        None
-    };
-    driver
-        .auth()
-        .web_session_snapshot(&crate::cloud::driver::WebAuthorizationInput {
-            cookies,
-            browser_context: context,
-            ..Default::default()
-        })
-}
-
-pub(crate) fn retry_read_from_active_authorization_window<T>(
-    app: &AppHandle,
-    provider: CloudProvider,
-    store: &impl CredentialStore,
-    retry: impl FnOnce() -> Result<T, QuarkError>,
-) -> Result<Option<T>, QuarkError> {
-    let Some(snapshot) = active_web_session_snapshot(app, provider)? else {
-        return Ok(None);
-    };
-    retry_read_with_refreshed_web_session(provider, store, &snapshot, retry).map(Some)
 }
 
 /// The authorization page can visit several hosts, but a captured Cookie

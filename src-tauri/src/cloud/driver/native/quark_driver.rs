@@ -165,14 +165,8 @@ impl UploadOps for QuarkDriver<'_> {
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        Ok(s.with_provider(CloudProvider::Quark, |store| {
-            run_cloud_work(
-                CloudProvider::Quark,
-                SessionWorkKind::Mutation,
-                store,
-                &h,
-                || QuarkClient::new(cookie(store)?, &h).upload_file(&parent_id, &path, &h),
-            )
-        })?)
+        s.with_upload_session(CloudProvider::Quark, &h, |store| {
+            QuarkClient::new(cookie(store)?, &h).upload_file(&parent_id, &path, &h)
+        })
     }
 }

@@ -15,7 +15,10 @@ pub(crate) fn password_login_with_browser(
         Ok(NativeLoginOutcome::NeedBrowserFallback(error))
             if browser_login::supports_browser_password(provider) =>
         {
-            if ProviderRegistry::global().get(provider).browser_profile_owner {
+            if ProviderRegistry::global()
+                .get(provider)
+                .browser_profile_owner
+            {
                 set_browser_password_login_preferred(store, provider, true)?;
             }
             browser(matches!(error, QuarkError::CaptchaRequired))
@@ -186,7 +189,8 @@ pub async fn cloud_begin_authorization(
         )
         .title(format!("{} 网页授权", provider.key()))
         .inner_size(1024.0, 760.0)
-        .incognito(!browser_login::supports_browser_password(provider))
+        .incognito(false)
+        .data_directory(authorization_profile_directory(&app, provider)?)
         .on_new_window(|url, _features| {
             if allows_cloud_authorization_popup(&url) {
                 NewWindowResponse::Allow
@@ -324,31 +328,37 @@ pub async fn cloud_reauthorize_failed_task(
             else {
                 return Ok(false);
             };
-            match recover_provider_password_session(
-                requested_provider,
-                &state.store,
-                http,
-                &credential,
-            ) {
-                Ok(()) => Ok(true),
-                Err(error)
-                    if browser_login::can_fallback_to_browser(&error)
-                        || matches!(error, QuarkError::CaptchaRequired) =>
-                {
-                    browser_password_login(
-                        &browser_app,
-                        requested_provider,
-                        &state.store,
-                        http,
-                        credential.username(),
-                        credential.password(),
-                        Some(credential.account_id()),
-                        matches!(error, QuarkError::CaptchaRequired),
-                    )?;
-                    Ok(true)
-                }
-                Err(error) => Err(error),
+            let recovered =
+                match recover_authorization(&browser_app, state, requested_provider, http, true) {
+                    Ok(()) => Ok(true),
+                    Err(error)
+                        if browser_login::can_fallback_to_browser(&error)
+                            || matches!(error, QuarkError::CaptchaRequired) =>
+                    {
+                        browser_password_login(
+                            &browser_app,
+                            requested_provider,
+                            &state.store,
+                            http,
+                            credential.username(),
+                            credential.password(),
+                            Some(credential.account_id()),
+                            matches!(error, QuarkError::CaptchaRequired),
+                        )?;
+                        Ok(true)
+                    }
+                    Err(error) => Err(error),
+                }?;
+            if recovered {
+                state.auth_supervisor.ready_locked(
+                    &state.store,
+                    requested_provider,
+                    Some(credential.account_id().to_owned()),
+                    Some(CloudAuthMethod::Password),
+                    auth_supervisor::session_expiry(&state.store, requested_provider)?,
+                )?;
             }
+            Ok(recovered)
         })
         .await?;
         if recovered {
@@ -512,6 +522,13 @@ pub async fn cloud_complete_authorization(
         } else {
             driver.auth().complete_web(&input)?
         };
+        state.auth_supervisor.ready_locked(
+            &state.store,
+            provider,
+            Some(account.id.clone()),
+            Some(account.auth_method),
+            auth_supervisor::session_expiry(&state.store, provider)?,
+        )?;
         let _ = window.close();
         if ProviderRegistry::global()
             .get(provider)
@@ -607,6 +624,13 @@ pub async fn cloud_login_password(
                 password.as_str(),
             ),
         )?;
+        state.auth_supervisor.ready_locked(
+            &state.store,
+            provider,
+            Some(account.id.clone()),
+            Some(account.auth_method),
+            auth_supervisor::session_expiry(&state.store, provider)?,
+        )?;
         Ok(account)
     })
     .await?;
@@ -619,8 +643,8 @@ pub async fn cloud_login_password(
 pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(), QuarkError> {
     require_connected_provider(provider)?;
     let copy = app.clone();
-    run_session_work(app, provider, SessionWorkKind::Logout, move |s, _| {
-        if browser_login::supports_browser_password(provider) {
+    run(app, provider, move |s, _| {
+        {
             let profile_window = WebviewWindowBuilder::new(
                 &copy,
                 format!("cloud-logout-{}", provider.key()),
@@ -631,7 +655,7 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
                 ),
             )
             .visible(false)
-            .data_directory(password_webview_data_directory(&copy, provider)?)
+            .data_directory(authorization_profile_directory(&copy, provider)?)
             .build()
             .map_err(|_| QuarkError::Storage)?;
             let cleared = profile_window
@@ -639,12 +663,9 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
                 .map_err(|_| QuarkError::Storage);
             let _ = profile_window.close();
             cleared?;
-            s.password_recovery_attempts
-                .lock()
-                .map_err(|_| QuarkError::Storage)?
-                .remove(provider.key());
         }
         logout_provider(provider, &s.store)?;
+        s.auth_supervisor.disconnect_locked(&s.store, provider)?;
         if let Some(w) = copy.get_webview_window(&format!("cloud-auth-{}", provider.key())) {
             let _ = w.close();
         }

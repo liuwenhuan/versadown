@@ -243,20 +243,9 @@ impl UploadOps for BaiduDriver<'_> {
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        Ok(s.with_provider(CloudProvider::Baidu, |store| {
-            run_cloud_work(
-                CloudProvider::Baidu,
-                SessionWorkKind::Mutation,
-                store,
-                &h,
-                || {
-                    let client = baidu::BaiduClient::new(
-                        load_provider_session(CloudProvider::Baidu, store)?,
-                        &h,
-                    );
-                    client.upload_file(&parent_id, &path, &h)
-                },
-            )
-        })?)
+        s.with_upload_session(CloudProvider::Baidu, &h, |store| {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, &h)
+                .upload_file(&parent_id, &path, &h)
+        })
     }
 }

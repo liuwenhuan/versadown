@@ -144,6 +144,7 @@ pub fn run() {
             // download runtime. Register this state immediately so those early
             // calls cannot race a later `manage` call.
             app.manage(std::sync::Arc::clone(&cloud));
+            cloud.start_authorization_maintenance();
             let manifest_sidecar = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("binaries")
                 .join(aria2_binary_name());

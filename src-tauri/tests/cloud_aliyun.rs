@@ -5,6 +5,35 @@ use alldownloader_lib::cloud::{
 };
 use std::{collections::VecDeque, io::Write, sync::Mutex};
 
+#[test]
+fn aliyun_refresh_preserves_provider_ttl_for_durable_maintenance() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::session_expiry, CloudProvider, ProviderRegistry,
+    };
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"access_token":"old","refresh_token":"refresh","drive_id":"drive"}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"access_token":"new","refresh_token":"rotated","expires_in":3600}"#,
+    ]);
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!(ProviderRegistry::global()
+        .driver(CloudProvider::Aliyun, &store, &http)
+        .auth()
+        .refresh_session()
+        .unwrap());
+    assert!(session_expiry(&store, CloudProvider::Aliyun)
+        .unwrap()
+        .is_some_and(|expires| expires >= before + 3600 && expires <= before + 3605));
+}
+
 struct RecordingHttp {
     responses: Mutex<VecDeque<CloudHttpResponse>>,
     requests: Mutex<Vec<CloudHttpRequest>>,
@@ -202,6 +231,7 @@ fn aliyun_browser_session_uses_the_current_web_bearer_before_refreshing() {
             access_token: "browser-access".into(),
             drive_id: "browser-drive".into(),
             browser_access_ready: false,
+            expires_at: None,
         })
         .unwrap();
 
@@ -238,6 +268,7 @@ fn aliyun_browser_session_falls_back_when_nick_name_is_empty() {
             access_token: "browser-access".into(),
             drive_id: "browser-drive".into(),
             browser_access_ready: false,
+            expires_at: None,
         })
         .unwrap();
 
@@ -259,6 +290,7 @@ fn aliyun_browser_session_lists_the_root_with_the_same_current_bearer() {
             access_token: "browser-access".into(),
             drive_id: "browser-drive".into(),
             browser_access_ready: false,
+            expires_at: None,
         })
         .unwrap();
 

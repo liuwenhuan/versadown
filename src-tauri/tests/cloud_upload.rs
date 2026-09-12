@@ -83,6 +83,47 @@ fn upload_transfer_allows_same_account_list_and_logout_without_resurrecting_sess
 fn logout_during_upload_init_prevents_late_refresh_from_restoring_credentials() {
     upload_does_not_lock_account(true);
 }
+
+#[test]
+fn rejected_upload_initialization_renews_session_but_never_replays_the_mutation() {
+    use alldownloader_lib::cloud::commands::CloudState;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct RejectedInit(AtomicUsize);
+    impl CloudHttpTransport for RejectedInit {
+        fn send(&self, r: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            if r.url.contains("/auth/token") {
+                return Ok(CloudHttpResponse {
+                    status: 200,
+                    body: r#"{"access_token":"new","refresh_token":"rotated","expires_in":3600}"#
+                        .into(),
+                    ..Default::default()
+                });
+            }
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(CloudHttpResponse {
+                status: 401,
+                body: "{}".into(),
+                ..Default::default()
+            })
+        }
+    }
+    impl CloudUploadTransport for RejectedInit {
+        fn send_upload(&self, _: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+            panic!("no upload without accepted initialization")
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let state = CloudState::new(root.path().join("sessions")).unwrap();
+    state.store.save("pikpak", br#"{"access_token":"old","refresh_token":"refresh","expires_at":9999999999,"device_id":"device"}"#).unwrap();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut file, b"hello").unwrap();
+    let http = RejectedInit(AtomicUsize::new(0));
+    assert!(matches!(
+        state.upload_pikpak_file(&http, "0", file.path()),
+        Err(QuarkError::SessionRenewedRetryOperation)
+    ));
+    assert_eq!(http.0.load(Ordering::SeqCst), 1);
+}
 fn upload_does_not_lock_account(block_init: bool) {
     use alldownloader_lib::cloud::commands::CloudState;
     use std::{

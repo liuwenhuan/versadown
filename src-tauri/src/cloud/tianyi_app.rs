@@ -95,6 +95,58 @@ struct LoginParameters {
 }
 
 impl TianyiAppSession {
+    /// The desktop protocol exchanges its existing access token for fresh
+    /// signing keys; absent optional token fields retain their previous values.
+    pub(crate) fn refresh(&self, http: &impl CloudHttpTransport) -> Result<Self, QuarkError> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("appId", APP_ID)
+            .append_pair("accessToken", &self.access_token)
+            .append_pair("clientType", API_CLIENT_TYPE)
+            .append_pair("version", API_VERSION)
+            .append_pair("channelId", API_CHANNEL)
+            .finish();
+        let response = http.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("{API_URL}/getSessionForPC.action?{query}"),
+            headers: BTreeMap::from([
+                ("Accept".into(), "application/json;charset=UTF-8".into()),
+                ("X-Request-ID".into(), uuid::Uuid::new_v4().to_string()),
+            ]),
+            body: None,
+        })?;
+        let value = super::http::response_json(&response)?;
+        let reply: SessionReply =
+            serde_json::from_value(value).map_err(|_| QuarkError::InvalidResponse)?;
+        match protocol_code(&reply.res_code).as_deref() {
+            Some("0") => {}
+            Some("UserInvalidOpenToken" | "InvalidSessionKey" | "InvalidAccessToken") => {
+                return Err(QuarkError::AuthorizationExpired)
+            }
+            _ => return Err(QuarkError::Provider("天翼 App 会话刷新被拒绝".into())),
+        }
+        if !reply.login_name.is_empty() && reply.login_name != self.login_name {
+            return Err(QuarkError::AuthorizationExpired);
+        }
+        if reply.session_key.is_empty() || reply.session_secret.is_empty() {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let mut session = self.clone();
+        session.session_key = reply.session_key;
+        session.session_secret = reply.session_secret;
+        if !reply.family_session_key.is_empty() {
+            session.family_session_key = reply.family_session_key;
+        }
+        if !reply.family_session_secret.is_empty() {
+            session.family_session_secret = reply.family_session_secret;
+        }
+        if !reply.access_token.is_empty() {
+            session.access_token = reply.access_token;
+        }
+        if !reply.refresh_token.is_empty() {
+            session.refresh_token = reply.refresh_token;
+        }
+        Ok(session)
+    }
     pub(crate) fn login_name(&self) -> &str {
         &self.login_name
     }

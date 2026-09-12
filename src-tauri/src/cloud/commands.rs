@@ -48,27 +48,69 @@ pub struct CloudState {
     pub share_refresh_budget: share::CloudShareRefreshBudget,
     pub(crate) password_download_refresh_budget: browser_login::PasswordDownloadRefreshBudget,
     pending_authorization_retries: Mutex<HashMap<String, PendingCloudAuthorizationRetries>>,
-    password_recovery_attempts: Mutex<HashMap<String, std::time::Instant>>,
+    pub auth_supervisor: auth_supervisor::AuthSupervisor,
     http: ReqwestTransport,
-    provider_operations: HashMap<CloudProvider, Mutex<()>>,
 }
 
 impl CloudState {
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
-        Ok(Self {
+        let state = Self {
             share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
             share_refresh_budget: Default::default(),
             password_download_refresh_budget: Default::default(),
             pending_authorization_retries: Default::default(),
-            password_recovery_attempts: Default::default(),
+            auth_supervisor: Default::default(),
             store: DpapiCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,
-            provider_operations: ProviderRegistry::global()
-                .all()
-                .iter()
-                .map(|d| (d.provider, Mutex::new(())))
-                .collect(),
-        })
+        };
+        for descriptor in ProviderRegistry::global().all() {
+            state
+                .auth_supervisor
+                .restore(&state.store, descriptor.provider)?;
+        }
+        Ok(state)
+    }
+    pub fn start_authorization_maintenance(self: &Arc<Self>) {
+        for descriptor in ProviderRegistry::global().all() {
+            let state = Arc::downgrade(self);
+            let provider = descriptor.provider;
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    let Some(state) = state.upgrade() else {
+                        return;
+                    };
+                    let _ =
+                        tauri::async_runtime::spawn_blocking(move || -> Result<(), CloudError> {
+                            if !state.auth_supervisor.is_due(&state.store, provider)? {
+                                return Ok(());
+                            }
+                            let revision = state
+                                .auth_supervisor
+                                .record(&state.store, provider)?
+                                .session_revision;
+                            state.auth_supervisor.maintain(
+                                &state.store,
+                                provider,
+                                Some(revision),
+                                false,
+                                || {
+                                    auth_supervisor::recover_in_order(
+                                        provider,
+                                        &state.store,
+                                        ProviderRegistry::global()
+                                            .driver(provider, &state.store, &state.http)
+                                            .auth(),
+                                        false,
+                                        || Ok(false),
+                                    )
+                                },
+                            )
+                        })
+                        .await;
+                }
+            });
+        }
     }
 }
 

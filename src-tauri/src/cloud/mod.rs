@@ -1,10 +1,11 @@
 pub mod aliyun;
+pub mod auth_supervisor;
 pub mod baidu;
 mod browser_login;
 pub mod commands;
 mod common;
-pub mod driver;
 mod credentials;
+pub mod driver;
 mod http;
 mod pikpak;
 mod quark;

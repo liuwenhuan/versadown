@@ -6,6 +6,10 @@ use std::{
     sync::Mutex,
 };
 pub trait CredentialStore: Send + Sync {
+    /// Snapshot consumers delegate renewal to AuthSupervisor.
+    fn automatic_session_recovery(&self) -> bool {
+        true
+    }
     fn save(&self, key: &str, value: &[u8]) -> Result<(), QuarkError>;
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError>;
     fn remove(&self, key: &str) -> Result<(), QuarkError>;

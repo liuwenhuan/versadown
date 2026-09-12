@@ -136,6 +136,19 @@ impl DownloadOps for TianyiDriver<'_> {
     }
 }
 impl ProviderAuth for TianyiDriver<'_> {
+    fn refresh_session(&mut self) -> Result<bool, CloudError> {
+        if self.store.load("tianyi")?.is_none() {
+            return Ok(false);
+        }
+        let mut session: tianyi::TianyiSession =
+            load_provider_session(CloudProvider::Tianyi, &self.store)?;
+        let Some(app) = session.app.as_ref() else {
+            return Ok(false);
+        };
+        session.app = Some(app.refresh(&self.http)?);
+        save_provider_session(CloudProvider::Tianyi, &self.store, &session)?;
+        Ok(true)
+    }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
             browser_context: true,
@@ -244,20 +257,9 @@ impl UploadOps for TianyiDriver<'_> {
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        Ok(s.with_provider(CloudProvider::Tianyi, |store| {
-            run_cloud_work(
-                CloudProvider::Tianyi,
-                SessionWorkKind::Mutation,
-                store,
-                &h,
-                || {
-                    let client = tianyi::TianyiClient::new(
-                        load_provider_session(CloudProvider::Tianyi, store)?,
-                        &h,
-                    );
-                    client.upload_file(&parent_id, &path, &h)
-                },
-            )
-        })?)
+        s.with_upload_session(CloudProvider::Tianyi, &h, |store| {
+            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, store)?, &h)
+                .upload_file(&parent_id, &path, &h)
+        })
     }
 }

@@ -115,6 +115,13 @@ impl DownloadOps for PikpakDriver<'_> {
     }
 }
 impl ProviderAuth for PikpakDriver<'_> {
+    fn refresh_session(&mut self) -> Result<bool, CloudError> {
+        if self.store.load("pikpak")?.is_none() {
+            return Ok(false);
+        }
+        PikPakClient::new(&self.http, &self.store).refresh_session()?;
+        Ok(true)
+    }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
             token_script: Some(WEB_TOKENS_JS),
@@ -170,6 +177,9 @@ impl ProviderAuth for PikpakDriver<'_> {
         let http = &self.http;
         Ok({
             let temporary = MemoryCredentialStore::default();
+            if let Some(previous) = self.store.load("pikpak")? {
+                temporary.save("pikpak", &previous)?;
+            }
             let client = PikPakClient::new(http, &temporary);
             client.login(credential.username(), credential.password())?;
             let account = client.account()?;
@@ -190,16 +200,6 @@ impl UploadOps for PikpakDriver<'_> {
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        Ok(run_with_session_recovery(
-            CloudProvider::Pikpak,
-            &s.store,
-            SessionWorkKind::Mutation,
-            || s.upload_pikpak_file(&h, &parent_id, &path),
-            |credential| {
-                s.with_provider(CloudProvider::Pikpak, |store| {
-                    recover_provider_password_session(CloudProvider::Pikpak, store, &h, credential)
-                })
-            },
-        )?)
+        s.upload_pikpak_file(&h, &parent_id, &path)
     }
 }

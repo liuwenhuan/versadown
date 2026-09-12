@@ -41,6 +41,11 @@ pub(crate) fn with_xunlei_client<T, H: CloudHttpTransport>(
 ) -> Result<T, QuarkError> {
     let session = load_provider_session(CloudProvider::Xunlei, store)?;
     let client = xunlei::XunleiClient::new(session, http);
+    let client = if store.automatic_session_recovery() {
+        client
+    } else {
+        client.supervised()
+    };
     let result = work(&client);
     save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
     result
@@ -242,7 +247,7 @@ pub fn parse_web_tokens(raw: &str) -> Result<PikPakSession, QuarkError> {
         access_token: required(&v, "access_token").map_err(|_| QuarkError::AuthorizationPending)?,
         refresh_token: required(&v, "refresh_token")
             .map_err(|_| QuarkError::AuthorizationPending)?,
-        expires_at: u64::MAX,
+        expires_at: v["expires_at"].as_u64().unwrap_or(u64::MAX),
         device_id: v["device_id"].as_str().unwrap_or("").into(),
         captcha_token: v["captcha_token"].as_str().unwrap_or("").into(),
         client_id: v["client_id"]
@@ -314,6 +319,7 @@ pub(crate) fn parse_aliyun_web_session(
         refresh_token: required_field(&["refresh_token", "refreshToken"])?,
         drive_id: required_field(&["default_drive_id", "defaultDriveId", "drive_id", "driveId"])?,
         browser_access_ready: false,
+        expires_at: value["expires_at"].as_u64(),
     })
 }
 
@@ -331,6 +337,8 @@ pub(crate) const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
   if (typeof v === 'string') { try { inspect(JSON.parse(v), depth + 1); } catch (_) {} return; }
   if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
   for (const [k, x] of Object.entries(v)) {
+   if (['expires_at','expiresAt'].includes(k) && Number.isFinite(Number(x))) out.expires_at = Number(x);
+   if (['expire_time','expireTime'].includes(k) && typeof x === 'string' && Number.isFinite(Date.parse(x))) out.expires_at = Math.floor(Date.parse(x) / 1000);
    const target = Object.entries(fields).find(([, names]) => names.includes(k));
    if (target && typeof x === 'string' && x) out[target[0]] = x;
    else if (!/password/i.test(k)) inspect(x, depth + 1);
@@ -348,6 +356,7 @@ pub(crate) const WEB_TOKENS_JS: &str = r#"(() => {
   if (typeof v === 'string') { try { inspect(JSON.parse(v),depth+1); } catch (_) {} return; }
   if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
   for (const [k,x] of Object.entries(v)) {
+   if (['expires_at','expiresAt'].includes(k) && Number.isFinite(Number(x))) out.expires_at = Number(x);
    if (['access_token','accessToken'].includes(k) && typeof x === 'string') out.access_token=x;
    else if (['refresh_token','refreshToken'].includes(k) && typeof x === 'string') out.refresh_token=x;
    else if (['device_id','deviceId','deviceid'].includes(k) && typeof x === 'string') out.device_id=x;

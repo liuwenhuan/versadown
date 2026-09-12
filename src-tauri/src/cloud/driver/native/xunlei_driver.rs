@@ -122,6 +122,16 @@ impl DownloadOps for XunleiDriver<'_> {
     }
 }
 impl ProviderAuth for XunleiDriver<'_> {
+    fn refresh_session(&mut self) -> Result<bool, CloudError> {
+        if self.store.load("xunlei")?.is_none() {
+            return Ok(false);
+        }
+        let session = load_provider_session(CloudProvider::Xunlei, &self.store)?;
+        let client = xunlei::XunleiClient::new(session, &self.http);
+        let session = client.refresh_session()?;
+        save_provider_session(CloudProvider::Xunlei, &self.store, &session)?;
+        Ok(true)
+    }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
             token_script: Some(XUNLEI_WEB_TOKENS_JS),
@@ -155,20 +165,8 @@ impl UploadOps for XunleiDriver<'_> {
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        Ok(s.with_provider(CloudProvider::Xunlei, |store| {
-            run_cloud_work(
-                CloudProvider::Xunlei,
-                SessionWorkKind::Mutation,
-                store,
-                &h,
-                || {
-                    let session = load_provider_session(CloudProvider::Xunlei, store)?;
-                    let client = xunlei::XunleiClient::new(session, &h);
-                    let file = client.upload_file(&parent_id, &path)?;
-                    save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
-                    Ok(file)
-                },
-            )
-        })?)
+        s.with_upload_session(CloudProvider::Xunlei, &h, |store| {
+            with_xunlei_client(store, &h, |client| client.upload_file(&parent_id, &path))
+        })
     }
 }

@@ -85,6 +85,10 @@ pub(crate) fn complete_native_password_login<S>(
 
 /// Protocol inputs only: the command host owns windows, scripts and browser fallback.
 pub trait ProviderAuth {
+    /// Returns false when no renewable credential is available. Never opens UI.
+    fn refresh_session(&mut self) -> Result<bool, CloudError> {
+        Ok(false)
+    }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe::default()
     }
@@ -224,8 +228,11 @@ fn require(enabled: bool) -> Result<(), CloudError> {
     }
 }
 
-struct StoreRef<'a>(&'a dyn CredentialStore);
+pub(crate) struct StoreRef<'a>(pub(crate) &'a dyn CredentialStore);
 impl CredentialStore for StoreRef<'_> {
+    fn automatic_session_recovery(&self) -> bool {
+        self.0.automatic_session_recovery()
+    }
     fn save(&self, key: &str, bytes: &[u8]) -> Result<(), CloudError> {
         self.0.save(key, bytes)
     }

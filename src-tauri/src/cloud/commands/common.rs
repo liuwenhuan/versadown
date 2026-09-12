@@ -69,10 +69,20 @@ pub(crate) async fn run<T: Send + 'static>(
 }
 
 pub(crate) async fn run_when_initialized<T: Send + 'static>(
+    lookup: impl FnMut() -> Option<Arc<CloudState>> + Send + 'static,
+    provider: CloudProvider,
+    work: impl FnOnce(&CloudState, &ReqwestTransport) -> Result<T, QuarkError> + Send + 'static,
+    initialization_timeout: std::time::Duration,
+) -> Result<T, QuarkError> {
+    run_initialized(lookup, provider, work, initialization_timeout, true).await
+}
+
+async fn run_initialized<T: Send + 'static>(
     mut lookup: impl FnMut() -> Option<Arc<CloudState>> + Send + 'static,
     provider: CloudProvider,
     work: impl FnOnce(&CloudState, &ReqwestTransport) -> Result<T, QuarkError> + Send + 'static,
     initialization_timeout: std::time::Duration,
+    exclusive: bool,
 ) -> Result<T, QuarkError> {
     // The webview can issue IPC before setup has registered CloudState.
     // Wait without holding provider locks or occupying the blocking pool;
@@ -91,93 +101,75 @@ pub(crate) async fn run_when_initialized<T: Send + 'static>(
         tokio::time::sleep(remaining.min(std::time::Duration::from_millis(25))).await;
     };
     tauri::async_runtime::spawn_blocking(move || {
-        state.with_provider(provider, |_| work(&state, &state.http))
+        if exclusive {
+            state.with_provider(provider, |_| work(&state, &state.http))
+        } else {
+            work(&state, &state.http)
+        }
     })
     .await
     .map_err(|_| QuarkError::Transport("网盘任务中断".into()))?
+}
+
+pub(crate) struct SessionWorkContext<'a> {
+    pub store: crate::cloud::driver::StoreRef<'a>,
+    state: &'a CloudState,
+}
+impl std::ops::Deref for SessionWorkContext<'_> {
+    type Target = CloudState;
+    fn deref(&self) -> &Self::Target {
+        self.state
+    }
 }
 
 pub(crate) async fn run_session_work<T: Send + 'static>(
     app: AppHandle,
     provider: CloudProvider,
     kind: SessionWorkKind,
-    mut work: impl FnMut(&CloudState, &ReqwestTransport) -> Result<T, QuarkError> + Send + 'static,
+    mut work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
+        + Send
+        + 'static,
 ) -> Result<T, QuarkError> {
     let refresh_app = app.clone();
-    run(app, provider, move |state, http| {
-        let first = if browser_login::supports_browser_password(provider)
-            && kind == SessionWorkKind::Read
-        {
-            run_with_browser_session_recovery(
-                &refresh_app,
+    run_initialized(
+        move || {
+            app.try_state::<Arc<CloudState>>()
+                .map(|s| Arc::clone(s.inner()))
+        },
+        provider,
+        move |state, http| {
+            state.auth_supervisor.run(
+                &state.store,
                 provider,
                 kind,
-                state,
-                http,
-                true,
-                || work(state, http),
+                |snapshot| {
+                    work(
+                        &SessionWorkContext {
+                            store: crate::cloud::driver::StoreRef(snapshot),
+                            state,
+                        },
+                        http,
+                    )
+                },
+                |genuine_auth_error| {
+                    recover_authorization(&refresh_app, state, provider, http, genuine_auth_error)
+                },
             )
-        } else {
-            run_cloud_work(provider, kind, &state.store, http, || work(state, http))
-        };
-        let Err(error) = first else {
-            return first;
-        };
-        // Mutating provider operations are never replayed. A provider captcha
-        // is also never retried; the official page must handle it explicitly.
-        if kind != SessionWorkKind::Read || !can_retry_read_with_web_session(&error) {
-            return Err(error);
-        }
-        match retry_read_from_active_authorization_window(
-            &refresh_app,
-            provider,
-            &state.store,
-            || run_cloud_work(provider, kind, &state.store, http, || work(state, http)),
-        ) {
-            Ok(Some(value)) => Ok(value),
-            Ok(None) | Err(_) => Err(error),
-        }
-    })
+        },
+        std::time::Duration::from_secs(10),
+        false,
+    )
     .await
 }
 
 pub(crate) async fn run_web_session_read_work<T: Send + 'static>(
     app: AppHandle,
     provider: CloudProvider,
-    mut work: impl FnMut(&CloudState, &ReqwestTransport) -> Result<T, QuarkError> + Send + 'static,
+    work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
+        + Send
+        + 'static,
 ) -> Result<T, QuarkError> {
-    let refresh_app = app.clone();
-    run(app, provider, move |state, http| {
-        let first = if browser_login::supports_browser_password(provider) {
-            run_with_browser_session_recovery(
-                &refresh_app,
-                provider,
-                SessionWorkKind::Read,
-                state,
-                http,
-                false,
-                || work(state, http),
-            )
-        } else {
-            work(state, http)
-        };
-        let Err(error) = first else {
-            return first;
-        };
-        if !can_retry_read_with_web_session(&error) {
-            return Err(error);
-        }
-        match retry_read_from_active_authorization_window(
-            &refresh_app,
-            provider,
-            &state.store,
-            || work(state, http),
-        ) {
-            Ok(Some(value)) => Ok(value),
-            Ok(None) | Err(_) => Err(error),
-        }
-    })
-    .await
+    run_session_work(app, provider, SessionWorkKind::Read, work).await
 }
 
 pub(crate) fn valid_name(name: &str) -> Result<(), QuarkError> {
@@ -297,11 +289,7 @@ impl CloudState {
         provider: CloudProvider,
         work: impl FnOnce(&DpapiCredentialStore) -> Result<T, QuarkError>,
     ) -> Result<T, QuarkError> {
-        let mutex = self
-            .provider_operations
-            .get(&provider)
-            .ok_or(CloudError::ProviderUnsupported)?;
-        let _guard = mutex.lock().map_err(|_| QuarkError::Storage)?;
-        work(&self.store)
+        self.auth_supervisor
+            .with_provider(provider, || work(&self.store))
     }
 }

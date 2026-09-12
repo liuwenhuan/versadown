@@ -72,6 +72,42 @@ fn dpapi_session_roundtrip_never_writes_plaintext() {
 struct Sequence(Mutex<(Vec<CloudHttpResponse>, Vec<CloudHttpRequest>)>);
 
 #[test]
+fn saved_password_recovery_reuses_the_provider_account_device() {
+    use alldownloader_lib::cloud::{CloudPasswordCredential, CloudProvider, ProviderRegistry};
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"old","refresh_token":"old-refresh","expires_at":0,"device_id":"stable-account-device","user_id":"account"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"captcha_token":"captcha","expires_in":300}"#,
+        r#"{"access_token":"new","refresh_token":"new-refresh","expires_in":3600,"sub":"account"}"#,
+        r#"{"sub":"account","name":"alice"}"#,
+        r#"{"files":[],"next_page_token":""}"#,
+    ]);
+    let credential = CloudPasswordCredential::new(
+        CloudProvider::Pikpak,
+        "account",
+        "alice",
+        "backend-password",
+    );
+    let (_, bytes) = ProviderRegistry::global()
+        .driver(CloudProvider::Pikpak, &store, &http)
+        .auth()
+        .recover_password(&credential)
+        .unwrap();
+    let session: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(session["device_id"], "stable-account-device");
+}
+
+#[test]
+fn browser_token_capture_preserves_a_known_absolute_expiry() {
+    use alldownloader_lib::cloud::commands::parse_web_tokens;
+    let session = parse_web_tokens(
+        r#"{"access_token":"access","refresh_token":"refresh","expires_at":2000000000}"#,
+    )
+    .unwrap();
+    assert_eq!(session.expires_at, 2000000000);
+}
+
+#[test]
 fn risk_limited_refreshes_action_captcha_once_and_persists_it() {
     assert_eq!(
         alldownloader_lib::cloud::pikpak_captcha_sign(

@@ -436,6 +436,49 @@ fn modern_web_captcha_action_tracks_mutations_without_reusing_a_read_action() {
     assert_eq!(requests[1].headers["X-Captcha-Token"], "write-token");
 }
 
+#[test]
+fn supervised_xunlei_keeps_action_ticket_preflight_but_never_replays_a_rejected_mutation() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::SessionSnapshot, CloudProvider, CredentialStore, MemoryCredentialStore,
+        ProviderRegistry,
+    };
+    for rejected in [false, true] {
+        let mut session =
+            serde_json::to_value(modern_signed_session("read-token", u64::MAX)).unwrap();
+        session["web_security"]["action"] = "GET:/drive/v1/files".into();
+        let store = MemoryCredentialStore::default();
+        store
+            .save("xunlei", &serde_json::to_vec(&session).unwrap())
+            .unwrap();
+        let snapshot = SessionSnapshot::new(&store, CloudProvider::Xunlei).unwrap();
+        let reply = if rejected {
+            r#"{"error_code":16,"error":"unauthenticated"}"#
+        } else {
+            "{}"
+        };
+        let http = RecordingHttp::sequence(&[
+            r#"{"captcha_token":"write-token","expires_in":300}"#,
+            reply,
+        ]);
+        let result = ProviderRegistry::global()
+            .driver(CloudProvider::Xunlei, &snapshot, &http)
+            .rename("file-1", "name");
+        if rejected {
+            assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
+        } else {
+            result.unwrap();
+        }
+        let requests = http.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].url.ends_with("/v1/shield/captcha/init"));
+        assert_eq!(requests[1].method, "PATCH");
+        assert_eq!(requests[1].headers["X-Captcha-Token"], "write-token");
+        let action: serde_json::Value =
+            serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(action["action"], "PATCH:/drive/v1/files/file-1");
+    }
+}
+
 // Break caught: a service captcha_invalid response must allow one bounded renewal.
 #[test]
 fn modern_web_retries_captcha_rejection_once_and_preserves_review_url() {

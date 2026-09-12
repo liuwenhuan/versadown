@@ -13,6 +13,61 @@ const TIANYI_LOGIN_RSA_KEY: &str = concat!(
     "4anY+YzZJcyOcEGKVQIDAQAB",
 );
 
+#[test]
+fn tianyi_supervisor_refreshes_app_session_without_reentering_password_login() {
+    use alldownloader_lib::cloud::{
+        CloudProvider, CredentialStore, MemoryCredentialStore, ProviderRegistry,
+    };
+    let store = MemoryCredentialStore::default();
+    store.save("tianyi", br#"{"cookie":"old-cookie","auth_method":"password","app":{"sessionKey":"old-key","sessionSecret":"old-secret","accessToken":"renewable-token","refreshToken":"retained-refresh","loginName":"alice@189.cn"}}"#).unwrap();
+    let http = RecordingHttp::sequence(&[
+        r#"{"res_code":0,"sessionKey":"new-key","sessionSecret":"new-secret"}"#,
+    ]);
+    assert!(ProviderRegistry::global()
+        .driver(CloudProvider::Tianyi, &store, &http)
+        .auth()
+        .refresh_session()
+        .unwrap());
+    let stored: serde_json::Value =
+        serde_json::from_slice(&store.load("tianyi").unwrap().unwrap()).unwrap();
+    assert_eq!(stored["app"]["sessionKey"], "new-key");
+    assert_eq!(stored["app"]["sessionSecret"], "new-secret");
+    assert_eq!(stored["app"]["accessToken"], "renewable-token");
+    assert_eq!(stored["app"]["refreshToken"], "retained-refresh");
+    assert_eq!(stored["app"]["loginName"], "alice@189.cn");
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]
+        .url
+        .starts_with("https://api.cloud.189.cn/getSessionForPC.action?"));
+    assert!(requests[0].url.contains("accessToken=renewable-token"));
+    assert!(requests[0].url.contains("appId=8025431004"));
+}
+
+#[test]
+fn tianyi_rejected_or_wrong_account_app_refresh_keeps_original_credentials() {
+    use alldownloader_lib::cloud::{
+        CloudProvider, CredentialStore, MemoryCredentialStore, ProviderRegistry,
+    };
+    for reply in [
+        r#"{"res_code":"UserInvalidOpenToken"}"#,
+        r#"{"res_code":0,"sessionKey":"new","sessionSecret":"new","loginName":"different-account"}"#,
+    ] {
+        let store = MemoryCredentialStore::default();
+        let old = br#"{"cookie":"","app":{"sessionKey":"old-key","sessionSecret":"old-secret","accessToken":"old-token","loginName":"alice@189.cn"}}"#;
+        store.save("tianyi", old).unwrap();
+        let http = RecordingHttp::sequence(&[reply]);
+        assert!(matches!(
+            ProviderRegistry::global()
+                .driver(CloudProvider::Tianyi, &store, &http)
+                .auth()
+                .refresh_session(),
+            Err(QuarkError::AuthorizationExpired)
+        ));
+        assert_eq!(store.load("tianyi").unwrap().unwrap(), old);
+    }
+}
+
 fn tianyi_app_login_page() -> String {
     format!(
         r#"<input id="captchaToken" value="captcha-token">

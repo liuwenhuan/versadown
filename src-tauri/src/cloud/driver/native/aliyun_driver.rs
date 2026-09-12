@@ -103,6 +103,13 @@ impl DownloadOps for AliyunDriver<'_> {
     }
 }
 impl ProviderAuth for AliyunDriver<'_> {
+    fn refresh_session(&mut self) -> Result<bool, CloudError> {
+        if self.store.load("aliyun")?.is_none() {
+            return Ok(false);
+        }
+        aliyun::AliyunClient::new(&self.store, &self.http).refresh_session()?;
+        Ok(true)
+    }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
             token_script: Some(ALIYUN_WEB_TOKENS_JS),
@@ -136,14 +143,8 @@ impl UploadOps for AliyunDriver<'_> {
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        Ok(s.with_provider(CloudProvider::Aliyun, |store| {
-            run_cloud_work(
-                CloudProvider::Aliyun,
-                SessionWorkKind::Mutation,
-                store,
-                &h,
-                || aliyun::AliyunClient::new(store, &h).upload_file(&parent_id, &path),
-            )
-        })?)
+        s.with_upload_session(CloudProvider::Aliyun, &h, |store| {
+            aliyun::AliyunClient::new(store, &h).upload_file(&parent_id, &path)
+        })
     }
 }

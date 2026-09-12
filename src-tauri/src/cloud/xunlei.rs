@@ -1271,6 +1271,7 @@ const XUNLEI_RECYCLE_BIN_NAME: &str = "回收站";
 pub struct XunleiClient<'a, T: CloudHttpTransport> {
     session: RefCell<XunleiSession>,
     http: &'a T,
+    automatic_session_recovery: bool,
 }
 
 impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
@@ -1284,7 +1285,15 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         Self {
             session: RefCell::new(session),
             http,
+            automatic_session_recovery: true,
         }
+    }
+    pub(crate) fn supervised(mut self) -> Self {
+        self.automatic_session_recovery = false;
+        self
+    }
+    pub(crate) fn refresh_session(&self) -> Result<XunleiSession, QuarkError> {
+        self.refresh(self.session())
     }
 
     pub fn session(&self) -> XunleiSession {
@@ -1591,7 +1600,11 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         url: String,
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
-        let mut session = self.ready_session()?;
+        let mut session = if self.automatic_session_recovery {
+            self.ready_session()?
+        } else {
+            self.session()
+        };
         if session.profile.is_modern_web() {
             let parsed = url::Url::parse(&url).map_err(|_| QuarkError::InvalidResponse)?;
             let action = format!("{method}:{}", parsed.path());
@@ -1605,6 +1618,11 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             {
                 session = self.refresh_web_captcha(&action)?;
                 renewed = true;
+            }
+            // A request-scoped action ticket is a precondition, not permission
+            // to replay an operation. Long-lived token renewal stays supervised.
+            if !self.automatic_session_recovery {
+                return self.raw(method, url, body, &session);
             }
             let mut refreshed = false;
             loop {
@@ -1622,6 +1640,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                     result => return result,
                 }
             }
+        }
+        if !self.automatic_session_recovery {
+            return self.raw(method, url, body, &session);
         }
         match self.raw(method, url.clone(), body.clone(), &session) {
             Err(QuarkError::AuthorizationExpired) if session.profile.can_refresh() => {

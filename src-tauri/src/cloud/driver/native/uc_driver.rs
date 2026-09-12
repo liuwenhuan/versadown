@@ -164,17 +164,9 @@ impl UploadOps for UcDriver<'_> {
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        Ok(s.with_provider(CloudProvider::Uc, |store| {
-            run_cloud_work(
-                CloudProvider::Uc,
-                SessionWorkKind::Mutation,
-                store,
-                &h,
-                || {
-                    uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, &h)
-                        .upload_file(&parent_id, &path, &h)
-                },
-            )
-        })?)
+        s.with_upload_session(CloudProvider::Uc, &h, |store| {
+            uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, &h)
+                .upload_file(&parent_id, &path, &h)
+        })
     }
 }

@@ -290,6 +290,8 @@ pub struct AliyunSession {
     /// The current bearer was captured immediately after the official web login.
     #[serde(default)]
     pub browser_access_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 pub struct AliyunClient<'a, S: CredentialStore, T: CloudHttpTransport> {
@@ -401,6 +403,16 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
                 .unwrap_or(&previous.drive_id)
                 .to_owned(),
             browser_access_ready: false,
+            expires_at: value["expires_in"]
+                .as_u64()
+                .filter(|ttl| *ttl > 0)
+                .map(|ttl| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                        .saturating_add(ttl)
+                }),
         })
     }
 
@@ -408,6 +420,9 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         let refreshed = self.refresh(previous)?;
         self.save(&refreshed)?;
         Ok(refreshed)
+    }
+    pub(crate) fn refresh_session(&self) -> Result<(), QuarkError> {
+        self.refresh_and_persist(&self.stored()?).map(|_| ())
     }
 
     fn bearer_headers(session: &AliyunSession) -> BTreeMap<String, String> {
@@ -493,6 +508,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
             access_token: String::new(),
             drive_id: String::new(),
             browser_access_ready: false,
+            expires_at: None,
         })?;
         let (account, _) = self.validate(&session)?;
         self.save(&session)?;
@@ -525,6 +541,10 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         &self,
     ) -> Result<(AliyunSession, CloudAccount, CloudDirectory), QuarkError> {
         let previous = self.stored()?;
+        if !self.store.automatic_session_recovery() {
+            let (account, root) = self.validate(&previous)?;
+            return Ok((previous, account, root));
+        }
         if previous.browser_access_ready {
             match self.validate(&previous) {
                 Ok((account, root)) => return Ok((previous, account, root)),
@@ -580,7 +600,7 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
         let session = self.stored()?;
         let first = self.directory_with(&session, parent);
         match first {
-            Err(QuarkError::AuthorizationExpired) => {
+            Err(QuarkError::AuthorizationExpired) if self.store.automatic_session_recovery() => {
                 let refreshed = self.refresh_and_persist(&session)?;
                 self.directory_with(&refreshed, parent)
             }

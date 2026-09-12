@@ -411,7 +411,16 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         if username.trim().is_empty() || password.is_empty() {
             return Err(QuarkError::InvalidInput("请输入账号和密码".into()));
         }
-        let device_id = uuid::Uuid::new_v4().simple().to_string();
+        let device_id = self
+            .store
+            .load("pikpak")?
+            .map(|bytes| {
+                serde_json::from_slice::<PikPakSession>(&bytes).map_err(|_| QuarkError::Storage)
+            })
+            .transpose()?
+            .map(|session| session.device_id)
+            .filter(|device| !device.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
         let pending = PikPakSession {
             access_token: String::new(),
             refresh_token: String::new(),
@@ -460,52 +469,8 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         }
         Ok(session)
     }
-    /// Caller holds the shared session coordinator only around this credential operation.
-    pub(crate) fn session_snapshot(&self) -> Result<PikPakSession, QuarkError> {
-        let session = self.stored()?;
-        if session.expires_at <= now() + 60 {
-            self.refresh(session)
-        } else {
-            Ok(session)
-        }
-    }
-    /// Upload initialization does no credential writes and can safely run without the provider lock.
-    pub(crate) fn send_snapshot(
-        &self,
-        method: &'static str,
-        url: &str,
-        body: Value,
-        session: &PikPakSession,
-    ) -> Result<Value, QuarkError> {
-        self.raw(method, url.into(), Some(body), Some(session))
-    }
-    /// Re-read current credentials under the shared lock, so logout or another refresh wins over a stale upload snapshot.
-    pub(crate) fn recover_snapshot(
-        &self,
-        previous: &PikPakSession,
-        captcha: bool,
-        method: &str,
-        url: &str,
-    ) -> Result<PikPakSession, QuarkError> {
-        let current = self.stored()?;
-        if current.device_id != previous.device_id
-            || (!current.user_id.is_empty()
-                && !previous.user_id.is_empty()
-                && current.user_id != previous.user_id)
-        {
-            return Err(QuarkError::AuthorizationExpired);
-        }
-        if captcha {
-            if current.captcha_token != previous.captcha_token {
-                return Ok(current);
-            }
-            self.refresh_action_captcha(method, url, current)
-        } else {
-            if current.access_token != previous.access_token {
-                return self.session_snapshot();
-            }
-            self.refresh(current)
-        }
+    pub(crate) fn refresh_session(&self) -> Result<(), QuarkError> {
+        self.refresh(self.stored()?).map(|_| ())
     }
     fn refresh(&self, mut s: PikPakSession) -> Result<PikPakSession, QuarkError> {
         let client_id = s.client_id.as_deref().unwrap_or(&self.client_id);
@@ -538,6 +503,9 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
         let s = self.stored()?;
+        if !self.store.automatic_session_recovery() {
+            return self.raw(method, url, body, Some(&s));
+        }
         let mut access_refreshed = s.expires_at <= now() + 60;
         let mut s = if access_refreshed {
             self.refresh(s)?
