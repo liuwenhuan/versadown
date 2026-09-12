@@ -3,7 +3,9 @@ use super::{
     types::{Aria2Error, RpcSecret},
 };
 use std::{
-    path::PathBuf,
+    collections::HashSet,
+    io,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::Duration,
 };
@@ -11,6 +13,51 @@ use tokio::time::{timeout_at, Instant};
 
 const STARTUP_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const OPERATION_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+// aria2.session is the restart manifest. aria2-next's stream database only owns
+// in-flight transfer state; leaving the same GID in both sources makes startup
+// reject the manifest with an identity ownership conflict. Release only those
+// overlapping stream identities so the manifest can recreate and resume them.
+fn repair_stream_session_identity_conflicts(data_dir: &Path) -> io::Result<usize> {
+    let session_path = data_dir.join("aria2.session");
+    let state_path = data_dir.join("aria2-next-state/stream/state.db");
+    if !session_path.is_file() || !state_path.is_file() {
+        return Ok(0);
+    }
+
+    let session = std::fs::read_to_string(&session_path)?;
+    let session_gids = session
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("gid="))
+        .map(str::trim)
+        .filter(|gid| !gid.is_empty())
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    if session_gids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut connection = rusqlite::Connection::open_with_flags(
+        state_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    let transaction = connection.transaction().map_err(io::Error::other)?;
+    let removed = {
+        let mut statement = transaction
+            .prepare("DELETE FROM downloads WHERE gid = ?1")
+            .map_err(io::Error::other)?;
+        let mut removed = 0;
+        for gid in session_gids {
+            removed += statement
+                .execute(rusqlite::params![gid])
+                .map_err(io::Error::other)?;
+        }
+        removed
+    };
+    transaction.commit().map_err(io::Error::other)?;
+    Ok(removed)
+}
 
 #[derive(Clone, Debug)]
 pub struct Aria2LaunchConfig {
@@ -86,6 +133,7 @@ impl Aria2Process {
             .create(true)
             .append(true)
             .open(config.data_dir.join("aria2.session"))?;
+        repair_stream_session_identity_conflicts(&config.data_dir)?;
         let mut last_error = Aria2Error::ReadinessTimeout;
         for _ in 0..3 {
             let secret = RpcSecret::from_token(&config.aria2.rpc_token)?;

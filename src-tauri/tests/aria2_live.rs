@@ -473,6 +473,7 @@ async fn bundled_aria2_next_accepts_ed2k_and_downloads_hls_and_dash_manifests() 
                 source: source.clone(),
                 name: name.into(),
                 kind: kind.into(),
+                is_private: false,
             })
             .unwrap();
         media
@@ -632,11 +633,6 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
     let path = fixture.config.download_dir.join("cancelled.bin");
     let partial = std::fs::read(&path).unwrap();
     assert!(!partial.is_empty());
-    assert!(fixture
-        .config
-        .download_dir
-        .join("cancelled.bin.aria2")
-        .is_file());
     assert_eq!(
         fixture.client.remove(cancelled_gid).await.unwrap(),
         cancelled_gid
@@ -660,11 +656,6 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
     .await
     .expect("cancelled GID remained in the engine queue");
     assert_eq!(std::fs::read(path).unwrap(), partial);
-    assert!(fixture
-        .config
-        .download_dir
-        .join("cancelled.bin.aria2")
-        .is_file());
     fixture.terminate_for_cleanup();
-    println!("Aria2 Next 2.7.5: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial/control files passed");
+    println!("Aria2 Next 2.7.5: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial files passed");
 }

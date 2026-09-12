@@ -117,3 +117,61 @@ async fn bundled_sidecar_is_authenticated_saves_session_and_exits() {
     assert!(!session.contains("rpc-secret"));
     assert!(!session.contains("token:"));
 }
+
+#[tokio::test]
+async fn startup_releases_stream_identity_already_listed_in_legacy_session() {
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = config(root.path());
+    launch.binary = root.path().join("missing-aria2-next.exe");
+    let stream = launch.data_dir.join("aria2-next-state/stream");
+    std::fs::create_dir_all(&stream).unwrap();
+    let database = rusqlite::Connection::open(stream.join("state.db")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE downloads(gid TEXT PRIMARY KEY, uri TEXT NOT NULL, path TEXT NOT NULL, etag TEXT NOT NULL, last_modified TEXT NOT NULL, total_length INTEGER NOT NULL, completed_length INTEGER NOT NULL, completed_ranges TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT (unixepoch()));",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO downloads(gid,uri,path,etag,last_modified,total_length,completed_length,completed_ranges) VALUES(?1,?2,?3,'','',10,1,'[]')",
+            rusqlite::params![
+                "aaaaaaaaaaaaaaaa",
+                "https://example.test/duplicate",
+                root.path().join("duplicate.bin").to_string_lossy(),
+            ],
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO downloads(gid,uri,path,etag,last_modified,total_length,completed_length,completed_ranges) VALUES(?1,?2,?3,'','',10,1,'[]')",
+            rusqlite::params![
+                "cccccccccccccccc",
+                "https://example.test/state-only",
+                root.path().join("state-only.bin").to_string_lossy(),
+            ],
+        )
+        .unwrap();
+    drop(database);
+    std::fs::create_dir_all(&launch.data_dir).unwrap();
+    std::fs::write(
+        launch.data_dir.join("aria2.session"),
+        "https://example.test/duplicate\n\t gid=aaaaaaaaaaaaaaaa\n\t header=Cookie: private-fixture\nhttps://example.test/keep\n\t gid=bbbbbbbbbbbbbbbb\n\t pause=true\n",
+    )
+    .unwrap();
+
+    assert!(Aria2Process::start(launch).await.is_err());
+
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("data/aria2.session")).unwrap(),
+        "https://example.test/duplicate\n\t gid=aaaaaaaaaaaaaaaa\n\t header=Cookie: private-fixture\nhttps://example.test/keep\n\t gid=bbbbbbbbbbbbbbbb\n\t pause=true\n"
+    );
+    let database = rusqlite::Connection::open(stream.join("state.db")).unwrap();
+    let remaining = database
+        .prepare("SELECT gid FROM downloads ORDER BY gid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(remaining, vec!["cccccccccccccccc"]);
+}
