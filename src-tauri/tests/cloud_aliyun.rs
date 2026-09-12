@@ -364,6 +364,44 @@ fn aliyun_root_listing_refreshes_once_after_an_authentication_failure() {
 }
 
 #[test]
+fn aliyun_second_authentication_failure_after_refresh_stops_without_more_requests() {
+    // Break caught: recursively refreshing/replaying a rejected retry instead
+    // of returning the second authentication error to the caller.
+    let store = MemoryCredentialStore::default();
+    store.save("aliyun", br#"{"refresh_token":"refresh","access_token":"expired","drive_id":"drive","browser_access_ready":true}"#).unwrap();
+    let rejected = || CloudHttpResponse {
+        status: 401,
+        body: r#"{"code":"AccessTokenInvalid"}"#.into(),
+        ..Default::default()
+    };
+    let http = RecordingHttp::responses([
+        rejected(),
+        CloudHttpResponse {
+            status: 200,
+            body:
+                r#"{"access_token":"fresh","refresh_token":"rotated","default_drive_id":"drive"}"#
+                    .into(),
+            ..Default::default()
+        },
+        rejected(),
+    ]);
+    assert!(matches!(
+        AliyunClient::new(&store, &http).directory("root"),
+        Err(QuarkError::AuthorizationExpired)
+    ));
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].url.ends_with("/adrive/v3/file/list"));
+    assert!(requests[1].url.ends_with("/token/refresh"));
+    assert!(requests[2].url.ends_with("/adrive/v3/file/list"));
+    assert_eq!(requests[0].headers["Authorization"], "Bearer expired");
+    assert_eq!(requests[2].headers["Authorization"], "Bearer fresh");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&store.load("aliyun").unwrap().unwrap()).unwrap();
+    assert_eq!(persisted["refresh_token"], "rotated");
+}
+
+#[test]
 fn aliyun_mkdir_accepts_current_file_name_response_field() {
     // The live /v2/file/create folder response uses `file_name`, not `name`.
     // Rejecting that response leaves a successfully created folder invisible to

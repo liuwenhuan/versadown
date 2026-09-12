@@ -1,3 +1,5 @@
+#[path = "support/upload.rs"]
+mod upload_support;
 use alldownloader_lib::cloud::{
     xunlei::{
         XunleiClient, XunleiClientProfile, XunleiResumableUpload, XunleiSession, XunleiWebContext,
@@ -66,6 +68,7 @@ impl CloudHttpTransport for RecordingHttp {
 
 impl CloudUploadTransport for RecordingHttp {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+        let request = upload_support::consume(request)?;
         self.upload_requests.lock().unwrap().push(request);
         self.upload_responses
             .lock()
@@ -1117,10 +1120,9 @@ fn xunlei_upload_file_signs_https_s3_multipart_transfer_and_completes_it() {
     );
     assert_eq!(uploads[1].method, "PUT");
     assert!(uploads[1].url.contains("partNumber=1&uploadId=upload-id"));
-    assert_eq!(uploads[1].body, b"xunlei-bytes");
+    assert_eq!(upload_support::bytes(&uploads[1].body), b"xunlei-bytes");
     assert_eq!(uploads[2].method, "POST");
-    assert!(uploads[2]
-        .body
+    assert!(upload_support::bytes(&uploads[2].body)
         .windows("part-etag".len())
         .any(|part| part == b"part-etag"));
 }

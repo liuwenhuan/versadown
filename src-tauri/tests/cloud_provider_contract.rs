@@ -14,6 +14,259 @@ use std::{
     sync::Mutex,
 };
 
+// Breaks caught: omitting a catalog entry, routing a stable source to the wrong
+// provider, leaking/reusing an old password, changing recovery order, or enabling
+// cookie keepalive. Expectations are literal compatibility fixtures.
+#[test]
+fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources() {
+    use alldownloader_lib::cloud::{
+        auth_supervisor::{recover_in_order, AuthSupervisor},
+        driver::ProviderAuth,
+        saved_cloud_credential_info, select_password_credential_account,
+        share::parse_stable_cloud_share_source,
+        CloudAccount, CloudError, ProviderRegistry, SessionWorkKind,
+    };
+    use std::sync::Arc;
+    struct NoNetwork;
+    impl CloudHttpTransport for NoNetwork {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
+            panic!("unconnected capability must reject before network IO")
+        }
+    }
+    struct RejectedRecovery(Arc<Mutex<Vec<&'static str>>>);
+    impl ProviderAuth for RejectedRecovery {
+        fn refresh_session(&mut self) -> Result<bool, CloudError> {
+            self.0.lock().unwrap().push("refresh");
+            Err(CloudError::AuthorizationExpired)
+        }
+        fn recover_password(
+            &mut self,
+            _: &CloudPasswordCredential,
+        ) -> Result<(CloudAccount, Vec<u8>), CloudError> {
+            self.0.lock().unwrap().push("password");
+            Err(CloudError::AuthorizationExpired)
+        }
+    }
+    use CloudProvider::*;
+    use PasswordLoginMode::{None as NoPassword, OfficialWebView, RustDirect};
+    let rows = [
+        (
+            Quark,
+            "quark",
+            "0",
+            NoPassword,
+            false,
+            true,
+            "https://pan.quark.cn/s/example",
+        ),
+        (
+            Pikpak,
+            "pikpak",
+            "0",
+            RustDirect,
+            true,
+            false,
+            "https://mypikpak.com/s/example",
+        ),
+        (
+            Baidu,
+            "baidu",
+            "/",
+            RustDirect,
+            false,
+            true,
+            "https://pan.baidu.com/s/1example",
+        ),
+        (
+            Tianyi,
+            "tianyi",
+            "-11",
+            RustDirect,
+            true,
+            false,
+            "https://cloud.189.cn/t/example",
+        ),
+        (
+            Aliyun,
+            "aliyun",
+            "root",
+            OfficialWebView,
+            true,
+            false,
+            "https://www.alipan.com/s/example",
+        ),
+        (
+            Xunlei,
+            "xunlei",
+            "0",
+            OfficialWebView,
+            true,
+            true,
+            "https://pan.xunlei.com/s/example",
+        ),
+        (
+            Uc,
+            "uc",
+            "0",
+            OfficialWebView,
+            false,
+            true,
+            "https://drive.uc.cn/s/example",
+        ),
+    ];
+    let registry = ProviderRegistry::global();
+    let catalog = registry.catalog();
+    for (provider, key, root, password_mode, scheduled, transfer, share_url) in rows {
+        let descriptor = catalog
+            .iter()
+            .find(|d| d.provider == provider)
+            .unwrap_or_else(|| panic!("missing provider descriptor: {key}"));
+        assert_eq!(catalog.iter().filter(|d| d.provider == provider).count(), 1);
+        assert_eq!(registry.by_key(key).unwrap().provider, provider);
+        assert_eq!(descriptor.root_directory_id, root);
+        let recycle = format!("__all_downloader_{key}_recycle_bin__");
+        assert_eq!(descriptor.recycle_bin_directory_id, recycle);
+        assert_eq!(descriptor.authorization.password_login_mode, password_mode);
+        assert!(descriptor.authorization.web);
+        assert_eq!(
+            descriptor.authorization.password,
+            password_mode == RustDirect
+        );
+        assert!(descriptor.capabilities.list && descriptor.capabilities.download);
+        assert!(descriptor.capabilities.upload);
+        assert_eq!(descriptor.max_upload_concurrency, 2);
+        let source = format!("cloud://{key}/folder%2Ffile%20name");
+        assert_eq!(
+            parse_stable_cloud_source(&source).unwrap(),
+            (provider, "folder/file name".into())
+        );
+        let share = url::Url::parse(share_url).unwrap();
+        assert_eq!(registry.for_share_url(&share).unwrap().provider, provider);
+        let share_hash = "a".repeat(64);
+        let entry_hash = "b".repeat(64);
+        assert_eq!(
+            parse_stable_cloud_share_source(&format!(
+                "cloud-share://{key}/{share_hash}/{entry_hash}"
+            ))
+            .unwrap(),
+            (provider, share_hash, entry_hash)
+        );
+
+        let store = MemoryCredentialStore::default();
+        let capabilities = registry.share_capabilities(provider, &store, &NoNetwork);
+        assert!(descriptor.capabilities.share_inspect && capabilities.inspect.is_some());
+        assert!(capabilities.resolve.is_some());
+        assert_eq!(descriptor.capabilities.share_transfer, transfer);
+        assert_eq!(descriptor.capabilities.recorded_transfer_resolve, transfer);
+        assert_eq!(capabilities.transfer.is_some(), transfer);
+        assert_eq!(capabilities.recorded.is_some(), transfer);
+        let mut driver = registry.driver(provider, &store, &NoNetwork);
+        assert!(matches!(driver.account(), Err(CloudError::NotAuthorized)));
+        for directory in [root, recycle.as_str()] {
+            assert!(
+                matches!(
+                    driver.list_directory(directory),
+                    Err(CloudError::NotAuthorized | CloudError::AuthorizationExpired)
+                ),
+                "{key}: {directory}"
+            );
+        }
+        assert!(
+            matches!(
+                driver.resolve_download("file"),
+                Err(CloudError::NotAuthorized | CloudError::AuthorizationExpired)
+            ),
+            "{key}"
+        );
+
+        let direct = password_mode == RustDirect;
+        if direct {
+            save_password_credential(
+                &store,
+                CloudPasswordCredential::new(provider, "old", "alice", "old-secret"),
+            )
+            .unwrap();
+            store.save(key, b"old-session").unwrap();
+            select_password_credential_account(&store, provider, "new").unwrap();
+            assert!(store.load(key).unwrap().is_none());
+            assert!(load_password_credential(&store, provider)
+                .unwrap()
+                .is_none());
+            save_password_credential(
+                &store,
+                CloudPasswordCredential::new(provider, "new", "bob", "new-secret"),
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(
+                    saved_cloud_credential_info(&store, provider)
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::json!({"username":"bob", "hasSavedPassword":true})
+            );
+        } else {
+            assert!(saved_cloud_credential_info(&store, provider)
+                .unwrap()
+                .is_none());
+        }
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let mut auth = RejectedRecovery(attempts.clone());
+        assert!(matches!(
+            recover_in_order(provider, &store, &mut auth, true, || {
+                attempts.lock().unwrap().push("profile");
+                Ok(false)
+            }),
+            Err(CloudError::WebAuthorizationRequired)
+        ));
+        let expected = if direct {
+            vec!["refresh", "password", "profile"]
+        } else {
+            vec!["refresh", "profile"]
+        };
+        assert_eq!(*attempts.lock().unwrap(), expected, "{key}");
+
+        let supervisor = AuthSupervisor::new(|| 1000, || 30);
+        store.save(key, b"old-session").unwrap();
+        supervisor
+            .ready(&store, provider, Some("old".into()), None, None)
+            .unwrap();
+        assert!(supervisor
+            .record(&store, provider)
+            .unwrap()
+            .next_refresh_at
+            .is_none());
+        store.save(key, b"new-session").unwrap();
+        supervisor
+            .ready(&store, provider, Some("new".into()), None, Some(4600))
+            .unwrap();
+        let record = supervisor.record(&store, provider).unwrap();
+        assert_eq!(record.account_id.as_deref(), Some("new"));
+        assert_eq!(
+            record.next_refresh_at,
+            if scheduled { Some(3850) } else { None },
+            "{key}"
+        );
+        let session = supervisor
+            .run(
+                &store,
+                provider,
+                SessionWorkKind::Read,
+                |snapshot| snapshot.load(key),
+                |_| panic!("new session is not due"),
+            )
+            .unwrap();
+        assert_eq!(session.unwrap(), b"new-session");
+        logout_provider(provider, &store).unwrap();
+        assert!(store.load(key).unwrap().is_none());
+        assert!(saved_cloud_credential_info(&store, provider)
+            .unwrap()
+            .is_none());
+    }
+    assert_eq!(catalog.len(), 7);
+}
+
 #[test]
 fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before_io() {
     use alldownloader_lib::cloud::{share::*, ProviderRegistry};

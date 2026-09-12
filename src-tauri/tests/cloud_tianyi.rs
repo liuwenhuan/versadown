@@ -306,6 +306,73 @@ fn tianyi_app_directory_collects_following_pages() {
 }
 
 #[test]
+fn tianyi_full_directory_pages_retain_every_item_until_the_empty_page() {
+    // Break caught: stopping at an exactly full page or dropping a later page.
+    let first = tianyi_directory_page(0, 100);
+    let second = tianyi_directory_page(100, 100);
+    let empty = tianyi_directory_page(200, 0);
+    for session in directory_pagination_sessions() {
+        let http = RecordingHttp::sequence(&[&first, &second, &empty]);
+        let directory = TianyiClient::new(session, &http)
+            .directory("folder")
+            .unwrap();
+        assert_eq!(directory.items.len(), 200);
+        for id in 0..200 {
+            assert!(
+                directory
+                    .items
+                    .iter()
+                    .any(|item| item.id == format!("file-{id}")),
+                "missing file-{id}"
+            );
+        }
+        let requests = http.requests();
+        assert_eq!(requests.len(), 3);
+        for (index, request) in requests.iter().enumerate() {
+            let url = url::Url::parse(&request.url).unwrap();
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(key, _)| key == "pageNum")
+                    .unwrap()
+                    .1,
+                (index + 1).to_string()
+            );
+        }
+    }
+}
+
+#[test]
+fn tianyi_repeated_directory_page_fails_bounded_without_returning_partial_success() {
+    // Break caught: cycling forever or presenting a partial directory as a
+    // successful complete result when the server repeats an earlier page.
+    let page = tianyi_directory_page(0, 100);
+    for session in directory_pagination_sessions() {
+        let http = RecordingHttp::sequence(&[&page, &page]);
+        assert!(matches!(
+            TianyiClient::new(session, &http).directory("folder"),
+            Err(QuarkError::InvalidResponse)
+        ));
+        let requests = http.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].url.contains("pageNum=2"));
+    }
+}
+
+fn directory_pagination_sessions() -> [TianyiSession; 2] {
+    [
+        TianyiSession::cookie("COOKIE_LOGIN_USER=local"),
+        serde_json::from_value(serde_json::json!({
+            "cookie": "", "auth_method": "password",
+            "app": {
+                "sessionKey": "app-session-key", "sessionSecret": "app-session-secret",
+                "accessToken": "access-token", "loginName": "alice@189.cn"
+            }
+        }))
+        .unwrap(),
+    ]
+}
+
+#[test]
 fn tianyi_maps_the_official_xml_directory_response() {
     // The authenticated browser endpoint currently returns XML for file
     // listing even though mutation responses can still be JSON.  The client
