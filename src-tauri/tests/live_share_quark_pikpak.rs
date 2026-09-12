@@ -246,7 +246,7 @@ impl IsolatedAria2 {
         let downloads = root.join("downloads");
         let config = Aria2LaunchConfig {
             binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+                .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
             data_dir: root.join("aria2-data"),
             download_dir: downloads.clone(),
             parent_pid: std::process::id(),

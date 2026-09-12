@@ -102,7 +102,7 @@ async fn concurrent_manual_retries_start_one_engine_and_shutdown_cleanly() {
     assert!(!runtime.initialize().await.available);
     std::fs::copy(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
         staged_binary,
     )
     .unwrap();
@@ -125,7 +125,7 @@ async fn concurrent_manual_retries_start_one_engine_and_shutdown_cleanly() {
 async fn runtime_reconfigures_to_the_saved_rpc_port_and_token_immediately() {
     let root = tempfile::tempdir().unwrap();
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries/aria2c-x86_64-pc-windows-msvc.exe");
+        .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe");
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let events = Arc::new(Events::default());
     let runtime = EngineRuntime::new(
@@ -158,7 +158,7 @@ async fn runtime_reconfigures_to_the_saved_rpc_port_and_token_immediately() {
         RpcSecret::from_token(updated.aria2.rpc_token).unwrap(),
     )
     .unwrap();
-    assert_eq!(client.get_version().await.unwrap().version, "1.37.0");
+    assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
     assert!(runtime.shutdown(Duration::from_secs(5)).await.child_stopped);
 }
 
@@ -166,7 +166,7 @@ async fn runtime_reconfigures_to_the_saved_rpc_port_and_token_immediately() {
 async fn failed_reconfiguration_restores_the_previous_running_engine() {
     let root = tempfile::tempdir().unwrap();
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries/aria2c-x86_64-pc-windows-msvc.exe");
+        .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe");
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let events = Arc::new(Events::default());
     let runtime = EngineRuntime::new(
@@ -191,7 +191,7 @@ async fn failed_reconfiguration_restores_the_previous_running_engine() {
 async fn monitor_restarts_an_exited_owned_engine_once_without_exposing_the_old_service() {
     let root = tempfile::tempdir().unwrap();
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries/aria2c-x86_64-pc-windows-msvc.exe");
+        .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe");
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let events = Arc::new(Events::default());
     let runtime = Arc::new(EngineRuntime::new(

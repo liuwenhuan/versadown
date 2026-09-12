@@ -78,7 +78,7 @@ async fn shutdown_deadline_includes_busy_operation_lock_and_stops_owned_child() 
     let root = tempfile::tempdir().unwrap();
     let config = Aria2LaunchConfig {
         binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
         data_dir: root.path().join("data"),
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),
@@ -817,7 +817,7 @@ async fn owned_engine_restarts_once_and_shutdown_kills_only_after_deadline() {
     let root = tempfile::tempdir().unwrap();
     let config = Aria2LaunchConfig {
         binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
         data_dir: root.path().join("data"),
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),
@@ -1101,7 +1101,7 @@ async fn replacement_client_remains_available_when_recovery_persistence_fails() 
     let root = tempfile::tempdir().unwrap();
     let config = Aria2LaunchConfig {
         binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
         data_dir: root.path().join("data"),
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),
@@ -1175,7 +1175,7 @@ async fn recovery_failure_still_switches_websocket_and_wakes_idle_sync() {
     let root = tempfile::tempdir().unwrap();
     let config = Aria2LaunchConfig {
         binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
         data_dir: root.path().join("data"),
         download_dir: root.path().join("downloads"),
         parent_pid: std::process::id(),

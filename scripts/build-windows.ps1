@@ -5,43 +5,23 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$nodeBin = Join-Path $projectRoot '.tools\node-v24.20.0-win-x64'
-$installedNodeBin = Join-Path $env:LOCALAPPDATA 'Programs\nodejs'
-$cargoHome = Join-Path $projectRoot '.tools\cargo'
-$rustupHome = Join-Path $projectRoot '.tools\rustup'
-$installedCargoHome = Join-Path $env:USERPROFILE '.cargo'
-$installedCargoBin = Join-Path $installedCargoHome 'bin'
-$installedRustupHome = Join-Path $env:USERPROFILE '.rustup'
-$stableToolchain = 'stable-x86_64-pc-windows-msvc'
+. (Join-Path $PSScriptRoot 'build-tools.ps1')
+
 $releaseTargetDir = Join-Path $projectRoot '.tools\release-target'
 $publishedDir = Join-Path $projectRoot 'artifacts'
 $publishedBinary = Join-Path $publishedDir 'alldownloader.exe'
-
-if (Test-Path -LiteralPath $nodeBin) {
-    $env:Path = "$nodeBin;$env:Path"
-} elseif (Test-Path -LiteralPath (Join-Path $installedNodeBin 'npm.cmd')) {
-    $env:Path = "$installedNodeBin;$env:Path"
-}
-if (Test-Path -LiteralPath (Join-Path $cargoHome 'bin\cargo.exe')) {
-    $env:CARGO_HOME = $cargoHome
-    $env:Path = "$cargoHome\bin;$env:Path"
-} elseif (Test-Path -LiteralPath (Join-Path $installedCargoBin 'cargo.exe')) {
-    $env:CARGO_HOME = $installedCargoHome
-    $env:Path = "$installedCargoBin;$env:Path"
-}
-# A project-local rustup directory may exist without a configured toolchain.
-# Prefer it only when it contains the stable MSVC toolchain; otherwise use the
-# already installed per-user toolchain rather than asking rustup to reconfigure.
-if (Test-Path -LiteralPath (Join-Path $rustupHome "toolchains\$stableToolchain")) {
-    $env:RUSTUP_HOME = $rustupHome
-} elseif (Test-Path -LiteralPath (Join-Path $installedRustupHome "toolchains\$stableToolchain")) {
-    $env:RUSTUP_HOME = $installedRustupHome
-    $env:RUSTUP_TOOLCHAIN = $stableToolchain
-}
+$publishedSidecarDir = Join-Path $publishedDir 'binaries'
+$sidecarName = 'aria2-next-x86_64-pc-windows-msvc.exe'
+$sidecarSource = Join-Path $projectRoot "src-tauri\binaries\$sidecarName"
+$publishedSidecar = Join-Path $publishedSidecarDir $sidecarName
+$legacyPublishedSidecar = Join-Path $publishedSidecarDir 'aria2c-x86_64-pc-windows-msvc.exe'
+$buildTools = Get-AllDownloaderBuildTools -ProjectRoot $projectRoot
+$pnpmCommand = $buildTools.Pnpm
+$cargoCommand = $buildTools.Cargo
+$env:Path = "$(Split-Path -Parent $pnpmCommand);$(Split-Path -Parent $cargoCommand);$env:Path"
+$env:CARGO_TARGET_DIR = $releaseTargetDir
 $env:CARGO_INCREMENTAL = '1'
 
-$npmCommand = (Get-Command npm.cmd -ErrorAction Stop).Source
-$cargoCommand = (Get-Command cargo.exe -ErrorAction Stop).Source
 $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
 if (-not (Test-Path -LiteralPath $vcvars)) {
     throw "Visual Studio C++ build environment was not found: $vcvars"
@@ -49,12 +29,11 @@ if (-not (Test-Path -LiteralPath $vcvars)) {
 
 Set-Location $projectRoot
 if ($Installer) {
-    $command = '"{0}" >nul && "{1}" run tauri:build' -f $vcvars, $npmCommand
+    $command = '"{0}" >nul && "{1}" exec tauri build --runner "{2}"' -f $vcvars, $pnpmCommand, $cargoCommand
 } else {
     # Keep the distributable binary out of the shared Cargo target. Other
     # development builds may omit `custom-protocol` and would otherwise
     # overwrite the release executable with one that points at the Vite URL.
-    $env:CARGO_TARGET_DIR = $releaseTargetDir
     $frontendInputs = @(
         (Join-Path $projectRoot 'index.html'),
         (Join-Path $projectRoot 'package.json'),
@@ -86,7 +65,7 @@ if ($Installer) {
     $previousSignature = if (Test-Path -LiteralPath $signatureFile) { (Get-Content -LiteralPath $signatureFile -Raw).Trim() } else { '' }
 
     if ($frontendSignature -ne $previousSignature -or -not (Test-Path -LiteralPath $distDir)) {
-        & $npmCommand run build
+        & $pnpmCommand run build
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
         Set-Content -LiteralPath $signatureFile -Value $frontendSignature -NoNewline
@@ -99,12 +78,19 @@ if ($Installer) {
 & cmd.exe /d /s /c $command
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-if (-not $Installer) {
-    $builtBinary = Join-Path $releaseTargetDir 'release\alldownloader.exe'
-    if (-not (Test-Path -LiteralPath $builtBinary)) {
-        throw "发布二进制未生成: $builtBinary"
-    }
-    New-Item -ItemType Directory -Force -Path $publishedDir | Out-Null
-    Copy-Item -LiteralPath $builtBinary -Destination $publishedBinary -Force
-    Write-Host "已发布: $publishedBinary"
+$builtBinary = Join-Path $releaseTargetDir 'release\alldownloader.exe'
+if (-not (Test-Path -LiteralPath $builtBinary)) {
+    throw "Release binary was not produced: $builtBinary"
 }
+New-Item -ItemType Directory -Force -Path $publishedDir | Out-Null
+Copy-Item -LiteralPath $builtBinary -Destination $publishedBinary -Force
+if (-not (Test-Path -LiteralPath $sidecarSource -PathType Leaf)) {
+    throw "Aria2 Next sidecar was not found: $sidecarSource"
+}
+New-Item -ItemType Directory -Force -Path $publishedSidecarDir | Out-Null
+Copy-Item -LiteralPath $sidecarSource -Destination $publishedSidecar -Force
+if (Test-Path -LiteralPath $legacyPublishedSidecar -PathType Leaf) {
+    Remove-Item -LiteralPath $legacyPublishedSidecar -Force
+}
+Write-Host "Published: $publishedBinary"
+Write-Host "Published: $publishedSidecar"

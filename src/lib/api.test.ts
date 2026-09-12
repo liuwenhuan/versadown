@@ -15,6 +15,23 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
+it('classifies ED2K, FTP, HLS and DASH in the browser fallback', async () => {
+  const { parseLocally } = await import('./api');
+
+  expect(parseLocally('ed2k://|file|Example%20Archive.zip|42|0123456789ABCDEF0123456789ABCDEF|/')).toMatchObject({
+    task: { kind: 'ed2k', name: 'Example Archive.zip' }
+  });
+  expect(parseLocally('ftp://alice:secret@example.test/pub/archive.zip')).toMatchObject({
+    task: { kind: 'ftp', name: 'archive.zip', source: 'ftp://example.test/pub/archive.zip' }
+  });
+  expect(parseLocally('https://media.test/live/master.m3u8?token=one')).toMatchObject({
+    task: { kind: 'hls', name: 'master.m3u8' }
+  });
+  expect(parseLocally('https://media.test/video/manifest.mpd')).toMatchObject({
+    task: { kind: 'dash', name: 'manifest.mpd' }
+  });
+});
+
 it('maps a share confirmation without inventing an aria2 task', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'share_confirmation',

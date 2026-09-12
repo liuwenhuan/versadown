@@ -102,7 +102,7 @@ async function waitForChildExit(child, timeoutMs) {
 }
 
 function windowsChildProcessIds(parentPid) {
-  const script = `$items = @(Get-CimInstance Win32_Process -Filter \"ParentProcessId = ${Number(parentPid)}\" | Where-Object { $_.Name -like 'aria2c*' } | Select-Object -ExpandProperty ProcessId); ConvertTo-Json -Compress -InputObject $items`;
+  const script = `$items = @(Get-CimInstance Win32_Process -Filter \"ParentProcessId = ${Number(parentPid)}\" | Where-Object { $_.Name -like 'aria2-next*' } | Select-Object -ExpandProperty ProcessId); ConvertTo-Json -Compress -InputObject $items`;
   const result = require('node:child_process').execFileSync(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-Command', script],

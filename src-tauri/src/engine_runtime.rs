@@ -12,10 +12,10 @@ use tokio::sync::{watch, Mutex};
 
 use crate::{
     aria2::{
-        Aria2GlobalStat, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, DownloadService,
-        EventSink, TransferSynchronizer,
+        Aria2GlobalStat, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, DownloadAction,
+        DownloadService, EventSink, TransferSynchronizer, UriSubmissionOptions,
     },
-    TaskStatus, TaskStore,
+    DownloadTask, FtpDownloadEngine, MediaDownloadEngine, TaskStatus, TaskStore,
 };
 
 #[cfg(test)]
@@ -197,6 +197,8 @@ pub struct EngineRuntime {
     launch_config: RwLock<Aria2LaunchConfig>,
     store: Arc<TaskStore>,
     download_events: Arc<dyn EventSink>,
+    ftp: Arc<FtpDownloadEngine>,
+    media: Arc<MediaDownloadEngine>,
     state_events: Arc<dyn EngineStateSink>,
     state: RwLock<EngineAvailability>,
     slot: Mutex<EngineSlot>,
@@ -212,10 +214,22 @@ impl EngineRuntime {
         download_events: Arc<dyn EventSink>,
         state_events: Arc<dyn EngineStateSink>,
     ) -> Self {
+        let ftp = Arc::new(FtpDownloadEngine::new(
+            &launch_config.download_dir,
+            Arc::clone(&store),
+            Arc::clone(&download_events),
+        ));
+        let media = Arc::new(MediaDownloadEngine::new(
+            &launch_config.data_dir,
+            Arc::clone(&store),
+            Arc::clone(&download_events),
+        ));
         Self {
             launch_config: RwLock::new(launch_config),
             store,
             download_events,
+            ftp,
+            media,
             state_events,
             state: RwLock::new(EngineAvailability::starting()),
             slot: Mutex::new(EngineSlot {
@@ -245,6 +259,7 @@ impl EngineRuntime {
             return self.set_state(EngineAvailability::unavailable("应用正在退出"));
         }
         self.set_state(EngineAvailability::starting());
+        let _ = self.ftp.recover().await;
         let mut slot = self.slot.lock().await;
         if self.exiting.load(Ordering::Acquire) {
             self.stop_slot_for_exit(&mut slot).await;
@@ -263,6 +278,7 @@ impl EngineRuntime {
                 }
                 return match recovered {
                     Ok(_) => {
+                        let _ = self.media.recover(Arc::clone(&service)).await;
                         let client = slot.client.clone();
                         Self::start_synchronizer_if_needed(slot, service, client);
                         self.set_state(EngineAvailability::available())
@@ -313,6 +329,7 @@ impl EngineRuntime {
         }
         match recovered {
             Ok(_) => {
+                let _ = self.media.recover(Arc::clone(&service)).await;
                 Self::start_synchronizer_if_needed(slot, service, Some(client));
                 self.set_state(EngineAvailability::available())
             }
@@ -343,14 +360,131 @@ impl EngineRuntime {
     }
 
     pub async fn global_stat(&self) -> Result<Aria2GlobalStat, EngineUnavailableError> {
-        let service = self.service().await?;
+        let ftp = self.ftp.global_stat().ok();
+        let mut stat =
+            match self.service().await {
+                Ok(service) => service.api().get_global_stat().await.map_err(|error| {
+                    EngineUnavailableError {
+                        message: format!("下载引擎不可用：{error}"),
+                    }
+                })?,
+                Err(_)
+                    if ftp
+                        .as_ref()
+                        .is_some_and(|stat| stat.num_active > 0 || stat.num_waiting > 0) =>
+                {
+                    Aria2GlobalStat {
+                        download_speed: 0,
+                        upload_speed: 0,
+                        num_active: 0,
+                        num_waiting: 0,
+                        num_stopped: 0,
+                        num_stopped_total: 0,
+                    }
+                }
+                Err(error) => return Err(error),
+            };
+        if let Some(ftp) = ftp {
+            stat.download_speed = stat.download_speed.saturating_add(ftp.download_speed);
+            stat.upload_speed = stat.upload_speed.saturating_add(ftp.upload_speed);
+            stat.num_active = stat.num_active.saturating_add(ftp.num_active);
+            stat.num_waiting = stat.num_waiting.saturating_add(ftp.num_waiting);
+            stat.num_stopped = stat.num_stopped.saturating_add(ftp.num_stopped);
+            stat.num_stopped_total = stat.num_stopped_total.saturating_add(ftp.num_stopped_total);
+        }
+        Ok(stat)
+    }
+
+    pub async fn submit_uri_with_options(
+        self: &Arc<Self>,
+        task_id: uuid::Uuid,
+        uris: Vec<String>,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, String> {
+        if uris.len() == 1 && uris[0].to_ascii_lowercase().starts_with("ftp://") {
+            return self
+                .ftp
+                .submit_uri(task_id, &uris[0], options)
+                .await
+                .map_err(|error| error.to_string());
+        }
+        let service = self.service().await.map_err(|error| error.to_string())?;
+        let task = self
+            .store
+            .find(task_id)
+            .map_err(|error| error.to_string())?;
+        if uris.len() == 1 && matches!(task.kind.as_str(), "hls" | "dash") {
+            return self
+                .media
+                .submit_uri(service, task_id, &uris[0], options)
+                .await
+                .map_err(|error| error.to_string());
+        }
         service
-            .api()
-            .get_global_stat()
+            .submit_uri_with_options(task_id, uris, options)
             .await
-            .map_err(|error| EngineUnavailableError {
-                message: format!("下载引擎不可用：{error}"),
-            })
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn resubmit_uri_with_options(
+        self: &Arc<Self>,
+        task_id: uuid::Uuid,
+        uris: Vec<String>,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, String> {
+        if uris.len() == 1 && uris[0].to_ascii_lowercase().starts_with("ftp://") {
+            return self
+                .ftp
+                .submit_uri(task_id, &uris[0], options)
+                .await
+                .map_err(|error| error.to_string());
+        }
+        let service = self.service().await.map_err(|error| error.to_string())?;
+        let task = self
+            .store
+            .find(task_id)
+            .map_err(|error| error.to_string())?;
+        if uris.len() == 1 && matches!(task.kind.as_str(), "hls" | "dash") {
+            return self
+                .media
+                .submit_uri(service, task_id, &uris[0], options)
+                .await
+                .map_err(|error| error.to_string());
+        }
+        service
+            .resubmit_uri_with_options(task_id, uris, options)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn control(
+        self: &Arc<Self>,
+        task_id: uuid::Uuid,
+        action: DownloadAction,
+    ) -> Result<DownloadTask, String> {
+        let task = self
+            .store
+            .find(task_id)
+            .map_err(|error| error.to_string())?;
+        if task.kind == "ftp" {
+            return self
+                .ftp
+                .control(task_id, action)
+                .await
+                .map_err(|error| error.to_string());
+        }
+        let service = self.service().await.map_err(|error| error.to_string())?;
+        if matches!(task.kind.as_str(), "hls" | "dash") {
+            return self
+                .media
+                .control(service, task_id, action)
+                .await
+                .map_err(|error| error.to_string());
+        }
+        service
+            .control(task_id, action)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Applies the complete aria2 configuration immediately. The RPC endpoint and
@@ -394,6 +528,13 @@ impl EngineRuntime {
             .launch_config
             .write()
             .unwrap_or_else(|error| error.into_inner()) = launch_config;
+        self.ftp.set_default_directory(
+            &self
+                .launch_config
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .download_dir,
+        );
         let state = self.retry_locked(&mut slot).await;
         if state.available {
             Ok(state)
@@ -403,6 +544,13 @@ impl EngineRuntime {
                 .launch_config
                 .write()
                 .unwrap_or_else(|error| error.into_inner()) = current_config;
+            self.ftp.set_default_directory(
+                &self
+                    .launch_config
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .download_dir,
+            );
             let restored = self.retry_locked(&mut slot).await;
             if restored.available {
                 Err(error)
@@ -468,6 +616,8 @@ impl EngineRuntime {
     pub async fn shutdown(&self, timeout: Duration) -> crate::aria2::recovery::ShutdownReport {
         let deadline = tokio::time::Instant::now() + timeout;
         self.exiting.store(true, Ordering::Release);
+        self.ftp.shutdown().await;
+        self.media.shutdown().await;
         let mut slot = match tokio::time::timeout_at(deadline, self.slot.lock()).await {
             Ok(slot) => slot,
             Err(_) => {
@@ -534,6 +684,9 @@ impl EngineRuntime {
             return;
         };
         for mut task in tasks {
+            if matches!(task.kind.as_str(), "ftp" | "hls" | "dash") {
+                continue;
+            }
             if !matches!(
                 task.status,
                 TaskStatus::Downloading | TaskStatus::Queued | TaskStatus::Parsing
@@ -1179,7 +1332,7 @@ mod tests {
         Arc::new(EngineRuntime::new(
             Aria2LaunchConfig {
                 binary: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+                    .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
                 data_dir: root.join("data"),
                 download_dir: root.join("downloads"),
                 parent_pid: std::process::id(),

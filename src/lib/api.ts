@@ -2,8 +2,23 @@ import { AiSettings, AiSettingsInput, AppSettings, CloudShareAccessCodeRequired,
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
+  if (/^ed2k:\/\/\|file\|/i.test(value)) {
+    return decodeURIComponent(value.split('|')[2] || 'ED2K 下载');
+  }
   const path = value.split(/[?#]/)[0];
   return decodeURIComponent(path.split('/').filter(Boolean).pop() || '新下载任务');
+}
+
+function sourceForDisplay(value: string, kind: string) {
+  if (kind !== 'ftp') return value;
+  try {
+    const parsed = new URL(value);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return value;
+  }
 }
 
 function id() { return `local-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
@@ -18,8 +33,13 @@ export function parseLocally(input: string): ParseDownloadResult {
     ];
     return { confirmation: { taskId: id(), title: 'BT 下载任务', requiresConfirmation: true, resources, processing: ['完成后按白名单检查后处理步骤'] } };
   }
-  if (/^https?:\/\//i.test(trimmed)) {
-    return { task: { id: id(), name: fileNameFrom(trimmed), kind: 'file', status: 'downloading', progress: 0, speed: '准备连接', source: trimmed } };
+  if (/^(?:https?|ftp):\/\//i.test(trimmed) || /^ed2k:\/\/\|file\|/i.test(trimmed)) {
+    const kind = /^ed2k:/i.test(trimmed) ? 'ed2k'
+      : /^ftp:/i.test(trimmed) ? 'ftp'
+        : /\.m3u8(?:[?#]|$)/i.test(trimmed) ? 'hls'
+          : /\.mpd(?:[?#]|$)/i.test(trimmed) ? 'dash'
+            : 'file';
+    return { task: { id: id(), name: fileNameFrom(trimmed), kind, status: 'downloading', progress: 0, speed: '准备连接', source: sourceForDisplay(trimmed, kind) } };
   }
   return { confirmation: { taskId: id(), title: '待确认的下载内容', requiresConfirmation: true, resources: [{ id: `${id()}-candidate`, name: '从文本中发现的候选下载项', size: '需要进一步解析', selected: true }], processing: ['将用本地规则提取链接；必要时请求脱敏 AI 分析'] } };
 }

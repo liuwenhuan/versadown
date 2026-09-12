@@ -8,9 +8,12 @@ mod commands;
 mod connectors;
 mod downloader;
 mod duplicates;
+mod engine_migration;
 mod engine_runtime;
+mod ftp;
 mod launcher;
 mod magnet_metadata;
+mod media;
 mod models;
 mod parser;
 mod policy;
@@ -28,9 +31,11 @@ pub use downloader::{
     ParseResource,
 };
 pub use duplicates::{duplicate_state, retry_duplicate_state};
+pub use engine_migration::run_aria2_next_migration;
 pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
+pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpTarget};
 pub use launcher::{
     launcher_hexagon_points, launcher_hexagon_region, launcher_live_regions, launcher_menu_entries,
     launcher_native_chrome_policy, launcher_window_style_without_frame,
@@ -38,6 +43,7 @@ pub use launcher::{
     LauncherLiveRegions, LauncherNativeChromePolicy, LauncherPoint, LauncherRegion,
 };
 pub use magnet_metadata::{resolve_magnet_torrent, MagnetMetadataError, ResolvedMagnetTorrent};
+pub use media::{MediaDownloadEngine, MediaDownloadError};
 pub use models::{
     may_transition, AiSettings, AiSettingsInput, AppSettings, Aria2Settings, DownloadTask,
     DuplicateDownloadState, LauncherVisibility, MagnetMetadataSettings, NewTask, ProxySettings,
@@ -49,7 +55,7 @@ pub use parser::{
 };
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
-pub use store::{StoreError, TaskStore};
+pub use store::{LegacyPurgeReport, StoreError, TaskStore};
 pub use window_lifecycle::{
     manager_close_disposition, ApplicationLifecycle, ManagerCloseDisposition,
 };
@@ -146,10 +152,10 @@ pub fn run() {
                 .resource_dir()?
                 .join("binaries")
                 .join(aria2_binary_name());
-            let sidecar = if manifest_sidecar.exists() {
-                manifest_sidecar
-            } else {
+            let sidecar = if bundled_sidecar.exists() {
                 bundled_sidecar
+            } else {
+                manifest_sidecar
             };
             let default_destination = if background_ui_test.as_deref() == Some("1") {
                 std::env::var_os("ALLDOWNLOADER_TEST_DOWNLOAD_DIR")
@@ -180,6 +186,7 @@ pub fn run() {
             let launcher_visibility = settings.launcher_visibility;
             let destination = std::path::PathBuf::from(&settings.download_directory);
             std::fs::create_dir_all(&destination)?;
+            run_aria2_next_migration(&store, &data_dir, &destination)?;
             let launch_config = Aria2LaunchConfig {
                 binary: sidecar,
                 data_dir: data_dir.clone(),

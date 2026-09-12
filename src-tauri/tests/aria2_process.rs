@@ -15,7 +15,7 @@ fn config(root: &std::path::Path) -> Aria2LaunchConfig {
     drop(listener);
     Aria2LaunchConfig {
         binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
         data_dir: root.join("data"),
         download_dir: root.join("downloads"),
         parent_pid: std::process::id(),
@@ -46,6 +46,7 @@ fn launch_arguments_disable_remote_rpc_and_enable_persistence() {
         "--save-session-interval=10",
         "--pause-metadata=true",
         "--continue=true",
+        "--state-dir=fixture\\data\\aria2-next-state",
         "--no-conf=true",
         "--enable-dht=false",
         "--enable-dht6=false",
@@ -104,7 +105,7 @@ async fn bundled_sidecar_is_authenticated_saves_session_and_exits() {
     let root = tempfile::tempdir().unwrap();
     let (mut child, client) = Aria2Process::start(config(root.path())).await.unwrap();
     assert!(child.is_running().unwrap());
-    assert_eq!(client.get_version().await.unwrap().version, "1.37.0");
+    assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
     let unauthenticated =
         Aria2RpcClient::new(client.endpoint().as_str(), RpcSecret::from_bytes([0; 32])).unwrap();
     assert!(unauthenticated.get_global_stat().await.is_err());

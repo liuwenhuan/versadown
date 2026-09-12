@@ -139,6 +139,10 @@ fn normalize_access_code(value: &str) -> Result<String, ShareInputError> {
 #[serde(rename_all = "snake_case")]
 pub enum CandidateKind {
     Direct,
+    Ed2k,
+    Ftp,
+    Hls,
+    Dash,
     Magnet,
     Torrent,
     Thunder,
@@ -158,22 +162,44 @@ pub fn classify_input(input: &str) -> Candidate {
     let uri = input.trim().to_string();
     let lower = uri.to_lowercase();
     let path_without_query = lower.split(['?', '#']).next().unwrap_or(&lower);
-    let kind = if lower.starts_with("magnet:") {
+    let kind = if valid_ed2k_file_link(&uri) {
+        CandidateKind::Ed2k
+    } else if lower.starts_with("ed2k:") {
+        CandidateKind::Text
+    } else if lower.starts_with("magnet:") {
         CandidateKind::Magnet
     } else if lower.starts_with("thunder://") {
         CandidateKind::Thunder
+    } else if lower.starts_with("ftp://") {
+        CandidateKind::Ftp
     } else if lower.contains("pan.quark.cn") || lower.contains("quark.cn/s/") {
         CandidateKind::QuarkShare
     } else if lower.contains("mypikpak.com") || lower.contains("pikpak.me") {
         CandidateKind::PikPakShare
     } else if path_without_query.ends_with(".torrent") {
         CandidateKind::Torrent
+    } else if (lower.starts_with("http://") || lower.starts_with("https://"))
+        && path_without_query.ends_with(".m3u8")
+    {
+        CandidateKind::Hls
+    } else if (lower.starts_with("http://") || lower.starts_with("https://"))
+        && path_without_query.ends_with(".mpd")
+    {
+        CandidateKind::Dash
     } else if lower.starts_with("http://") || lower.starts_with("https://") {
         CandidateKind::Direct
     } else {
         CandidateKind::Text
     };
-    let auto_start = matches!(kind, CandidateKind::Direct | CandidateKind::Thunder);
+    let auto_start = matches!(
+        kind,
+        CandidateKind::Direct
+            | CandidateKind::Ed2k
+            | CandidateKind::Ftp
+            | CandidateKind::Hls
+            | CandidateKind::Dash
+            | CandidateKind::Thunder
+    );
     Candidate {
         kind,
         uri,
@@ -182,18 +208,32 @@ pub fn classify_input(input: &str) -> Candidate {
 }
 
 pub fn extract_candidates(text: &str) -> Vec<Candidate> {
-    let pattern = Regex::new(r"(?i)(magnet:\?[^\s<>]+|thunder://[^\s<>]+|https?://[^\s<>]+)")
-        .expect("static candidate pattern");
+    let pattern = Regex::new(
+        r"(?i)(ed2k://\|file\|[^\r\n<>]*?\|/|magnet:\?[^\s<>]+|thunder://[^\s<>]+|ftp://[^\s<>]+|https?://[^\s<>]+)",
+    )
+    .expect("static candidate pattern");
     pattern
         .find_iter(text)
         .map(|match_| {
             classify_input(
                 match_
                     .as_str()
-                    .trim_end_matches(|character: char| ".,;，。)】".contains(character)),
+                    .trim_end_matches(|character: char| ".,;；，。)】]}".contains(character)),
             )
         })
         .collect()
+}
+
+fn valid_ed2k_file_link(value: &str) -> bool {
+    let parts = value.split('|').collect::<Vec<_>>();
+    parts.len() >= 6
+        && parts[0].eq_ignore_ascii_case("ed2k://")
+        && parts[1].eq_ignore_ascii_case("file")
+        && !parts[2].trim().is_empty()
+        && parts[3].parse::<u64>().is_ok()
+        && parts[4].len() == 32
+        && parts[4].bytes().all(|byte| byte.is_ascii_hexdigit())
+        && parts.last() == Some(&"/")
 }
 
 #[cfg(test)]

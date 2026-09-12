@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    path::Path,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -32,6 +33,15 @@ pub enum StoreError {
     IntegerOutOfRange { field: &'static str },
     #[error("invalid cloud directory group data: {0}")]
     InvalidCloudDirectoryGroupData(&'static str),
+    #[error("file operation failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LegacyPurgeReport {
+    pub removed_tasks: usize,
+    pub removed_files: usize,
+    pub skipped_outside_files: usize,
 }
 
 pub struct TaskStore {
@@ -475,6 +485,48 @@ impl TaskStore {
         self.fail_with_code(id, None, message)
     }
 
+    /// Removes unfinished records created by the retired aria2 engine and only
+    /// deletes payloads whose resolved path stays inside the configured download root.
+    pub fn purge_incompatible_engine_tasks(
+        &self,
+        download_root: &Path,
+    ) -> Result<LegacyPurgeReport, StoreError> {
+        let root = std::fs::canonicalize(download_root)?;
+        let tasks = self
+            .list()?
+            .into_iter()
+            .filter(|task| !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled))
+            .collect::<Vec<_>>();
+        let mut report = LegacyPurgeReport::default();
+
+        for task in &tasks {
+            for file in self.files(task.id)? {
+                let path = std::path::PathBuf::from(file.path);
+                match remove_legacy_payload_file(&root, &path)? {
+                    LegacyFileRemoval::Removed => report.removed_files += 1,
+                    LegacyFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
+                    LegacyFileRemoval::Missing => {}
+                }
+                let mut sidecar = path.into_os_string();
+                sidecar.push(".aria2");
+                match remove_legacy_payload_file(&root, Path::new(&sidecar))? {
+                    LegacyFileRemoval::Removed => report.removed_files += 1,
+                    LegacyFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
+                    LegacyFileRemoval::Missing => {}
+                }
+            }
+        }
+
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        for task in &tasks {
+            transaction.execute("DELETE FROM tasks WHERE id = ?1", [task.id.to_string()])?;
+        }
+        transaction.commit()?;
+        report.removed_tasks = tasks.len();
+        Ok(report)
+    }
+
     /// Stores a durable, machine-readable failure kind alongside the safe
     /// text displayed to the user. A missing code deliberately clears an old
     /// cloud-auth classification left by an earlier attempt.
@@ -784,6 +836,44 @@ impl TaskStore {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+}
+
+enum LegacyFileRemoval {
+    Removed,
+    OutsideRoot,
+    Missing,
+}
+
+fn remove_legacy_payload_file(
+    download_root: &Path,
+    candidate: &Path,
+) -> Result<LegacyFileRemoval, StoreError> {
+    if !candidate.is_absolute() {
+        return Ok(LegacyFileRemoval::OutsideRoot);
+    }
+    let metadata = match std::fs::symlink_metadata(candidate) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LegacyFileRemoval::Missing)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let resolved = std::fs::canonicalize(candidate)?;
+    if !resolved.starts_with(download_root) {
+        return Ok(LegacyFileRemoval::OutsideRoot);
+    }
+    if !(metadata.is_file() || metadata.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to remove non-file payload {}",
+                candidate.display()
+            ),
+        )
+        .into());
+    }
+    std::fs::remove_file(candidate)?;
+    Ok(LegacyFileRemoval::Removed)
 }
 
 const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at FROM tasks";

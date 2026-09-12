@@ -3,6 +3,10 @@
 use alldownloader_lib::aria2::{
     Aria2Api, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, Aria2Status,
 };
+use alldownloader_lib::{
+    Aria2GlobalStat, DownloadService, DownloadTask, EventSink, MediaDownloadEngine, NewTask,
+    TaskStatus, TaskStore, UriSubmissionOptions,
+};
 use axum::{
     body::{Body, Bytes},
     extract::{OriginalUri, State},
@@ -28,6 +32,14 @@ const PAYLOAD_BYTES: usize = 1024 * 1024;
 const HOLD_AFTER_BYTES: usize = 256 * 1024;
 const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const POLL: Duration = Duration::from_millis(50);
+
+struct NoMediaEvents;
+
+impl EventSink for NoMediaEvents {
+    fn task_updated(&self, _: &DownloadTask) {}
+
+    fn global_stat_updated(&self, _: &Aria2GlobalStat) {}
+}
 
 #[tokio::test]
 async fn transfer_gate_blocks_until_the_test_releases_it() {
@@ -222,6 +234,34 @@ impl LiveAria2Fixture {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
             .route("/payload.bin", get(serve_payload))
+            .route(
+                "/playlist.m3u8",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")],
+                        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\npayload.bin\n#EXT-X-ENDLIST\n",
+                    )
+                }),
+            )
+            .route(
+                "/manifest.mpd",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/dash+xml")],
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT1S" minBufferTime="PT1S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+  <Period duration="PT1S">
+    <AdaptationSet mimeType="video/mp4">
+      <Representation id="1" bandwidth="1000">
+        <BaseURL>payload.bin</BaseURL>
+        <SegmentBase />
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>"#,
+                    )
+                }),
+            )
             .with_state(http.clone());
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -233,7 +273,7 @@ impl LiveAria2Fixture {
         drop(listener);
         let config = Aria2LaunchConfig {
             binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("binaries/aria2c-x86_64-pc-windows-msvc.exe"),
+                .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
             data_dir: root.path().join("data"),
             download_dir: root.path().join("downloads"),
             parent_pid: std::process::id(),
@@ -241,7 +281,7 @@ impl LiveAria2Fixture {
             aria2,
         };
         let (process, client) = Aria2Process::start(config.clone()).await.unwrap();
-        assert_eq!(client.get_version().await.unwrap().version, "1.37.0");
+        assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
         Self {
             process: Some(process),
             client,
@@ -396,6 +436,87 @@ impl LiveAria2Fixture {
     }
 }
 
+#[tokio::test]
+async fn bundled_aria2_next_accepts_ed2k_and_downloads_hls_and_dash_manifests() {
+    let mut fixture = LiveAria2Fixture::start().await;
+
+    let ed2k = "ed2k://|file|fixture.bin|1048576|0123456789ABCDEF0123456789ABCDEF|/";
+    let ed2k_gid = fixture
+        .client
+        .add_uri(vec![ed2k.into()], BTreeMap::new())
+        .await
+        .expect("Aria2 Next accepts an ED2K link through JSON-RPC");
+    let ed2k_status = fixture.client.tell_status(&ed2k_gid).await.unwrap();
+    assert!(matches!(
+        ed2k_status.status.as_str(),
+        "waiting" | "active" | "paused"
+    ));
+    let _ = fixture.client.force_remove(&ed2k_gid).await;
+
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let service = Arc::new(DownloadService::new(
+        Arc::new(fixture.client.clone()),
+        Arc::clone(&store),
+    ));
+    let media = Arc::new(MediaDownloadEngine::new(
+        fixture.config.data_dir.clone(),
+        Arc::clone(&store),
+        Arc::new(NoMediaEvents),
+    ));
+    for (kind, name, manifest) in [
+        ("hls", "fixture-hls.bin", "playlist.m3u8"),
+        ("dash", "fixture-dash.bin", "manifest.mpd"),
+    ] {
+        let source = format!("{}/{}", fixture.origin, manifest);
+        let task = store
+            .create(NewTask {
+                source: source.clone(),
+                name: name.into(),
+                kind: kind.into(),
+            })
+            .unwrap();
+        media
+            .submit_uri(
+                Arc::clone(&service),
+                task.id,
+                &source,
+                UriSubmissionOptions {
+                    directory: Some(fixture.config.download_dir.clone()),
+                    output_name: Some(name.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let task = store.find(task.id).unwrap();
+                assert_ne!(
+                    task.status,
+                    TaskStatus::Failed,
+                    "{manifest}: {:?}",
+                    task.error
+                );
+                if task.status == TaskStatus::Completed {
+                    break;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("media task did not complete");
+        let output = fixture.config.download_dir.join(name);
+        assert!(output.is_file(), "{manifest} did not produce {name}");
+        assert_eq!(
+            std::fs::metadata(output).unwrap().len(),
+            PAYLOAD_BYTES as u64
+        );
+        fixture.assert_download_sha256(name);
+    }
+
+    fixture.save_and_shutdown().await;
+}
+
 impl Drop for LiveAria2Fixture {
     fn drop(&mut self) {
         // Failure cleanup touches only this fixture's owned child and temporary data.
@@ -431,7 +552,7 @@ async fn bundled_aria2_downloads_pauses_resumes_and_stops() {
         "unpause must exercise an actual HTTP Range continuation"
     );
     fixture.save_and_shutdown().await;
-    println!("aria2 1.37.0: real progress, pause, Range resume, SHA-256, session save and owned-child shutdown passed");
+    println!("Aria2 Next 2.7.5: real progress, pause, Range resume, SHA-256, session save and owned-child shutdown passed");
 }
 
 #[tokio::test]
@@ -545,5 +666,5 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
         .join("cancelled.bin.aria2")
         .is_file());
     fixture.terminate_for_cleanup();
-    println!("aria2 1.37.0: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial/control files passed");
+    println!("Aria2 Next 2.7.5: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial/control files passed");
 }

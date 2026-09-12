@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.alldownloader.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -16,5 +16,5 @@
     ],
     "security": { "csp": null }
   },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico"], "resources": ["binaries/aria2c-x86_64-pc-windows-msvc.exe"], "windows": { "wix": { "language": ["zh-CN"] } } }
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico"], "resources": ["binaries/aria2-next-x86_64-pc-windows-msvc.exe"], "windows": { "wix": { "language": ["zh-CN"] } } }
 }

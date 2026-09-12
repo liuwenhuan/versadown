@@ -363,6 +363,26 @@ it('keeps the live magnet metadata stage in the transfer-metrics row', () => {
   expect(metadata.closest('.transfer-metrics')).not.toBeNull();
 });
 
+it('labels ed2k ftp hls and dash tasks without exposing raw protocol links', () => {
+  render(<DownloadQueue
+    tasks={[
+      { id: 'ed2k-1', name: 'Example.zip', source: 'ed2k://|file|Example.zip|42|0123456789ABCDEF0123456789ABCDEF|/', kind: 'ed2k', status: 'downloading', progress: 1 },
+      { id: 'ftp-1', name: 'file.iso', source: 'ftp://demo:secret@example.test/file.iso', kind: 'ftp', status: 'downloading', progress: 2 },
+      { id: 'hls-1', name: 'master.m3u8', source: 'https://media.test/master.m3u8', kind: 'hls', status: 'downloading', progress: 3 },
+      { id: 'dash-1', name: 'manifest.mpd', source: 'https://media.test/manifest.mpd', kind: 'dash', status: 'downloading', progress: 4 },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('ED2K 下载')).toBeVisible();
+  expect(screen.getByText('FTP 下载')).toBeVisible();
+  expect(screen.getByText('HLS 流媒体下载')).toBeVisible();
+  expect(screen.getByText('MPEG-DASH 流媒体下载')).toBeVisible();
+  expect(screen.queryByText(/demo:secret/)).not.toBeInTheDocument();
+});
+
 it('shows transferred bytes, live speed and ETA without exposing peer-count noise', () => {
   render(<DownloadQueue
     tasks={[{

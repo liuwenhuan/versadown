@@ -11,6 +11,8 @@ artifacts/
 .env.*
 !*.example
 .tools/
+.master-release-target/
+.share-release-target/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts

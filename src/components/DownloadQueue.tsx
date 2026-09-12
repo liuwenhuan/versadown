@@ -131,6 +131,10 @@ function taskSubtitle(task: QueueTask): string | undefined {
   const fileCount = task.children?.length ?? task.files?.length ?? 0;
   if (task.kind === 'magnet') return `磁力任务 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
   if (task.kind === 'torrent') return `BT 种子 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
+  if (task.kind === 'ed2k') return 'ED2K 下载';
+  if (task.kind === 'ftp') return 'FTP 下载';
+  if (task.kind === 'hls') return 'HLS 流媒体下载';
+  if (task.kind === 'dash') return 'MPEG-DASH 流媒体下载';
   if (task.kind === 'folder') return '网盘下载任务';
   if (task.kind === 'cloud') return '网盘下载任务';
   return undefined;
@@ -139,6 +143,8 @@ function taskSubtitle(task: QueueTask): string | undefined {
 function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   if (kind === 'folder') return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7a2.2 2.2 0 0 1 2.2 2.2v1.8" /></svg>;
   if (kind === 'magnet' || kind === 'torrent') return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v8a5 5 0 0 0 10 0V4" /><path d="M7 8h4M13 8h4M7 4h4M13 4h4" /></svg>;
+  if (kind === 'ed2k') return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8.5 8.5 5 12l3.5 3.5M15.5 8.5 19 12l-3.5 3.5" /><path d="M10 17 14 7" /></svg>;
+  if (kind === 'hls' || kind === 'dash') return <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></svg>;
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 

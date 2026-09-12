@@ -155,7 +155,7 @@ async fn load_torrent_base64_with_timeout(
 }
 
 pub fn aria2_binary_name() -> &'static str {
-    "aria2c-x86_64-pc-windows-msvc.exe"
+    "aria2-next-x86_64-pc-windows-msvc.exe"
 }
 
 fn decode_thunder_source(source: &str) -> Result<String, DownloadError> {
@@ -177,7 +177,7 @@ fn decode_thunder_source(source: &str) -> Result<String, DownloadError> {
         .to_ascii_lowercase();
     if !matches!(scheme.as_str(), "http" | "https" | "ftp") {
         return Err(DownloadError::ThunderInput(
-            "该迅雷链接不是 aria2 可下载的 HTTP/HTTPS/FTP 地址".into(),
+            "该迅雷链接不是可下载的 HTTP/HTTPS/FTP 地址".into(),
         ));
     }
     Ok(target.to_string())
@@ -193,13 +193,26 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
     } else {
         candidate.uri.clone()
     };
+    let effective_kind = match &candidate.kind {
+        CandidateKind::Thunder if source.to_ascii_lowercase().starts_with("ftp://") => {
+            CandidateKind::Ftp
+        }
+        CandidateKind::Thunder => CandidateKind::Direct,
+        kind => kind.clone(),
+    };
     let mut new_task = NewTask::direct(source);
-    new_task.kind = match candidate.kind {
+    new_task.kind = match effective_kind {
+        CandidateKind::Ed2k => "ed2k",
+        CandidateKind::Ftp => "ftp",
+        CandidateKind::Hls => "hls",
+        CandidateKind::Dash => "dash",
         CandidateKind::Magnet => "magnet",
         CandidateKind::Torrent => "torrent",
         _ => "file",
     }
     .to_string();
+    new_task.name = readable_task_name(&new_task.source, &new_task.kind)
+        .unwrap_or_else(|| new_task.name.clone());
     if let Some(task) = store.find_by_source(&new_task.source)? {
         if task.status != TaskStatus::Recycled {
             return Ok(ParseOutcome {
@@ -237,6 +250,24 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
     })
 }
 
+fn readable_task_name(source: &str, kind: &str) -> Option<String> {
+    let encoded = if kind == "ed2k" {
+        source.split('|').nth(2)?.to_owned()
+    } else if kind == "ftp" {
+        return crate::parse_ftp_url(source)
+            .ok()
+            .map(|target| target.file_name().to_owned());
+    } else {
+        let url = url::Url::parse(source).ok()?;
+        url.path_segments()?.next_back()?.to_owned()
+    };
+    percent_encoding::percent_decode_str(&encoded)
+        .decode_utf8()
+        .ok()
+        .map(|name| name.into_owned())
+        .filter(|name| !name.trim().is_empty())
+}
+
 pub fn confirm_download(id: Uuid, store: &TaskStore) -> Result<DownloadTask, DownloadError> {
     Ok(store.transition(id, TaskStatus::Queued)?)
 }
@@ -263,6 +294,29 @@ mod tests {
     }
 
     #[test]
+    fn protocol_specific_tasks_receive_safe_readable_names_and_thunder_ftp_uses_ftp_engine() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let hls = prepare_download(
+            "https://media.test/live/master.m3u8?token=temporary",
+            &store,
+        )
+        .unwrap();
+        assert_eq!(hls.task.name, "master.m3u8");
+
+        let ed2k = prepare_download(
+            "ed2k://|file|Example%20Archive.zip|42|0123456789ABCDEF0123456789ABCDEF|/",
+            &store,
+        )
+        .unwrap();
+        assert_eq!(ed2k.task.name, "Example Archive.zip");
+
+        let wrapped = STANDARD.encode(b"AAftp://example.test/pub/archive.zipZZ");
+        let thunder = prepare_download(&format!("thunder://{wrapped}"), &store).unwrap();
+        assert_eq!(thunder.task.kind, "ftp");
+        assert_eq!(thunder.task.name, "archive.zip");
+    }
+
+    #[test]
     fn share_page_is_not_saved_as_a_cloud_task_source() {
         let store = TaskStore::open_in_memory().unwrap();
         let source = "https://pan.baidu.com/s/share-id?pwd=1234";
@@ -272,6 +326,24 @@ mod tests {
             Err(DownloadError::CloudShareInput)
         ));
         assert!(store.find_by_source(source).unwrap().is_none());
+    }
+
+    #[test]
+    fn protocol_specific_inputs_keep_a_stable_task_kind() {
+        let store = TaskStore::open_in_memory().unwrap();
+        for (source, expected) in [
+            (
+                "ed2k://|file|Example.zip|42|0123456789ABCDEF0123456789ABCDEF|/",
+                "ed2k",
+            ),
+            ("ftp://example.test/pub/file.iso", "ftp"),
+            ("https://media.example.test/master.m3u8", "hls"),
+            ("https://media.example.test/manifest.mpd", "dash"),
+        ] {
+            let outcome = prepare_download(source, &store).unwrap();
+            assert_eq!(outcome.task.kind, expected, "{source}");
+            assert!(!outcome.requires_confirmation, "{source}");
+        }
     }
 
     #[test]

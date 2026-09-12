@@ -11,8 +11,10 @@
     "test:launcher": "node scripts/smoke-launcher.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:binary": "cargo build --manifest-path src-tauri/Cargo.toml --release --features custom-protocol",
-    "tauri:build": "tauri build"
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
+    "build:windows:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Installer",
+    "tauri:binary": "pnpm run build:windows",
+    "tauri:build": "pnpm run build:windows:installer"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

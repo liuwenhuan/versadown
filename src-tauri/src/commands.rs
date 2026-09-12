@@ -89,7 +89,7 @@ pub(crate) fn task_payload(
 pub(crate) fn task_payload_with_cleanup(
     store: &TaskStore,
     plans: Option<&crate::cloud::share::CloudSharePlanStore>,
-    task: DownloadTask,
+    mut task: DownloadTask,
 ) -> Result<DownloadTaskPayload, String> {
     let cleanup_pending =
         if task.status == TaskStatus::Completed && task.source.starts_with("cloud-share://") {
@@ -106,6 +106,7 @@ pub(crate) fn task_payload_with_cleanup(
     let reauthorization_required = crate::cloud::commands::requires_cloud_reauthorization_failure(
         task.failure_code.as_deref(),
     );
+    redact_ftp_credentials(&mut task);
     Ok(DownloadTaskPayload {
         task,
         files,
@@ -247,16 +248,17 @@ pub async fn parse_download(
             }
         };
     }
-    let service = state
-        .runtime
-        .service()
-        .await
-        .map_err(|error| error.to_string())?;
     let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
     if outcome.duplicate.is_some() {
+        redact_ftp_credentials(&mut outcome.task);
         return Ok(ParseDownloadOutcome::Task(outcome));
     }
     if outcome.task.kind == "torrent" {
+        let service = state
+            .runtime
+            .service()
+            .await
+            .map_err(|error| error.to_string())?;
         let options = download_submission_options(&state)?
             .into_aria2_options()
             .map_err(|error| error.to_string())?;
@@ -288,11 +290,17 @@ pub async fn parse_download(
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     } else if !outcome.requires_confirmation {
         let options = download_submission_options(&state)?;
-        outcome.task = service
+        outcome.task = state
+            .runtime
             .submit_uri_with_options(outcome.task.id, vec![outcome.task.source.clone()], options)
             .await
             .map_err(|error| error.to_string())?;
     } else if outcome.task.kind == "magnet" {
+        let service = state
+            .runtime
+            .service()
+            .await
+            .map_err(|error| error.to_string())?;
         let options = download_submission_options(&state)?;
         let metadata_settings = state
             .settings
@@ -337,6 +345,7 @@ pub async fn parse_download(
         }
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     }
+    redact_ftp_credentials(&mut outcome.task);
     Ok(ParseDownloadOutcome::Task(outcome))
 }
 
@@ -619,12 +628,13 @@ fn apply_queue_cleanup_projection(
 
 pub(crate) fn queue_task_payload_from_task(
     store: &TaskStore,
-    task: DownloadTask,
+    mut task: DownloadTask,
 ) -> Result<QueueTaskPayload, String> {
     let files = store.files(task.id).map_err(|error| error.to_string())?;
     let reauthorization_required = crate::cloud::commands::requires_cloud_reauthorization_failure(
         task.failure_code.as_deref(),
     );
+    redact_ftp_credentials(&mut task);
     Ok(QueueTaskPayload {
         id: task.id.to_string(),
         source: task.source,
@@ -1241,7 +1251,7 @@ async fn run_local_task_action(
     }
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
-    if action == "cancel" && current.aria_gid.is_none() {
+    if action == "cancel" && current.aria_gid.is_none() && current.kind != "ftp" {
         let task = force_cancel_unsubmitted_task(&state.store, current)?;
         return task_action_outcome(&state.store, task, None);
     }
@@ -1263,12 +1273,8 @@ async fn run_local_task_action(
         "cancel" => DownloadAction::Cancel,
         _ => return Err("当前任务不能执行此操作".to_string()),
     };
-    let service = state
+    let task = state
         .runtime
-        .service()
-        .await
-        .map_err(|error| error.to_string())?;
-    let task = service
         .control(id, action)
         .await
         .map_err(|error| error.to_string())?;
@@ -1285,16 +1291,12 @@ pub async fn resolve_duplicate_download(
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
     let resolution = duplicate_state(&state.store, &current).map_err(|error| error.to_string())?;
-    let service = state
-        .runtime
-        .service()
-        .await
-        .map_err(|error| error.to_string())?;
     let task = match (action.as_str(), resolution) {
         ("resume", DuplicateDownloadState::ResumeAvailable)
             if current.status == TaskStatus::Paused && current.aria_gid.is_some() =>
         {
-            service
+            state
+                .runtime
                 .control(current.id, DownloadAction::Resume)
                 .await
                 .map_err(|error| error.to_string())?
@@ -1355,11 +1357,6 @@ pub(crate) async fn resubmit_task(
             .ok_or_else(|| "网盘分享下载状态不可用，请重新解析分享链接".to_string())?;
         reserve_cloud_share_resubmission(&cloud.share_plans, &task)?;
     }
-    let service = state
-        .runtime
-        .service()
-        .await
-        .map_err(|error| error.to_string())?;
     options = crate::cloud::commands::cloud_directory_member_retry_options(
         &state.store,
         task.id,
@@ -1374,6 +1371,11 @@ pub(crate) async fn resubmit_task(
         options.proxy = configured.proxy;
     }
     if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
+        let service = state
+            .runtime
+            .service()
+            .await
+            .map_err(|error| error.to_string())?;
         let share = task.source.starts_with("cloud-share://");
         let resolved = if share {
             crate::cloud::commands::resolve_stable_cloud_share_download(app.clone(), &task.source)
@@ -1423,6 +1425,11 @@ pub(crate) async fn resubmit_task(
         return Err("种子任务请重新添加后再选择文件下载".to_string());
     }
     if task.kind == "magnet" {
+        let service = state
+            .runtime
+            .service()
+            .await
+            .map_err(|error| error.to_string())?;
         let selected_indices = state
             .store
             .files(task.id)
@@ -1461,10 +1468,20 @@ pub(crate) async fn resubmit_task(
             .map_err(|error| error.to_string());
     }
     options.output_name = None;
-    service
+    state
+        .runtime
         .resubmit_uri_with_options(task.id, vec![task.source], options)
         .await
         .map_err(|error| error.to_string())
+}
+
+fn redact_ftp_credentials(task: &mut DownloadTask) {
+    if task.kind != "ftp" {
+        return;
+    }
+    if let Ok(target) = crate::parse_ftp_url(&task.source) {
+        task.source = target.display_source().to_owned();
+    }
 }
 
 fn reserve_cloud_share_resubmission(
@@ -3264,7 +3281,7 @@ mod tests {
             .find("reserve_cloud_share_resubmission")
             .expect("cloud-share retry must reserve its original task");
         let engine = body
-            .find("runtime\n        .service()")
+            .find(".service()")
             .expect("resubmit obtains the engine");
         let provider = body
             .find("resolve_stable_cloud_share_download")

@@ -26,6 +26,7 @@ pub struct Aria2LaunchConfig {
 /// Contains the transient secret: pass directly to Command, never log these arguments.
 pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<String> {
     let session = config.data_dir.join("aria2.session");
+    let state_dir = config.data_dir.join("aria2-next-state");
     vec![
         "--no-conf=true".into(),
         "--enable-rpc=true".into(),
@@ -35,6 +36,7 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
         format!("--rpc-listen-port={}", config.aria2.rpc_port),
         format!("--rpc-secret={}", secret.hex()),
         "--continue=true".into(),
+        format!("--state-dir={}", state_dir.display()),
         format!("--input-file={}", session.display()),
         format!("--save-session={}", session.display()),
         "--save-session-interval=10".into(),
