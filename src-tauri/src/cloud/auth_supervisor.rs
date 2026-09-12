@@ -32,6 +32,41 @@ pub struct AuthSupervisor {
     clock: Box<dyn Fn() -> i64 + Send + Sync>,
     jitter: Box<dyn Fn() -> i64 + Send + Sync>,
     locks: HashMap<CloudProvider, tokio::sync::Mutex<()>>,
+    // Only complete credential revisions are visible to ordinary operations.
+    // This short lock is never held while contacting a provider.
+    published: std::sync::Mutex<HashMap<CloudProvider, PublishedSession>>,
+}
+
+#[derive(Clone)]
+struct PublishedSession {
+    revision: u64,
+    account_id: Option<String>,
+    binding: uuid::Uuid,
+    bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPhase {
+    Proactive,
+    AuthFailure,
+    ProfileOnly,
+}
+impl From<bool> for RecoveryPhase {
+    fn from(genuine: bool) -> Self {
+        if genuine {
+            Self::AuthFailure
+        } else {
+            Self::Proactive
+        }
+    }
+}
+
+// This capability never leaves one run invocation or survives a restart.
+struct ProfileContinuation {
+    revision: u64,
+    failures: u32,
+    next_allowed: Option<i64>,
+    binding: uuid::Uuid,
 }
 impl Default for AuthSupervisor {
     fn default() -> Self {
@@ -52,6 +87,7 @@ impl AuthSupervisor {
         jitter: impl Fn() -> i64 + Send + Sync + 'static,
     ) -> Self {
         Self {
+            published: Default::default(),
             clock: Box::new(clock),
             jitter: Box::new(jitter),
             locks: ProviderRegistry::global()
@@ -98,6 +134,101 @@ impl AuthSupervisor {
             next_allowed_attempt_at: None,
             health: AuthHealth::Disconnected,
         })
+    }
+    fn publish_locked(
+        &self,
+        store: &impl CredentialStore,
+        record: &AuthMaintenanceRecord,
+        explicit_authorization: bool,
+    ) -> Result<(), CloudError> {
+        let bytes = store.load(record.provider.key())?;
+        let mut published = self.published.lock().map_err(|_| CloudError::Storage)?;
+        let binding = published
+            .get(&record.provider)
+            .filter(|previous| {
+                !explicit_authorization
+                    || (record.account_id.is_some() && previous.account_id == record.account_id)
+            })
+            .map(|previous| previous.binding)
+            .unwrap_or_else(uuid::Uuid::new_v4);
+        published.insert(
+            record.provider,
+            PublishedSession {
+                revision: record.session_revision,
+                account_id: record.account_id.clone(),
+                binding,
+                bytes,
+            },
+        );
+        Ok(())
+    }
+    fn seed_locked(
+        &self,
+        store: &impl CredentialStore,
+        provider: CloudProvider,
+    ) -> Result<(), CloudError> {
+        if !self
+            .published
+            .lock()
+            .map_err(|_| CloudError::Storage)?
+            .contains_key(&provider)
+        {
+            self.publish_locked(store, &self.record(store, provider)?, false)?;
+        }
+        Ok(())
+    }
+    fn snapshot(
+        &self,
+        store: &impl CredentialStore,
+        provider: CloudProvider,
+    ) -> Result<SessionSnapshot, CloudError> {
+        // Legacy native entry points may update the credential store without a
+        // maintenance record. Reconcile only when no writer owns the provider;
+        // an unversioned replacement starts a fresh binding (never a retry grant).
+        if let Ok(_guard) = self
+            .locks
+            .get(&provider)
+            .ok_or(CloudError::ProviderUnsupported)?
+            .try_lock()
+        {
+            let record = self.record(store, provider)?;
+            let bytes = store.load(provider.key())?;
+            let mut published = self.published.lock().map_err(|_| CloudError::Storage)?;
+            if published.get(&provider).is_none_or(|previous| {
+                previous.revision != record.session_revision
+                    || previous.account_id != record.account_id
+                    || previous.bytes != bytes
+            }) {
+                published.insert(
+                    provider,
+                    PublishedSession {
+                        revision: record.session_revision,
+                        account_id: record.account_id,
+                        binding: uuid::Uuid::new_v4(),
+                        bytes,
+                    },
+                );
+            }
+        }
+        let published = self
+            .published
+            .lock()
+            .map_err(|_| CloudError::Storage)?
+            .get(&provider)
+            .cloned();
+        let published = match published {
+            Some(value) => value,
+            None => self.with_provider(provider, || {
+                self.seed_locked(store, provider)?;
+                self.published
+                    .lock()
+                    .map_err(|_| CloudError::Storage)?
+                    .get(&provider)
+                    .cloned()
+                    .ok_or(CloudError::Storage)
+            })?,
+        };
+        SessionSnapshot::from_published(provider, published)
     }
     fn save(
         &self,
@@ -156,7 +287,8 @@ impl AuthSupervisor {
         record.account_id = account;
         record.auth_method = method;
         self.mark_ready(&mut record, expires);
-        self.save(store, &record)
+        self.save(store, &record)?;
+        self.publish_locked(store, &record, true)
     }
     pub fn disconnect(
         &self,
@@ -175,7 +307,8 @@ impl AuthSupervisor {
         record.account_id = None;
         record.auth_method = None;
         record.health = AuthHealth::Disconnected;
-        self.save(store, &record)
+        self.save(store, &record)?;
+        self.publish_locked(store, &record, true)
     }
     pub fn restore(
         &self,
@@ -186,10 +319,10 @@ impl AuthSupervisor {
             .load(&format!("cloud-auth-maintenance-{}", provider.key()))?
             .is_some()
         {
-            return self.record(store, provider).map(|_| ());
+            return self.with_provider(provider, || self.seed_locked(store, provider));
         }
         if store.load(provider.key())?.is_none() {
-            return Ok(());
+            return self.with_provider(provider, || self.seed_locked(store, provider));
         }
         let mut record = self.record(store, provider)?;
         record.health = AuthHealth::Restoring;
@@ -228,6 +361,7 @@ impl AuthSupervisor {
         work: impl FnOnce() -> Result<(), CloudError>,
     ) -> Result<(), CloudError> {
         self.with_provider(provider, || {
+            self.seed_locked(store, provider)?;
             let mut record = self.record(store, provider)?;
             if revision.is_some_and(|revision| revision != record.session_revision) {
                 return Ok(());
@@ -263,7 +397,8 @@ impl AuthSupervisor {
                 Ok(()) => {
                     let expires = session_expiry(store, provider)?;
                     self.mark_ready(&mut record, expires);
-                    self.save(store, &record)
+                    self.save(store, &record)?;
+                    self.publish_locked(store, &record, false)
                 }
                 Err(error) => {
                     record.health = if matches!(error, CloudError::CaptchaRequired) {
@@ -285,18 +420,32 @@ impl AuthSupervisor {
         provider: CloudProvider,
         kind: SessionWorkKind,
         mut work: impl FnMut(&dyn CredentialStore) -> Result<T, CloudError>,
-        mut recover: impl FnMut(bool) -> Result<(), CloudError>,
+        mut recover: impl FnMut(RecoveryPhase) -> Result<(), CloudError>,
     ) -> Result<T, CloudError> {
         if kind == SessionWorkKind::Logout {
             return self.with_provider(provider, || work(store));
         }
+        let mut continuation = None;
         if self.is_due(store, provider)? {
             let revision = self.record(store, provider)?.session_revision;
             // A proactive refresh failure must not stop still-valid ordinary reads.
-            let _ = self.maintain(store, provider, Some(revision), false, || recover(false));
+            let _ = self.maintain(store, provider, Some(revision), false, || {
+                let record = self.record(store, provider)?;
+                let binding = self.snapshot(store, provider)?.binding;
+                let result = recover(RecoveryPhase::Proactive);
+                if matches!(result, Err(CloudError::WebAuthorizationRequired)) {
+                    continuation = Some(ProfileContinuation {
+                        revision: record.session_revision,
+                        failures: record.consecutive_failures,
+                        next_allowed: record.next_allowed_attempt_at,
+                        binding,
+                    });
+                }
+                result
+            });
         }
-        let revision = self.record(store, provider)?.session_revision;
-        let snapshot = SessionSnapshot::new(store, provider)?;
+        let snapshot = self.snapshot(store, provider)?;
+        let revision = snapshot.revision;
         let result = work(&snapshot);
         self.persist_snapshot(store, provider, revision, &snapshot)?;
         match result {
@@ -320,14 +469,65 @@ impl AuthSupervisor {
                 if snapshot.initial.is_none() || store.load(provider.key())?.is_none() {
                     return Err(error);
                 }
-                self.maintain(store, provider, Some(revision), true, || recover(true))?;
+                if let Some(ticket) = continuation.take() {
+                    self.with_provider(provider, || {
+                        let mut record = self.record(store, provider)?;
+                        let current = self.snapshot(store, provider)?;
+                        if current.binding != ticket.binding {
+                            return Err(CloudError::NotAuthorized);
+                        }
+                        if record.session_revision != ticket.revision {
+                            return Ok(());
+                        }
+                        if record.consecutive_failures != ticket.failures
+                            || record.next_allowed_attempt_at != ticket.next_allowed
+                            || record.health == AuthHealth::RiskBlocked
+                        {
+                            return Err(CloudError::WebAuthorizationRequired);
+                        }
+                        match recover(RecoveryPhase::ProfileOnly) {
+                            Ok(()) => {
+                                self.mark_ready(&mut record, session_expiry(store, provider)?);
+                                self.save(store, &record)?;
+                                self.publish_locked(store, &record, false)
+                            }
+                            Err(error) => {
+                                if matches!(error, CloudError::CaptchaRequired) {
+                                    record.health = AuthHealth::RiskBlocked;
+                                    self.save(store, &record)?;
+                                }
+                                Err(error)
+                            }
+                        }
+                    })?;
+                } else {
+                    self.maintain(store, provider, Some(revision), true, || {
+                        recover(RecoveryPhase::AuthFailure)
+                    })?;
+                }
+                let next = self.snapshot(store, provider)?;
+                if next.initial.is_none()
+                    || next.binding != snapshot.binding
+                    || next.account_id != snapshot.account_id
+                {
+                    return Err(CloudError::NotAuthorized);
+                }
                 if kind == SessionWorkKind::Mutation {
                     return Err(CloudError::SessionRenewedRetryOperation);
                 }
-                let next = SessionSnapshot::new(store, provider)?;
-                let revision = self.record(store, provider)?.session_revision;
+                let revision = next.revision;
                 let result = work(&next);
                 self.persist_snapshot(store, provider, revision, &next)?;
+                if matches!(result, Err(CloudError::CaptchaRequired)) {
+                    self.with_provider(provider, || {
+                        let mut record = self.record(store, provider)?;
+                        if record.session_revision == revision {
+                            record.health = AuthHealth::RiskBlocked;
+                            self.save(store, &record)?;
+                        }
+                        Ok(())
+                    })?;
+                }
                 result
             }
             result => result,
@@ -352,6 +552,7 @@ impl AuthSupervisor {
             }
             if let Some(bytes) = current {
                 store.save(provider.key(), &bytes)?;
+                self.publish_locked(store, &self.record(store, provider)?, false)?;
             }
             Ok(())
         })
@@ -364,9 +565,10 @@ pub fn recover_in_order(
     provider: CloudProvider,
     store: &impl CredentialStore,
     auth: &mut dyn driver::ProviderAuth,
-    genuine_auth_error: bool,
+    phase: impl Into<RecoveryPhase>,
     mut profile: impl FnMut() -> Result<bool, CloudError>,
 ) -> Result<(), CloudError> {
+    let phase = phase.into();
     fn auth_failure(error: &CloudError) -> bool {
         matches!(
             error,
@@ -375,31 +577,33 @@ pub fn recover_in_order(
                 | CloudError::WebAuthorizationRequired
         )
     }
-    match auth.refresh_session() {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(error) if auth_failure(&error) => {}
-        Err(error) => return Err(error),
-    }
-    if cloud_session_policy(provider).supports_password_fallback {
-        if let Some(credential) = load_password_credential(store, provider)? {
-            // A browser-only password preference still uses its persistent profile.
-            if !browser_password_login_preferred(store, provider)? {
-                match auth.recover_password(&credential) {
-                    Ok((account, session)) => {
-                        if account.id.is_empty() || account.id != credential.account_id() {
-                            return Err(CloudError::WebAuthorizationRequired);
+    if phase != RecoveryPhase::ProfileOnly {
+        match auth.refresh_session() {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) if auth_failure(&error) => {}
+            Err(error) => return Err(error),
+        }
+        if cloud_session_policy(provider).supports_password_fallback {
+            if let Some(credential) = load_password_credential(store, provider)? {
+                // A browser-only password preference still uses its persistent profile.
+                if !browser_password_login_preferred(store, provider)? {
+                    match auth.recover_password(&credential) {
+                        Ok((account, session)) => {
+                            if account.id.is_empty() || account.id != credential.account_id() {
+                                return Err(CloudError::WebAuthorizationRequired);
+                            }
+                            store.save(provider.key(), &session)?;
+                            return Ok(());
                         }
-                        store.save(provider.key(), &session)?;
-                        return Ok(());
+                        Err(error) if auth_failure(&error) => {}
+                        Err(error) => return Err(error),
                     }
-                    Err(error) if auth_failure(&error) => {}
-                    Err(error) => return Err(error),
                 }
             }
         }
     }
-    if genuine_auth_error {
+    if phase != RecoveryPhase::Proactive {
         match profile() {
             Ok(true) => return Ok(()),
             Ok(false) | Err(CloudError::AuthorizationPending) => {}
@@ -414,14 +618,34 @@ pub struct SessionSnapshot {
     provider: CloudProvider,
     initial: Option<Vec<u8>>,
     store: MemoryCredentialStore,
+    revision: u64,
+    account_id: Option<String>,
+    binding: uuid::Uuid,
 }
 impl SessionSnapshot {
     pub fn new(store: &impl CredentialStore, provider: CloudProvider) -> Result<Self, CloudError> {
         let initial = store.load(provider.key())?;
+        Self::from_published(
+            provider,
+            PublishedSession {
+                revision: 0,
+                account_id: None,
+                binding: uuid::Uuid::new_v4(),
+                bytes: initial,
+            },
+        )
+    }
+    fn from_published(
+        provider: CloudProvider,
+        published: PublishedSession,
+    ) -> Result<Self, CloudError> {
         let snapshot = Self {
             provider,
-            initial,
+            initial: published.bytes,
             store: MemoryCredentialStore::default(),
+            revision: published.revision,
+            account_id: published.account_id,
+            binding: published.binding,
         };
         if let Some(bytes) = &snapshot.initial {
             snapshot.store.save(provider.key(), bytes)?;

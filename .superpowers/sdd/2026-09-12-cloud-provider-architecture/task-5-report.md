@@ -67,3 +67,37 @@ PikPak/Aliyun/Xunlei 快照消费者禁用客户端内置 token 刷新及失败�
 - 老版本 cookie/session 没有可靠 account owner 时，不会静默接受浏览器里可能不同的账号；需要一次显式授权建立绑定。可用的旧密码 credential 提供既有账号 owner。
 - Tianyi App 当前协议没有可用 TTL 字段，因此按实际鉴权失败刷新，不编造短周期 keepalive。没有已知 expiry 的 token/session 同样按需恢复。
 - 单进程单账号的 provider guard 与现有 DPAPI 单键原子发布没有扩展成跨键事务。网络成功后如果维护记录保存失败，会返回 Storage，并沿用事前已持久的退避记录；已轮换 session 仍由原凭据键保存。
+
+## 独立审查修复 round 1/5
+
+基线 `2d07407`。依照 receiving-code-review 与 TDD 技能，先验证四项审查意见，再实现；没有派生子代理，没有 Task 6 或前端扩展。
+
+### 行为 RED 与修复
+
+`cargo test --manifest-path src-tauri/Cargo.toml --test cloud_auth_supervisor review_` 实际运行 4 项，0 通过、4 失败：
+
+1. `review_account_replacement_never_replays_an_old_read_on_the_new_account`：Barrier 等待 A 请求发出后显式替换 B，旧实现用 B 重跑 closure 并返回成功，授权错误断言失败。现在已发布 snapshot 包含同一版本的 session/revision/account ID 和仅后端使用的授权 lineage；恢复前后的 binding 必须相同，账号替换或退出返回 `NotAuthorized`，不在 B 执行第二次 closure。同账号正常 refresh 保持 lineage；退出后即使重新登录 A 也建立新 lineage。
+2. `review_proactive_auth_failure_can_continue_to_profile_in_the_same_run`：已知 expiry 到期的 Aliyun 分支在主动 refresh 被拒绝后，普通读取确认真实 auth error，但结果仍为 `WebAuthorizationRequired`，profile 成功分支未达到。现在 `RecoveryPhase` 区分 Proactive/AuthFailure/ProfileOnly；当前 run 内的 proactive 恢复穷尽 refresh/password 后，保留一次性 continuation（绑定 revision、失败次数、持久 deadline、lineage）。实际读取再确认鉴权失效时只继续尚未执行的 profile，不重新调用 refresh/password，也不增加一次失败计数。该许可不跨 run、不持久化；后续调用和重启仍受退避约束。修复用例同时验证 Aliyun/Xunlei，refresh 恰好一次、profile 恰好一次、读取两次。
+3. `review_captcha_on_the_second_read_persists_risk_blocked_without_a_third_read`：第二次读取返回 Captcha 时，旧状态仍 Ready。现在第二次结果同样记录 RiskBlocked，保留 Captcha 错误，closure 共两次；mutation 原有单次约束保留。
+4. `review_refresh_publication_never_exposes_new_session_with_old_revision`：真实 maintenance closure 已写入 new-token、尚未发布新 revision 时通过 Barrier 暂停，普通读取实际拿到 new-token 而不是上一完整版本 old-token。现在刷新期间读取短锁复制上一已发布版本；完整凭据/revision 更新后才共同发布。没有持网络锁执行普通操作。用例使用 Barrier + channel，2 秒 recv_timeout 只作死锁故障上限，并在断言前释放屏障清理线程，没有 sleep 或概率竞态。
+
+前三项相关修复后，首次复跑为 3 通过/1 失败（仅 profile 用例）；加入 continuation 后 supervisor 17/17 通过。随后补充两项边界覆盖：profile 继续失败后，后续调用和重启仍保持一次失败及原 deadline；A 退出再登录 A 不能复活旧 mutation。
+
+扩大到原 upload 集时发现 3 个旧入口回归：测试通过 native store 写入授权，但新快照缓存仍为启动时的空版本。修复为在 provider `try_lock` 成功时短临界区协调未版本化的旧凭据更新；刷新持锁时完全不读取半发布存储。未版本化替换建立新的 lineage，不能给旧操作授予重试许可。原 upload 6/6 恢复通过。初始测试的两处 Rust 借用编译反馈不计作行为 RED。
+
+### 本轮实际验证
+
+继续使用 `CARGO_TARGET_DIR=.tools/test-target`，没有运行全量测试。
+
+| 实际命令 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_auth_supervisor --test cloud_upload` | 19 + 6 = 25 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_auth_supervisor --test cloud_session --test cloud_coordination --test cloud_sessions --test cloud_tianyi --test cloud_aliyun --test cloud_xunlei --test cloud_upload --test cloud_provider_contract` | 19 + 15 + 2 + 29 + 33 + 19 + 35 + 6 + 16 = 174 通过，退出 0 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib cloud::commands` | 90 通过，241 未运行，退出 0 |
+| `./scripts/build-windows.ps1` | 退出 0，release 1 分 26 秒；复用未变化的 dist，发布主程序及 aria2 sidecar |
+| `rustfmt --edition 2021 --config skip_children=true`（本轮 3 个 Rust 文件） | 退出 0 |
+| `git diff --check` | 退出 0 |
+
+曾将上述 integration 目标和 `--lib cloud::commands` 合并运行；Cargo 将名称过滤器应用到所有 integration 目标，该次只有 90 项命令测试实际运行，integration 全部 0 项。因此随后去除名称过滤器单独重跑并获得上表 174 项通过，没有把 0 项运行计入验收。
+
+自审：维护 envelope 字段未增加、没有秘密；session 副本和 lineage 仅在后端内存中；普通网络工作不持 publication 短锁，存储同步仅在 refresh guard 可立即获取时进行；固定恢复顺序和所有前端错误码保留。仍未做真实账号 E2E、真实 WebView 交互或长期挂机；协议与持久化边界风险沿用上一节。

@@ -211,7 +211,7 @@ pub(crate) fn recover_authorization(
     state: &CloudState,
     provider: CloudProvider,
     http: &impl CloudHttpTransport,
-    genuine_auth_error: bool,
+    genuine_auth_error: impl Into<auth_supervisor::RecoveryPhase>,
 ) -> Result<(), QuarkError> {
     auth_supervisor::recover_in_order(
         provider,

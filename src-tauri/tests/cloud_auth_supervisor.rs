@@ -15,6 +15,258 @@ fn fixture(now: i64, jitter: i64) -> (AuthSupervisor, Arc<AtomicI64>, MemoryCred
 }
 
 #[test]
+fn review_account_replacement_never_replays_an_old_read_on_the_new_account() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Aliyun;
+    store.save(provider.key(), b"account-A").unwrap();
+    supervisor
+        .ready(&store, provider, Some("A".into()), None, None)
+        .unwrap();
+    let started = std::sync::Barrier::new(2);
+    let replaced = std::sync::Barrier::new(2);
+    let calls = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let operation = scope.spawn(|| {
+            supervisor.run(
+                &store,
+                provider,
+                SessionWorkKind::Read,
+                |snapshot| {
+                    let count = calls.fetch_add(1, Ordering::SeqCst);
+                    if count == 0 {
+                        assert_eq!(snapshot.load(provider.key())?.unwrap(), b"account-A");
+                        started.wait();
+                        replaced.wait();
+                        Err(CloudError::AuthorizationExpired)
+                    } else {
+                        Ok(snapshot.load(provider.key())?.unwrap())
+                    }
+                },
+                |_| panic!("account replacement is not a refresh"),
+            )
+        });
+        started.wait();
+        supervisor
+            .with_provider(provider, || store.save(provider.key(), b"account-B"))
+            .unwrap();
+        supervisor
+            .ready(&store, provider, Some("B".into()), None, None)
+            .unwrap();
+        replaced.wait();
+        assert!(matches!(
+            operation.join().unwrap(),
+            Err(CloudError::NotAuthorized | CloudError::AuthorizationExpired)
+        ));
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn review_refresh_publication_never_exposes_new_session_with_old_revision() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Aliyun;
+    store.save(provider.key(), b"old-token").unwrap();
+    supervisor
+        .ready(&store, provider, Some("A".into()), None, None)
+        .unwrap();
+    let written = std::sync::Barrier::new(2);
+    let release = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let refresh = scope.spawn(|| {
+            supervisor.maintain(&store, provider, None, true, || {
+                store.save(provider.key(), b"new-token")?;
+                written.wait();
+                release.wait();
+                Ok(())
+            })
+        });
+        written.wait();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let supervisor = &supervisor;
+        let store = &store;
+        let read = scope.spawn(move || {
+            tx.send(supervisor.run(
+                store,
+                provider,
+                SessionWorkKind::Read,
+                |snapshot| snapshot.load(provider.key()),
+                |_| panic!(),
+            ))
+            .unwrap();
+        });
+        let observed = rx.recv_timeout(std::time::Duration::from_secs(2));
+        release.wait();
+        refresh.join().unwrap().unwrap();
+        read.join().unwrap();
+        assert_eq!(observed.unwrap().unwrap().unwrap(), b"old-token");
+    });
+    let latest = supervisor
+        .run(
+            &store,
+            provider,
+            SessionWorkKind::Read,
+            |snapshot| snapshot.load(provider.key()),
+            |_| panic!(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest, b"new-token");
+}
+
+#[test]
+fn review_captcha_on_the_second_read_persists_risk_blocked_without_a_third_read() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Pikpak;
+    store.save(provider.key(), b"old").unwrap();
+    let calls = AtomicUsize::new(0);
+    let result: Result<(), _> = supervisor.run(
+        &store,
+        provider,
+        SessionWorkKind::Read,
+        |_| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(CloudError::AuthorizationExpired)
+            } else {
+                Err(CloudError::CaptchaRequired)
+            }
+        },
+        |_| store.save(provider.key(), b"renewed"),
+    );
+    assert!(matches!(result, Err(CloudError::CaptchaRequired)));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        supervisor.record(&store, provider).unwrap().health,
+        AuthHealth::RiskBlocked
+    );
+}
+
+#[test]
+fn review_proactive_auth_failure_can_continue_to_profile_in_the_same_run() {
+    use alldownloader_lib::cloud::driver::ProviderAuth;
+    struct Rejected<'a>(&'a AtomicUsize);
+    impl ProviderAuth for Rejected<'_> {
+        fn refresh_session(&mut self) -> Result<bool, CloudError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(CloudError::AuthorizationExpired)
+        }
+    }
+    for provider in [CloudProvider::Aliyun, CloudProvider::Xunlei] {
+        let (supervisor, clock, store) = fixture(1000, 30);
+        store
+            .save(provider.key(), br#"{"expires_at":2000}"#)
+            .unwrap();
+        supervisor
+            .ready(&store, provider, Some("A".into()), None, Some(2000))
+            .unwrap();
+        clock.store(1670, Ordering::SeqCst);
+        let refreshes = AtomicUsize::new(0);
+        let profiles = AtomicUsize::new(0);
+        let reads = AtomicUsize::new(0);
+        let result = supervisor.run(
+            &store,
+            provider,
+            SessionWorkKind::Read,
+            |snapshot| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                if snapshot.load(provider.key())?.as_deref() == Some(b"profile-session") {
+                    Ok(())
+                } else {
+                    Err(CloudError::AuthorizationExpired)
+                }
+            },
+            |phase| {
+                recover_in_order(provider, &store, &mut Rejected(&refreshes), phase, || {
+                    profiles.fetch_add(1, Ordering::SeqCst);
+                    store.save(provider.key(), b"profile-session")?;
+                    Ok(true)
+                })
+            },
+        );
+        assert!(result.is_ok(), "{provider:?}: {result:?}");
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(profiles.load(Ordering::SeqCst), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[test]
+fn review_failed_profile_continuation_cannot_escape_backoff_in_another_run_or_restart() {
+    let (supervisor, clock, store) = fixture(1000, 30);
+    let provider = CloudProvider::Aliyun;
+    store
+        .save(provider.key(), br#"{"expires_at":2000}"#)
+        .unwrap();
+    supervisor
+        .ready(&store, provider, Some("A".into()), None, Some(2000))
+        .unwrap();
+    clock.store(1670, Ordering::SeqCst);
+    let phases = std::sync::Mutex::new(Vec::new());
+    let result: Result<(), _> = supervisor.run(
+        &store,
+        provider,
+        SessionWorkKind::Mutation,
+        |_| Err(CloudError::AuthorizationExpired),
+        |phase| {
+            phases.lock().unwrap().push(phase);
+            Err(CloudError::WebAuthorizationRequired)
+        },
+    );
+    assert!(matches!(result, Err(CloudError::WebAuthorizationRequired)));
+    let phases = phases.into_inner().unwrap();
+    assert_eq!(phases.len(), 2);
+    assert!(phases[0] == RecoveryPhase::Proactive && phases[1] == RecoveryPhase::ProfileOnly);
+    let record = supervisor.record(&store, provider).unwrap();
+    assert_eq!(record.consecutive_failures, 1);
+    assert_eq!(record.next_allowed_attempt_at, Some(1970));
+    let restarted = AuthSupervisor::new(|| 1700, || 30);
+    restarted.restore(&store, provider).unwrap();
+    for current in [&supervisor, &restarted] {
+        let result: Result<(), _> = current.run(
+            &store,
+            provider,
+            SessionWorkKind::Read,
+            |_| Err(CloudError::AuthorizationExpired),
+            |_| panic!("persisted backoff must apply"),
+        );
+        assert!(matches!(result, Err(CloudError::WebAuthorizationRequired)));
+        assert_eq!(
+            current
+                .record(&store, provider)
+                .unwrap()
+                .consecutive_failures,
+            1
+        );
+    }
+}
+
+#[test]
+fn review_logout_and_relogin_of_the_same_account_does_not_revive_an_old_operation() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Pikpak;
+    store.save(provider.key(), b"old").unwrap();
+    supervisor
+        .ready(&store, provider, Some("A".into()), None, None)
+        .unwrap();
+    let calls = AtomicUsize::new(0);
+    let result: Result<(), _> = supervisor.run(
+        &store,
+        provider,
+        SessionWorkKind::Mutation,
+        |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            store.remove(provider.key())?;
+            supervisor.disconnect(&store, provider)?;
+            store.save(provider.key(), b"new-login")?;
+            supervisor.ready(&store, provider, Some("A".into()), None, None)?;
+            Err(CloudError::AuthorizationExpired)
+        },
+        |_| panic!(),
+    );
+    assert!(matches!(result, Err(CloudError::NotAuthorized)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn known_expiry_is_scheduled_before_eighty_percent_or_five_minutes_with_bounded_jitter() {
     for (expires, jitter, expected) in [
         (11000, 30, 8970),
