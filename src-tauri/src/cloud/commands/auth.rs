@@ -1,4 +1,28 @@
 use super::*;
+use crate::cloud::driver::{NativeLoginOutcome, ProviderAuth};
+
+/// The host owns browser fallback; the callback keeps this boundary testable without a WebView.
+pub(crate) fn password_login_with_browser(
+    provider: CloudProvider,
+    store: &impl CredentialStore,
+    auth: &mut dyn ProviderAuth,
+    username: &str,
+    password: &str,
+    mut browser: impl FnMut(bool) -> Result<CloudAccount, QuarkError>,
+) -> Result<CloudAccount, QuarkError> {
+    match auth.login_password(username, password) {
+        Ok(NativeLoginOutcome::Authenticated(account)) => Ok(account),
+        Ok(NativeLoginOutcome::NeedBrowserFallback(error))
+            if browser_login::supports_browser_password(provider) =>
+        {
+            if ProviderRegistry::global().get(provider).browser_profile_owner {
+                set_browser_password_login_preferred(store, provider, true)?;
+            }
+            browser(matches!(error, QuarkError::CaptchaRequired))
+        }
+        Ok(NativeLoginOutcome::NeedBrowserFallback(error)) | Err(error) => Err(error),
+    }
+}
 
 pub(crate) fn validate_browser_password_session(
     provider: CloudProvider,
@@ -553,23 +577,15 @@ pub async fn cloud_login_password(
         // Remember the latest submitted input before contacting the provider,
         // so a rejected or interrupted attempt does not force re-entry.
         save_password_login_draft(&state.store, provider, &username, &password)?;
-        let account = match ProviderRegistry::global()
-            .driver(provider, &state.store, http)
-            .auth()
-            .login_password(&username, &password)
-        {
-            Ok(account) => account,
-            Err(error)
-                if browser_login::supports_browser_password(provider)
-                    && (browser_login::can_fallback_to_browser(&error)
-                        || matches!(error, QuarkError::CaptchaRequired)) =>
-            {
-                if ProviderRegistry::global()
-                    .get(provider)
-                    .browser_profile_owner
-                {
-                    set_browser_password_login_preferred(&state.store, provider, true)?;
-                }
+        let account = password_login_with_browser(
+            provider,
+            &state.store,
+            ProviderRegistry::global()
+                .driver(provider, &state.store, http)
+                .auth(),
+            &username,
+            &password,
+            |captcha| {
                 browser_password_login(
                     &browser_app,
                     provider,
@@ -578,11 +594,10 @@ pub async fn cloud_login_password(
                     &username,
                     &password,
                     None,
-                    matches!(error, QuarkError::CaptchaRequired),
-                )?
-            }
-            Err(error) => return Err(error),
-        };
+                    captcha,
+                )
+            },
+        )?;
         save_password_credential(
             &state.store,
             CloudPasswordCredential::new(

@@ -24,6 +24,9 @@ use crate::cloud::{
 };
 use crate::TaskStore;
 
+#[path = "password_login_tests.rs"]
+mod password_login_tests;
+
 struct MetadataRequestTransport {
     requests: Mutex<Vec<CloudHttpRequest>>,
     responses: Mutex<VecDeque<&'static str>>,

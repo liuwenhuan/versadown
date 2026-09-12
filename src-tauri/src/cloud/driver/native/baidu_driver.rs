@@ -152,25 +152,23 @@ impl ProviderAuth for BaiduDriver<'_> {
         &mut self,
         username: &str,
         password: &str,
-    ) -> Result<CloudAccount, CloudError> {
+    ) -> Result<NativeLoginOutcome, CloudError> {
         let provider = CloudProvider::Baidu;
         let store = &self.store;
         let http = &self.http;
-        let account = {
-            let native_result = if browser_password_login_preferred(store, provider)? {
-                Err(QuarkError::WebAuthorizationRequired)
-            } else {
-                baidu::BaiduClient::login_password(&username, &password, http)
-            };
-            let session = native_result?;
-            set_browser_password_login_preferred(store, provider, false)?;
+        let native_result = if browser_password_login_preferred(store, provider)? {
+            Err(QuarkError::WebAuthorizationRequired)
+        } else {
+            baidu::BaiduClient::login_password(username, password, http)
+        };
+        complete_native_password_login(native_result, |session| {
             let client = baidu::BaiduClient::new(session.clone(), http);
             let account = client.account()?;
             client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
+            set_browser_password_login_preferred(store, provider, false)?;
             save_provider_session(CloudProvider::Baidu, store, &session)?;
-            account
-        };
-        Ok(account)
+            Ok(account)
+        })
     }
     fn recover_password(
         &mut self,

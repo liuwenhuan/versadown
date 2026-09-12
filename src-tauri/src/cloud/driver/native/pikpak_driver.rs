@@ -144,7 +144,7 @@ impl ProviderAuth for PikpakDriver<'_> {
         &mut self,
         username: &str,
         password: &str,
-    ) -> Result<CloudAccount, CloudError> {
+    ) -> Result<NativeLoginOutcome, CloudError> {
         let provider = CloudProvider::Pikpak;
         let store = &self.store;
         let http = &self.http;
@@ -160,7 +160,7 @@ impl ProviderAuth for PikpakDriver<'_> {
             )?;
             account
         };
-        Ok(account)
+        Ok(NativeLoginOutcome::Authenticated(account))
     }
     fn recover_password(
         &mut self,

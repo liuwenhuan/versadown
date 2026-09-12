@@ -87,3 +87,58 @@ $env:CARGO_TARGET_DIR = Join-Path (Get-Location) '.tools/test-target'
 - checked：网页登录候选先验证根目录，再替换会话；同账号密码恢复校验、browser profile 持久重置义务和失败清理由原 helper 继续执行；密码回退只保存一次最终凭据。
 - checked：driver/common 没有 Tauri/WebView/对话框依赖；文件对话框在锁外；PikPak 上传锁边界及迅雷刷新落盘由现有测试覆盖。
 - 限制：未执行真实服务商登录、实际 Windows WebView 交互或真实账号端到端上传下载；这部分继续依赖既有协议 fixture/HTTP 回归与发布编译。没有已知阻塞问题。
+
+## Fix round 1：恢复密码登录阶段边界（2026-09-12）
+
+### 发现与修复
+
+复核确认原提交 `8642a48` 的回退范围回归：host 把整个 `ProviderAuth::login_password` 的错误作为浏览器候选，但驱动在底层原生登录成功后还有 account/root 验证。这会把第二阶段的 InvalidResponse、Provider、Captcha 等错误误当作登录回退，启动 WebView，并可能设置百度 browser-preferred。前一轮“密码回退保持行为”的自审结论因此不充分；本轮用阶段行为测试补上缺口。
+
+- 协议边界新增 `NativeLoginOutcome::{Authenticated, NeedBrowserFallback}`。Authenticated 携带验证并保存成功的账户；NeedBrowserFallback 只由底层原生 login 结果中原有明确可回退错误产生。
+- 百度、天翼共同使用纯协议阶段 helper：先判断原生 login 结果，再运行 account/root/save；后一阶段任何错误直接保留为 Err，不做回退分类。
+- host 的 `password_login_with_browser` 只处理显式 NeedBrowserFallback。浏览器创建、验证码交互与回调留在 commands/auth，未引入 Tauri 到 driver。
+- 百度清除 browser preference 的写操作移到 account/root 验证成功之后；验证失败不写入或删除任何会话/偏好。PikPak 仅把原有成功账户封装为 Authenticated，流程与错误不变。
+- 原始底层客户端 login 方法内部的既有探测仍属于基线 login phase；本轮只纠正其返回成功之后的驱动验证阶段，没有额外改动服务商协议、超时或重试策略。
+
+### RED → GREEN 与测试边界
+
+先行为保持地提取可注入浏览器回调的 host seam，再添加百度/天翼 × account/root 四项 recording driver 测试。执行：
+
+`cargo test --manifest-path src-tauri/Cargo.toml --lib post_login_`
+
+RED：退出 1，0 passed / 4 failed；四项均在“浏览器 host 调用次数实际 1、预期 0”断言失败，确认真实行为失败，未把编译/链接/沙箱错误记作 RED。完成结果类型与阶段修复后，同一命令 GREEN：4 passed。
+
+随后扩展为独立 `commands/password_login_tests.rs` 中 10 个行为测试，加 1 个 integration consumer：
+
+- 四项 recording driver 分别循环 InvalidResponse、Provider、Captcha，验证 login 成功后 account/root 失败时 host 调用为 0、错误 code/message 原样、preference 不变。
+- 三项真实 native driver HTTP 测试：百度第 8 次 account、第 9 次 root 请求，天翼第 6 次 root 请求注入上述三种错误，均保持旧 session，并通过记录 store 验证没有任何 save/remove。
+- 原生登录的六种可回退错误仍调用浏览器一次并保留 captcha 标志；Storage、Transport、InvalidInput 等不可回退错误直接返回。
+- 百度/天翼真实成功路径仍验证根目录、保存会话、返回 Password 账户，且不启动浏览器。
+- 非 GUI integration consumer 通过公开 dyn ProviderAuth 构造并取得 NeedBrowserFallback；未依赖 Tauri host，也未添加测试 manifest 或链接规避。
+
+天翼 App session 的 account() 在原生 login 成功后只读取已保证非空的 login_name，没有独立 HTTP 请求可注入 account 失败；该阶段用 recording ProviderAuth 和同一生产阶段 helper 覆盖，root 阶段另有真实 HTTP 覆盖。此限制没有通过制造不存在的协议请求掩盖。
+
+### 本轮最终验证
+
+Rust 均设置 `CARGO_TARGET_DIR=.tools/test-target` 并调用 `C:/Users/deepin/.cargo/bin/cargo.exe`。按授权边界影响范围选择定向测试，未执行全量测试。
+
+| 实际命令 | 结果 |
+| --- | --- |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib post_login_` | RED 4 失败后 GREEN 4 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib login_` | 中间扩展回归 22 通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib cloud::commands` | 最终 88 通过，241 未运行 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_provider_contract --test cloud_session --test cloud_sessions --test cloud_baidu --test cloud_tianyi` | 16 + 15 + 27 + 31 + 31 = 120 通过 |
+| `node_modules/.bin/vitest.cmd run src/lib/cloudApi.test.ts src/components/CloudWorkspace.test.tsx src/components/CloudManager.test.tsx --exclude '.worktrees/**'` | 113 通过 |
+| 仓库工具解析后的 `pnpm build` | 退出 0，62 模块 |
+| `./scripts/build-windows.ps1` | 退出 0，release 50.47 秒；重新发布 exe 与 aria2 sidecar |
+| `git diff --check` | 退出 0 |
+
+本轮最终验收 Rust 208 项、前端 113 项通过；中间定向运行不重复累加。前端测试与构建、Windows 发布构建按既有环境约束获准在沙箱外执行。仅有基线 dead_code、linker 导出提示、rustup 路径提示及 Vite window 静态/动态导入提示。
+
+### 自审、规模与疑虑
+
+- 本轮 commands.rs 仍 77 行；auth.rs 639 → 654；driver.rs 251 → 275；Baidu driver 264 → 262；Tianyi driver 264 → 263；新增测试模块 346 行。
+- 生产 commands 的 provider match 仍为 0，native driver factory 仍为唯一 1 处；没有恢复巨型命令路由或新增 UI 依赖。
+- checked：Tauri 命令名/参数、账户 JSON、file kind、stable sources 和安全单账号保存流程未变；只在成功账户返回后保存密码凭据，验证失败不会进入 browser host。
+- checked：回退判定没有再包住 post-validation；百度偏好写入也不发生在失败的 account/root 之前；真实 fixture 明确证明底层 login 已完成才发生注入错误。
+- 疑虑：未做真实账号/实际 WebView 交互；天翼 account 无独立网络阶段的测试限制见上。没有剩余已知阻塞问题。

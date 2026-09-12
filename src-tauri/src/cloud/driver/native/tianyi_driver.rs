@@ -161,19 +161,18 @@ impl ProviderAuth for TianyiDriver<'_> {
         &mut self,
         username: &str,
         password: &str,
-    ) -> Result<CloudAccount, CloudError> {
+    ) -> Result<NativeLoginOutcome, CloudError> {
         let provider = CloudProvider::Tianyi;
         let store = &self.store;
         let http = &self.http;
-        let account = {
-            let session = tianyi::TianyiClient::login_password(&username, &password, http)?;
+        let native_result = tianyi::TianyiClient::login_password(username, password, http);
+        complete_native_password_login(native_result, |session| {
             let client = tianyi::TianyiClient::new(session.clone(), http);
             let account = client.account()?;
             client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
             save_provider_session(CloudProvider::Tianyi, store, &session)?;
-            account
-        };
-        Ok(account)
+            Ok(account)
+        })
     }
     fn recover_password(
         &mut self,

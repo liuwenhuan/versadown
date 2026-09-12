@@ -59,6 +59,30 @@ pub struct WebAuthorizationRecipe {
     pub browser_context: bool,
 }
 
+/// Only the native login phase can request browser fallback. Validation and
+/// persistence errors remain ordinary errors, even when they have the same code.
+pub enum NativeLoginOutcome {
+    Authenticated(CloudAccount),
+    NeedBrowserFallback(CloudError),
+}
+
+pub(crate) fn complete_native_password_login<S>(
+    login: Result<S, CloudError>,
+    validate_and_save: impl FnOnce(S) -> Result<CloudAccount, CloudError>,
+) -> Result<NativeLoginOutcome, CloudError> {
+    let session = match login {
+        Ok(session) => session,
+        Err(error)
+            if browser_login::can_fallback_to_browser(&error)
+                || matches!(error, CloudError::CaptchaRequired) =>
+        {
+            return Ok(NativeLoginOutcome::NeedBrowserFallback(error));
+        }
+        Err(error) => return Err(error),
+    };
+    validate_and_save(session).map(NativeLoginOutcome::Authenticated)
+}
+
 /// Protocol inputs only: the command host owns windows, scripts and browser fallback.
 pub trait ProviderAuth {
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
@@ -71,7 +95,7 @@ pub trait ProviderAuth {
         &mut self,
         _username: &str,
         _password: &str,
-    ) -> Result<CloudAccount, CloudError> {
+    ) -> Result<NativeLoginOutcome, CloudError> {
         Err(CloudError::WebAuthorizationRequired)
     }
     fn recover_password(

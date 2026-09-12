@@ -265,6 +265,22 @@ fn native_capability_drivers_work_in_a_consumer_without_a_tauri_host() {
 }
 
 #[test]
+fn native_password_auth_outcome_is_usable_without_a_tauri_host() {
+    use alldownloader_lib::cloud::{
+        driver::NativeLoginOutcome, set_browser_password_login_preferred, ProviderRegistry,
+    };
+    let store = MemoryCredentialStore::default();
+    set_browser_password_login_preferred(&store, CloudProvider::Baidu, true).unwrap();
+    let http = RecordingHttp::sequence([]);
+    let mut driver = ProviderRegistry::global().driver(CloudProvider::Baidu, &store, &http);
+    assert!(matches!(
+        driver.auth().login_password("fixture-user", "fixture-password"),
+        Ok(NativeLoginOutcome::NeedBrowserFallback(QuarkError::WebAuthorizationRequired)),
+    ));
+    assert!(store.load("baidu").unwrap().is_none());
+}
+
+#[test]
 fn browser_account_replacement_fails_closed_and_attempts_all_owner_cleanup() {
     use alldownloader_lib::cloud::{
         baidu_browser_profile_username, select_password_credential_account,
