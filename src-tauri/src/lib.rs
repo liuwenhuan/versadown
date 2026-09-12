@@ -17,8 +17,10 @@ mod media;
 mod models;
 mod parser;
 mod policy;
+mod privacy;
 mod processing;
 mod store;
+mod update;
 mod window_lifecycle;
 
 pub use aria2::*;
@@ -80,10 +82,17 @@ struct TauriDownloadEvents {
 
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
+        let private_visible = self
+            .app
+            .try_state::<commands::AppState>()
+            .and_then(|state| commands::privacy_task_visibility(&state).ok())
+            .is_some_and(|visibility| visibility.unlocked);
         if let Ok(payload) =
             commands::task_update_payload(&self.store, Some(&self.cloud.share_plans), task.clone())
         {
-            let _ = self.app.emit("download-task-updated", payload);
+            if !task.is_private || private_visible {
+                let _ = self.app.emit("download-task-updated", payload);
+            }
         }
         commands::schedule_cloud_share_refresh(self.app.clone(), task);
         cloud::commands::schedule_cloud_share_cleanup(self.app.clone(), task);
@@ -103,6 +112,14 @@ impl EngineStateSink for TauriDownloadEvents {
 #[tauri::command]
 fn app_version_command() -> String {
     app_version()
+}
+
+#[tauri::command]
+async fn check_for_app_update() -> Result<Option<update::AppUpdate>, String> {
+    let current_version = app_version();
+    tauri::async_runtime::spawn_blocking(move || update::fetch_app_update(&current_version))
+        .await
+        .map_err(|error| format!("版本检测任务失败：{error}"))?
 }
 
 pub fn run() {
@@ -177,6 +194,8 @@ pub fn run() {
                 .load(ai::API_KEY_SECRET_NAME)
                 .map_err(|_| "无法读取本机保存的 AI API Key")?
                 .is_some();
+            settings.privacy_password_configured =
+                privacy::password_is_configured(&ai_secrets).map_err(|_| "无法读取隐私模式密码")?;
             if settings.download_directory.trim().is_empty() {
                 settings.download_directory = default_destination.to_string_lossy().into_owned();
             }
@@ -214,6 +233,7 @@ pub fn run() {
                 settings: std::sync::Mutex::new(settings),
                 settings_path,
                 ai_secrets,
+                privacy_session: Default::default(),
                 cloud_download_sources: Default::default(),
             });
             app.manage(launcher::LauncherInteractionState::new(
@@ -240,6 +260,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_version_command,
+            check_for_app_update,
             commands::parse_download,
             commands::confirm_cloud_share_download,
             commands::confirm_download_command,
@@ -258,6 +279,10 @@ pub fn run() {
             commands::retry_download_engine,
             commands::get_download_global_stat,
             commands::get_settings,
+            commands::get_privacy_task_visibility,
+            commands::configure_privacy_download,
+            commands::unlock_privacy_tasks,
+            commands::lock_privacy_tasks,
             commands::update_debug_reports,
             commands::update_settings,
             commands::update_ai_settings,

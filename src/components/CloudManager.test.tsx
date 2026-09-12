@@ -1180,6 +1180,41 @@ it('queues a selected cloud folder as one directory parent task', async () => {
   expect(onDownloadTask).toHaveBeenCalledWith(root);
 });
 
+it('requires an ordinary-download confirmation before queuing a cloud file when privacy downloads are enabled', async () => {
+  const user = userEvent.setup();
+  const downloadCloudFile = vi.fn().mockResolvedValue({ task: { id: 'file-download-1', name: '报告.pdf', kind: 'cloud', status: 'queued', progress: 0 } });
+  const client = createCloudFake({ downloadCloudFile });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} privacyDownloadEnabled />);
+
+  await screen.findByText('报告.pdf');
+  await user.click(screen.getByRole('checkbox', { name: '选择 报告.pdf' }));
+  await user.click(screen.getByRole('button', { name: '下载' }));
+
+  const confirmation = screen.getByRole('alertdialog', { name: '确认下载' });
+  expect(downloadCloudFile).not.toHaveBeenCalled();
+  await user.click(within(confirmation).getByRole('button', { name: '立即下载' }));
+
+  await waitFor(() => expect(downloadCloudFile).toHaveBeenCalledWith('quark', 'file-1', false));
+});
+
+it('marks a selected cloud folder private only after the private-download confirmation', async () => {
+  const user = userEvent.setup();
+  const queuedTask = { id: 'folder-download-private', name: '归档', kind: 'folder' as const, status: 'queued' as const, progress: 0 };
+  const downloadCloudDirectory = vi.fn().mockResolvedValue({ task: { task: queuedTask }, queuedCount: 1, failures: [] });
+  const client = createCloudFake({ downloadCloudDirectory });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} privacyDownloadEnabled />);
+
+  await screen.findByText('归档');
+  await user.click(screen.getByRole('checkbox', { name: '选择 归档' }));
+  await user.click(screen.getByRole('button', { name: '下载' }));
+
+  const confirmation = screen.getByRole('alertdialog', { name: '确认下载' });
+  expect(downloadCloudDirectory).not.toHaveBeenCalled();
+  await user.click(within(confirmation).getByRole('button', { name: '隐私下载' }));
+
+  await waitFor(() => expect(downloadCloudDirectory).toHaveBeenCalledWith('quark', 'folder-1', '归档', true));
+});
+
 it('reports queued count and redacted per-file directory download failures instead of silently succeeding', async () => {
   const user = userEvent.setup();
   const queuedTask = { id: 'folder-download-1', name: '归档', kind: 'folder' as const, status: 'queued' as const, progress: 0 };

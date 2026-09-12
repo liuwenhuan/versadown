@@ -38,6 +38,7 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     pub settings_path: PathBuf,
     pub ai_secrets: DpapiCredentialStore,
+    pub privacy_session: crate::privacy::PrivacySession,
     pub cloud_download_sources: crate::cloud::commands::CloudDownloadSourceGate,
 }
 
@@ -50,6 +51,78 @@ pub struct DownloadTaskPayload {
     /// A queue-safe action hint for callers that receive a task-action result
     /// before the next list projection arrives.
     pub reauthorization_required: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrivacyTaskVisibility {
+    pub enabled: bool,
+    pub unlocked: bool,
+}
+
+pub(crate) fn privacy_task_visibility(state: &AppState) -> Result<PrivacyTaskVisibility, String> {
+    let accepting_new_private_downloads = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())?
+        .privacy_download_enabled;
+    // Disabling new private downloads must never unlock historical private
+    // tasks. Keep their protection and unlock control available until every
+    // private task has been removed.
+    let enabled = accepting_new_private_downloads
+        || state
+            .store
+            .has_private_tasks()
+            .map_err(|error| error.to_string())?;
+    Ok(PrivacyTaskVisibility {
+        enabled,
+        unlocked: enabled && state.privacy_session.is_unlocked(),
+    })
+}
+
+/// Private task names must not cross the event boundary while the session is
+/// locked. Fail closed if settings state cannot be read.
+pub(crate) fn should_emit_task_update(state: &AppState, is_private: bool) -> bool {
+    !is_private
+        || privacy_task_visibility(state)
+            .map(|visibility| visibility.unlocked)
+            .unwrap_or(false)
+}
+
+pub(crate) fn ensure_private_task_access(
+    state: &AppState,
+    task: &DownloadTask,
+) -> Result<(), String> {
+    if task.is_private && !privacy_task_visibility(state)?.unlocked {
+        return Err("隐私任务已锁定，请先解锁".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_private_group_access(
+    state: &AppState,
+    group: &CloudDirectoryGroup,
+) -> Result<(), String> {
+    if group.is_private && !privacy_task_visibility(state)?.unlocked {
+        return Err("隐私任务已锁定，请先解锁".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_private_download_enabled(
+    state: &AppState,
+    private_download: bool,
+) -> Result<(), String> {
+    if private_download
+        && !state
+            .settings
+            .lock()
+            .map_err(|_| "设置锁不可用".to_string())?
+            .privacy_download_enabled
+    {
+        return Err("请先在设置中开启隐私下载".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -217,6 +290,7 @@ pub async fn parse_download(
     app: AppHandle,
     input: String,
     access_code: Option<String>,
+    require_confirmation: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<ParseDownloadOutcome, String> {
     if let Some(candidate) =
@@ -231,10 +305,16 @@ pub async fn parse_download(
             crate::cloud::share::ShareConfirmationOutcome::Confirmation(plan) => {
                 Ok(ParseDownloadOutcome::ShareConfirmation(plan))
             }
-            crate::cloud::share::ShareConfirmationOutcome::AutoSubmit { source } => {
+            crate::cloud::share::ShareConfirmationOutcome::AutoSubmit {
+                source,
+                confirmation,
+            } => {
+                if require_confirmation.unwrap_or(false) {
+                    return Ok(ParseDownloadOutcome::ShareConfirmation(confirmation));
+                }
                 let configured = download_submission_options(&state)?;
                 let action = crate::cloud::commands::submit_cloud_share_file(
-                    app, &state, source, configured,
+                    app, &state, source, configured, false,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -251,7 +331,15 @@ pub async fn parse_download(
     let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
     if outcome.duplicate.is_some() {
         redact_ftp_credentials(&mut outcome.task);
+        ensure_private_task_access(&state, &outcome.task)?;
         return Ok(ParseDownloadOutcome::Task(outcome));
+    }
+    if require_confirmation.unwrap_or(false) && !outcome.requires_confirmation {
+        outcome.task = state
+            .store
+            .transition(outcome.task.id, TaskStatus::AwaitingUser)
+            .map_err(|error| error.to_string())?;
+        outcome.requires_confirmation = true;
     }
     if outcome.task.kind == "torrent" {
         let service = state
@@ -355,6 +443,7 @@ pub async fn confirm_cloud_share_download(
     plan_source: String,
     selected_ids: Vec<String>,
     destination_directory: Option<String>,
+    private_download: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<CloudShareBatchOutcome, crate::cloud::QuarkError> {
     let cloud = app
@@ -368,6 +457,9 @@ pub async fn confirm_cloud_share_download(
     let configured =
         download_submission_options_for_directory(&state, destination_directory.as_deref())
             .map_err(crate::cloud::QuarkError::InvalidInput)?;
+    let private_download = private_download.unwrap_or(false);
+    ensure_private_download_enabled(&state, private_download)
+        .map_err(crate::cloud::QuarkError::InvalidInput)?;
     if selection.directory_name.is_some() {
         let plan = crate::cloud::commands::plan_cloud_share_directory_download(&selection)?;
         let store = Arc::clone(&state.store);
@@ -375,15 +467,22 @@ pub async fn confirm_cloud_share_download(
         let group_source = selection.plan_source.clone();
         let submit_app = app.clone();
         let root_event_app = app.clone();
+        let emit_root = !private_download
+            || privacy_task_visibility(&state)
+                .map(|visibility| visibility.unlocked)
+                .unwrap_or(false);
         let outcome = crate::cloud::commands::submit_cloud_directory_plan_with_group_event(
             &store,
             provider,
             &group_source,
             plan,
             configured,
+            private_download,
             move |root| {
-                use tauri::Emitter;
-                let _ = root_event_app.emit("download-task-updated", root);
+                if emit_root {
+                    use tauri::Emitter;
+                    let _ = root_event_app.emit("download-task-updated", root);
+                }
                 Ok(())
             },
             move |_, source, options, context| {
@@ -396,16 +495,21 @@ pub async fn confirm_cloud_share_download(
                         source,
                         options,
                         context,
+                        private_download,
                     )
                     .await
                 }
             },
         )
         .await?;
-        return Ok(CloudShareBatchOutcome {
+        let mut result = CloudShareBatchOutcome {
             outcomes: vec![outcome.task],
             failures: Vec::new(),
-        });
+        };
+        if private_download {
+            mark_cloud_share_outcomes_private(&state.store, &mut result)?;
+        }
+        return Ok(result);
     }
     let selections = selection
         .entries
@@ -413,14 +517,64 @@ pub async fn confirm_cloud_share_download(
         .map(|entry| (entry.selected_id, entry.source))
         .collect();
     let state = &*state;
-    Ok(submit_cloud_share_batch_with(selections, |source| {
+    let mut result = submit_cloud_share_batch_with(selections, |source| {
         let app = app.clone();
         let configured = configured.clone();
         async move {
-            crate::cloud::commands::submit_cloud_share_file(app, state, source, configured).await
+            crate::cloud::commands::submit_cloud_share_file(
+                app,
+                state,
+                source,
+                configured,
+                private_download,
+            )
+            .await
         }
     })
-    .await)
+    .await;
+    if private_download {
+        mark_cloud_share_outcomes_private(&state.store, &mut result)?;
+    }
+    Ok(result)
+}
+
+fn mark_cloud_share_outcomes_private(
+    store: &TaskStore,
+    result: &mut CloudShareBatchOutcome,
+) -> Result<(), crate::cloud::QuarkError> {
+    for outcome in &mut result.outcomes {
+        let id = outcome.payload.task.id;
+        if let Some(group) = store
+            .cloud_directory_group(id)
+            .map_err(|_| crate::cloud::QuarkError::Storage)?
+        {
+            store
+                .set_cloud_directory_group_private(group.id, true)
+                .map_err(|_| crate::cloud::QuarkError::Storage)?;
+            for item in store
+                .cloud_directory_group_items(group.id)
+                .map_err(|_| crate::cloud::QuarkError::Storage)?
+            {
+                if let Some(task_id) = item.task_id {
+                    store
+                        .set_private(task_id, true)
+                        .map_err(|_| crate::cloud::QuarkError::Storage)?;
+                }
+            }
+            outcome.payload.task.is_private = true;
+            outcome.queue_task = Some(
+                cloud_directory_group_queue_task(store, group.id)
+                    .map_err(crate::cloud::QuarkError::Transport)?,
+            );
+        } else {
+            let task = store
+                .set_private(id, true)
+                .map_err(|_| crate::cloud::QuarkError::Storage)?;
+            outcome.payload =
+                task_payload(store, task).map_err(crate::cloud::QuarkError::Transport)?;
+        }
+    }
+    Ok(())
 }
 
 async fn submit_cloud_share_batch_with<F, Fut>(
@@ -486,8 +640,11 @@ pub async fn confirm_download_command(
     task_id: String,
     selected_ids: Vec<String>,
     destination_directory: Option<String>,
+    private_download: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
+    let private_download = private_download.unwrap_or(false);
+    ensure_private_download_enabled(&state, private_download)?;
     let service = state
         .runtime
         .service()
@@ -495,6 +652,11 @@ pub async fn confirm_download_command(
         .map_err(|error| error.to_string())?;
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &current)?;
+    let current = state
+        .store
+        .set_private(id, private_download)
+        .map_err(|error| error.to_string())?;
     let options =
         download_submission_options_for_directory(&state, destination_directory.as_deref())?;
     if current.aria_gid.is_some() {
@@ -533,13 +695,16 @@ pub async fn list_tasks(
     let cloud = app
         .try_state::<Arc<crate::cloud::commands::CloudState>>()
         .map(|cloud| Arc::clone(cloud.inner()));
-    list_queue_tasks_in_background(Arc::clone(&state.store), cloud, scope).await
+    let visibility = privacy_task_visibility(&state)?;
+    let include_private = visibility.unlocked;
+    list_queue_tasks_in_background(Arc::clone(&state.store), cloud, scope, include_private).await
 }
 
 async fn list_queue_tasks_in_background(
     store: Arc<TaskStore>,
     cloud: Option<Arc<crate::cloud::commands::CloudState>>,
     scope: Option<String>,
+    include_private: bool,
 ) -> Result<Vec<QueueTaskPayload>, String> {
     // SQLite and the encrypted share journal can block. Keep the complete
     // projection off the window thread, including focus-triggered refreshes.
@@ -551,7 +716,8 @@ async fn list_queue_tasks_in_background(
         if let Some(cloud) = cloud.as_ref() {
             let _ = cloud.share_plans.restore_cleanup_pending_messages(&store);
         }
-        let mut tasks = list_queue_tasks_for_scope(&store, scope.as_deref())?;
+        let mut tasks =
+            list_queue_tasks_for_scope_with_privacy(&store, scope.as_deref(), include_private)?;
         if let Some(plans) = cloud.as_ref().map(|cloud| &cloud.share_plans) {
             apply_queue_cleanup_projection(&mut tasks, plans)?;
         }
@@ -568,8 +734,32 @@ pub fn list_queue_tasks_for_scope(
     store: &TaskStore,
     scope: Option<&str>,
 ) -> Result<Vec<QueueTaskPayload>, String> {
+    list_queue_tasks_for_scope_with_privacy(store, scope, true)
+}
+
+pub fn list_queue_tasks_for_scope_with_privacy(
+    store: &TaskStore,
+    scope: Option<&str>,
+    include_private: bool,
+) -> Result<Vec<QueueTaskPayload>, String> {
     let leaves = list_tasks_with_cleanup_projection_for_scope(store, None, None)?;
-    project_cloud_directory_groups(store, leaves, scope)
+    let tasks = project_cloud_directory_groups(store, leaves, scope)?;
+    Ok(if include_private {
+        tasks
+    } else {
+        without_private_queue_tasks(tasks)
+    })
+}
+
+fn without_private_queue_tasks(tasks: Vec<QueueTaskPayload>) -> Vec<QueueTaskPayload> {
+    tasks
+        .into_iter()
+        .filter(|task| !task.is_private)
+        .map(|mut task| {
+            task.children = without_private_queue_tasks(task.children);
+            task
+        })
+        .collect()
 }
 
 /// Produces the single durable queue root for one cloud-directory group.
@@ -659,6 +849,7 @@ pub(crate) fn queue_task_payload_from_task(
         created_at: task.created_at,
         updated_at: task.updated_at,
         completed_at: task.completed_at,
+        is_private: task.is_private,
         files,
         cleanup_pending: false,
         children: Vec::new(),
@@ -721,6 +912,7 @@ fn virtual_cloud_directory_item_payload(
         created_at: group.created_at,
         updated_at: group.updated_at,
         completed_at: None,
+        is_private: group.is_private,
         files: Vec::new(),
         cleanup_pending: false,
         children: Vec::new(),
@@ -759,6 +951,7 @@ fn cloud_directory_folder_payload(
         created_at: group.created_at,
         updated_at: group.updated_at,
         completed_at: None,
+        is_private: group.is_private,
         files: Vec::new(),
         cleanup_pending: false,
         children: Vec::new(),
@@ -963,6 +1156,7 @@ fn aggregate_cloud_directory_root(
                 .max()
                 .unwrap_or(updated_at)
         }),
+        is_private: group.is_private,
         files: Vec::new(),
         cleanup_pending: false,
         children,
@@ -1140,6 +1334,7 @@ pub async fn task_action(
         .cloud_directory_group(id)
         .map_err(|error| error.to_string())?
     {
+        ensure_private_group_access(&state, &group)?;
         return run_cloud_directory_group_action(app.clone(), &state, &group, &action).await;
     }
     for group in state
@@ -1154,6 +1349,7 @@ pub async fn task_action(
             .iter()
             .find(|item| item.id == id && item.task_id.is_none())
         {
+            ensure_private_group_access(&state, &group)?;
             return match action.as_str() {
                 "retry" => crate::cloud::commands::retry_cloud_directory_group_item(
                     app.clone(),
@@ -1175,6 +1371,7 @@ async fn run_cloud_directory_group_action(
     group: &CloudDirectoryGroup,
     action: &str,
 ) -> Result<TaskActionOutcome, String> {
+    ensure_private_group_access(state, group)?;
     if !matches!(action, "pause" | "resume" | "cancel" | "retry") {
         return Err("当前任务不能执行此操作".to_string());
     }
@@ -1234,8 +1431,10 @@ async fn run_local_task_action(
     app: AppHandle,
 ) -> Result<TaskActionOutcome, String> {
     let state = app.state::<AppState>();
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let current = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &current)?;
     if action == "retry_cleanup" {
-        let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
         let task = crate::cloud::commands::cleanup_cloud_share_task(app.clone(), id, true)
             .await
             .map_err(|_| "网盘转存文件清理未完成，可重试清理".to_string())?;
@@ -1250,8 +1449,6 @@ async fn run_local_task_action(
             queue_task: None,
         });
     }
-    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    let current = state.store.find(id).map_err(|error| error.to_string())?;
     if action == "cancel" && current.aria_gid.is_none() && current.kind != "ftp" {
         let task = force_cancel_unsubmitted_task(&state.store, current)?;
         return task_action_outcome(&state.store, task, None);
@@ -1291,6 +1488,7 @@ pub async fn resolve_duplicate_download(
     let state = app.state::<AppState>();
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &current)?;
     let resolution = duplicate_state(&state.store, &current).map_err(|error| error.to_string())?;
     let task = match (action.as_str(), resolution) {
         ("resume", DuplicateDownloadState::ResumeAvailable)
@@ -1416,8 +1614,10 @@ pub(crate) async fn resubmit_task(
                         message,
                     );
                     if let Ok(updated) = state.store.find(task.id) {
-                        if let Ok(payload) = task_update_payload(&state.store, None, updated) {
-                            let _ = app.emit("download-task-updated", payload);
+                        if should_emit_task_update(state, updated.is_private) {
+                            if let Ok(payload) = task_update_payload(&state.store, None, updated) {
+                                let _ = app.emit("download-task-updated", payload);
+                            }
                         }
                     }
                 }
@@ -1594,8 +1794,10 @@ pub(crate) fn schedule_cloud_share_refresh(app: AppHandle, task: &DownloadTask) 
                         crate::cloud::commands::share_resolution_failure_message(&error),
                     );
                     if let Ok(task) = state.store.find(current.id) {
-                        if let Ok(payload) = task_update_payload(&state.store, None, task) {
-                            let _ = app.emit("download-task-updated", payload);
+                        if should_emit_task_update(&state, task.is_private) {
+                            if let Ok(payload) = task_update_payload(&state.store, None, task) {
+                                let _ = app.emit("download-task-updated", payload);
+                            }
                         }
                     }
                 }
@@ -1688,8 +1890,15 @@ pub fn open_task_directory(task_id: String, state: State<'_, AppState>) -> Resul
         .cloud_directory_group(id)
         .map_err(|error| error.to_string())?
     {
-        Some(group) => cloud_directory_group_output_root(&group)?,
-        None => task_output_directory(&state.store, id)?,
+        Some(group) => {
+            ensure_private_group_access(&state, &group)?;
+            cloud_directory_group_output_root(&group)?
+        }
+        None => {
+            let task = state.store.find(id).map_err(|error| error.to_string())?;
+            ensure_private_task_access(&state, &task)?;
+            task_output_directory(&state.store, id)?
+        }
     };
     tauri_plugin_opener::open_path(&directory, None::<&str>)
         .map_err(|error| format!("无法打开下载目录：{error}"))
@@ -1725,6 +1934,8 @@ fn task_associated_file_path(store: &TaskStore, task_id: Uuid) -> Result<PathBuf
 #[tauri::command]
 pub fn open_task_file(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let task = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &task)?;
     let path = task_associated_file_path(&state.store, id)?;
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|error| format!("无法使用系统默认应用打开文件：{error}"))
@@ -1749,6 +1960,7 @@ fn cloud_directory_group_output_root(group: &CloudDirectoryGroup) -> Result<Path
 pub fn play_task_videos(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let task = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &task)?;
     if task.status != TaskStatus::Completed {
         return Err("仅已完成任务可以播放视频".to_string());
     }
@@ -1773,6 +1985,7 @@ pub fn remove_task_record(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let task = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &task)?;
     if matches!(
         task.status,
         TaskStatus::Draft
@@ -1810,15 +2023,16 @@ pub fn recycle_task(
     state: State<'_, AppState>,
 ) -> Result<QueueTaskPayload, String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    if state
+    if let Some(group) = state
         .store
         .cloud_directory_group(id)
         .map_err(|error| error.to_string())?
-        .is_some()
     {
+        ensure_private_group_access(&state, &group)?;
         return recycle_cloud_directory_group(&state.store, id);
     }
     let task = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &task)?;
     if !matches!(
         task.status,
         TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
@@ -1912,6 +2126,19 @@ pub async fn purge_recycled_tasks(
     state: State<'_, AppState>,
     cloud: State<'_, Arc<crate::cloud::commands::CloudState>>,
 ) -> Result<(), String> {
+    for task_id in &task_ids {
+        let id = Uuid::parse_str(task_id).map_err(|_| "任务 ID 无效".to_string())?;
+        if let Some(group) = state
+            .store
+            .cloud_directory_group(id)
+            .map_err(|error| error.to_string())?
+        {
+            ensure_private_group_access(&state, &group)?;
+        } else {
+            let task = state.store.find(id).map_err(|error| error.to_string())?;
+            ensure_private_task_access(&state, &task)?;
+        }
+    }
     purge_recycled_task_batch(
         Arc::clone(&state.store),
         Arc::clone(cloud.inner()),
@@ -2057,12 +2284,14 @@ pub async fn select_files(
     indices: Vec<u32>,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let current = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &current)?;
     let service = state
         .runtime
         .service()
         .await
         .map_err(|error| error.to_string())?;
-    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let task = service
         .select_files(id, indices)
         .await
@@ -2076,12 +2305,14 @@ pub async fn cancel_download_file(
     file_index: u32,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let current = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &current)?;
     let service = state
         .runtime
         .service()
         .await
         .map_err(|error| error.to_string())?;
-    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     if !state
         .store
         .files(id)
@@ -2135,6 +2366,58 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
         .lock()
         .map_err(|_| "设置锁不可用".to_string())
         .map(|settings| settings.clone())
+}
+
+#[tauri::command]
+pub fn get_privacy_task_visibility(
+    state: State<'_, AppState>,
+) -> Result<PrivacyTaskVisibility, String> {
+    privacy_task_visibility(&state)
+}
+
+#[tauri::command]
+pub fn configure_privacy_download(
+    enabled: bool,
+    password: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<AppSettings, String> {
+    crate::privacy::require_unlocked_configuration(&state.privacy_session, &state.ai_secrets)?;
+    if let Some(password) = password {
+        crate::privacy::configure_password(&state.ai_secrets, password)?;
+    }
+    let configured = crate::privacy::password_is_configured(&state.ai_secrets)?;
+    if enabled && !configured {
+        return Err("开启隐私下载前请先设置隐私模式密码".into());
+    }
+    state.privacy_session.lock();
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())?;
+    settings.privacy_download_enabled = enabled;
+    settings.privacy_password_configured = configured;
+    persist_settings(&state.settings_path, &settings)?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+pub fn unlock_privacy_tasks(
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<PrivacyTaskVisibility, String> {
+    if !privacy_task_visibility(&state)?.enabled {
+        return Err("请先开启隐私下载".into());
+    }
+    if !state.privacy_session.unlock(&state.ai_secrets, password)? {
+        return Err("隐私模式密码不正确".into());
+    }
+    privacy_task_visibility(&state)
+}
+
+#[tauri::command]
+pub fn lock_privacy_tasks(state: State<'_, AppState>) -> Result<PrivacyTaskVisibility, String> {
+    state.privacy_session.lock();
+    privacy_task_visibility(&state)
 }
 
 fn persist_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
@@ -2269,6 +2552,8 @@ pub async fn update_settings(
         .map_err(|_| "设置锁不可用".to_string())?
         .clone();
     settings.ai = previous.ai;
+    settings.privacy_download_enabled = previous.privacy_download_enabled;
+    settings.privacy_password_configured = previous.privacy_password_configured;
     if settings.aria2 != previous.aria2 {
         state
             .runtime
@@ -2296,10 +2581,33 @@ pub async fn update_settings(
 mod tests {
     use super::*;
     use crate::{
-        cloud::{share::CloudShareEntry, share::CloudSharePlan, CloudProvider},
+        cloud::{
+            share::CloudShareEntry, share::CloudSharePlan, CloudProvider, MemoryCredentialStore,
+        },
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
         DuplicateDownloadState, NewTask,
     };
+
+    #[test]
+    fn private_visibility_requires_the_configured_password_for_this_session() {
+        let credentials = MemoryCredentialStore::default();
+        let session = crate::privacy::PrivacySession::default();
+
+        crate::privacy::configure_password(&credentials, "correct horse battery staple".into())
+            .unwrap();
+        assert!(!session.is_unlocked());
+        assert!(!session
+            .unlock(&credentials, "wrong password".into())
+            .unwrap());
+        assert!(!session.is_unlocked());
+        assert!(session
+            .unlock(&credentials, "correct horse battery staple".into())
+            .unwrap());
+        assert!(session.is_unlocked());
+
+        session.lock();
+        assert!(!session.is_unlocked());
+    }
 
     #[test]
     fn failed_cloud_authentication_task_projects_a_reauthorization_action() {
@@ -2329,6 +2637,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn locked_queue_projection_excludes_private_tasks_and_private_directory_roots() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let ordinary = store
+            .create(NewTask::direct("https://example.test/ordinary.zip"))
+            .unwrap();
+        let private = store
+            .create(NewTask::direct("https://example.test/private.zip"))
+            .unwrap();
+        store.set_private(private.id, true).unwrap();
+        let private_group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "private-directory",
+                    "私密目录",
+                    "C:\\Downloads",
+                )
+                .with_private_download(true),
+                &[],
+            )
+            .unwrap();
+
+        let locked = list_queue_tasks_for_scope_with_privacy(&store, None, false).unwrap();
+        assert_eq!(
+            locked
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![ordinary.id.to_string()]
+        );
+        assert!(!locked
+            .iter()
+            .any(|task| task.id == private_group.id.to_string()));
+
+        let unlocked = list_queue_tasks_for_scope_with_privacy(&store, None, true).unwrap();
+        assert_eq!(unlocked.len(), 3);
+        assert!(unlocked
+            .iter()
+            .any(|task| task.id == private.id.to_string() && task.is_private));
+        assert!(unlocked
+            .iter()
+            .any(|task| task.id == private_group.id.to_string() && task.is_private));
+    }
+
     #[tokio::test]
     async fn background_queue_read_preserves_scopes() {
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
@@ -2346,13 +2699,13 @@ mod tests {
             })
             .unwrap();
         let active_tasks =
-            list_queue_tasks_in_background(Arc::clone(&store), None, Some("active".into()))
+            list_queue_tasks_in_background(Arc::clone(&store), None, Some("active".into()), true)
                 .await
                 .unwrap();
         assert_eq!(active_tasks.len(), 1);
         assert_eq!(active_tasks[0].id, active.id.to_string());
         let terminal =
-            list_queue_tasks_in_background(Arc::clone(&store), None, Some("terminal".into()))
+            list_queue_tasks_in_background(Arc::clone(&store), None, Some("terminal".into()), true)
                 .await
                 .unwrap();
         assert_eq!(terminal.len(), 1);
@@ -2366,7 +2719,7 @@ mod tests {
         let store = Arc::new(TaskStore::open_path(&path).unwrap());
         let blocker = rusqlite::Connection::open(&path).unwrap();
         blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
-        let mut read = Box::pin(list_queue_tasks_in_background(store, None, None));
+        let mut read = Box::pin(list_queue_tasks_in_background(store, None, None, true));
         let waiting = tokio::time::timeout(std::time::Duration::from_millis(100), &mut read).await;
         // The caller can keep servicing events even while SQLite is waiting.
         blocker.execute_batch("ROLLBACK").unwrap();

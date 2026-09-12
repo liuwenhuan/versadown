@@ -163,7 +163,10 @@ pub enum ShareInspection {
 
 pub enum ShareConfirmationOutcome {
     Confirmation(CloudShareConfirmation),
-    AutoSubmit { source: String },
+    AutoSubmit {
+        source: String,
+        confirmation: CloudShareConfirmation,
+    },
     AccessCodeRequired,
 }
 

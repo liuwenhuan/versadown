@@ -16,6 +16,7 @@ interface SettingsPanelProps {
   browseDirectory?(currentDirectory: string): Promise<string | null>;
   saveAiSettings?(settings: AiSettingsInput): Promise<AiSettings>;
   loadAiModels?(settings: AiSettingsInput): Promise<string[]>;
+  configurePrivacyDownload?(enabled: boolean, password?: string): Promise<AppSettings>;
 }
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
@@ -23,7 +24,7 @@ const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, b
 const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 };
 const themeLabels: Record<ThemeMode, string> = { auto: '跟随系统', light: '浅色', dark: '深色' };
 
-export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels }: SettingsPanelProps) {
+export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, configurePrivacyDownload }: SettingsPanelProps) {
   const [debugReports, setDebugReports] = useState(initial.debugReports);
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
@@ -32,6 +33,11 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [magnetMetadata, setMagnetMetadata] = useState<MagnetMetadataSettings>(initial.magnetMetadata ?? defaultMagnetMetadataSettings);
   const [aria2, setAria2] = useState<Aria2Settings>(initial.aria2 ?? defaultAria2Settings);
   const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
+  const [privacyDownloadEnabled, setPrivacyDownloadEnabled] = useState(initial.privacyDownloadEnabled ?? false);
+  const [privacyPasswordConfigured, setPrivacyPasswordConfigured] = useState(initial.privacyPasswordConfigured ?? false);
+  const [privacyPassword, setPrivacyPassword] = useState('');
+  const [privacyPasswordConfirmation, setPrivacyPasswordConfirmation] = useState('');
+  const [privacyStatus, setPrivacyStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [magnetMetadataSaved, setMagnetMetadataSaved] = useState(false);
   const [aria2Status, setAria2Status] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiApiKey, setAiApiKey] = useState('');
@@ -42,7 +48,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); }, [initial]);
+  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
 
   function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
     return { debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, deleteTransferredShareFilesAfterDownload, ...overrides };
@@ -126,6 +132,25 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     saveWithoutStatus(currentSettings({ deleteTransferredShareFilesAfterDownload: enabled }));
   }
 
+  async function savePrivacyDownload(event: FormEvent) {
+    event.preventDefault();
+    setPrivacyStatus(null);
+    if (privacyDownloadEnabled && privacyPassword && privacyPassword !== privacyPasswordConfirmation) {
+      setPrivacyStatus({ kind: 'error', message: '两次输入的隐私模式密码不一致' });
+      return;
+    }
+    try {
+      const saved = await configurePrivacyDownload?.(privacyDownloadEnabled, privacyPassword || undefined)
+        ?? currentSettings({ privacyDownloadEnabled, privacyPasswordConfigured: privacyPasswordConfigured || Boolean(privacyPassword) });
+      setPrivacyPasswordConfigured(saved.privacyPasswordConfigured ?? Boolean(privacyPassword));
+      setPrivacyPassword('');
+      setPrivacyPasswordConfirmation('');
+      setPrivacyStatus({ kind: 'success', message: privacyDownloadEnabled ? '隐私下载已开启' : '隐私下载已关闭' });
+    } catch (error) {
+      setPrivacyStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   function saveMagnetMetadata(event: FormEvent) {
     event.preventDefault();
     const savedMetadata = { ...magnetMetadata, baseUrl: magnetMetadata.baseUrl.trim() };
@@ -171,6 +196,14 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         </form>
         <label className="setting-row"><span><b>悬浮球显示</b><small>“关闭显示”后仍可在这里重新开启。</small></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
         <label className="setting-row"><span><b>下载完成后自动删除转存文件</b><small>仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。</small></span><input aria-label="下载完成后自动删除转存文件" type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
+        <form className="privacy-download-settings proxy-settings" onSubmit={(event) => void savePrivacyDownload(event)}>
+          <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => { setPrivacyDownloadEnabled(event.target.checked); setPrivacyStatus(null); }} /></label>
+          <fieldset disabled={!privacyDownloadEnabled}>
+            <label><span>隐私模式密码</span><input aria-label="隐私模式密码" type="password" autoComplete="new-password" placeholder={privacyPasswordConfigured ? '留空则保留现有密码' : '设置隐私模式密码'} value={privacyPassword} onChange={(event) => setPrivacyPassword(event.target.value)} /></label>
+            <label><span>确认隐私模式密码</span><input aria-label="确认隐私模式密码" type="password" autoComplete="new-password" value={privacyPasswordConfirmation} onChange={(event) => setPrivacyPasswordConfirmation(event.target.value)} /></label>
+          </fieldset>
+          <div className="settings-actions"><button className="primary" type="submit">保存隐私下载设置</button>{privacyStatus && <span role="status" className={privacyStatus.kind}>{privacyStatus.message}</span>}</div>
+        </form>
       </>}
       {activeTab === 'network' && <>
       <form className="proxy-settings" onSubmit={saveProxy}>

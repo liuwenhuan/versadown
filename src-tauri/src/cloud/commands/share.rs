@@ -57,10 +57,18 @@ pub async fn submit_cloud_share_file(
     state: &AppState,
     source: String,
     configured: UriSubmissionOptions,
+    private_download: bool,
 ) -> Result<TaskActionOutcome, QuarkError> {
-    let submission =
-        submit_cloud_share_file_internal(app.clone(), state, source, configured, None, true)
-            .await?;
+    let submission = submit_cloud_share_file_internal(
+        app.clone(),
+        state,
+        source,
+        configured,
+        None,
+        true,
+        private_download,
+    )
+    .await?;
     let outcome = match submission {
         CloudShareFileSubmission::Queued(outcome)
         | CloudShareFileSubmission::Duplicate(outcome) => outcome,
@@ -81,6 +89,7 @@ pub(crate) async fn submit_cloud_share_file_internal(
     configured: UriSubmissionOptions,
     directory_context: Option<DirectoryLeafContext>,
     append_entry_directory: bool,
+    private_download: bool,
 ) -> Result<CloudShareFileSubmission, QuarkError> {
     share::parse_stable_cloud_share_source(&source)?;
     let _source_submission = state.cloud_download_sources.acquire(&source).await?;
@@ -90,6 +99,7 @@ pub(crate) async fn submit_cloud_share_file_internal(
         .map_err(|_| QuarkError::Storage)?
         .filter(|task| task.status != TaskStatus::Recycled)
     {
+        ensure_private_task_access(state, &existing).map_err(QuarkError::InvalidInput)?;
         if !is_retryable_cloud_share_prepare(&existing) {
             let duplicate =
                 duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
@@ -110,6 +120,7 @@ pub(crate) async fn submit_cloud_share_file_internal(
         configured,
         directory_context,
         append_entry_directory,
+        private_download,
         || async {
             state
                 .runtime
@@ -129,6 +140,7 @@ pub async fn submit_cloud_share_directory_leaf(
     source: String,
     configured: UriSubmissionOptions,
     context: DirectoryLeafContext,
+    private_download: bool,
 ) -> Result<DirectoryLeafSubmission, QuarkError> {
     match submit_cloud_share_file_internal(
         app.clone(),
@@ -137,6 +149,7 @@ pub async fn submit_cloud_share_directory_leaf(
         configured,
         Some(context),
         false,
+        private_download,
     )
     .await?
     {
@@ -163,7 +176,7 @@ where
     RFut: std::future::Future<Output = Result<ResolvedCloudDownload, QuarkError>>,
 {
     submit_new_cloud_share_file_scoped_with(
-        tasks, plans, source, configured, None, true, service, resolve,
+        tasks, plans, source, configured, None, true, false, service, resolve,
     )
     .await
 }
@@ -175,6 +188,7 @@ pub(crate) async fn submit_new_cloud_share_file_scoped_with<S, SFut, R, RFut>(
     mut configured: UriSubmissionOptions,
     directory_context: Option<DirectoryLeafContext>,
     append_entry_directory: bool,
+    private_download: bool,
     service: S,
     resolve: R,
 ) -> Result<TaskActionOutcome, QuarkError>
@@ -241,9 +255,13 @@ where
                 source: source.clone(),
                 name: output_name,
                 kind: "cloud".into(),
+                is_private: private_download,
             })
             .map_err(|_| QuarkError::Storage)?,
     };
+    let prepared = tasks
+        .set_private(prepared.id, private_download)
+        .map_err(|_| QuarkError::Storage)?;
     if let Err(error) = plans.reserve_local_task(&source, prepared.id) {
         return match tasks.remove_task_record(prepared.id) {
             Ok(()) | Err(crate::StoreError::NotFound(_)) => Err(error),
@@ -396,7 +414,9 @@ pub(crate) async fn cleanup_cloud_share_task(
                 cloud.as_ref().map(|cloud| &cloud.share_plans),
                 task.clone(),
             ) {
-                let _ = app.emit("download-task-updated", payload);
+                if should_emit_task_update(&state, task.is_private) {
+                    let _ = app.emit("download-task-updated", payload);
+                }
             }
             Ok(task)
         }
@@ -465,7 +485,9 @@ pub(crate) async fn cleanup_cloud_share_task_inner(
             Some(&cloud.share_plans),
             updated.clone(),
         ) {
-            let _ = app.emit("download-task-updated", payload);
+            if should_emit_task_update(&state, updated.is_private) {
+                let _ = app.emit("download-task-updated", payload);
+            }
         }
         Ok(updated)
     } else {

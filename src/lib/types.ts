@@ -33,6 +33,8 @@ export interface QueueTask {
   updated_at?: number;
   completed_at?: number;
   completedAt?: number;
+  is_private?: boolean;
+  isPrivate?: boolean;
   files?: readonly DownloadFile[];
   file_index?: number;
   selected?: boolean;
@@ -174,4 +176,17 @@ export interface AppSettings {
   magnetMetadata: MagnetMetadataSettings;
   aria2: Aria2Settings;
   deleteTransferredShareFilesAfterDownload: boolean;
+  privacyDownloadEnabled?: boolean;
+  privacyPasswordConfigured?: boolean;
+}
+
+export interface PrivacyTaskVisibility {
+  enabled: boolean;
+  unlocked: boolean;
+}
+
+export interface AppUpdate {
+  version: string;
+  notes: string;
+  downloadUrl: string;
 }

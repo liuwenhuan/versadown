@@ -60,6 +60,7 @@ fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> Dow
             source: source.into(),
             name: name.into(),
             kind: "cloud".into(),
+            is_private: false,
         })
         .unwrap()
 }

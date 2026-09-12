@@ -5,7 +5,9 @@ use crate::models::{
 };
 use crate::{
     commands::{
-        cloud_directory_group_queue_task, task_action_outcome, AppState, TaskActionOutcome,
+        cloud_directory_group_queue_task, ensure_private_download_enabled,
+        ensure_private_group_access, ensure_private_task_access, should_emit_task_update,
+        task_action_outcome, AppState, TaskActionOutcome,
     },
     duplicate_state, DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };

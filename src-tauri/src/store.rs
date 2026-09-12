@@ -228,9 +228,10 @@ impl TaskStore {
             created_at,
             updated_at: created_at,
             completed_at: None,
+            is_private: new_task.is_private,
         };
-        connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.created_at, task.updated_at])?;
+        connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at, is_private) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.created_at, task.updated_at, task.is_private])?;
         Ok(task)
     }
 
@@ -254,12 +255,13 @@ impl TaskStore {
             status: TaskStatus::Queued,
             created_at: timestamp,
             updated_at: timestamp,
+            is_private: new_group.is_private,
         };
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         transaction.execute(
-            "INSERT INTO cloud_directory_groups (id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO cloud_directory_groups (id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 group.id.to_string(),
                 group.provider.key(),
@@ -269,6 +271,7 @@ impl TaskStore {
                 group.status.as_db(),
                 group.created_at,
                 group.updated_at,
+                group.is_private,
             ],
         )?;
         for (item_index, new_item) in new_items.iter().enumerate() {
@@ -301,7 +304,7 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
                  FROM cloud_directory_groups WHERE id = ?1",
                 [id.to_string()],
                 cloud_directory_group_from_row,
@@ -313,13 +316,37 @@ impl TaskStore {
     pub fn cloud_directory_groups(&self) -> Result<Vec<CloudDirectoryGroup>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let mut statement = connection.prepare(
-            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at
+            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
              FROM cloud_directory_groups ORDER BY created_at, id",
         )?;
         let groups = statement
             .query_map([], cloud_directory_group_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(groups)
+    }
+
+    pub fn set_cloud_directory_group_private(
+        &self,
+        id: Uuid,
+        is_private: bool,
+    ) -> Result<CloudDirectoryGroup, StoreError> {
+        validate_uuid(id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE cloud_directory_groups SET is_private = ?1, updated_at = ?2 WHERE id = ?3",
+            params![is_private, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        connection
+            .query_row(
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
+                 FROM cloud_directory_groups WHERE id = ?1",
+                [id.to_string()],
+                cloud_directory_group_from_row,
+            )
+            .map_err(StoreError::from)
     }
 
     pub fn cloud_directory_group_items(
@@ -365,7 +392,7 @@ impl TaskStore {
         }
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
                  FROM cloud_directory_groups WHERE id = ?1",
                 [group_id.to_string()],
                 cloud_directory_group_from_row,
@@ -452,7 +479,7 @@ impl TaskStore {
         connection
             .query_row(
                 "SELECT groups.id, groups.provider, groups.remote_directory_id, groups.relative_directory,
-                        groups.output_directory, groups.status, groups.created_at, groups.updated_at
+                        groups.output_directory, groups.status, groups.created_at, groups.updated_at, groups.is_private
                  FROM cloud_directory_groups AS groups
                  INNER JOIN cloud_directory_group_items AS items ON items.group_id = groups.id
                  WHERE items.task_id = ?1",
@@ -512,6 +539,34 @@ impl TaskStore {
 
     pub fn list(&self) -> Result<Vec<DownloadTask>, StoreError> {
         self.list_matching("")
+    }
+
+    pub fn has_private_tasks(&self) -> Result<bool, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM tasks WHERE is_private = 1
+                    UNION ALL
+                    SELECT 1 FROM cloud_directory_groups WHERE is_private = 1
+                )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|exists| exists != 0)
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_private(&self, id: Uuid, is_private: bool) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET is_private = ?1, updated_at = ?2 WHERE id = ?3",
+            params![is_private, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
     }
 
     pub fn list_active(&self) -> Result<Vec<DownloadTask>, StoreError> {
@@ -1014,7 +1069,7 @@ fn remove_legacy_payload_file(
     Ok(LegacyFileRemoval::Removed)
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1091,7 +1146,16 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             "ALTER TABLE cloud_directory_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'queued';",
         )?;
     }
-    transaction.execute_batch("PRAGMA user_version = 8;")?;
+    if !column_exists(&transaction, "tasks", "is_private")? {
+        transaction
+            .execute_batch("ALTER TABLE tasks ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    if !column_exists(&transaction, "cloud_directory_groups", "is_private")? {
+        transaction.execute_batch(
+            "ALTER TABLE cloud_directory_groups ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 9;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -1199,6 +1263,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         completed_at: row.get(18)?,
         metadata_gid: row.get(19)?,
         created_at: row.get(20)?,
+        is_private: row.get(21)?,
     })
 }
 
@@ -1225,6 +1290,7 @@ fn cloud_directory_group_from_row(row: &Row<'_>) -> rusqlite::Result<CloudDirect
         status: TaskStatus::from_db(&status).ok_or(rusqlite::Error::InvalidQuery)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        is_private: row.get(8)?,
     })
 }
 
@@ -1350,6 +1416,44 @@ mod tests {
 
         assert!(store.find(first.id).is_ok());
         assert!(store.find(second.id).is_ok());
+    }
+
+    #[test]
+    fn private_task_flag_survives_a_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let task_id = {
+            let store = TaskStore::open_path(&database).unwrap();
+            store
+                .create(NewTask {
+                    source: "https://example.test/private.zip".into(),
+                    name: "private.zip".into(),
+                    kind: "file".into(),
+                    is_private: true,
+                })
+                .unwrap()
+                .id
+        };
+
+        let store = TaskStore::open_path(&database).unwrap();
+        assert!(store.find(task_id).unwrap().is_private);
+    }
+
+    #[test]
+    fn private_directory_group_counts_as_private_task_history() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let base = std::path::PathBuf::from("C:/downloads");
+        assert!(!store.has_private_tasks().unwrap());
+
+        store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(CloudProvider::Quark, "private-root", "Private", &base)
+                    .with_private_download(true),
+                &[],
+            )
+            .unwrap();
+
+        assert!(store.has_private_tasks().unwrap());
     }
 
     #[test]

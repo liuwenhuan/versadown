@@ -135,7 +135,10 @@ pub fn inspect_share_with_adapter(
     };
     store.upsert(&plan)?;
     Ok(match automatic_source {
-        Some(source) => ShareConfirmationOutcome::AutoSubmit { source },
+        Some(source) => ShareConfirmationOutcome::AutoSubmit {
+            source,
+            confirmation,
+        },
         None => ShareConfirmationOutcome::Confirmation(confirmation),
     })
 }

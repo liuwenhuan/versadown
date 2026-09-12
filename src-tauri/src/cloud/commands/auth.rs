@@ -355,6 +355,33 @@ pub async fn cloud_reauthorize_failed_task(
         .map_err(|_| QuarkError::InvalidInput("任务 ID 无效".into()))?;
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
 
+    match state.store.find(id) {
+        Ok(task) => {
+            ensure_private_task_access(&state, &task).map_err(QuarkError::InvalidInput)?;
+        }
+        Err(crate::StoreError::NotFound(_)) => {
+            for group in state
+                .store
+                .cloud_directory_groups()
+                .map_err(|_| QuarkError::Storage)?
+            {
+                let matches_requested = group.id == id
+                    || state
+                        .store
+                        .cloud_directory_group_items(group.id)
+                        .map_err(|_| QuarkError::Storage)?
+                        .iter()
+                        .any(|item| item.id == id);
+                if matches_requested {
+                    ensure_private_group_access(&state, &group)
+                        .map_err(QuarkError::InvalidInput)?;
+                    break;
+                }
+            }
+        }
+        Err(_) => return Err(QuarkError::Storage),
+    }
+
     let requested_provider = reauthorization_provider(&state.store, id)?;
 
     if browser_login::supports_browser_password(requested_provider) {
@@ -456,6 +483,9 @@ pub async fn resume_reauthorized_provider_tasks(
         let Ok(task) = state.store.find(id) else {
             continue;
         };
+        if !should_emit_task_update(&state, task.is_private) {
+            continue;
+        }
         if state
             .store
             .cloud_directory_group_for_task(id)
@@ -479,21 +509,25 @@ pub async fn resume_reauthorized_provider_tasks(
         match crate::commands::resubmit_task(app.clone(), &state, task, Default::default()).await {
             Ok(task) => {
                 if let Ok(outcome) = task_action_outcome(&state.store, task, None) {
-                    if let Some(queue_task) = outcome.queue_task {
-                        let _ = app.emit("download-task-updated", queue_task);
-                    } else {
-                        let _ = app.emit("download-task-updated", outcome.payload);
+                    if should_emit_task_update(&state, outcome.payload.task.is_private) {
+                        if let Some(queue_task) = outcome.queue_task {
+                            let _ = app.emit("download-task-updated", queue_task);
+                        } else {
+                            let _ = app.emit("download-task-updated", outcome.payload);
+                        }
                     }
                 }
             }
             Err(_) => {
                 if let Ok(task) = state.store.find(id) {
-                    if let Ok(payload) = crate::commands::task_update_payload(
-                        &state.store,
-                        Some(&cloud.share_plans),
-                        task,
-                    ) {
-                        let _ = app.emit("download-task-updated", payload);
+                    if should_emit_task_update(&state, task.is_private) {
+                        if let Ok(payload) = crate::commands::task_update_payload(
+                            &state.store,
+                            Some(&cloud.share_plans),
+                            task,
+                        ) {
+                            let _ = app.emit("download-task-updated", payload);
+                        }
                     }
                 }
             }
@@ -516,6 +550,9 @@ pub async fn resume_reauthorized_provider_tasks(
         else {
             continue;
         };
+        if !should_emit_task_update(&state, group.is_private) {
+            continue;
+        }
         if matches!(
             group.status,
             TaskStatus::Cancelled | TaskStatus::Recycled | TaskStatus::Completed
@@ -537,10 +574,12 @@ pub async fn resume_reauthorized_provider_tasks(
         }
         if let Ok(outcome) = retry_cloud_directory_group_item(app.clone(), group_id, item_id).await
         {
-            if let Some(queue_task) = outcome.queue_task {
-                let _ = app.emit("download-task-updated", queue_task);
-            } else {
-                let _ = app.emit("download-task-updated", outcome.payload);
+            if should_emit_task_update(&state, outcome.payload.task.is_private) {
+                if let Some(queue_task) = outcome.queue_task {
+                    let _ = app.emit("download-task-updated", queue_task);
+                } else {
+                    let _ = app.emit("download-task-updated", outcome.payload);
+                }
             }
         }
     }

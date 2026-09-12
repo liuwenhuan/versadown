@@ -448,7 +448,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const completionTime = isCompleted ? completedAt(task.completed_at ?? task.completedAt) : undefined;
         const completedHasPlayableMedia = isCompleted && taskHasPlayableMedia(task);
         const completedFileType = isCompleted ? taskAssociatedFileType(task) : undefined;
-        return <div className="task-group" key={task.id}>
+        return <div className={`task-group${isCompleted ? ' completed-task-group' : ''}${isExpanded ? ' is-expanded' : ''}`} key={task.id}>
           <article data-task-id={task.id} className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>

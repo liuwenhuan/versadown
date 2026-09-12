@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::cloud::{CloudHttpRequest, CloudHttpResponse, CloudHttpTransport};
 use serde_json::Value;

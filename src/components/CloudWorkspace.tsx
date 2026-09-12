@@ -5,6 +5,7 @@ import { CloudManager, CloudManagerClient } from './CloudManager';
 export interface CloudWorkspaceProps {
   client: CloudManagerClient;
   onDownloadTask?(task: unknown): void;
+  privacyDownloadEnabled?: boolean;
 }
 
 type WorkspaceTab = 'management' | CloudProvider;
@@ -22,7 +23,7 @@ function errorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
-export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) {
+export function CloudWorkspace({ client, onDownloadTask, privacyDownloadEnabled = false }: CloudWorkspaceProps) {
   const [accounts, setAccounts] = useState<readonly CloudAccount[]>([]);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('management');
   const [catalog, setCatalog] = useState<readonly ProviderDescriptor[]>([]);
@@ -101,6 +102,7 @@ export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) 
           provider={provider}
           client={client}
           initialAccount={account ?? null}
+          privacyDownloadEnabled={privacyDownloadEnabled}
           authorizationOnly
           restoreOnMount={false}
           onAccountAuthorized={acceptAccount}
@@ -115,6 +117,7 @@ export function CloudWorkspace({ client, onDownloadTask }: CloudWorkspaceProps) 
       provider={activeAccount.provider}
       client={client}
       initialAccount={activeAccount}
+      privacyDownloadEnabled={privacyDownloadEnabled}
       restoreOnMount={false}
       showSessionActions={false}
       onDownloadTask={onDownloadTask}

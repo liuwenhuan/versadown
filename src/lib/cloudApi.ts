@@ -69,9 +69,18 @@ function cloudDownloadResult(result: NativeCloudDownload): TaskActionResult {
     ? { duplicate: { task, state: duplicate }, ...(queueTask ? { queueTask } : {}) }
     : { task, ...(queueTask ? { queueTask } : {}) };
 }
-export const downloadCloudFile = (provider: CloudProvider, fileId: string): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', { provider, fileId })
+export const downloadCloudFile = (provider: CloudProvider, fileId: string, privateDownload = false): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', {
+  provider,
+  fileId,
+  ...(privateDownload ? { privateDownload: true } : {})
+})
   .then(cloudDownloadResult);
-export const downloadCloudDirectory = (provider: CloudProvider, directoryId: string, directoryName: string): Promise<CloudDirectoryDownloadOutcome> => invoke<NativeCloudDirectoryDownload>('cloud_download_directory', { provider, directoryId, directoryName })
+export const downloadCloudDirectory = (provider: CloudProvider, directoryId: string, directoryName: string, privateDownload = false): Promise<CloudDirectoryDownloadOutcome> => invoke<NativeCloudDirectoryDownload>('cloud_download_directory', {
+  provider,
+  directoryId,
+  directoryName,
+  ...(privateDownload ? { privateDownload: true } : {})
+})
   .then((result) => ({ ...result, task: cloudDownloadResult(result.task) }));
 export const logoutCloud = (provider: CloudProvider) => invoke<void>('cloud_logout', { provider });
 export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[]) => invoke<CloudFile[]>('cloud_upload_files', { provider, parentId, paths: paths ?? null });

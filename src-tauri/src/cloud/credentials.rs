@@ -67,6 +67,7 @@ pub fn credential_key_is_supported(key: &str) -> bool {
             | "xunlei"
             | "uc"
             | "ai-api-key"
+            | "privacy-download-password-v1"
             | "cloud-share-plans-v1"
             | "cloud-password-pikpak"
             | "cloud-password-baidu"

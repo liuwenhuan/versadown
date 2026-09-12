@@ -213,8 +213,8 @@ async function run() {
 
     const managerViewport = JSON.parse(await evaluate(manager, 'JSON.stringify({ width: innerWidth, height: innerHeight })'));
     assert(
-      Math.abs(managerViewport.width - 900) <= 1 && Math.abs(managerViewport.height - 575) <= 1,
-      `Main window did not use the compact 900x575 layout: ${JSON.stringify(managerViewport)}`
+      Math.abs(managerViewport.width - 960) <= 1 && Math.abs(managerViewport.height - 640) <= 1,
+      `Main window did not use the requested 960x640 layout: ${JSON.stringify(managerViewport)}`
     );
 
     const titlebarLayout = JSON.parse(await evaluate(manager, `JSON.stringify((() => {

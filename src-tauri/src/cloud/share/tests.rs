@@ -1312,7 +1312,7 @@ fn only_an_explicit_exact_root_file_is_selected_for_automatic_submission() {
     let expected = file.source_for("f1");
     assert!(matches!(
         inspect_share_with_adapter(&store, &PlanAdapter(file), &candidate).unwrap(),
-        ShareConfirmationOutcome::AutoSubmit { source } if source == expected
+        ShareConfirmationOutcome::AutoSubmit { source, .. } if source == expected
     ));
 
     for root_kind in [
@@ -2085,6 +2085,7 @@ async fn unavailable_engine_keeps_a_share_directory_leaf_linked_to_its_failed_ro
             group_id: group.id,
             item_id: item.id,
         }),
+        false,
         false,
         || async {
             Err::<Arc<crate::DownloadService>, _>(QuarkError::Transport(

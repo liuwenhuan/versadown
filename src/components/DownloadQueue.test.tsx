@@ -71,6 +71,25 @@ it('keeps a folder as one row until the user expands it', async () => {
   expect(onCommand).toHaveBeenCalledWith('file-1', 'pause');
 });
 
+it('skips offscreen rendering for collapsed task groups but restores full layout when expanded', async () => {
+  const user = userEvent.setup();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const { container } = render(<DownloadQueue tasks={[folderTask]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+    const taskGroup = container.querySelector('.task-group')!;
+
+    expect(getComputedStyle(taskGroup).contentVisibility).toBe('auto');
+
+    await user.click(screen.getByRole('button', { name: '展开 Season 1' }));
+    expect(taskGroup).toHaveClass('is-expanded');
+    expect(getComputedStyle(taskGroup).contentVisibility).not.toBe('auto');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
 it('reveals nested cloud directory files only after each directory is expanded', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();

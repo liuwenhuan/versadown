@@ -186,6 +186,7 @@ async fn review_recycling_during_resolution_prevents_atomic_leaf_claim_and_submi
         "root",
         &plan,
         destination.path(),
+        false,
     )
     .unwrap();
     let item = store
@@ -245,6 +246,7 @@ async fn review_late_duplicate_retry_never_erases_the_successful_leaf_link() {
         "root",
         &plan,
         destination.path(),
+        false,
     )
     .unwrap();
     let item = store
@@ -572,6 +574,7 @@ async fn publishes_the_directory_root_before_any_leaf_is_created_or_published() 
             directory: Some(destination.path().to_path_buf()),
             ..Default::default()
         },
+        false,
         move |root| {
             assert_eq!(root.kind, "folder");
             assert_eq!(root.name, "夸克精选壁纸");

@@ -98,6 +98,27 @@ it('enables cleanup for application-created transfer files by default', () => {
   expect(screen.getByText('仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。')).toBeVisible();
 });
 
+it('requires a confirmed password before saving enabled private downloads', async () => {
+  const user = userEvent.setup();
+  const configurePrivacyDownload = vi.fn().mockResolvedValue({ ...initial, privacyDownloadEnabled: true, privacyPasswordConfigured: true });
+  render(<SettingsPanel initial={initial} onChange={() => {}} configurePrivacyDownload={configurePrivacyDownload} />);
+
+  await user.click(screen.getByRole('checkbox', { name: '开启隐私下载' }));
+  await user.type(screen.getByLabelText('隐私模式密码'), 'private-pass');
+  await user.type(screen.getByLabelText('确认隐私模式密码'), 'private-pass');
+  await user.click(screen.getByRole('button', { name: '保存隐私下载设置' }));
+
+  expect(configurePrivacyDownload).toHaveBeenCalledWith(true, 'private-pass');
+  expect(await screen.findByRole('status')).toHaveTextContent('隐私下载已开启');
+});
+
+it('uses the shared settings form treatment for privacy password inputs', () => {
+  render(<SettingsPanel initial={{ ...initial, privacyDownloadEnabled: true }} onChange={() => {}} />);
+
+  expect(screen.getByLabelText('隐私模式密码').closest('form')).toHaveClass('proxy-settings');
+  expect(screen.getByLabelText('确认隐私模式密码').closest('form')).toHaveClass('proxy-settings');
+});
+
 it('saves the preferred magnet metadata service from advanced settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();

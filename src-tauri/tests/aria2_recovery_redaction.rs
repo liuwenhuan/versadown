@@ -75,6 +75,7 @@ async fn recover_with_sensitive_persistence_failure(
             source: source.into(),
             name: "recovery fixture".into(),
             kind: "file".into(),
+            is_private: false,
         })
         .unwrap();
     let mut task = store.bind_gid(task.id, "recovery-gid").unwrap();

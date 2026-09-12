@@ -12,13 +12,17 @@ const state = vi.hoisted(() => ({
   confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
-  reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn()
+  reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
+  privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
+  updateCheck: vi.fn(), openExternalUrl: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
+  getPrivacyTaskVisibility: state.privacyVisibility,
+  checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
   defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } },
   getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 } }),
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
@@ -85,6 +89,12 @@ beforeEach(() => {
   state.reauthorizeFailedCloudTask.mockReset();
   state.getCompletedCloudAuthorization.mockReset().mockResolvedValue(null);
   state.completeCloudAuthorization.mockReset();
+  state.privacyVisibility.mockReset();
+  state.privacyVisibility.mockResolvedValue({ enabled: false, unlocked: false });
+  state.updateCheck.mockReset();
+  state.updateCheck.mockResolvedValue(null);
+  state.openExternalUrl.mockReset();
+  state.openExternalUrl.mockResolvedValue(undefined);
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -95,17 +105,65 @@ beforeEach(() => {
   });
 });
 
-it('uses native drag regions for the app title bar without the delayed bridge call', () => {
-  render(<App />);
-  const header = document.querySelector('.app-header')!;
-  const brand = document.querySelector('.brand')!;
+it('opens application information from About and returns to the task list', async () => {
+  state.list.mockResolvedValueOnce([oldTask]);
+  await act(async () => { render(<App />); });
+  const navigation = screen.getByRole('navigation', { name: '主导航' });
+  const about = within(navigation).getByRole('button', { name: '关于' });
+  await userEvent.click(about);
 
-  expect(brand).toHaveAttribute('data-tauri-drag-region');
-  expect(header.querySelector('[data-tauri-drag-region]')).toBeInTheDocument();
+  expect(about).toHaveClass('nav-active');
+  expect(about).toHaveAttribute('aria-current', 'page');
+  const page = screen.getByRole('region', { name: '关于' });
+  expect(within(page).getByRole('heading', { name: '万能下载 VersaDown' })).toBeVisible();
+  const configuration = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+  expect(within(page).getByText(`版本 ${configuration.version}`)).toBeVisible();
+  expect(within(page).getByRole('heading', { name: '主要功能' })).toBeVisible();
+  expect(within(page).getByRole('heading', { name: '使用说明' })).toBeVisible();
+  expect(screen.queryByText('Windows Beta')).not.toBeInTheDocument();
 
-  fireEvent.mouseDown(brand, { button: 0 });
+  await userEvent.click(within(navigation).getByRole('button', { name: /^任务/ }));
+  expect(screen.queryByRole('region', { name: '关于' })).not.toBeInTheDocument();
+  expect(screen.getByText('archive.iso')).toBeVisible();
+  expect(about).not.toHaveClass('nav-active');
+  expect(about).not.toHaveAttribute('aria-current');
+});
 
-  expect(state.startDragging).not.toHaveBeenCalled();
+it('anchors About at the bottom of the sidebar without the Beta footer', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    await act(async () => { render(<App />); });
+    const navigation = screen.getByRole('navigation', { name: '主导航' });
+    const about = within(navigation).getByRole('button', { name: '关于' });
+    expect(within(navigation).getAllByRole('button').at(-1)).toBe(about);
+    expect(getComputedStyle(about).marginTop).toBe('auto');
+    expect(screen.queryByText('Windows Beta')).not.toBeInTheDocument();
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('highlights a newer release and opens its official download page from About', async () => {
+  const update = {
+    version: '0.2.0',
+    notes: '新增版本更新提示，并优化隐私任务操作体验。',
+    downloadUrl: 'https://versadown.aigutta.com/download.html'
+  };
+  state.updateCheck.mockResolvedValue(update);
+  const user = userEvent.setup();
+  await act(async () => { render(<App />); });
+
+  const navigation = screen.getByRole('navigation', { name: '主导航' });
+  await user.click(await within(navigation).findByRole('button', { name: '有新版本' }));
+
+  const updateLink = await screen.findByRole('button', { name: '下载新版本 0.2.0' });
+  expect(updateLink).toHaveTextContent('新版本发布：0.2.0');
+  expect(updateLink).toHaveTextContent(update.notes);
+  await user.click(updateLink);
+
+  expect(state.openExternalUrl).toHaveBeenCalledWith(update.downloadUrl);
 });
 
 it('keeps title-bar controls outside native drag regions', () => {
@@ -325,7 +383,9 @@ it('uses the dark launcher graphic and vector icons in the primary navigation', 
     expect(brandMark?.querySelector('img')).toHaveAttribute('src', expect.stringContaining('dark_mint'));
 
     const navigation = screen.getByRole('navigation', { name: '主导航' });
-    expect(navigation.querySelectorAll('.nav-icon svg')).toHaveLength(3);
+    for (const button of within(navigation).getAllByRole('button')) {
+      expect(button.querySelector('.nav-icon svg')).toBeInTheDocument();
+    }
     expect(navigation).not.toHaveTextContent('↓');
     expect(navigation).not.toHaveTextContent('☁');
     expect(navigation).not.toHaveTextContent('⚙');
@@ -386,6 +446,39 @@ it('sorts only the active task tab from the menu beside total speed', async () =
 
   await user.click(screen.getByRole('tab', { name: /已完成/ }));
   expect(visibleNames()).toEqual(['delta.zip', 'beta.zip']);
+});
+
+it('filters unlocked private tasks from the task sort menu', async () => {
+  const ordinaryTask: QueueTask = { ...oldTask, id: 'ordinary-task', name: 'ordinary.zip' };
+  const privateTask: QueueTask = { ...oldTask, id: 'private-task', name: 'private.zip', is_private: true };
+  state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: true });
+  state.list.mockResolvedValue([ordinaryTask, privateTask]);
+  const user = userEvent.setup();
+  render(<App />);
+
+  const queue = await screen.findByRole('region', { name: '下载队列' });
+  expect(await screen.findByRole('button', { name: '锁定隐私任务' })).toBeVisible();
+  expect(screen.queryByRole('combobox', { name: '筛选任务' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '仅隐私任务' }));
+
+  await waitFor(() => expect(within(queue).getByTitle('private.zip')).toBeVisible());
+  expect(within(queue).queryByTitle('ordinary.zip')).not.toBeInTheDocument();
+});
+
+it('uses the shared line icon and input treatment when unlocking private tasks', async () => {
+  state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: false });
+  const user = userEvent.setup();
+  render(<App />);
+
+  const unlockButton = await screen.findByRole('button', { name: '解锁隐私任务' });
+  expect(unlockButton.querySelector('svg')).not.toBeNull();
+  expect(unlockButton).not.toHaveTextContent('🔒');
+  await user.click(unlockButton);
+
+  const passwordInput = await screen.findByLabelText('隐私模式密码');
+  expect(passwordInput.closest('.cloud-operation-editor')).not.toBeNull();
 });
 
 it('shows all start for paused tasks and resumes every paused task from the active tab', async () => {
@@ -643,12 +736,12 @@ it('keeps a protected share open for an access code before completing its normal
   expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
   expect(downloadInput).toHaveValue(shareLink);
   expect(accessCode).toHaveFocus();
-  expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined);
+  expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined, false);
 
   await user.type(accessCode, '1234');
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
 
-  await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234'));
+  await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234', false));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
   expect(screen.getByText('archive.iso')).toBeVisible();
 });
@@ -923,7 +1016,7 @@ it('does not let an old response clear a reparsed confirmation for the same shar
   fireEvent.click(secondSubmit);
   fireEvent.click(secondSubmit);
   expect(state.confirmCloud).toHaveBeenCalledTimes(2);
-  expect(state.confirmCloud).toHaveBeenLastCalledWith('cloud-share://uc/same-plan', ['f2'], undefined);
+  expect(state.confirmCloud).toHaveBeenLastCalledWith('cloud-share://uc/same-plan', ['f2'], undefined, false);
 
   await act(async () => { firstSubmission.resolve({ outcomes: [], failures: [] }); });
 
@@ -1193,7 +1286,7 @@ it('reopens awaiting magnet file confirmation and confirms only through the dial
   expect(state.selectFiles).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
 
-  expect(state.confirm).toHaveBeenCalledWith('magnet-awaiting', ['1']);
+  expect(state.confirm).toHaveBeenCalledWith('magnet-awaiting', ['1'], undefined, false);
   expect(state.selectFiles).not.toHaveBeenCalled();
 });
 
