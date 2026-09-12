@@ -2544,8 +2544,13 @@ pub async fn cloud_login_password(
         let reset_baidu_profile = provider == CloudProvider::Baidu
             && prepare_baidu_account_login(&state.store, &username)?;
         let reset_password_profile = prepare_password_account_login(&state.store, provider, &username)?;
+        reset_password_profile_if_required(
+            &state.store,
+            provider,
+            reset_baidu_profile || reset_password_profile,
+            || clear_password_webview_profile(&browser_app, provider),
+        )?;
         if reset_baidu_profile || reset_password_profile {
-            clear_password_webview_profile(&browser_app, provider)?;
             if provider == CloudProvider::Baidu {
                 set_baidu_browser_profile_username(&state.store, None)?;
             }

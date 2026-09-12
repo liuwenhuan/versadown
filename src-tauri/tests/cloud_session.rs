@@ -217,6 +217,143 @@ struct LoadRecordingStore {
     load_calls: AtomicUsize,
 }
 
+fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
+    use alldownloader_lib::cloud::{
+        prepare_password_account_login, reset_password_profile_if_required, DpapiCredentialStore,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let store = DpapiCredentialStore::new(root.path().to_owned()).unwrap();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(provider, "old-account", "alice", "old-secret"),
+    )
+    .unwrap();
+    store.save(provider.key(), b"old-session").unwrap();
+    let attempt = |store: &DpapiCredentialStore| -> Result<&str, QuarkError> {
+        let reset = prepare_password_account_login(store, provider, "bob")?;
+        reset_password_profile_if_required(store, provider, reset, || Err(QuarkError::Storage))?;
+        Ok("old-account")
+    };
+    assert!(attempt(&store).is_err());
+    assert!(store.load(provider.key()).unwrap().is_none());
+    drop(store);
+    let reopened = DpapiCredentialStore::new(root.path().to_owned()).unwrap();
+    assert!(
+        attempt(&reopened).is_err(),
+        "{provider:?} must not accept old-account after a failed profile reset and restart"
+    );
+    let marker = format!("cloud-password-profile-reset-{}", provider.key());
+    assert_eq!(reopened.load(&marker).unwrap(), Some(b"1".to_vec()));
+    assert_ne!(
+        std::fs::read(root.path().join(format!("{marker}.bin"))).unwrap(),
+        b"1"
+    );
+    // A real successful reset is the sole path allowed to remove the marker.
+    let reset_calls = Cell::new(0);
+    reset_password_profile_if_required(&reopened, provider, false, || {
+        reset_calls.set(reset_calls.get() + 1);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(reset_calls.get(), 1);
+    assert!(reopened.load(&marker).unwrap().is_none());
+    assert!(!prepare_password_account_login(&reopened, provider, "bob").unwrap());
+}
+
+#[test]
+fn failed_password_profile_reset_survives_restart_for_baidu() {
+    verify_failed_password_profile_reset_after_restart(CloudProvider::Baidu);
+}
+
+#[test]
+fn failed_password_profile_reset_survives_restart_for_tianyi() {
+    verify_failed_password_profile_reset_after_restart(CloudProvider::Tianyi);
+}
+
+#[test]
+fn failed_profile_marker_removal_keeps_reset_mandatory_and_blocks_login() {
+    use alldownloader_lib::cloud::{
+        prepare_password_account_login, reset_password_profile_if_required,
+    };
+    struct RemovalFailure {
+        inner: MemoryCredentialStore,
+    }
+    impl CredentialStore for RemovalFailure {
+        fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+            self.inner.save(key, bytes)
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+            self.inner.load(key)
+        }
+        fn remove(&self, key: &str) -> Result<(), QuarkError> {
+            if key.starts_with("cloud-password-profile-reset-") {
+                return Err(QuarkError::Storage);
+            }
+            self.inner.remove(key)
+        }
+    }
+    for provider in [CloudProvider::Baidu, CloudProvider::Tianyi] {
+        let store = RemovalFailure {
+            inner: MemoryCredentialStore::default(),
+        };
+        assert!(reset_password_profile_if_required(&store, provider, true, || Ok(())).is_err());
+        assert!(prepare_password_account_login(&store, provider, "bob").unwrap());
+    }
+}
+
+#[test]
+fn failed_profile_marker_write_preserves_old_owner_and_never_starts_reset() {
+    use alldownloader_lib::cloud::{
+        prepare_password_account_login, reset_password_profile_if_required,
+    };
+    struct MarkerWriteFailure {
+        inner: MemoryCredentialStore,
+    }
+    impl CredentialStore for MarkerWriteFailure {
+        fn save(&self, key: &str, bytes: &[u8]) -> Result<(), QuarkError> {
+            if key.starts_with("cloud-password-profile-reset-") {
+                return Err(QuarkError::Storage);
+            }
+            self.inner.save(key, bytes)
+        }
+        fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+            self.inner.load(key)
+        }
+        fn remove(&self, key: &str) -> Result<(), QuarkError> {
+            self.inner.remove(key)
+        }
+    }
+    for provider in [CloudProvider::Baidu, CloudProvider::Tianyi] {
+        let store = MarkerWriteFailure {
+            inner: MemoryCredentialStore::default(),
+        };
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(provider, "old", "alice", "secret"),
+        )
+        .unwrap();
+        store.save(provider.key(), b"old-session").unwrap();
+        assert!(prepare_password_account_login(&store, provider, "bob").is_err());
+        assert_eq!(
+            store.load(provider.key()).unwrap(),
+            Some(b"old-session".to_vec())
+        );
+        assert_eq!(
+            load_password_credential(&store, provider)
+                .unwrap()
+                .unwrap()
+                .username(),
+            "alice"
+        );
+        assert!(
+            reset_password_profile_if_required(&store, provider, true, || panic!(
+                "must persist obligation before browser reset"
+            ))
+            .is_err()
+        );
+    }
+}
+
 impl CredentialStore for LoadRecordingStore {
     fn save(&self, _: &str, _: &[u8]) -> Result<(), QuarkError> {
         Ok(())

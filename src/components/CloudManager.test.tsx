@@ -99,6 +99,49 @@ it('restores encrypted login input into masked fields and keeps it after a faile
   expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '****');
 });
 
+it('preserves a password edited while an earlier login is pending and submits the newer value next', async () => {
+  let rejectFirst!: (error: unknown) => void;
+  const pending = new Promise<never>((_, reject) => { rejectFirst = reject; });
+  const client = createCloudFake({
+    loginCloudWithPassword: vi.fn().mockReturnValueOnce(pending).mockRejectedValue(new Error('第二次失败')),
+    getSavedCloudCredentials: vi.fn().mockResolvedValueOnce(null).mockResolvedValue({ username: 'alice', hasSavedPassword: true })
+  });
+  render(<CloudManager provider="baidu" client={client} authorizationOnly />);
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.change(screen.getByLabelText('账号'), { target: { value: 'alice' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'P1' } });
+  fireEvent.submit(screen.getByLabelText('密码').closest('form')!);
+  expect(screen.getByLabelText('密码')).not.toBeDisabled();
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'P2' } });
+  await act(async () => { rejectFirst(new Error('第一次失败')); });
+  expect(screen.getByLabelText('密码')).toHaveValue('P2');
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '密码');
+  await act(async () => { fireEvent.submit(screen.getByLabelText('密码').closest('form')!); });
+  expect(client.loginCloudWithPassword).toHaveBeenLastCalledWith('baidu', { username: 'alice', password: 'P2' });
+});
+
+it('does not restore a stale saved-password placeholder after editing during metadata refresh', async () => {
+  let finishMetadata!: (value: { username: string; hasSavedPassword: boolean }) => void;
+  const metadata = new Promise<{ username: string; hasSavedPassword: boolean }>(resolve => { finishMetadata = resolve; });
+  const client = createCloudFake({
+    loginCloudWithPassword: vi.fn().mockRejectedValue(new Error('登录失败')),
+    getSavedCloudCredentials: vi.fn().mockResolvedValueOnce(null).mockReturnValueOnce(metadata)
+  });
+  render(<CloudManager provider="baidu" client={client} authorizationOnly />);
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.change(screen.getByLabelText('账号'), { target: { value: 'alice' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'P1' } });
+  await act(async () => { fireEvent.submit(screen.getByLabelText('密码').closest('form')!); });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'P2' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: '' } });
+  await act(async () => { finishMetadata({ username: 'alice', hasSavedPassword: true }); });
+  expect(screen.getByLabelText('密码')).toHaveValue('');
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '密码');
+  fireEvent.submit(screen.getByLabelText('密码').closest('form')!);
+  expect(screen.getByText('请输入账号和密码后再登录。')).toBeVisible();
+  expect(client.loginCloudWithPassword).toHaveBeenCalledTimes(1);
+});
+
 it('sends only the edited password and never the saved-password handle', async () => {
   const client = createCloudFake({ getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', hasSavedPassword: true }) });
   render(<CloudManager provider="tianyi" client={client} authorizationOnly />);

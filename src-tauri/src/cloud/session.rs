@@ -509,6 +509,37 @@ pub(crate) fn uses_password_browser_profile(provider: CloudProvider) -> bool {
     matches!(provider, CloudProvider::Baidu | CloudProvider::Tianyi)
 }
 
+fn password_profile_reset_pending(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+) -> Result<bool, QuarkError> {
+    let Some(key) = super::password_profile_reset_key(provider) else {
+        return Ok(false);
+    };
+    match store.load(key)? {
+        None => Ok(false),
+        Some(value) if value == b"1" => Ok(true),
+        Some(_) => Err(QuarkError::Storage),
+    }
+}
+
+/// A durable marker survives account cleanup and restart. Only a successful
+/// browser reset may remove it; a failed reset never permits login to continue.
+pub fn reset_password_profile_if_required(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+    force: bool,
+    reset: impl FnOnce() -> Result<(), QuarkError>,
+) -> Result<(), QuarkError> {
+    if !force && !password_profile_reset_pending(store, provider)? {
+        return Ok(());
+    }
+    let key = super::password_profile_reset_key(provider).ok_or(QuarkError::Storage)?;
+    store.save(key, b"1")?;
+    reset()?;
+    store.remove(key)
+}
+
 /// Clears a previous account and returns whether its password WebView profile
 /// also needs resetting. Direct-only providers have no such profile.
 pub fn prepare_password_account_login(
@@ -516,6 +547,7 @@ pub fn prepare_password_account_login(
     provider: CloudProvider,
     username: &str,
 ) -> Result<bool, QuarkError> {
+    let pending_reset = password_profile_reset_pending(store, provider)?;
     let credential = load_password_credential(store, provider)?;
     let draft = load_password_login_draft(store, provider)?;
     let owner = if provider == CloudProvider::Baidu {
@@ -534,9 +566,14 @@ pub fn prepare_password_account_login(
             .is_some_and(|value| value.as_str() != username)
         || (credential.is_none() && store.load(provider.key())?.is_some());
     if changed {
+        if let Some(key) = super::password_profile_reset_key(provider) {
+            // Record the obligation before removing the last evidence of the
+            // old owner. CredentialStore encrypts and atomically publishes it.
+            store.save(key, b"1")?;
+        }
         clear_password_account(store, provider)?;
     }
-    Ok(changed && uses_password_browser_profile(provider))
+    Ok(pending_reset || (changed && uses_password_browser_profile(provider)))
 }
 
 pub fn run_with_session_recovery<T>(

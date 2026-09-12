@@ -434,6 +434,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const [passwordLoginBusy, setPasswordLoginBusy] = useState(false);
   const passwordLoginInFlight = useRef(false);
   const passwordFieldsEdited = useRef(false);
+  const passwordInputVersion = useRef(0);
   const effectiveAuthorizationCapabilities = descriptor.authorization;
   const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
@@ -573,16 +574,19 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const credentials: CloudCredentials = useSavedPassword
       ? { username: username.trim(), useSavedPassword: true }
       : { username: username.trim(), password };
+    const submittedInputVersion = passwordInputVersion.current;
     passwordLoginInFlight.current = true;
     setPasswordLoginBusy(true);
     try {
       await addAccount(() => client.loginCloudWithPassword(provider, credentials));
     } finally {
       // Submitted plaintext is released from component state after the attempt.
-      if (credentials.password) {
+      if (credentials.password && passwordInputVersion.current === submittedInputVersion) {
         setPassword('');
         const saved = await client.getSavedCloudCredentials?.(provider).catch(() => null);
-        setSavedUsername(saved?.hasSavedPassword ? saved.username : null);
+        if (passwordInputVersion.current === submittedInputVersion) {
+          setSavedUsername(saved?.hasSavedPassword ? saved.username : null);
+        }
       }
       passwordLoginInFlight.current = false;
       setPasswordLoginBusy(false);
@@ -831,8 +835,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       <header className="cloud-heading"><h2>{label}网盘</h2></header>
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsDirectPasswordLogin && <>
-          <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; setUsername(event.target.value); }} />
-          <input aria-label="密码" placeholder={useSavedPassword ? "****" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; setSavedUsername(null); setPassword(event.target.value); }} />
+          <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
+          <input aria-label="密码" placeholder={useSavedPassword ? "****" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
           <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? '正在自动登录…' : '登录'}</button>
         </>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}

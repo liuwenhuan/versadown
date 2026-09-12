@@ -90,3 +90,53 @@ Rust 既有警告：两个无关的 dead_code、Windows linker 导出信息与 r
 - `src/visual-tests/CloudAuthorizationVisual.tsx`：编译发现的必要调用方迁移。
 
 自审关注点：前端返回类型不能携带密码；空白/冲突/跨用户名引用拒绝；网页流程不在清理前写新 session；密码保存失败不留下部分 session；各 owner 删除错误不短路其它删除；PikPak 不误走密码浏览器；工作区标签仍按 catalog；旧单账号记录仍可读。未运行真实服务商登录和 Windows WebView 交互验收，服务商行为由当前定向测试及发布编译验证。
+
+## Fix round 1：持久重置义务与编辑版本保护
+
+基线 `ef3532f`。本轮按审查意见逐条验证，不派生子代理。
+
+### P1：失败的浏览器清理不能丢失重置义务
+
+根因确认：旧实现先删除 session/password/draft/profile owner，再清理浏览器数据。清理失败后没有持久状态证明仍需清理；重新打开存储并提交同一新用户名时，旧 owner 已为空，代码会绕过重置。
+
+RED 命令：
+
+```powershell
+C:/Users/deepin/.cargo/bin/cargo.exe test --manifest-path src-tauri/Cargo.toml --test cloud_session failed_password_profile_reset
+```
+
+退出 1。`failed_password_profile_reset_is_required_again_after_reopening_encrypted_store` 在真正创建/关闭/重新创建 DpapiCredentialStore 后断言失败：`Baidu must not accept old-account after a failed profile reset and restart`。并非 mock 存储或源代码文本检查。
+
+修复：统一安全凭据键契约新增 `cloud-password-profile-reset-baidu`、`cloud-password-profile-reset-tianyi`；仍通过现有 DPAPI 存储加密、临时文件写入与原子发布。`prepare_password_account_login` 必须先保存标志，才可清理旧 owner；后续准备登录始终重读该标志。`reset_password_profile_if_required` 先确保持久标志存在，再执行真实 WebView 清理回调；回调成功后使用存储的单文件删除操作原子删除标志。写标志、清理或删标志失败均返回错误，阻断保存登录草稿和接受旧浏览器账号。任何普通账号凭据清理都不删除此标志。
+
+最终测试拆为百度和天翼两个独立重启用例，均验证：第一次清理失败 → 旧 session 已清理 → 重开同一加密存储 → 仍强制清理，无法到达接受 old-account 的分支 → 标志文件是密文 → 成功清理才删除标志，之后不再重复重置。另有标志写入失败保留旧 owner/不启动浏览器清理、标志删除失败保留重置义务并阻止登录的测试。标志只在 Rust 内使用，不加入前端 DTO，不明文写盘。
+
+### P2：旧请求不能清空用户后来输入的密码
+
+根因确认：原 finally 块无条件清密码，并异步恢复保存元数据。请求等待期间输入 P2，旧请求结束后会将 P2 清空。
+
+RED 命令：
+
+```powershell
+node_modules/.bin/vitest.cmd run src/components/CloudManager.test.tsx --exclude '.worktrees/**' -t 'preserves a password edited'
+```
+
+退出 1：`preserves a password edited while an earlier login is pending and submits the newer value next` 预期输入值 P2，实际空串。输入保持可编辑，测试确实在延迟失败请求期间输入了新密码。
+
+修复：用户名和密码编辑递增输入版本，提交时捕获版本快照。旧请求结束时仅在版本仍匹配时清本次输入；读取保存元数据后再次核对版本，防止这个异步阶段覆盖新编辑。未禁用输入，也没有仅靠字符串相等判断而忽略编辑后改回原值的情形。
+
+GREEN 覆盖 P1 请求延迟失败期间输入 P2、P2 保留且下次确实提交 P2；同时覆盖元数据刷新期间编辑并清空密码，旧响应不能恢复 `****` 或偷偷提交保存引用。
+
+### 本轮最终验证与自审
+
+```powershell
+C:/Users/deepin/.cargo/bin/cargo.exe test --manifest-path src-tauri/Cargo.toml --test cloud_session --test cloud_provider_contract
+node_modules/.bin/vitest.cmd run src/components/CloudManager.test.tsx src/components/CloudWorkspace.test.tsx src/lib/cloudApi.test.ts --exclude '.worktrees/**'
+pnpm build
+./scripts/build-windows.ps1
+git diff --check
+```
+
+Rust 指定集退出 0：cloud_session 15、cloud_provider_contract 12，共 27 项。前端指定集退出 0：CloudManager 94、CloudWorkspace 15、cloudApi 4，共 113 项。`pnpm build` 退出 0，62 模块。`./scripts/build-windows.ps1` 退出 0，release 用时 54.45 秒，已重新发布主程序与 aria2 sidecar。`git diff --check` 退出 0。
+
+本轮改动仅涉及 credentials/session/commands、CloudManager 及相关测试和本报告。保留已有 Rust dead_code、链接信息和 Vite 分块提示，没有新增阻塞问题。自审确认持久标志写入先于 owner 删除，失败回调与失败删标志均不继续登录；同一 provider 的既有串行执行边界保持不变。真实 Windows DPAPI 重开与密文检查已执行；真实服务商登录和实际 WebView 清理仍未交互验收，失败回调边界通过定向测试注入。

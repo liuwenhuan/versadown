@@ -44,6 +44,14 @@ pub(crate) const BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY: &str =
 pub(crate) const BAIDU_BROWSER_PROFILE_USERNAME_KEY: &str =
     "cloud-password-baidu-browser-profile-username";
 
+pub(crate) fn password_profile_reset_key(provider: super::CloudProvider) -> Option<&'static str> {
+    match provider {
+        super::CloudProvider::Baidu => Some("cloud-password-profile-reset-baidu"),
+        super::CloudProvider::Tianyi => Some("cloud-password-profile-reset-tianyi"),
+        _ => None,
+    }
+}
+
 pub fn credential_key_is_supported(key: &str) -> bool {
     matches!(
         key,
@@ -64,6 +72,8 @@ pub fn credential_key_is_supported(key: &str) -> bool {
             | "cloud-password-draft-tianyi"
             | BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY
             | BAIDU_BROWSER_PROFILE_USERNAME_KEY
+            | "cloud-password-profile-reset-baidu"
+            | "cloud-password-profile-reset-tianyi"
             | "cloud-auth-maintenance-quark"
             | "cloud-auth-maintenance-pikpak"
             | "cloud-auth-maintenance-baidu"
