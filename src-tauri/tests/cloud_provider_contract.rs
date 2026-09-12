@@ -14,6 +14,256 @@ use std::{
     sync::Mutex,
 };
 
+// A wrong provider selection, dropped argument, or capability bypass must be observable here.
+#[test]
+fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
+    use alldownloader_lib::cloud::driver::*;
+    use alldownloader_lib::cloud::{
+        CloudAccount, CloudAuthMethod, CloudDirectory, CloudError, CloudFile, ProviderRegistry,
+    };
+    use std::sync::Arc;
+    struct RecordingFactory(Arc<Mutex<Vec<String>>>);
+    struct RecordingDriver(Arc<Mutex<Vec<String>>>);
+    impl DriveOps for RecordingDriver {
+        fn account(&mut self) -> Result<CloudAccount, CloudError> {
+            self.0.lock().unwrap().push("account".into());
+            Ok(CloudAccount {
+                provider: CloudProvider::Quark,
+                id: "recorded".into(),
+                display_name: "recorded".into(),
+                auth_method: CloudAuthMethod::Web,
+            })
+        }
+        fn list_directory(&mut self, parent: &str) -> Result<CloudDirectory, CloudError> {
+            self.0.lock().unwrap().push(format!("list:{parent}"));
+            Ok(CloudDirectory {
+                id: parent.into(),
+                items: vec![],
+            })
+        }
+        fn rename(&mut self, file: &str, name: &str) -> Result<(), CloudError> {
+            self.0.lock().unwrap().push(format!("rename:{file}:{name}"));
+            Ok(())
+        }
+        fn trash_transferred_files(&mut self, files: &[String]) -> Result<(), CloudError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("cleanup:{}", files.join(",")));
+            Ok(())
+        }
+    }
+    impl DownloadOps for RecordingDriver {
+        fn resolve_download(
+            &mut self,
+            file: &str,
+        ) -> Result<alldownloader_lib::cloud::commands::ResolvedCloudDownload, CloudError> {
+            self.0.lock().unwrap().push(format!("download:{file}"));
+            Ok(alldownloader_lib::cloud::commands::ResolvedCloudDownload {
+                url: "https://download.example/file".into(),
+                name: file.into(),
+                headers: vec![],
+            })
+        }
+    }
+    impl ProviderAuth for RecordingDriver {
+        fn recover_password(
+            &mut self,
+            credential: &CloudPasswordCredential,
+        ) -> Result<(CloudAccount, Vec<u8>), CloudError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("auth:{}", credential.username()));
+            Ok((
+                CloudAccount {
+                    provider: CloudProvider::Quark,
+                    id: "recorded".into(),
+                    display_name: "recorded".into(),
+                    auth_method: CloudAuthMethod::Password,
+                },
+                b"snapshot".to_vec(),
+            ))
+        }
+    }
+    impl UploadOps for RecordingDriver {
+        fn upload(
+            &mut self,
+            _state: &alldownloader_lib::cloud::commands::CloudState,
+            _http: &dyn UploadHttp,
+            parent: &str,
+            path: &std::path::Path,
+        ) -> Result<CloudFile, CloudError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("upload:{parent}:{}", path.display()));
+            Ok(CloudFile {
+                id: "uploaded".into(),
+                parent_id: parent.into(),
+                name: "file".into(),
+                kind: "file".into(),
+                size: Some(3),
+                modified_at: None,
+            })
+        }
+    }
+    impl ProviderBackend for RecordingDriver {}
+    impl ProviderDriverFactory for RecordingFactory {
+        fn create<'a>(
+            &self,
+            provider: CloudProvider,
+            _store: &'a dyn CredentialStore,
+            _http: &'a dyn CloudHttpTransport,
+        ) -> Box<dyn ProviderBackend + 'a> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("provider:{}", provider.key()));
+            Box::new(RecordingDriver(self.0.clone()))
+        }
+    }
+    struct NoNetwork;
+    impl CloudHttpTransport for NoNetwork {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
+            panic!("unsupported operations must not perform network I/O")
+        }
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = ProviderRegistry::with_driver_factory(Arc::new(RecordingFactory(calls.clone())));
+    let store = MemoryCredentialStore::default();
+    let mut facade = registry.driver(CloudProvider::Quark, &store, &NoNetwork);
+    assert_eq!(facade.account().unwrap().id, "recorded");
+    assert_eq!(facade.list_directory("parent").unwrap().id, "parent");
+    facade.rename("file", "renamed").unwrap();
+    facade
+        .trash_transferred_files(&["transferred".into()])
+        .unwrap();
+    assert_eq!(facade.resolve_download("leaf").unwrap().name, "leaf");
+    assert_eq!(
+        facade
+            .auth()
+            .recover_password(&CloudPasswordCredential::new(
+                CloudProvider::Quark,
+                "recorded",
+                "user",
+                "secret"
+            ))
+            .unwrap()
+            .1,
+        b"snapshot"
+    );
+    assert!(matches!(
+        facade.copy_files(&["file".into()], "parent"),
+        Err(CloudError::ProviderUnsupported)
+    ));
+    let upload_root = tempfile::tempdir().unwrap();
+    let state =
+        alldownloader_lib::cloud::commands::CloudState::new(upload_root.path().into()).unwrap();
+    let upload_http = alldownloader_lib::cloud::ReqwestTransport::new().unwrap();
+    assert_eq!(
+        facade
+            .upload(
+                &state,
+                &upload_http,
+                "parent",
+                std::path::Path::new("file.bin")
+            )
+            .unwrap()
+            .id,
+        "uploaded"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            "provider:quark",
+            "account",
+            "list:parent",
+            "rename:file:renamed",
+            "cleanup:transferred",
+            "download:leaf",
+            "auth:user",
+            "upload:parent:file.bin"
+        ]
+    );
+    let mut disabled = registry.get(CloudProvider::Quark).capabilities;
+    disabled.rename = false;
+    disabled.upload = false;
+    let mut unsupported = ProviderDriver::new(disabled, Box::new(RecordingDriver(calls.clone())));
+    let before = calls.lock().unwrap().len();
+    assert!(matches!(
+        unsupported.rename("file", "forbidden"),
+        Err(CloudError::ProviderUnsupported)
+    ));
+    assert!(matches!(
+        unsupported.upload(
+            &state,
+            &upload_http,
+            "parent",
+            std::path::Path::new("forbidden.bin")
+        ),
+        Err(CloudError::ProviderUnsupported)
+    ));
+    assert_eq!(calls.lock().unwrap().len(), before);
+}
+
+#[test]
+fn public_command_exports_keep_all_provider_codes_and_file_kind_json() {
+    use alldownloader_lib::cloud::{commands, CloudFileKind};
+    let store = MemoryCredentialStore::default();
+    for provider in CloudProvider::ALL {
+        let capability =
+            serde_json::to_value(commands::cloud_provider_capabilities(provider)).unwrap();
+        assert_eq!(capability["provider"], provider.key());
+        let error =
+            commands::restore_account(provider, &store, &RecordingHttp::sequence([])).unwrap_err();
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["code"],
+            "not_authorized"
+        );
+        commands::logout_provider(provider, &store).unwrap();
+    }
+    assert_eq!(serde_json::to_value(CloudFileKind::File).unwrap(), "file");
+    assert_eq!(
+        serde_json::to_value(CloudFileKind::Folder).unwrap(),
+        "folder"
+    );
+    assert!(serde_json::from_str::<CloudFileKind>("\"invalid\"").is_err());
+}
+
+#[test]
+fn native_capability_drivers_work_in_a_consumer_without_a_tauri_host() {
+    use alldownloader_lib::cloud::{CloudError, ProviderRegistry};
+    struct NoNetwork;
+    impl CloudHttpTransport for NoNetwork {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
+            panic!("an unauthorized native driver must fail before network I/O")
+        }
+    }
+    let store = MemoryCredentialStore::default();
+    for provider in CloudProvider::ALL {
+        let mut driver = ProviderRegistry::global().driver(provider, &store, &NoNetwork);
+        let _recipe = driver.auth().web_authorization_recipe();
+        assert!(
+            matches!(driver.account(), Err(CloudError::NotAuthorized)),
+            "{provider:?}"
+        );
+        let directory_error = driver
+            .list_directory(ProviderRegistry::global().get(provider).root_directory_id)
+            .unwrap_err();
+        let expected_code = if matches!(provider, CloudProvider::Quark | CloudProvider::Pikpak | CloudProvider::Aliyun) {
+            "credentials_expired"
+        } else {
+            "not_authorized"
+        };
+        assert_eq!(
+            serde_json::to_value(directory_error).unwrap()["code"],
+            expected_code,
+            "{provider:?}"
+        );
+    }
+}
+
 #[test]
 fn browser_account_replacement_fails_closed_and_attempts_all_owner_cleanup() {
     use alldownloader_lib::cloud::{

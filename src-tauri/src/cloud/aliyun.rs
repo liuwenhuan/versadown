@@ -914,7 +914,7 @@ fn parse_file(value: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
             .ok_or(QuarkError::InvalidResponse)?,
-        kind: required(value, "type")?,
+        kind: required(value, "type")?.parse()?,
         size: value
             .get("size")
             .and_then(|size| size.as_u64().or_else(|| size.as_str()?.parse().ok())),

@@ -1,6 +1,6 @@
 use super::{CloudAuthorizationCapabilities, CloudProvider, PasswordLoginMode};
 use serde::Serialize;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use url::Url;
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -34,6 +34,14 @@ pub struct ProviderDescriptor {
     pub authorization: CloudAuthorizationCapabilities,
     pub authorization_url: &'static str,
     pub password_login_hosts: &'static [&'static str],
+    #[serde(skip)]
+    pub web_session_cookie_urls: &'static [&'static str],
+    #[serde(skip)]
+    pub(crate) browser_context: bool,
+    #[serde(skip)]
+    pub(crate) browser_profile_owner: bool,
+    #[serde(skip)]
+    pub(crate) recycle_directory_download: bool,
     pub capabilities: ProviderCapabilities,
     /// Exact hosts: suffix and query-string matches are never trusted.
     pub share_hosts: &'static [&'static str],
@@ -70,6 +78,7 @@ impl ProviderDescriptor {
 
 pub struct ProviderRegistry {
     descriptors: Vec<ProviderDescriptor>,
+    driver_factory: Arc<dyn super::driver::ProviderDriverFactory>,
 }
 
 impl ProviderRegistry {
@@ -77,7 +86,27 @@ impl ProviderRegistry {
         static REGISTRY: OnceLock<ProviderRegistry> = OnceLock::new();
         REGISTRY.get_or_init(|| Self {
             descriptors: CloudProvider::ALL.into_iter().map(descriptor).collect(),
+            driver_factory: Arc::new(super::driver::NativeDriverFactory),
         })
+    }
+
+    pub fn with_driver_factory(factory: Arc<dyn super::driver::ProviderDriverFactory>) -> Self {
+        Self {
+            descriptors: CloudProvider::ALL.into_iter().map(descriptor).collect(),
+            driver_factory: factory,
+        }
+    }
+
+    pub fn driver<'a>(
+        &self,
+        provider: CloudProvider,
+        store: &'a dyn super::CredentialStore,
+        http: &'a dyn super::CloudHttpTransport,
+    ) -> super::driver::ProviderDriver<'a> {
+        super::driver::ProviderDriver::new(
+            self.get(provider).capabilities,
+            self.driver_factory.create(provider, store, http),
+        )
     }
 
     pub fn all(&self) -> &[ProviderDescriptor] {
@@ -208,6 +237,9 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
     };
     ProviderDescriptor {
         provider,
+        browser_context: provider == Tianyi,
+        browser_profile_owner: provider == Baidu,
+        recycle_directory_download: provider != Pikpak,
         display_name,
         root_directory_id,
         recycle_bin_directory_id,
@@ -243,6 +275,13 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Baidu => &["pan.baidu.com", "passport.baidu.com"],
             Tianyi => &["cloud.189.cn", "open.e.189.cn"],
             _ => &[],
+        },
+        web_session_cookie_urls: match provider {
+            Tianyi => &["https://cloud.189.cn"],
+            Quark => &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
+            Baidu => &["https://pan.baidu.com"],
+            Uc => &["https://drive.uc.cn", "https://pc-api.uc.cn"],
+            Pikpak | Aliyun | Xunlei => &[],
         },
         candidate_aliases: match provider {
             Quark => &[("pan.quark.cn", "/"), ("quark.cn", "/s/")],

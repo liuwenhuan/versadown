@@ -2,6 +2,8 @@ pub mod aliyun;
 pub mod baidu;
 mod browser_login;
 pub mod commands;
+mod common;
+pub mod driver;
 mod credentials;
 mod http;
 mod pikpak;

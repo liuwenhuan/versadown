@@ -1,0 +1,264 @@
+use super::*;
+pub(super) struct BaiduDriver<'a> {
+    pub(super) store: StoreRef<'a>,
+    pub(super) http: HttpRef<'a>,
+}
+impl ProviderBackend for BaiduDriver<'_> {}
+impl DriveOps for BaiduDriver<'_> {
+    fn trash_transferred_files(&mut self, files: &[String]) -> Result<(), CloudError> {
+        baidu::BaiduClient::new(
+            load_provider_session(CloudProvider::Baidu, &self.store)?,
+            &self.http,
+        )
+        .trash_transferred_files(files)
+    }
+    fn account(&mut self) -> Result<CloudAccount, CloudError> {
+        let provider = CloudProvider::Baidu;
+        let store = &self.store;
+        let http = &self.http;
+        if store.load(provider.key())?.is_none() {
+            return Err(CloudError::NotAuthorized);
+        }
+        {
+            let session = load_provider_session(CloudProvider::Baidu, store)?;
+            baidu::BaiduClient::new(session, http).account()
+        }
+    }
+    fn list_directory(&mut self, parent_id: &str) -> Result<CloudDirectory, CloudError> {
+        let provider = CloudProvider::Baidu;
+        let store = &self.store;
+        let http = &self.http;
+        if is_provider_recycle_bin(provider, parent_id) {
+            return {
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http)
+                    .list_recycle_bin()
+            };
+        }
+        {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http)
+                .directory(parent_id)
+        }
+    }
+    fn create_directory(&mut self, parent_id: &str, name: &str) -> Result<CloudFile, CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        let h = http;
+        {
+            let client =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, h);
+            client.mkdir(&parent_id, &name)?;
+            find_created_directory(client.directory(&parent_id)?, &name)
+        }
+    }
+    fn rename(&mut self, file_id: &str, name: &str) -> Result<(), CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        let h = http;
+        {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, h)
+                .rename(&file_id, &name)
+        }
+    }
+    fn move_files(
+        &mut self,
+        file_ids: &[String],
+        target_parent_id: &str,
+    ) -> Result<(), CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        let h = http;
+        {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, h)
+                .move_files(&file_ids, &target_parent_id)
+        }
+    }
+    fn copy_files(
+        &mut self,
+        file_ids: &[String],
+        target_parent_id: &str,
+    ) -> Result<(), CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        let h = http;
+        {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, h)
+                .copy_files(&file_ids, &target_parent_id)
+        }
+    }
+    fn trash(&mut self, file_ids: &[String]) -> Result<(), CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        let h = http;
+        {
+            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, h)
+                .trash(&file_ids)
+        }
+    }
+    fn delete(&mut self, file_ids: &[String]) -> Result<(), CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        {
+            let client =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.delete_recycle_entries(file_ids)
+        }
+    }
+    fn restore(&mut self, file_ids: &[String]) -> Result<(), CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        {
+            let client =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http);
+            let recycle_bin = client.list_recycle_bin()?;
+            validate_recycle_entry_ids(file_ids, &recycle_bin)?;
+            client.restore_recycle_entries(file_ids)
+        }
+    }
+}
+impl DownloadOps for BaiduDriver<'_> {
+    fn resolve_download(&mut self, file_id: &str) -> Result<ResolvedCloudDownload, CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        {
+            let download =
+                baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, http)
+                    .download(file_id)?;
+            Ok(ResolvedCloudDownload {
+                url: download.url,
+                name: download.name,
+                headers: download.headers.into_iter().collect(),
+            })
+        }
+    }
+}
+impl ProviderAuth for BaiduDriver<'_> {
+    fn complete_web(&mut self, input: &WebAuthorizationInput) -> Result<CloudAccount, CloudError> {
+        let store = &self.store;
+        let http = &self.http;
+        {
+            let session = baidu::parse_baidu_web_session(&input.cookies)?;
+            let account = finalize_baidu_web_authorization(
+                crate::cloud::ProviderRegistry::global().get(CloudProvider::Baidu),
+                session,
+                store,
+                http,
+            )?;
+            Ok(account)
+        }
+    }
+    fn login_password(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<CloudAccount, CloudError> {
+        let provider = CloudProvider::Baidu;
+        let store = &self.store;
+        let http = &self.http;
+        let account = {
+            let native_result = if browser_password_login_preferred(store, provider)? {
+                Err(QuarkError::WebAuthorizationRequired)
+            } else {
+                baidu::BaiduClient::login_password(&username, &password, http)
+            };
+            let session = native_result?;
+            set_browser_password_login_preferred(store, provider, false)?;
+            let client = baidu::BaiduClient::new(session.clone(), http);
+            let account = client.account()?;
+            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
+            save_provider_session(CloudProvider::Baidu, store, &session)?;
+            account
+        };
+        Ok(account)
+    }
+    fn recover_password(
+        &mut self,
+        credential: &CloudPasswordCredential,
+    ) -> Result<(CloudAccount, Vec<u8>), CloudError> {
+        let provider = CloudProvider::Baidu;
+        let store = &self.store;
+        let http = &self.http;
+        Ok({
+            let session = match baidu::BaiduClient::login_password(
+                credential.username(),
+                credential.password(),
+                http,
+            ) {
+                Ok(session) => session,
+                Err(
+                    error @ (QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired),
+                ) => {
+                    set_browser_password_login_preferred(store, provider, true)?;
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
+            set_browser_password_login_preferred(store, provider, false)?;
+            let client = baidu::BaiduClient::new(session.clone(), http);
+            let account = client.account()?;
+            (
+                account,
+                serde_json::to_vec(&session).map_err(|_| CloudError::Storage)?,
+            )
+        })
+    }
+    fn validate_browser_password(
+        &mut self,
+        cookies: &[String],
+        _browser_context: Option<&serde_json::Value>,
+        report_stage: &mut dyn FnMut(&'static str),
+    ) -> Result<(CloudAccount, Vec<u8>), CloudError> {
+        let provider = CloudProvider::Baidu;
+        let http = &self.http;
+        Ok({
+            let mut session = baidu::parse_baidu_web_session(cookies)?;
+            session.auth_method = CloudAuthMethod::Password;
+            let client = baidu::BaiduClient::new(session.clone(), http);
+            report_stage("账号信息校验");
+            let account = client.account()?;
+            report_stage("目录访问校验");
+            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
+            (
+                account,
+                serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
+            )
+        })
+    }
+    fn web_session_snapshot(
+        &mut self,
+        input: &WebAuthorizationInput,
+    ) -> Result<Option<Vec<u8>>, CloudError> {
+        let cookies = &input.cookies;
+        Ok(Some(
+            serde_json::to_vec(&baidu::parse_baidu_web_session(&cookies)?)
+                .map_err(|_| QuarkError::Storage)?,
+        ))
+    }
+}
+impl UploadOps for BaiduDriver<'_> {
+    fn upload(
+        &mut self,
+        s: &CloudState,
+        upload_http: &dyn UploadHttp,
+        parent_id: &str,
+        path: &Path,
+    ) -> Result<CloudFile, CloudError> {
+        let h = UploadHttpRef(upload_http);
+        Ok(s.with_provider(CloudProvider::Baidu, |store| {
+            run_cloud_work(
+                CloudProvider::Baidu,
+                SessionWorkKind::Mutation,
+                store,
+                &h,
+                || {
+                    let client = baidu::BaiduClient::new(
+                        load_provider_session(CloudProvider::Baidu, store)?,
+                        &h,
+                    );
+                    client.upload_file(&parent_id, &path, &h)
+                },
+            )
+        })?)
+    }
+}

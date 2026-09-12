@@ -77,7 +77,7 @@ pub struct CloudFile {
     pub id: String,
     pub parent_id: String,
     pub name: String,
-    pub kind: String,
+    pub kind: CloudFileKind,
     pub size: Option<u64>,
     pub modified_at: Option<String>,
 }
@@ -85,6 +85,52 @@ pub struct CloudFile {
 pub struct CloudDirectory {
     pub id: String,
     pub items: Vec<CloudFile>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudFileKind {
+    File,
+    Folder,
+}
+
+impl CloudFileKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Folder => "folder",
+        }
+    }
+}
+
+impl std::str::FromStr for CloudFileKind {
+    type Err = CloudError;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "file" => Ok(Self::File),
+            "folder" => Ok(Self::Folder),
+            _ => Err(CloudError::InvalidResponse),
+        }
+    }
+}
+
+impl From<&str> for CloudFileKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "file" => Self::File,
+            "folder" => Self::Folder,
+            _ => panic!("invalid internal cloud file kind: {value}"),
+        }
+    }
+}
+
+impl PartialEq<&str> for CloudFileKind {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(
+            (self, *other),
+            (Self::File, "file") | (Self::Folder, "folder")
+        )
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,7 +165,7 @@ impl Drop for PasswordLoginRequest {
     }
 }
 #[derive(Debug, Error)]
-pub enum QuarkError {
+pub enum CloudError {
     #[error("尚未授权此网盘，请登录后使用")]
     NotAuthorized,
     #[error("网盘会话已过期，请重新登录授权")]
@@ -149,7 +195,9 @@ pub enum QuarkError {
     #[error("当前网盘服务尚未接通，请稍后重试")]
     ProviderUnsupported,
 }
-impl Serialize for QuarkError {
+pub use CloudError as QuarkError;
+
+impl Serialize for CloudError {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let code = match self {
             Self::NotAuthorized => "not_authorized",
@@ -179,4 +227,10 @@ pub(crate) fn required(v: &serde_json::Value, key: &str) -> Result<String, Quark
 }
 pub(crate) fn encoded(v: &str) -> String {
     url::form_urlencoded::byte_serialize(v.as_bytes()).collect()
+}
+
+pub struct ResolvedCloudDownload {
+    pub url: String,
+    pub name: String,
+    pub headers: Vec<(String, String)>,
 }

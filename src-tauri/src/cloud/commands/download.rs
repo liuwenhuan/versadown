@@ -1,0 +1,1075 @@
+use super::*;
+
+pub(crate) const MAX_DIRECTORY_DOWNLOAD_DIRECTORIES: usize = 1_000;
+
+pub(crate) const MAX_DIRECTORY_DOWNLOAD_FILES: usize = 10_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedCloudFile {
+    pub file_id: String,
+    pub relative_directory: Vec<String>,
+    pub output_name: String,
+    pub size: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloudDirectoryDownloadPlan {
+    pub files: Vec<PlannedCloudFile>,
+}
+
+/// Builds a bounded, path-safe file plan before any signed URL is resolved or
+/// task is submitted. A failed plan therefore cannot leave a partial queue.
+pub fn plan_cloud_directory_download(
+    provider: CloudProvider,
+    root_id: &str,
+    root_name: &str,
+    mut list_directory: impl FnMut(&str) -> Result<CloudDirectory, QuarkError>,
+) -> Result<CloudDirectoryDownloadPlan, QuarkError> {
+    if root_id.trim().is_empty() {
+        return Err(QuarkError::InvalidInput("目录 ID 无效".into()));
+    }
+    if !ProviderRegistry::global()
+        .get(provider)
+        .recycle_directory_download
+        && root_id
+            == ProviderRegistry::global()
+                .get(provider)
+                .recycle_bin_directory_id
+    {
+        return Err(QuarkError::InvalidInput("PikPak 回收站不能下载目录".into()));
+    }
+
+    let mut files = Vec::new();
+    let mut visited_directories = HashSet::new();
+    let mut visited_files = HashSet::new();
+    let mut pending = vec![(
+        root_id.to_owned(),
+        vec![safe_directory_component(root_name)],
+    )];
+
+    while let Some((directory_id, relative_directory)) = pending.pop() {
+        if visited_directories.len() >= MAX_DIRECTORY_DOWNLOAD_DIRECTORIES {
+            return Err(QuarkError::InvalidInput("目录下载包含过多子目录".into()));
+        }
+        if !visited_directories.insert(directory_id.clone()) {
+            return Err(QuarkError::InvalidInput(
+                "目录下载检测到循环或重复目录".into(),
+            ));
+        }
+
+        let directory = list_directory(&directory_id)?;
+        if directory.id != directory_id {
+            return Err(QuarkError::InvalidResponse);
+        }
+        for item in directory.items.into_iter().rev() {
+            match item.kind.as_str() {
+                "file" => {
+                    if files.len() >= MAX_DIRECTORY_DOWNLOAD_FILES {
+                        return Err(QuarkError::InvalidInput("目录下载包含过多文件".into()));
+                    }
+                    if item.id.trim().is_empty() || !visited_files.insert(item.id.clone()) {
+                        return Err(QuarkError::InvalidInput("目录下载包含重复文件".into()));
+                    }
+                    files.push(PlannedCloudFile {
+                        file_id: item.id,
+                        relative_directory: relative_directory.clone(),
+                        output_name: safe_filename(&item.name),
+                        size: item.size,
+                    });
+                }
+                "folder" => {
+                    if item.id.trim().is_empty() {
+                        return Err(QuarkError::InvalidResponse);
+                    }
+                    if !ProviderRegistry::global()
+                        .get(provider)
+                        .recycle_directory_download
+                        && item.id
+                            == ProviderRegistry::global()
+                                .get(provider)
+                                .recycle_bin_directory_id
+                    {
+                        return Err(QuarkError::InvalidInput("PikPak 回收站不能下载目录".into()));
+                    }
+                    let mut child_path = relative_directory.clone();
+                    child_path.push(safe_directory_component(&item.name));
+                    pending.push((item.id, child_path));
+                }
+                _ => return Err(QuarkError::InvalidResponse),
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return Err(QuarkError::InvalidInput("空目录不能下载".into()));
+    }
+    if has_windows_output_path_collision(&files) {
+        return Err(QuarkError::InvalidInput("目录下载的输出路径冲突".into()));
+    }
+    Ok(CloudDirectoryDownloadPlan { files })
+}
+
+/// Converts an already-inspected share selection into the same durable plan
+/// used by personal-cloud directories. Stable `cloud-share://` sources become
+/// group item identities; provider credentials and signed URLs remain only in
+/// the encrypted share-plan store.
+pub fn plan_cloud_share_directory_download(
+    selection: &share::CloudShareDownloadSelection,
+) -> Result<CloudDirectoryDownloadPlan, QuarkError> {
+    let root_name = selection
+        .directory_name
+        .as_deref()
+        .ok_or_else(|| QuarkError::InvalidInput("该分享选择不是目录下载".into()))?;
+    if selection.entries.is_empty() {
+        return Err(QuarkError::InvalidInput("空目录不能下载".into()));
+    }
+    if selection.entries.len() > MAX_DIRECTORY_DOWNLOAD_FILES {
+        return Err(QuarkError::InvalidInput("目录下载包含过多文件".into()));
+    }
+    let root = safe_directory_component(root_name);
+    let strip_promoted_root = selection.entries.iter().all(|entry| {
+        entry
+            .relative_directory
+            .first()
+            .is_some_and(|component| component == root_name)
+    });
+    let mut sources = HashSet::new();
+    let files = selection
+        .entries
+        .iter()
+        .map(|entry| {
+            share::parse_stable_cloud_share_source(&entry.source)?;
+            if !sources.insert(entry.source.clone()) {
+                return Err(QuarkError::InvalidInput("目录下载包含重复文件".into()));
+            }
+            let mut relative_directory = Vec::with_capacity(entry.relative_directory.len() + 1);
+            relative_directory.push(root.clone());
+            relative_directory.extend(
+                entry
+                    .relative_directory
+                    .iter()
+                    .skip(usize::from(strip_promoted_root))
+                    .map(|component| safe_directory_component(component)),
+            );
+            Ok(PlannedCloudFile {
+                file_id: entry.source.clone(),
+                relative_directory,
+                output_name: safe_filename(&entry.name),
+                size: entry.size,
+            })
+        })
+        .collect::<Result<Vec<_>, QuarkError>>()?;
+    if has_windows_output_path_collision(&files) {
+        return Err(QuarkError::InvalidInput("目录下载的输出路径冲突".into()));
+    }
+    Ok(CloudDirectoryDownloadPlan { files })
+}
+
+pub(crate) fn has_windows_output_path_collision(files: &[PlannedCloudFile]) -> bool {
+    let mut file_targets = HashSet::new();
+    let mut directories = HashSet::new();
+    files.iter().any(|file| {
+        let target = file
+            .relative_directory
+            .iter()
+            .chain(std::iter::once(&file.output_name))
+            .map(|component| component.to_lowercase())
+            .collect::<Vec<_>>()
+            .join("\\");
+        if file_targets.contains(&target) || directories.contains(&target) {
+            return true;
+        }
+        for (index, _) in target.match_indices('\\') {
+            let ancestor = &target[..index];
+            if file_targets.contains(ancestor) {
+                return true;
+            }
+            directories.insert(ancestor.to_owned());
+        }
+        !file_targets.insert(target)
+    })
+}
+
+pub(crate) fn safe_directory_component(name: &str) -> String {
+    let value = safe_filename(name);
+    if matches!(value.as_str(), "." | "..") {
+        "folder".into()
+    } else {
+        value
+    }
+}
+
+pub fn enqueue_cloud_download(
+    store: &TaskStore,
+    url: &str,
+    name: &str,
+    _directory: &Path,
+    enqueue: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<DownloadTask, QuarkError> {
+    let task = store
+        .create(NewTask {
+            source: url.into(),
+            name: name.into(),
+            kind: "cloud".into(),
+        })
+        .map_err(|_| QuarkError::Storage)?;
+    // Keep parsing until engine acceptance so a failure can be recorded with a valid transition.
+    let gid = match enqueue(url) {
+        Ok(g) => g,
+        Err(message) => {
+            let _ = store.fail(task.id, &message);
+            return Err(QuarkError::Transport(message));
+        }
+    };
+    store
+        .bind_gid(task.id, &gid)
+        .map_err(|_| QuarkError::Storage)?;
+    store
+        .transition(task.id, TaskStatus::Queued)
+        .and_then(|_| store.transition(task.id, TaskStatus::Downloading))
+        .map_err(|_| QuarkError::Storage)
+}
+
+pub fn create_cloud_task(
+    store: &TaskStore,
+    provider: CloudProvider,
+    file_id: &str,
+    name: &str,
+) -> Result<DownloadTask, QuarkError> {
+    if file_id.trim().is_empty() {
+        return Err(QuarkError::InvalidInput("网盘文件 ID 无效".into()));
+    }
+    store
+        .create(NewTask {
+            source: format!(
+                "cloud://{}/{}",
+                provider.key(),
+                crate::cloud::types::encoded(file_id)
+            ),
+            name: safe_filename(name),
+            kind: "cloud".into(),
+        })
+        .map_err(|_| QuarkError::Storage)
+}
+
+/// Decodes the durable cloud task source. Its restrictive shape prevents a
+/// signed URL or arbitrary endpoint from being substituted during retry.
+pub fn parse_stable_cloud_source(source: &str) -> Result<(CloudProvider, String), QuarkError> {
+    let invalid = || QuarkError::InvalidInput("网盘任务来源无效，请从网盘重新创建下载".into());
+    let (provider, encoded) = source
+        .strip_prefix("cloud://")
+        .and_then(|value| value.split_once('/'))
+        .ok_or_else(invalid)?;
+    let provider = crate::cloud::ProviderRegistry::global()
+        .by_key(provider)
+        .ok_or_else(invalid)?
+        .provider;
+    if encoded.is_empty() || encoded.contains(['/', '?', '#', '&', '=']) || !encoded.is_ascii() {
+        return Err(invalid());
+    }
+    for (index, byte) in encoded.bytes().enumerate() {
+        if byte == b'%'
+            && !encoded
+                .as_bytes()
+                .get(index + 1..index + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err(invalid());
+        }
+    }
+    let id = url::form_urlencoded::parse(format!("id={encoded}").as_bytes())
+        .next()
+        .ok_or_else(invalid)?
+        .1
+        .into_owned();
+    if id.trim().is_empty()
+        || id
+            .chars()
+            .any(|character| character.is_control() || character == '\u{fffd}')
+    {
+        return Err(invalid());
+    }
+    Ok((provider, id))
+}
+
+/// Retrieves a fresh signed URL and request headers only for immediate aria2
+/// submission. Neither value is stored in `TaskStore`.
+pub async fn resolve_stable_cloud_download(
+    app: AppHandle,
+    source: &str,
+) -> Result<ResolvedCloudDownload, QuarkError> {
+    let (provider, file_id) = parse_stable_cloud_source(source)?;
+    run_session_work(app, provider, SessionWorkKind::Read, move |state, http| {
+        resolve_download(provider, &file_id, &state.store, http)
+    })
+    .await
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDirectoryDownloadFailure {
+    pub relative_path: String,
+    pub code: &'static str,
+    pub message: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudDirectoryDownloadOutcome {
+    pub task: TaskActionOutcome,
+    pub queued_count: usize,
+    pub failures: Vec<CloudDirectoryDownloadFailure>,
+}
+
+/// The only two durable outcomes of submitting one planned directory leaf.
+/// The resolver and aria2 details stay behind the submission boundary.
+pub enum DirectoryLeafSubmission {
+    Queued(uuid::Uuid),
+    Duplicate,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DirectoryLeafContext {
+    pub group_id: uuid::Uuid,
+    pub item_id: uuid::Uuid,
+}
+
+/// Persists the complete safe directory plan before any leaf receives a
+/// signed URL. The journal contains only stable provider IDs and local output
+/// components, never a URL or session material.
+pub fn create_cloud_directory_group_for_download(
+    store: &TaskStore,
+    provider: CloudProvider,
+    directory_id: &str,
+    plan: &CloudDirectoryDownloadPlan,
+    output_directory: &Path,
+) -> Result<CloudDirectoryGroup, QuarkError> {
+    let relative_directory = plan
+        .files
+        .first()
+        .and_then(|file| file.relative_directory.first())
+        .ok_or_else(|| QuarkError::InvalidInput("空目录不能下载".into()))?
+        .clone();
+    let items = plan
+        .files
+        .iter()
+        .map(|file| {
+            NewCloudDirectoryGroupItem::new(
+                file.file_id.clone(),
+                &file.relative_directory,
+                file.output_name.clone(),
+                file.size,
+            )
+        })
+        .collect::<Vec<_>>();
+    store
+        .create_cloud_directory_group(
+            NewCloudDirectoryGroup::new(
+                provider,
+                directory_id,
+                relative_directory,
+                output_directory,
+            ),
+            &items,
+        )
+        .map_err(|_| QuarkError::Storage)
+}
+
+pub(crate) enum CloudFileSubmission {
+    Queued(TaskActionOutcome),
+    Duplicate(TaskActionOutcome),
+}
+
+pub(crate) async fn submit_cloud_file(
+    app: AppHandle,
+    state: &AppState,
+    provider: CloudProvider,
+    file_id: String,
+    configured: UriSubmissionOptions,
+    directory_context: Option<DirectoryLeafContext>,
+) -> Result<CloudFileSubmission, QuarkError> {
+    let stable_source = format!(
+        "cloud://{}/{}",
+        provider.key(),
+        crate::cloud::types::encoded(&file_id)
+    );
+    let _source_submission = state.cloud_download_sources.acquire(&stable_source).await?;
+    if let Some(existing) = state
+        .store
+        .find_by_source(&stable_source)
+        .map_err(|_| QuarkError::Storage)?
+        .filter(|task| task.status != TaskStatus::Recycled)
+    {
+        let duplicate =
+            duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
+        return Ok(CloudFileSubmission::Duplicate(
+            task_action_outcome(&state.store, existing, Some(duplicate))
+                .map_err(QuarkError::Transport)?,
+        ));
+    }
+
+    let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
+    let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
+    if let Some(context) = directory_context {
+        state
+            .store
+            .link_cloud_directory_group_item_task(context.group_id, context.item_id, task.id)
+            .map_err(|_| QuarkError::Storage)?;
+    }
+    let signed_url = resolved.url.clone();
+    let mut options = resolved.into_uri_submission_options();
+    options.directory = configured.directory;
+    options.output_name = configured.output_name.or(options.output_name);
+    options.proxy = configured.proxy;
+    options.allow_overwrite = configured.allow_overwrite;
+    options.continue_download = configured.continue_download;
+    let service = state
+        .runtime
+        .service()
+        .await
+        .map_err(|error| QuarkError::Transport(error.to_string()))?;
+    let task = match service
+        .submit_uri_with_options(task.id, vec![signed_url], options)
+        .await
+    {
+        Ok(task) => task,
+        Err(error) => {
+            let message = format!("aria2 未能接受网盘下载任务：{error}");
+            let _ = state.store.fail(task.id, &message);
+            return Err(QuarkError::Transport(message));
+        }
+    };
+    Ok(CloudFileSubmission::Queued(
+        task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)?,
+    ))
+}
+
+pub(crate) fn planned_relative_path(file: &PlannedCloudFile) -> String {
+    file.relative_directory
+        .iter()
+        .chain(std::iter::once(&file.output_name))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub(crate) fn directory_download_output_directory(
+    base: &Path,
+    components: &[String],
+) -> Result<PathBuf, QuarkError> {
+    if !base.is_absolute() {
+        return Err(QuarkError::InvalidInput("下载目录必须是绝对路径".into()));
+    }
+    let mut target = base.to_path_buf();
+    for component in components {
+        target.push(provider_directory_component(component)?);
+    }
+    // Check lexical containment before touching the filesystem, even if the
+    // component normalization above changes in the future.
+    if !target.strip_prefix(base).is_ok_and(|relative| {
+        relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    }) {
+        return Err(QuarkError::InvalidResponse);
+    }
+    std::fs::create_dir_all(&target)
+        .map_err(|_| QuarkError::Transport("无法创建目录下载目标文件夹".into()))?;
+    Ok(target)
+}
+
+/// Restores the exact target of a linked directory member before a retry.
+/// This is needed when resolution or engine submission failed before aria2
+/// could persist a file path for the local task.
+pub fn cloud_directory_member_retry_options(
+    store: &TaskStore,
+    task_id: uuid::Uuid,
+    mut configured: UriSubmissionOptions,
+) -> Result<UriSubmissionOptions, QuarkError> {
+    let Some(group) = store
+        .cloud_directory_group_for_task(task_id)
+        .map_err(|_| QuarkError::Storage)?
+    else {
+        return Ok(configured);
+    };
+    let item = store
+        .cloud_directory_group_items(group.id)
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .find(|item| item.task_id == Some(task_id))
+        .ok_or(QuarkError::Storage)?;
+    configured.directory = Some(directory_download_output_directory(
+        &group.output_directory,
+        &item.relative_directory,
+    )?);
+    configured.output_name = Some(item.output_name);
+    Ok(configured)
+}
+
+pub(crate) fn provider_directory_component(component: &str) -> Result<String, QuarkError> {
+    let mut path_components = Path::new(component).components();
+    // Reject drive prefixes, ADS and device names before safe_filename could
+    // hide the unsafe provider input. Validate all components before mkdir.
+    if component.contains(['/', '\\', ':'])
+        || is_windows_device_name(component)
+        || component.chars().any(char::is_control)
+        || !matches!(path_components.next(), Some(Component::Normal(_)))
+        || path_components.next().is_some()
+    {
+        return Err(QuarkError::InvalidResponse);
+    }
+    // Confirmation renders these names with the same filename normalization.
+    Ok(safe_filename(component))
+}
+
+pub(crate) fn directory_download_failure(
+    file: &PlannedCloudFile,
+    error: &QuarkError,
+) -> CloudDirectoryDownloadFailure {
+    let (code, message) = directory_download_failure_fields(error);
+    CloudDirectoryDownloadFailure {
+        relative_path: planned_relative_path(file),
+        code,
+        message,
+    }
+}
+
+pub(crate) fn directory_download_failure_fields(
+    error: &QuarkError,
+) -> (&'static str, &'static str) {
+    match error {
+        QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
+            ("credentials_expired", "网盘会话已过期")
+        }
+        QuarkError::SessionRenewedRetryOperation => (
+            "session_renewed_retry_operation",
+            "登录已自动恢复，请重新执行本次操作",
+        ),
+        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => {
+            ("web_auth_required", "网盘需要网页验证")
+        }
+        QuarkError::Transport(_) => ("network_error", "网络或下载引擎错误"),
+        QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
+        QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),
+        QuarkError::Storage => ("credential_storage_error", "本机凭据或任务存储不可用"),
+        QuarkError::InvalidInput(_) => ("invalid_input", "下载参数无效"),
+        QuarkError::AuthorizationPending => ("authorization_pending", "网页授权尚未完成"),
+        QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
+            ("provider_unsupported", "当前网盘不支持该下载")
+        }
+        QuarkError::PikpakRegionalMembershipRestricted => (
+            "pikpak_regional_membership_restricted",
+            "PikPak 当前地区下载受限",
+        ),
+    }
+}
+
+pub(crate) fn cloud_directory_group_task_outcome(
+    store: &TaskStore,
+    group: &CloudDirectoryGroup,
+) -> Result<TaskActionOutcome, QuarkError> {
+    Ok(TaskActionOutcome {
+        payload: crate::commands::DownloadTaskPayload {
+            task: DownloadTask {
+                id: group.id,
+                source: format!("cloud-directory://{}/{}", group.provider.key(), group.id),
+                name: group.relative_directory.clone(),
+                kind: "folder".into(),
+                status: TaskStatus::Queued,
+                progress: 0,
+                error: None,
+                failure_code: None,
+                aria_gid: None,
+                followed_by_gid: None,
+                metadata_gid: None,
+                total_length: None,
+                completed_length: 0,
+                download_speed: 0,
+                upload_speed: 0,
+                connections: 0,
+                eta_seconds: None,
+                aria_error_code: None,
+                created_at: group.created_at,
+                updated_at: group.updated_at,
+                completed_at: None,
+            },
+            files: Vec::new(),
+            cleanup_pending: false,
+            reauthorization_required: false,
+        },
+        duplicate: None,
+        queue_task: Some(
+            cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
+        ),
+    })
+}
+
+/// Executes a previously validated plan through a narrow, injectable leaf
+/// submission boundary. This is shared by the Tauri command and deterministic
+/// connector tests, so persistence/linking semantics cannot drift from the
+/// real directory-download flow.
+pub async fn submit_cloud_directory_plan<F, Fut>(
+    store: &TaskStore,
+    provider: CloudProvider,
+    directory_id: &str,
+    plan: CloudDirectoryDownloadPlan,
+    configured: UriSubmissionOptions,
+    mut submit: F,
+) -> Result<CloudDirectoryDownloadOutcome, QuarkError>
+where
+    F: FnMut(CloudProvider, String, UriSubmissionOptions) -> Fut,
+    Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
+{
+    submit_cloud_directory_plan_with_group_event(
+        store,
+        provider,
+        directory_id,
+        plan,
+        configured,
+        |_| {},
+        move |provider, file_id, options, _| submit(provider, file_id, options),
+    )
+    .await
+}
+
+/// Publishes the durable directory root before starting any leaf submission.
+/// The leaf context lets the real downloader bind each local task to that root
+/// before aria2 can publish its first status event.
+pub async fn submit_cloud_directory_plan_with_group_event<F, Fut, G>(
+    store: &TaskStore,
+    provider: CloudProvider,
+    directory_id: &str,
+    plan: CloudDirectoryDownloadPlan,
+    configured: UriSubmissionOptions,
+    mut group_created: G,
+    mut submit: F,
+) -> Result<CloudDirectoryDownloadOutcome, QuarkError>
+where
+    F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
+    Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
+    G: FnMut(QueueTaskPayload),
+{
+    let base_directory = configured
+        .directory
+        .clone()
+        .ok_or_else(|| QuarkError::InvalidInput("未配置下载目录".into()))?;
+    let group = create_cloud_directory_group_for_download(
+        store,
+        provider,
+        directory_id,
+        &plan,
+        &base_directory,
+    )?;
+    group_created(
+        cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
+    );
+    let items = store
+        .cloud_directory_group_items(group.id)
+        .map_err(|_| QuarkError::Storage)?;
+    if items.len() != plan.files.len() {
+        return Err(QuarkError::Storage);
+    }
+    let mut failures = Vec::new();
+    let mut queued_count = 0;
+    for (file, item) in plan.files.into_iter().zip(items) {
+        let relative_path = planned_relative_path(&file);
+        let output_directory =
+            match directory_download_output_directory(&base_directory, &file.relative_directory) {
+                Ok(directory) => directory,
+                Err(error) => {
+                    persist_directory_failure(
+                        store,
+                        group.id,
+                        item.id,
+                        &file,
+                        &error,
+                        &mut failures,
+                    )?;
+                    continue;
+                }
+            };
+        let mut options = configured.clone();
+        options.directory = Some(output_directory);
+        options.output_name = Some(file.output_name.clone());
+        let context = DirectoryLeafContext {
+            group_id: group.id,
+            item_id: item.id,
+        };
+        match submit(provider, file.file_id.clone(), options, context).await {
+            Ok(DirectoryLeafSubmission::Queued(task_id)) => {
+                store
+                    .link_cloud_directory_group_item_task(group.id, item.id, task_id)
+                    .map_err(|_| QuarkError::Storage)?;
+                queued_count += 1;
+            }
+            Ok(DirectoryLeafSubmission::Duplicate) => {
+                let failure = CloudDirectoryDownloadFailure {
+                    relative_path,
+                    code: "duplicate",
+                    message: "已存在下载任务，未重复入队",
+                };
+                store
+                    .fail_cloud_directory_group_item(
+                        group.id,
+                        item.id,
+                        failure.code,
+                        failure.message,
+                    )
+                    .map_err(|_| QuarkError::Storage)?;
+                failures.push(failure);
+            }
+            Err(error) => {
+                persist_directory_failure(store, group.id, item.id, &file, &error, &mut failures)?;
+            }
+        }
+    }
+    Ok(CloudDirectoryDownloadOutcome {
+        task: cloud_directory_group_task_outcome(store, &group)?,
+        queued_count,
+        failures,
+    })
+}
+
+pub(crate) fn persist_directory_failure(
+    store: &TaskStore,
+    group_id: uuid::Uuid,
+    item_id: uuid::Uuid,
+    file: &PlannedCloudFile,
+    error: &QuarkError,
+    failures: &mut Vec<CloudDirectoryDownloadFailure>,
+) -> Result<(), QuarkError> {
+    let failure = directory_download_failure(file, error);
+    store
+        .fail_cloud_directory_group_item(group_id, item_id, failure.code, failure.message)
+        .map_err(|_| QuarkError::Storage)?;
+    failures.push(failure);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cloud_download_url(
+    app: AppHandle,
+    provider: CloudProvider,
+    file_id: String,
+) -> Result<TaskActionOutcome, QuarkError> {
+    let app_handle = app.clone();
+    let state = app_handle.state::<AppState>();
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    match submit_cloud_file(app, &state, provider, file_id, configured, None).await? {
+        CloudFileSubmission::Queued(outcome) | CloudFileSubmission::Duplicate(outcome) => {
+            Ok(outcome)
+        }
+    }
+}
+
+/// Queues every real file below one selected cloud folder. The plan is built in
+/// full before any download URL is resolved so cycles, duplicate nodes, empty
+/// folders, and the traversal limits fail without enqueuing a partial tree.
+#[tauri::command]
+pub async fn cloud_download_directory(
+    app: AppHandle,
+    provider: CloudProvider,
+    directory_id: String,
+    directory_name: String,
+) -> Result<CloudDirectoryDownloadOutcome, QuarkError> {
+    let planned_directory_id = directory_id.clone();
+    let plan = run_session_work(
+        app.clone(),
+        provider,
+        SessionWorkKind::Read,
+        move |state, http| {
+            plan_cloud_directory_download(provider, &planned_directory_id, &directory_name, |id| {
+                list_cloud_directory(provider, &state.store, http, id)
+            })
+        },
+    )
+    .await?;
+
+    let state = app.state::<AppState>();
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    let store = Arc::clone(&state.store);
+    let submit_app = app.clone();
+    let root_event_app = app.clone();
+    submit_cloud_directory_plan_with_group_event(
+        &store,
+        provider,
+        &directory_id,
+        plan,
+        configured,
+        move |root| {
+            use tauri::Emitter;
+            let _ = root_event_app.emit("download-task-updated", root);
+        },
+        move |provider, file_id, options, context| {
+            let app = submit_app.clone();
+            async move {
+                let state = app.state::<AppState>();
+                match submit_cloud_file(
+                    app.clone(),
+                    &state,
+                    provider,
+                    file_id,
+                    options,
+                    Some(context),
+                )
+                .await?
+                {
+                    CloudFileSubmission::Queued(outcome) => {
+                        Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
+                    }
+                    CloudFileSubmission::Duplicate(_) => Ok(DirectoryLeafSubmission::Duplicate),
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// Resubmits exactly one previously failed, unlinked directory leaf. The
+/// durable item is the authority for provider ID and output target; retry never
+/// scans by filename and never replays the rest of the directory plan.
+pub async fn retry_cloud_directory_group_item(
+    app: AppHandle,
+    group_id: uuid::Uuid,
+    item_id: uuid::Uuid,
+) -> Result<TaskActionOutcome, QuarkError> {
+    let state = app.state::<AppState>();
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    let store = Arc::clone(&state.store);
+    let submit_app = app.clone();
+    retry_cloud_directory_group_item_with(
+        &store,
+        group_id,
+        item_id,
+        configured,
+        move |provider, file_id, options, context| {
+            let app = submit_app.clone();
+            async move {
+                let state = app.state::<AppState>();
+                if file_id.starts_with("cloud-share://") {
+                    return submit_cloud_share_directory_leaf(
+                        app.clone(),
+                        &state,
+                        file_id,
+                        options,
+                        context,
+                    )
+                    .await;
+                }
+                match submit_cloud_file(
+                    app.clone(),
+                    &state,
+                    provider,
+                    file_id,
+                    options,
+                    Some(context),
+                )
+                .await?
+                {
+                    CloudFileSubmission::Queued(outcome) => {
+                        Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
+                    }
+                    CloudFileSubmission::Duplicate(_) => Ok(DirectoryLeafSubmission::Duplicate),
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// Resubmits every unlinked failed leaf in one durable directory group. Linked
+/// leaves are deliberately excluded: their existing local task remains the
+/// authority and must never be submitted a second time.
+pub async fn retry_cloud_directory_group_with<F, Fut>(
+    store: &TaskStore,
+    group_id: uuid::Uuid,
+    configured: UriSubmissionOptions,
+    mut submit: F,
+) -> Result<TaskActionOutcome, QuarkError>
+where
+    F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
+    Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
+{
+    let group = store
+        .cloud_directory_group(group_id)
+        .map_err(|_| QuarkError::Storage)?
+        .ok_or_else(|| QuarkError::InvalidInput("网盘目录下载任务不存在".into()))?;
+    let pending = store
+        .cloud_directory_group_items(group.id)
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .filter(|item| item.task_id.is_none())
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Err(QuarkError::InvalidInput(
+            "目录内没有可重新提交的网盘文件".into(),
+        ));
+    }
+    for item in pending {
+        // A failed provider attempt is recorded by the single-item path. Keep
+        // trying sibling leaves so one transient failure cannot starve the
+        // remainder of a directory retry.
+        let _ = retry_cloud_directory_group_item_with(
+            store,
+            group.id,
+            item.id,
+            configured.clone(),
+            |provider, file_id, options, context| submit(provider, file_id, options, context),
+        )
+        .await;
+    }
+    cloud_directory_group_task_outcome(store, &group)
+}
+
+pub async fn retry_cloud_directory_group(
+    app: AppHandle,
+    group_id: uuid::Uuid,
+) -> Result<TaskActionOutcome, QuarkError> {
+    let state = app.state::<AppState>();
+    let configured =
+        crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    let store = Arc::clone(&state.store);
+    let submit_app = app.clone();
+    retry_cloud_directory_group_with(
+        &store,
+        group_id,
+        configured,
+        move |provider, file_id, options, context| {
+            let app = submit_app.clone();
+            async move {
+                let state = app.state::<AppState>();
+                if file_id.starts_with("cloud-share://") {
+                    return submit_cloud_share_directory_leaf(
+                        app.clone(),
+                        &state,
+                        file_id,
+                        options,
+                        context,
+                    )
+                    .await;
+                }
+                match submit_cloud_file(
+                    app.clone(),
+                    &state,
+                    provider,
+                    file_id,
+                    options,
+                    Some(context),
+                )
+                .await?
+                {
+                    CloudFileSubmission::Queued(outcome) => {
+                        Ok(DirectoryLeafSubmission::Queued(outcome.payload.task.id))
+                    }
+                    CloudFileSubmission::Duplicate(_) => Ok(DirectoryLeafSubmission::Duplicate),
+                }
+            }
+        },
+    )
+    .await
+}
+
+pub async fn retry_cloud_directory_group_item_with<F, Fut>(
+    store: &TaskStore,
+    group_id: uuid::Uuid,
+    item_id: uuid::Uuid,
+    configured: UriSubmissionOptions,
+    mut submit: F,
+) -> Result<TaskActionOutcome, QuarkError>
+where
+    F: FnMut(CloudProvider, String, UriSubmissionOptions, DirectoryLeafContext) -> Fut,
+    Fut: Future<Output = Result<DirectoryLeafSubmission, QuarkError>>,
+{
+    let group = store
+        .cloud_directory_group(group_id)
+        .map_err(|_| QuarkError::Storage)?
+        .ok_or_else(|| QuarkError::InvalidInput("网盘目录下载任务不存在".into()))?;
+    let item = store
+        .cloud_directory_group_items(group_id)
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .find(|item| item.id == item_id)
+        .ok_or_else(|| QuarkError::InvalidInput("网盘目录文件不存在".into()))?;
+    if item.task_id.is_some() {
+        return Err(QuarkError::InvalidInput(
+            "网盘目录文件已经入队，不能重复提交".into(),
+        ));
+    }
+    let output_directory =
+        directory_download_output_directory(&group.output_directory, &item.relative_directory)?;
+    let mut options = configured;
+    options.directory = Some(output_directory);
+    options.output_name = Some(item.output_name.clone());
+    let context = DirectoryLeafContext {
+        group_id: group.id,
+        item_id: item.id,
+    };
+    match submit(
+        group.provider,
+        item.remote_file_id.clone(),
+        options,
+        context,
+    )
+    .await
+    {
+        Ok(DirectoryLeafSubmission::Queued(task_id)) => {
+            store
+                .link_cloud_directory_group_item_task(group.id, item.id, task_id)
+                .map_err(|_| QuarkError::Storage)?;
+            let mut outcome = task_action_outcome(
+                store,
+                store.find(task_id).map_err(|_| QuarkError::Storage)?,
+                None,
+            )
+            .map_err(QuarkError::Transport)?;
+            outcome.queue_task = Some(
+                cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
+            );
+            Ok(outcome)
+        }
+        Ok(DirectoryLeafSubmission::Duplicate) => {
+            store
+                .fail_cloud_directory_group_item(
+                    group.id,
+                    item.id,
+                    "duplicate",
+                    "已存在下载任务，未重复入队",
+                )
+                .map_err(|_| QuarkError::Storage)?;
+            Err(QuarkError::InvalidInput(
+                "已存在下载任务，未重复入队".into(),
+            ))
+        }
+        Err(error) => {
+            let (code, message) = directory_download_failure_fields(&error);
+            store
+                .fail_cloud_directory_group_item(group.id, item.id, code, message)
+                .map_err(|_| QuarkError::Storage)?;
+            Err(error)
+        }
+    }
+}
+
+impl ResolvedCloudDownload {
+    pub fn into_uri_submission_options(self) -> UriSubmissionOptions {
+        UriSubmissionOptions {
+            output_name: Some(safe_filename(&self.name)),
+            headers: self.headers,
+            ..Default::default()
+        }
+    }
+}
+
+pub fn resolve_download(
+    provider: CloudProvider,
+    file_id: &str,
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<ResolvedCloudDownload, QuarkError> {
+    ProviderRegistry::global()
+        .driver(provider, store, http)
+        .resolve_download(file_id)
+}
