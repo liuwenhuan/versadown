@@ -30,6 +30,32 @@ it('labels BitTorrent confirmation choices as select-file semantics', () => {
   expect(screen.getByRole('button', { name: /立即下载 2/ })).toBeVisible();
 });
 
+it('offers a private download action only while privacy download is enabled', async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  render(<ParseConfirmDialog result={result} privacyEnabled onConfirm={onConfirm} onSelectionChange={() => {}} onClose={() => {}} />);
+
+  expect(screen.getByRole('button', { name: /隐私下载 2/ })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: /隐私下载 2/ }));
+  expect(onConfirm).toHaveBeenCalledWith(['a', 'b'], undefined, true);
+});
+
+it('allows a direct single-file confirmation without parsed file metadata', async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  render(<ParseConfirmDialog
+    privacyEnabled
+    result={{ taskId: 'single-file', title: 'archive.zip', resources: [], processing: [] }}
+    onConfirm={onConfirm}
+    onSelectionChange={() => {}}
+    onClose={() => {}}
+  />);
+
+  await user.click(screen.getByRole('button', { name: /隐私下载/ }));
+
+  expect(onConfirm).toHaveBeenCalledWith([], undefined, true);
+});
+
 it('uses readable type for the confirmation download destination', () => {
   const stylesheet = document.createElement('style');
   stylesheet.textContent = readFileSync('src/styles.css', 'utf8');

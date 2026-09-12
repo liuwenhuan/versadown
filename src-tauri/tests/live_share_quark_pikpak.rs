@@ -493,7 +493,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
                 .ok_or("sample URL was not recognized")?;
         let adapter = provider_share_adapter(provider, &sessions, &transport)?;
         let source = match inspect_share_with_adapter(&plans, adapter.as_ref(), &candidate) {
-            Ok(ShareConfirmationOutcome::AutoSubmit { source }) => source,
+            Ok(ShareConfirmationOutcome::AutoSubmit { source, .. }) => source,
             Ok(ShareConfirmationOutcome::Confirmation(confirmation)) => {
                 let first = confirmation
                     .resources
@@ -596,6 +596,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
                 source,
                 name: entry.name,
                 kind: "cloud".into(),
+                is_private: false,
             })?;
             let over_limit = entry.size.is_some_and(|size| size > 20 * 1024 * 1024);
             let expected_size = entry.size;

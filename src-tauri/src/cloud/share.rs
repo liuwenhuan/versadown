@@ -101,7 +101,10 @@ pub enum ShareInspection {
 
 pub enum ShareConfirmationOutcome {
     Confirmation(CloudShareConfirmation),
-    AutoSubmit { source: String },
+    AutoSubmit {
+        source: String,
+        confirmation: CloudShareConfirmation,
+    },
     AccessCodeRequired,
 }
 
@@ -271,7 +274,10 @@ pub fn inspect_share_with_adapter(
     };
     store.upsert(&plan)?;
     Ok(match automatic_source {
-        Some(source) => ShareConfirmationOutcome::AutoSubmit { source },
+        Some(source) => ShareConfirmationOutcome::AutoSubmit {
+            source,
+            confirmation,
+        },
         None => ShareConfirmationOutcome::Confirmation(confirmation),
     })
 }
@@ -2683,7 +2689,7 @@ mod tests {
         let expected = file.source_for("f1");
         assert!(matches!(
             inspect_share_with_adapter(&store, &PlanAdapter(file), &candidate).unwrap(),
-            ShareConfirmationOutcome::AutoSubmit { source } if source == expected
+            ShareConfirmationOutcome::AutoSubmit { source, .. } if source == expected
         ));
 
         for root_kind in [
@@ -3452,6 +3458,7 @@ mod tests {
                 group_id: group.id,
                 item_id: item.id,
             }),
+            false,
             false,
             || async {
                 Err::<Arc<crate::DownloadService>, _>(QuarkError::Transport(

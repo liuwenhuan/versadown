@@ -69,6 +69,7 @@ impl DpapiCredentialStore {
                 | "xunlei"
                 | "uc"
                 | "ai-api-key"
+                | "privacy-download-password-v1"
                 | "cloud-share-plans-v1"
         ) && !matches!(
             key,

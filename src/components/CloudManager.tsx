@@ -19,8 +19,8 @@ export interface CloudManagerClient {
   trashCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   deleteCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   restoreCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
-  downloadCloudFile(provider: CloudProvider, fileId: string): Promise<unknown>;
-  downloadCloudDirectory(provider: CloudProvider, directoryId: string, directoryName: string): Promise<CloudDirectoryDownloadOutcome>;
+  downloadCloudFile(provider: CloudProvider, fileId: string, privateDownload?: boolean): Promise<unknown>;
+  downloadCloudDirectory(provider: CloudProvider, directoryId: string, directoryName: string, privateDownload?: boolean): Promise<CloudDirectoryDownloadOutcome>;
   logoutCloud(provider: CloudProvider): Promise<void>;
   pickAndUploadFiles(provider: CloudProvider, parentId: string): Promise<readonly CloudFile[] | void>;
 }
@@ -34,6 +34,7 @@ export interface CloudManagerProps {
   restoreOnMount?: boolean;
   showAccountTabs?: boolean;
   showSessionActions?: boolean;
+  privacyDownloadEnabled?: boolean;
   onAccountAuthorized?(account: CloudAccount): void;
   onAccountLoggedOut?(provider: CloudProvider): void;
 }
@@ -426,7 +427,7 @@ function CloudDestinationPicker({ action, provider, client, excludedIds, onChoos
   </div>, document.body);
 }
 
-export function CloudManager({ provider, client = unavailableClient, initialAccounts = [], onDownloadTask, authorizationOnly = false, restoreOnMount = true, showAccountTabs = true, showSessionActions = true, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+export function CloudManager({ provider, client = unavailableClient, initialAccounts = [], onDownloadTask, authorizationOnly = false, restoreOnMount = true, showAccountTabs = true, showSessionActions = true, privacyDownloadEnabled = false, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const label = providerLabel[provider];
   const rootId = cloudRootDirectoryId[provider];
   const providerAccounts = initialAccounts.filter((account) => account.provider === provider);
@@ -450,6 +451,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
   const [editor, setEditor] = useState<Editor>(null);
   const [editorValue, setEditorValue] = useState('');
   const [pendingTrash, setPendingTrash] = useState(false);
+  const [pendingDownload, setPendingDownload] = useState<readonly CloudFile[] | null>(null);
   const [pendingLogout, setPendingLogout] = useState(false);
   const [operation, setOperation] = useState<OperationState>(null);
   const [contextMenu, setContextMenu] = useState<CloudContextMenuState | null>(null);
@@ -727,20 +729,23 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
     return `当前为${sort.direction === 'ascending' ? '升序' : '降序'}`;
   }
 
-  function downloadSelection() {
-    if (!selected.length || selectedVirtualRecycleBin || isRecycleBin) return;
+  function submitDownload(items: readonly CloudFile[], privateDownload?: boolean) {
     void runOperation('下载', async () => {
       const directoryFailures: CloudDirectoryDownloadFailure[] = [];
       let queuedDirectoryFiles = 0;
-      await Promise.all(selected.map(async (item) => {
+      await Promise.all(items.map(async (item) => {
         if (item.kind === 'folder') {
-          const outcome = await client.downloadCloudDirectory(provider, item.id, item.name);
+          const outcome = privateDownload === undefined
+            ? await client.downloadCloudDirectory(provider, item.id, item.name)
+            : await client.downloadCloudDirectory(provider, item.id, item.name, privateDownload);
           onDownloadTask?.(outcome.task.queueTask ?? outcome.task);
           directoryFailures.push(...outcome.failures);
           queuedDirectoryFiles += outcome.queuedCount;
           return;
         }
-        const task = await client.downloadCloudFile(provider, item.id);
+        const task = privateDownload === undefined
+          ? await client.downloadCloudFile(provider, item.id)
+          : await client.downloadCloudFile(provider, item.id, privateDownload);
         onDownloadTask?.(task);
       }));
       if (directoryFailures.length) {
@@ -749,6 +754,21 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
         throw new Error(`目录下载已入队 ${queuedDirectoryFiles} 个文件；${details}${remaining}`);
       }
     }, false);
+  }
+
+  function downloadSelection() {
+    if (!selected.length || selectedVirtualRecycleBin || isRecycleBin) return;
+    if (privacyDownloadEnabled) {
+      setPendingDownload(selected.slice());
+      return;
+    }
+    submitDownload(selected);
+  }
+
+  function confirmPendingDownload(privateDownload: boolean) {
+    const items = pendingDownload;
+    setPendingDownload(null);
+    if (items?.length) submitDownload(items, privateDownload);
   }
 
   function uploadFiles() {
@@ -890,6 +910,7 @@ export function CloudManager({ provider, client = unavailableClient, initialAcco
 
     {editor && <form className="cloud-operation-editor" onSubmit={submitEditor} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setEditor(null); } }}><label>{editor === 'create' ? '目录名称' : '新名称'}<input aria-label={editor === 'create' ? '目录名称' : '新名称'} value={editorValue} onChange={(event) => setEditorValue(event.target.value)} autoFocus /></label><button className="primary" type="submit" disabled={operationBusy}>{editor === 'create' ? '确认新建目录' : '确认重命名'}</button><button type="button" className="secondary" disabled={operationBusy} onClick={() => setEditor(null)}>取消</button></form>}
     {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={isRecycleBin ? '确认永久删除' : '确认移入回收站'}><h3>{isRecycleBin ? '确认永久删除' : '确认移入回收站'}</h3><p>{isRecycleBin ? `所选 ${selected.length} 个项目将被永久删除，不可恢复。` : `所选 ${selected.length} 个项目将移入回收站，不会永久删除。`}</p><button className="secondary" onClick={() => setPendingTrash(false)}>取消</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation(isRecycleBin ? '永久删除' : '删除', () => isRecycleBin ? client.deleteCloudFiles(provider, selectedIds.slice()) : client.trashCloudFiles(provider, selectedIds.slice())); }}>{isRecycleBin ? '永久删除' : '移入回收站'}</button></section></div>}
+    {pendingDownload && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label="确认下载"><h3>确认下载</h3><p>所选 {pendingDownload.length} 个项目可作为普通任务或隐私任务加入下载队列。</p><button className="secondary" onClick={() => setPendingDownload(null)}>取消</button><button className="primary" onClick={() => confirmPendingDownload(false)}>立即下载</button><button className="secondary" onClick={() => confirmPendingDownload(true)}>隐私下载</button></section></div>}
     {showSessionActions && logoutConfirmation()}
     {operation && <p className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}>{operation.message}</p>}
     {!showSessionActions && reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}

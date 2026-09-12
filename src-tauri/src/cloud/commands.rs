@@ -4,7 +4,9 @@ use crate::models::{
 };
 use crate::{
     commands::{
-        cloud_directory_group_queue_task, task_action_outcome, AppState, TaskActionOutcome,
+        cloud_directory_group_queue_task, ensure_private_download_enabled,
+        ensure_private_group_access, ensure_private_task_access, should_emit_task_update,
+        task_action_outcome, AppState, TaskActionOutcome,
     },
     duplicate_state, DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
@@ -1521,6 +1523,7 @@ pub async fn cloud_reauthorize_failed_task(
 
     let requested_provider = match state.store.find(id) {
         Ok(task) => {
+            ensure_private_task_access(&state, &task).map_err(QuarkError::InvalidInput)?;
             if task.status != TaskStatus::Failed
                 || !requires_cloud_reauthorization_failure(task.failure_code.as_deref())
             {
@@ -1546,6 +1549,8 @@ pub async fn cloud_reauthorize_failed_task(
                             && requires_cloud_reauthorization_failure(item.failure_code.as_deref())
                     });
                 if matches_requested {
+                    ensure_private_group_access(&state, &group)
+                        .map_err(QuarkError::InvalidInput)?;
                     provider = Some(group.provider);
                     break;
                 }
@@ -1563,6 +1568,7 @@ pub async fn cloud_reauthorize_failed_task(
         .filter(|task| {
             task.status == TaskStatus::Failed
                 && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+                && should_emit_task_update(&state, task.is_private)
                 && cloud_provider_from_download_source(&task.source)
                     .is_ok_and(|provider| provider == requested_provider)
         })
@@ -1576,6 +1582,9 @@ pub async fn cloud_reauthorize_failed_task(
         .into_iter()
         .filter(|group| group.provider == requested_provider)
     {
+        if !should_emit_task_update(&state, group.is_private) {
+            continue;
+        }
         let items = state
             .store
             .cloud_directory_group_items(group.id)
@@ -1653,6 +1662,7 @@ fn queue_provider_authorization_failures(
         .filter(|task| {
             task.status == TaskStatus::Failed
                 && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+                && should_emit_task_update(&state, task.is_private)
                 && cloud_provider_from_download_source(&task.source).ok() == Some(provider)
         })
         .map(|task| task.id)
@@ -1664,6 +1674,9 @@ fn queue_provider_authorization_failures(
         .map_err(|_| QuarkError::Storage)?
     {
         if group.provider != provider {
+            continue;
+        }
+        if !should_emit_task_update(&state, group.is_private) {
             continue;
         }
         directory_items.extend(
@@ -1697,6 +1710,9 @@ async fn resume_pending_authorization_retries(
         let Ok(task) = state.store.find(id) else {
             continue;
         };
+        if !should_emit_task_update(&state, task.is_private) {
+            continue;
+        }
         if task.status != TaskStatus::Failed
             || !requires_cloud_reauthorization_failure(task.failure_code.as_deref())
             || cloud_provider_from_download_source(&task.source).ok() != Some(provider)
@@ -1707,33 +1723,45 @@ async fn resume_pending_authorization_retries(
         match crate::commands::resubmit_task(app.clone(), &state, task, Default::default()).await {
             Ok(task) => {
                 if let Ok(outcome) = task_action_outcome(&state.store, task, None) {
-                    if let Some(queue_task) = outcome.queue_task {
-                        let _ = app.emit("download-task-updated", queue_task);
-                    } else {
-                        let _ = app.emit("download-task-updated", outcome.payload);
+                    if should_emit_task_update(&state, outcome.payload.task.is_private) {
+                        if let Some(queue_task) = outcome.queue_task {
+                            let _ = app.emit("download-task-updated", queue_task);
+                        } else {
+                            let _ = app.emit("download-task-updated", outcome.payload);
+                        }
                     }
                 }
             }
             Err(_) => {
                 if let Ok(task) = state.store.find(id) {
-                    if let Ok(payload) = crate::commands::task_update_payload(
-                        &state.store,
-                        Some(&cloud.share_plans),
-                        task,
-                    ) {
-                        let _ = app.emit("download-task-updated", payload);
+                    if should_emit_task_update(&state, task.is_private) {
+                        if let Ok(payload) = crate::commands::task_update_payload(
+                            &state.store,
+                            Some(&cloud.share_plans),
+                            task,
+                        ) {
+                            let _ = app.emit("download-task-updated", payload);
+                        }
                     }
                 }
             }
         }
     }
     for (group_id, item_id) in pending.directory_items {
+        let Ok(Some(group)) = state.store.cloud_directory_group(group_id) else {
+            continue;
+        };
+        if !should_emit_task_update(&state, group.is_private) {
+            continue;
+        }
         if let Ok(outcome) = retry_cloud_directory_group_item(app.clone(), group_id, item_id).await
         {
-            if let Some(queue_task) = outcome.queue_task {
-                let _ = app.emit("download-task-updated", queue_task);
-            } else {
-                let _ = app.emit("download-task-updated", outcome.payload);
+            if should_emit_task_update(&state, outcome.payload.task.is_private) {
+                if let Some(queue_task) = outcome.queue_task {
+                    let _ = app.emit("download-task-updated", queue_task);
+                } else {
+                    let _ = app.emit("download-task-updated", outcome.payload);
+                }
             }
         }
     }
@@ -2902,6 +2930,7 @@ pub fn enqueue_cloud_download(
             source: url.into(),
             name: name.into(),
             kind: "cloud".into(),
+            is_private: false,
         })
         .map_err(|_| QuarkError::Storage)?;
     // Keep parsing until engine acceptance so a failure can be recorded with a valid transition.
@@ -2939,6 +2968,7 @@ pub fn create_cloud_task(
             ),
             name: safe_filename(name),
             kind: "cloud".into(),
+            is_private: false,
         })
         .map_err(|_| QuarkError::Storage)
 }
@@ -3034,10 +3064,18 @@ pub async fn submit_cloud_share_file(
     state: &AppState,
     source: String,
     configured: UriSubmissionOptions,
+    private_download: bool,
 ) -> Result<TaskActionOutcome, QuarkError> {
-    let submission =
-        submit_cloud_share_file_internal(app.clone(), state, source, configured, None, true)
-            .await?;
+    let submission = submit_cloud_share_file_internal(
+        app.clone(),
+        state,
+        source,
+        configured,
+        None,
+        true,
+        private_download,
+    )
+    .await?;
     let outcome = match submission {
         CloudShareFileSubmission::Queued(outcome)
         | CloudShareFileSubmission::Duplicate(outcome) => outcome,
@@ -3058,6 +3096,7 @@ async fn submit_cloud_share_file_internal(
     configured: UriSubmissionOptions,
     directory_context: Option<DirectoryLeafContext>,
     append_entry_directory: bool,
+    private_download: bool,
 ) -> Result<CloudShareFileSubmission, QuarkError> {
     share::parse_stable_cloud_share_source(&source)?;
     let _source_submission = state.cloud_download_sources.acquire(&source).await?;
@@ -3067,6 +3106,7 @@ async fn submit_cloud_share_file_internal(
         .map_err(|_| QuarkError::Storage)?
         .filter(|task| task.status != TaskStatus::Recycled)
     {
+        ensure_private_task_access(state, &existing).map_err(QuarkError::InvalidInput)?;
         if !is_retryable_cloud_share_prepare(&existing) {
             let duplicate =
                 duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
@@ -3087,6 +3127,7 @@ async fn submit_cloud_share_file_internal(
         configured,
         directory_context,
         append_entry_directory,
+        private_download,
         || async {
             state
                 .runtime
@@ -3106,6 +3147,7 @@ pub async fn submit_cloud_share_directory_leaf(
     source: String,
     configured: UriSubmissionOptions,
     context: DirectoryLeafContext,
+    private_download: bool,
 ) -> Result<DirectoryLeafSubmission, QuarkError> {
     match submit_cloud_share_file_internal(
         app.clone(),
@@ -3114,6 +3156,7 @@ pub async fn submit_cloud_share_directory_leaf(
         configured,
         Some(context),
         false,
+        private_download,
     )
     .await?
     {
@@ -3140,7 +3183,7 @@ where
     RFut: std::future::Future<Output = Result<ResolvedCloudDownload, QuarkError>>,
 {
     submit_new_cloud_share_file_scoped_with(
-        tasks, plans, source, configured, None, true, service, resolve,
+        tasks, plans, source, configured, None, true, false, service, resolve,
     )
     .await
 }
@@ -3152,6 +3195,7 @@ pub(crate) async fn submit_new_cloud_share_file_scoped_with<S, SFut, R, RFut>(
     mut configured: UriSubmissionOptions,
     directory_context: Option<DirectoryLeafContext>,
     append_entry_directory: bool,
+    private_download: bool,
     service: S,
     resolve: R,
 ) -> Result<TaskActionOutcome, QuarkError>
@@ -3218,9 +3262,13 @@ where
                 source: source.clone(),
                 name: output_name,
                 kind: "cloud".into(),
+                is_private: private_download,
             })
             .map_err(|_| QuarkError::Storage)?,
     };
+    let prepared = tasks
+        .set_private(prepared.id, private_download)
+        .map_err(|_| QuarkError::Storage)?;
     if let Err(error) = plans.reserve_local_task(&source, prepared.id) {
         return match tasks.remove_task_record(prepared.id) {
             Ok(()) | Err(crate::StoreError::NotFound(_)) => Err(error),
@@ -3373,7 +3421,9 @@ pub(crate) async fn cleanup_cloud_share_task(
                 cloud.as_ref().map(|cloud| &cloud.share_plans),
                 task.clone(),
             ) {
-                let _ = app.emit("download-task-updated", payload);
+                if should_emit_task_update(&state, task.is_private) {
+                    let _ = app.emit("download-task-updated", payload);
+                }
             }
             Ok(task)
         }
@@ -3440,7 +3490,9 @@ async fn cleanup_cloud_share_task_inner(
             Some(&cloud.share_plans),
             updated.clone(),
         ) {
-            let _ = app.emit("download-task-updated", payload);
+            if should_emit_task_update(&state, updated.is_private) {
+                let _ = app.emit("download-task-updated", payload);
+            }
         }
         Ok(updated)
     } else {
@@ -3486,6 +3538,7 @@ pub fn create_cloud_directory_group_for_download(
     directory_id: &str,
     plan: &CloudDirectoryDownloadPlan,
     output_directory: &Path,
+    private_download: bool,
 ) -> Result<CloudDirectoryGroup, QuarkError> {
     let relative_directory = plan
         .files
@@ -3512,7 +3565,8 @@ pub fn create_cloud_directory_group_for_download(
                 directory_id,
                 relative_directory,
                 output_directory,
-            ),
+            )
+            .with_private_download(private_download),
             &items,
         )
         .map_err(|_| QuarkError::Storage)
@@ -3529,6 +3583,7 @@ async fn submit_cloud_file(
     provider: CloudProvider,
     file_id: String,
     configured: UriSubmissionOptions,
+    private_download: bool,
     directory_context: Option<DirectoryLeafContext>,
 ) -> Result<CloudFileSubmission, QuarkError> {
     let stable_source = format!(
@@ -3543,6 +3598,7 @@ async fn submit_cloud_file(
         .map_err(|_| QuarkError::Storage)?
         .filter(|task| task.status != TaskStatus::Recycled)
     {
+        ensure_private_task_access(state, &existing).map_err(QuarkError::InvalidInput)?;
         let duplicate =
             duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
         return Ok(CloudFileSubmission::Duplicate(
@@ -3553,6 +3609,10 @@ async fn submit_cloud_file(
 
     let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
+    let task = state
+        .store
+        .set_private(task.id, private_download)
+        .map_err(|_| QuarkError::Storage)?;
     if let Some(context) = directory_context {
         state
             .store
@@ -3733,6 +3793,7 @@ fn cloud_directory_group_task_outcome(
                 created_at: group.created_at,
                 updated_at: group.updated_at,
                 completed_at: None,
+                is_private: group.is_private,
             },
             files: Vec::new(),
             cleanup_pending: false,
@@ -3767,6 +3828,7 @@ where
         directory_id,
         plan,
         configured,
+        false,
         |_| {},
         move |provider, file_id, options, _| submit(provider, file_id, options),
     )
@@ -3782,6 +3844,7 @@ pub async fn submit_cloud_directory_plan_with_group_event<F, Fut, G>(
     directory_id: &str,
     plan: CloudDirectoryDownloadPlan,
     configured: UriSubmissionOptions,
+    private_download: bool,
     mut group_created: G,
     mut submit: F,
 ) -> Result<CloudDirectoryDownloadOutcome, QuarkError>
@@ -3800,6 +3863,7 @@ where
         directory_id,
         &plan,
         &base_directory,
+        private_download,
     )?;
     group_created(
         cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
@@ -3892,12 +3956,25 @@ pub async fn cloud_download_url(
     app: AppHandle,
     provider: CloudProvider,
     file_id: String,
+    private_download: Option<bool>,
 ) -> Result<TaskActionOutcome, QuarkError> {
     let app_handle = app.clone();
     let state = app_handle.state::<AppState>();
     let configured =
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
-    match submit_cloud_file(app, &state, provider, file_id, configured, None).await? {
+    let private_download = private_download.unwrap_or(false);
+    ensure_private_download_enabled(&state, private_download).map_err(QuarkError::InvalidInput)?;
+    match submit_cloud_file(
+        app,
+        &state,
+        provider,
+        file_id,
+        configured,
+        private_download,
+        None,
+    )
+    .await?
+    {
         CloudFileSubmission::Queued(outcome) | CloudFileSubmission::Duplicate(outcome) => {
             Ok(outcome)
         }
@@ -3913,6 +3990,7 @@ pub async fn cloud_download_directory(
     provider: CloudProvider,
     directory_id: String,
     directory_name: String,
+    private_download: Option<bool>,
 ) -> Result<CloudDirectoryDownloadOutcome, QuarkError> {
     let planned_directory_id = directory_id.clone();
     let plan = run_session_work(
@@ -3930,6 +4008,12 @@ pub async fn cloud_download_directory(
     let state = app.state::<AppState>();
     let configured =
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    let private_download = private_download.unwrap_or(false);
+    ensure_private_download_enabled(&state, private_download).map_err(QuarkError::InvalidInput)?;
+    let emit_root = !private_download
+        || crate::commands::privacy_task_visibility(&state)
+            .map(|visibility| visibility.unlocked)
+            .unwrap_or(false);
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
     let root_event_app = app.clone();
@@ -3939,9 +4023,12 @@ pub async fn cloud_download_directory(
         &directory_id,
         plan,
         configured,
+        private_download,
         move |root| {
-            use tauri::Emitter;
-            let _ = root_event_app.emit("download-task-updated", root);
+            if emit_root {
+                use tauri::Emitter;
+                let _ = root_event_app.emit("download-task-updated", root);
+            }
         },
         move |provider, file_id, options, context| {
             let app = submit_app.clone();
@@ -3953,6 +4040,7 @@ pub async fn cloud_download_directory(
                     provider,
                     file_id,
                     options,
+                    private_download,
                     Some(context),
                 )
                 .await?
@@ -3979,6 +4067,12 @@ pub async fn retry_cloud_directory_group_item(
     let state = app.state::<AppState>();
     let configured =
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    let private_download = state
+        .store
+        .cloud_directory_group(group_id)
+        .map_err(|_| QuarkError::Storage)?
+        .ok_or_else(|| QuarkError::InvalidInput("网盘目录下载任务不存在".into()))?
+        .is_private;
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
     retry_cloud_directory_group_item_with(
@@ -3997,6 +4091,7 @@ pub async fn retry_cloud_directory_group_item(
                         file_id,
                         options,
                         context,
+                        private_download,
                     )
                     .await;
                 }
@@ -4006,6 +4101,7 @@ pub async fn retry_cloud_directory_group_item(
                     provider,
                     file_id,
                     options,
+                    private_download,
                     Some(context),
                 )
                 .await?
@@ -4073,6 +4169,11 @@ pub async fn retry_cloud_directory_group(
     let configured =
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     let store = Arc::clone(&state.store);
+    let private_download = store
+        .cloud_directory_group(group_id)
+        .map_err(|_| QuarkError::Storage)?
+        .ok_or_else(|| QuarkError::InvalidInput("网盘目录下载任务不存在".into()))?
+        .is_private;
     let submit_app = app.clone();
     retry_cloud_directory_group_with(
         &store,
@@ -4089,6 +4190,7 @@ pub async fn retry_cloud_directory_group(
                         file_id,
                         options,
                         context,
+                        private_download,
                     )
                     .await;
                 }
@@ -4098,6 +4200,7 @@ pub async fn retry_cloud_directory_group(
                     provider,
                     file_id,
                     options,
+                    private_download,
                     Some(context),
                 )
                 .await?

@@ -779,6 +779,7 @@ mod tests {
                         source,
                         name: "file".into(),
                         kind: "cloud".into(),
+                        is_private: false,
                     })
                     .unwrap();
                 plans.reserve_local_task(&task.source, task.id).unwrap();
@@ -1078,6 +1079,7 @@ mod tests {
                 source: a.clone(),
                 name: "a".into(),
                 kind: "cloud".into(),
+                is_private: false,
             })
             .unwrap();
         let second = tasks
@@ -1085,6 +1087,7 @@ mod tests {
                 source: b.clone(),
                 name: "b".into(),
                 kind: "cloud".into(),
+                is_private: false,
             })
             .unwrap();
         let first = set_status(&tasks, first.id, TaskStatus::Completed);
@@ -1164,6 +1167,7 @@ mod tests {
                 source: source.clone(),
                 name: "file".into(),
                 kind: "cloud".into(),
+                is_private: false,
             })
             .unwrap();
         let completed = set_status(&tasks, task.id, TaskStatus::Completed);
@@ -1235,6 +1239,7 @@ mod tests {
                 source: "cloud://baidu/personal-file".into(),
                 name: "personal".into(),
                 kind: "cloud".into(),
+                is_private: false,
             })
             .unwrap();
         let personal = set_status(&tasks, personal.id, TaskStatus::Completed);

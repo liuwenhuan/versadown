@@ -302,6 +302,7 @@ async fn publishes_the_directory_root_before_any_leaf_is_created_or_published() 
             directory: Some(destination.path().to_path_buf()),
             ..Default::default()
         },
+        false,
         move |root| {
             assert_eq!(root.kind, "folder");
             assert_eq!(root.name, "夸克精选壁纸");
