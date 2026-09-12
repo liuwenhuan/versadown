@@ -109,3 +109,24 @@ it('maps the tagged native task outcome without changing direct downloads', asyn
     task: { id: 'task-1', name: 'fixture.bin', kind: 'file', status: 'downloading', progress: 0 }
   });
 });
+
+it('sends the privacy confirmation and private selection flags only when requested', async () => {
+  native.invoke.mockResolvedValueOnce({ kind: 'task', task: { id: 'awaiting', name: 'fixture.bin', kind: 'file', status: 'awaiting_user', progress: 0 }, requires_confirmation: true, resources: [] });
+  native.invoke.mockResolvedValueOnce({ id: 'private-direct' });
+  native.invoke.mockResolvedValueOnce({ outcomes: [], failures: [] });
+  const { confirmCloudShareDownload, confirmDownload, parseDownload } = await import('./api');
+
+  await parseDownload('https://example.test/fixture.bin', undefined, true);
+  await confirmDownload('awaiting', [], undefined, true);
+  await confirmCloudShareDownload('cloud-share://quark/plan', ['f1'], undefined, true);
+
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'parse_download', {
+    input: 'https://example.test/fixture.bin', accessCode: undefined, requireConfirmation: true
+  });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'confirm_download_command', {
+    taskId: 'awaiting', selectedIds: [], privateDownload: true
+  });
+  expect(native.invoke).toHaveBeenNthCalledWith(3, 'confirm_cloud_share_download', {
+    planSource: 'cloud-share://quark/plan', selectedIds: ['f1'], privateDownload: true
+  });
+});

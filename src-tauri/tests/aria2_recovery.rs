@@ -586,6 +586,7 @@ async fn recovery_claims_regenerated_magnet_child_for_the_original_local_task() 
             source: "magnet:?xt=urn:btih:fixture".into(),
             name: "fixture".into(),
             kind: "torrent".into(),
+            is_private: false,
         })
         .unwrap();
     store
@@ -762,6 +763,7 @@ async fn recovery_does_not_guess_a_metadata_parent_when_multiple_legacy_magnets_
                 source: source.into(),
                 name: source.into(),
                 kind: "torrent".into(),
+                is_private: false,
             })
             .unwrap();
         let mut task = store.bind_gid(task.id, gid).unwrap();

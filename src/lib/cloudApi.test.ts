@@ -33,3 +33,20 @@ it('maps one directory parent task with its authoritative group root while prese
     failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
   });
 });
+
+it('marks cloud file and directory submissions as private only when explicitly requested', async () => {
+  native.invoke.mockClear();
+  native.invoke.mockResolvedValueOnce({ id: 'private-file' });
+  native.invoke.mockResolvedValueOnce({ task: { id: 'private-directory' }, queuedCount: 0, failures: [] });
+  const api = await import('./cloudApi');
+
+  await api.downloadCloudFile('quark', 'file-1', true);
+  await api.downloadCloudDirectory('quark', 'folder-1', '归档', true);
+
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'cloud_download_url', {
+    provider: 'quark', fileId: 'file-1', privateDownload: true
+  });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_download_directory', {
+    provider: 'quark', directoryId: 'folder-1', directoryName: '归档', privateDownload: true
+  });
+});

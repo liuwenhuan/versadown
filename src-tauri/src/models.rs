@@ -139,6 +139,10 @@ pub struct AppSettings {
     pub magnet_metadata: MagnetMetadataSettings,
     #[serde(default = "default_delete_transferred_share_files_after_download")]
     pub delete_transferred_share_files_after_download: bool,
+    #[serde(default)]
+    pub privacy_download_enabled: bool,
+    #[serde(default)]
+    pub privacy_password_configured: bool,
 }
 
 const fn default_delete_transferred_share_files_after_download() -> bool {
@@ -156,6 +160,8 @@ impl Default for AppSettings {
             ai: AiSettings::default(),
             magnet_metadata: MagnetMetadataSettings::default(),
             delete_transferred_share_files_after_download: true,
+            privacy_download_enabled: false,
+            privacy_password_configured: false,
         }
     }
 }
@@ -305,6 +311,8 @@ pub struct DownloadTask {
     pub updated_at: i64,
     #[serde(default)]
     pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub is_private: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -312,6 +320,7 @@ pub struct NewTask {
     pub source: String,
     pub name: String,
     pub kind: String,
+    pub is_private: bool,
 }
 
 impl NewTask {
@@ -327,6 +336,7 @@ impl NewTask {
             source,
             name,
             kind: "file".to_string(),
+            is_private: false,
         }
     }
 }
@@ -342,6 +352,8 @@ pub struct CloudDirectoryGroup {
     pub status: TaskStatus,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub is_private: bool,
 }
 
 /// A task as rendered in the queue. Cloud-directory roots and intermediate
@@ -376,6 +388,8 @@ pub struct QueueTaskPayload {
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub is_private: bool,
     pub files: Vec<TransferFile>,
     pub cleanup_pending: bool,
     #[serde(default)]
@@ -388,6 +402,7 @@ pub struct NewCloudDirectoryGroup {
     pub remote_directory_id: String,
     pub relative_directory: String,
     pub output_directory: PathBuf,
+    pub is_private: bool,
 }
 
 impl NewCloudDirectoryGroup {
@@ -402,7 +417,13 @@ impl NewCloudDirectoryGroup {
             remote_directory_id: remote_directory_id.into(),
             relative_directory: relative_directory.into(),
             output_directory: output_directory.as_ref().to_path_buf(),
+            is_private: false,
         }
+    }
+
+    pub fn with_private_download(mut self, is_private: bool) -> Self {
+        self.is_private = is_private;
+        self
     }
 }
 

@@ -241,6 +241,7 @@ impl DownloadService {
                     source: format!("aria2:{}", status.gid),
                     name: "恢复的下载任务".into(),
                     kind: "file".into(),
+                    is_private: false,
                 })?;
                 report.imported += 1;
                 store.bind_gid(task.id, &status.gid)?

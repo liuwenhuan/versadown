@@ -11,10 +11,10 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace } from './components/CloudWorkspace';
 import { SettingsPanel } from './components/SettingsPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { cancelDownloadFile, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, moveTaskToRecycle, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
-import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
+import { AiSettingsInput, AppSettings, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import darkMintIcon from './assets/launcher/dark_mint_128.png';
 import mintWhiteIcon from './assets/launcher/mint_white_128.png';
@@ -24,6 +24,7 @@ import type { CloudAuthorization } from './lib/cloudTypes';
 type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
 type TaskSortMode = 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
 type HeaderPanelMode = 'search' | 'download' | null;
+type PrivacyTaskFilter = 'all' | 'private' | 'ordinary';
 
 const defaultTaskSort: TaskSortMode = 'created-desc';
 const backgroundPurgeFrameSize = 24;
@@ -67,6 +68,10 @@ function sortTasks(tasks: readonly QueueTask[], mode: TaskSortMode): QueueTask[]
     if (comparison === 0) return left.index - right.index;
     return direction === 'asc' ? comparison : -comparison;
   }).map(({ task }) => task);
+}
+
+function isPrivateTask(task: QueueTask): boolean {
+  return task.isPrivate ?? task.is_private ?? false;
 }
 
 const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mode: TaskSortMode; label: string; ariaLabel: string }> }> = [
@@ -231,6 +236,11 @@ export function App() {
   const [headerPanel, setHeaderPanel] = useState<HeaderPanelMode>(null);
   const [headerConfirmation, setHeaderConfirmation] = useState<ParseResult | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [privacyVisibility, setPrivacyVisibility] = useState<PrivacyTaskVisibility>({ enabled: false, unlocked: false });
+  const [privacyTaskFilter, setPrivacyTaskFilter] = useState<PrivacyTaskFilter>('all');
+  const [privacyUnlockOpen, setPrivacyUnlockOpen] = useState(false);
+  const [privacyUnlockError, setPrivacyUnlockError] = useState<string | null>(null);
+  const [privacyUnlocking, setPrivacyUnlocking] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
@@ -239,24 +249,29 @@ export function App() {
   const [taskReauthorization, setTaskReauthorization] = useState<CloudAuthorization | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
-  const activeTasks = useMemo(() => tasks.filter((task) => !inactiveStatuses.has(task.status)), [tasks]);
-  const completedTasks = useMemo(() => tasks.filter((task) => task.status === 'completed'), [tasks]);
-  const failedTasks = useMemo(() => tasks.filter((task) => task.status === 'failed'), [tasks]);
-  const recycledTasks = useMemo(() => tasks.filter((task) => task.status === 'recycled' || task.status === 'cancelled'), [tasks]);
+  const privacyVisibleTasks = useMemo(() => tasks.filter((task) => privacyVisibility.unlocked || !isPrivateTask(task)), [privacyVisibility.unlocked, tasks]);
+  const filteredPrivacyTasks = useMemo(() => privacyVisibleTasks.filter((task) => {
+    if (privacyTaskFilter === 'all') return true;
+    return privacyTaskFilter === 'private' ? isPrivateTask(task) : !isPrivateTask(task);
+  }), [privacyTaskFilter, privacyVisibleTasks]);
+  const activeTasks = useMemo(() => filteredPrivacyTasks.filter((task) => !inactiveStatuses.has(task.status)), [filteredPrivacyTasks]);
+  const completedTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'completed'), [filteredPrivacyTasks]);
+  const failedTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'failed'), [filteredPrivacyTasks]);
+  const recycledTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'recycled' || task.status === 'cancelled'), [filteredPrivacyTasks]);
   const taskSearchResults = useMemo(() => headerPanel === 'search' && !isDownloadInput(searchInput)
-    ? tasks.filter((task) => searchTaskMatches(task, searchInput))
-    : [], [headerPanel, searchInput, tasks]);
+    ? filteredPrivacyTasks.filter((task) => searchTaskMatches(task, searchInput))
+    : [], [filteredPrivacyTasks, headerPanel, searchInput]);
   const unsortedVisibleTasks = downloadTab === 'active' ? activeTasks
     : downloadTab === 'completed' ? completedTasks
       : downloadTab === 'failed' ? failedTasks : recycledTasks;
   const visibleTasks = useMemo(() => sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]), [downloadTab, taskSorts, unsortedVisibleTasks]);
-  const detailsTask = useMemo(() => tasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, tasks]);
-  const downloadingTasks = tasks.filter((task) => task.status === 'downloading');
-  const pausedTasks = tasks.filter((task) => task.status === 'paused');
+  const detailsTask = useMemo(() => filteredPrivacyTasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, filteredPrivacyTasks]);
+  const downloadingTasks = filteredPrivacyTasks.filter((task) => task.status === 'downloading');
+  const pausedTasks = filteredPrivacyTasks.filter((task) => task.status === 'paused');
   const bulkTaskAction = pausedTasks.length > 0 ? 'resume' : downloadingTasks.length > 0 ? 'pause' : undefined;
   const currentSpeed = formatSpeed(downloadingTasks.reduce((total, task) => total + (task.speedBytes ?? task.download_speed ?? 0), 0));
   const pendingPurgeTasks = (pendingPurgeTaskIds ?? []).flatMap((id) => {
-    const task = tasks.find((item) => item.id === id);
+    const task = privacyVisibleTasks.find((item) => item.id === id);
     return task ? [task] : [];
   });
   const [eventsReady, setEventsReady] = useState(false);
@@ -267,6 +282,8 @@ export function App() {
   const permanentlyPurgedTaskIds = useRef(new Set<string>());
   const purgeInProgressRef = useRef(false);
   const engineEventEpoch = useRef(0);
+  const privacyUnlockPassword = useRef<HTMLInputElement>(null);
+  const previousPrivacyUnlocked = useRef(false);
   const tasksRef = useRef<QueueTask[]>(tasks);
   const confirmationGeneration = useRef(0);
   const headerConfirmationGeneration = useRef(0);
@@ -518,8 +535,28 @@ export function App() {
   useEffect(() => {
     let active = true;
     getSettings().then((loaded) => { if (active) setSettings(loaded); }).catch(() => undefined);
+    getPrivacyTaskVisibility().then((visibility) => { if (active) setPrivacyVisibility(visibility); }).catch(() => undefined);
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    const wasUnlocked = previousPrivacyUnlocked.current;
+    previousPrivacyUnlocked.current = privacyVisibility.unlocked;
+    if (privacyVisibility.unlocked) return;
+    setPrivacyTaskFilter('all');
+    setSelectedTaskId((id) => id && privacyVisibleTasks.some((task) => task.id === id) ? id : null);
+    setDetailsTaskId((id) => id && privacyVisibleTasks.some((task) => task.id === id) ? id : null);
+    if (!wasUnlocked) return;
+    setConfirmation(null);
+    setHeaderConfirmation(null);
+    setDuplicateQueue([]);
+    setPendingPurgeTaskIds(null);
+    setTaskReauthorization(null);
+  }, [privacyVisibility.unlocked, privacyVisibleTasks]);
+
+  useEffect(() => {
+    if (privacyUnlockOpen) privacyUnlockPassword.current?.focus();
+  }, [privacyUnlockOpen]);
 
   function saveSettings(next: AppSettings): Promise<void> {
     const previous = settings;
@@ -539,8 +576,48 @@ export function App() {
     return saved;
   }
 
+  async function savePrivacyConfiguration(enabled: boolean, password?: string) {
+    const saved = await configurePrivacyDownload(enabled, password);
+    setSettings(saved);
+    setPrivacyVisibility(await getPrivacyTaskVisibility());
+    return saved;
+  }
+
+  async function togglePrivacyVisibility() {
+    if (privacyVisibility.unlocked) {
+      setPrivacyVisibility(await lockPrivacyTasks());
+      return;
+    }
+    setPrivacyUnlockError(null);
+    setPrivacyUnlockOpen(true);
+  }
+
+  async function unlockPrivateTasks() {
+    const input = privacyUnlockPassword.current;
+    const password = input?.value ?? '';
+    if (input) input.value = '';
+    if (!password) {
+      setPrivacyUnlockError('请输入隐私模式密码');
+      return;
+    }
+    setPrivacyUnlocking(true);
+    try {
+      const visibility = await unlockPrivacyTasks(password);
+      setPrivacyVisibility(visibility);
+      setPrivacyUnlockOpen(false);
+      if (visibility.unlocked) {
+        await refreshTaskSnapshot(() => false, 'active');
+        await refreshTaskSnapshot(() => false, 'terminal');
+      }
+    } catch (error) {
+      setPrivacyUnlockError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPrivacyUnlocking(false);
+    }
+  }
+
   async function runLauncherBatchAction(command: 'pause' | 'resume') {
-    const targets = tasksRef.current.filter((task) => command === 'pause' ? task.status === 'downloading' : task.status === 'paused');
+    const targets = tasksRef.current.filter((task) => (privacyVisibility.unlocked || !isPrivateTask(task)) && (command === 'pause' ? task.status === 'downloading' : task.status === 'paused'));
     if (!targets.length) return;
     const results = await Promise.allSettled(targets.map((task) => runTaskAction(task.id, command)));
     let failure: unknown;
@@ -601,7 +678,7 @@ export function App() {
   }, []);
 
   async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal') {
-    const result = await parseDownload(input, accessCode);
+    const result = await parseDownload(input, accessCode, settings.privacyDownloadEnabled ?? false);
     if (result.task) { recordTaskEvent(result.task); setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
     if (result.confirmation) {
       if (confirmationPlacement === 'header') showHeaderConfirmation(result.confirmation);
@@ -651,7 +728,7 @@ export function App() {
     }
   }
 
-  async function confirm(selectedIds: string[], destinationDirectory?: string, placement: 'modal' | 'header' = 'modal') {
+  async function confirm(selectedIds: string[], destinationDirectory?: string, privateDownload = false, placement: 'modal' | 'header' = 'modal') {
     const activeConfirmation = placement === 'header' ? headerConfirmation : confirmation;
     if (!activeConfirmation) return;
     const activeGeneration = placement === 'header' ? headerConfirmationGeneration : confirmationGeneration;
@@ -663,7 +740,7 @@ export function App() {
       if (shareConfirmationsInFlight.current.has(planKey)) return;
       shareConfirmationsInFlight.current.add(planKey);
       try {
-        const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory);
+        const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory, privateDownload);
         const outcomes = result.outcomes;
         const cloudTasks = outcomes.flatMap((outcome) => outcome.queueTask ? [outcome.queueTask] : outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
         const duplicates = outcomes.flatMap((outcome) => outcome.duplicate ? [outcome.duplicate] : []);
@@ -699,8 +776,8 @@ export function App() {
       children: activeConfirmation.resources.filter((resource) => selectedIds.includes(resource.id)).map((resource) => ({ id: resource.id, name: resource.name, kind: 'file', status: 'queued', progress: 0, size: resource.size }))
     };
     const nativeTask = await (destinationDirectory
-      ? confirmDownload(activeConfirmation.taskId, selectedIds, destinationDirectory)
-      : confirmDownload(activeConfirmation.taskId, selectedIds)).catch(() => undefined);
+      ? confirmDownload(activeConfirmation.taskId, selectedIds, destinationDirectory, privateDownload)
+      : confirmDownload(activeConfirmation.taskId, selectedIds, undefined, privateDownload)).catch(() => undefined);
     const confirmed = nativeTask ?? task;
     recordTaskEvent(confirmed);
     setTasks((current) => upsertTask(current, confirmed)); setSelectedTaskId(confirmed.id); setActiveConfirmation(null);
@@ -1040,7 +1117,7 @@ export function App() {
             />
           </label>
           {(headerPanel || headerConfirmation) && <div className="header-input-panel" data-window-no-drag>
-            {headerConfirmation ? <ParseConfirmDialog placement="header" result={headerConfirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} onConfirm={(selectedIds, destinationDirectory) => void confirm(selectedIds, destinationDirectory, 'header')} onSelectionChange={(selectedIds) => setHeaderConfirmation((current) => current ? {
+            {headerConfirmation ? <ParseConfirmDialog placement="header" result={headerConfirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={(selectedIds, destinationDirectory, privateDownload) => void confirm(selectedIds, destinationDirectory, privateDownload, 'header')} onSelectionChange={(selectedIds) => setHeaderConfirmation((current) => current ? {
               ...current,
               resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
             } : current)} onClose={() => { dismissHeaderConfirmation(); setHeaderPanel(null); }} />
@@ -1090,19 +1167,24 @@ export function App() {
               {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" disabled={purgeInProgress} onClick={requestRecycleClear}>清空</button>}
             </div>
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
-            <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} />
+            <div className="task-privacy-actions">
+              {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}>{privacyVisibility.unlocked ? '🔓' : '🔒'}</button>}
+              {privacyVisibility.unlocked && <label className="task-privacy-filter"><span>筛选</span><select aria-label="筛选任务" value={privacyTaskFilter} onChange={(event) => setPrivacyTaskFilter(event.target.value as PrivacyTaskFilter)}><option value="all">全部任务</option><option value="private">仅隐私任务</option><option value="ordinary">仅普通任务</option></select></label>}
+              <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} />
+            </div>
           </header>
           <section className="queue-area">
             <DownloadQueue tasks={visibleTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onFileSelection={selectTaskFile} onFileCancel={cancelTaskFile} onConfirm={reopenTaskConfirmation} />
           </section>
         </section>}
-        <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} /></section>
-        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} /></section>}
+        <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
+        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
       </div>
-      {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
+      {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
       } : current)} onClose={dismissConfirmation} />}
+      {privacyUnlockOpen && <div className="modal-backdrop" role="presentation"><section className="confirm-dialog" role="dialog" aria-modal="true" aria-label="解锁隐私任务"><header><div className="confirm-dialog-title"><span aria-hidden="true">🔒</span><h2>解锁隐私任务</h2></div><button aria-label="关闭隐私解锁窗口" onClick={() => setPrivacyUnlockOpen(false)}>×</button></header><form onSubmit={(event) => { event.preventDefault(); void unlockPrivateTasks(); }}><div className="parse-resource-card"><label className="settings-field">隐私模式密码<input ref={privacyUnlockPassword} type="password" autoComplete="current-password" aria-label="隐私模式密码" disabled={privacyUnlocking} /></label>{privacyUnlockError && <p className="cloud-operation-status error" role="alert">{privacyUnlockError}</p>}</div><footer><span /><div><button type="button" onClick={() => setPrivacyUnlockOpen(false)} disabled={privacyUnlocking}>取消</button><button className="primary" type="submit" disabled={privacyUnlocking}>{privacyUnlocking ? '正在解锁…' : '解锁'}</button></div></footer></form></section></div>}
       {duplicate && <DuplicateDownloadDialog
         task={duplicate.task}
         state={duplicate.state}

@@ -1,4 +1,4 @@
-import { AiSettings, AiSettingsInput, AppSettings, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, QueueTask, TaskActionResult, TaskCommand } from './types';
+import { AiSettings, AiSettingsInput, AppSettings, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './types';
 import { invoke } from '@tauri-apps/api/core';
 
 function fileNameFrom(value: string) {
@@ -60,9 +60,9 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
     : { task, ...(queueTask ? { queueTask } : {}) };
 }
 
-export async function parseDownload(input: string, accessCode?: string): Promise<ParseDownloadResult> {
+export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false): Promise<ParseDownloadResult> {
   if (!isTauriRuntime()) return parseLocally(input);
-  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode });
+  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}) });
   if (result.kind === 'share_confirmation') {
     return {
       confirmation: {
@@ -96,9 +96,9 @@ export async function parseDownload(input: string, accessCode?: string): Promise
   };
 }
 
-export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<QueueTask | undefined> {
+export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false): Promise<QueueTask | undefined> {
   if (!isTauriRuntime()) return undefined;
-  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, destinationDirectory });
+  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}) });
 }
 
 export type PersistedTaskScope = 'active' | 'terminal';
@@ -120,9 +120,9 @@ export async function openTaskFile(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_file', { taskId });
 }
 
-export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string): Promise<CloudShareBatchResult> {
+export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false): Promise<CloudShareBatchResult> {
   if (!isTauriRuntime()) return { outcomes: [], failures: [] };
-  const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, destinationDirectory });
+  const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}) });
   return { outcomes: result.outcomes.map(duplicateResult), failures: result.failures };
 }
 
@@ -180,7 +180,9 @@ export const defaultSettings: AppSettings = {
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
   aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 },
-  deleteTransferredShareFilesAfterDownload: true
+  deleteTransferredShareFilesAfterDownload: true,
+  privacyDownloadEnabled: false,
+  privacyPasswordConfigured: false
 };
 
 export async function getSettings(): Promise<AppSettings> {
@@ -189,6 +191,23 @@ export async function getSettings(): Promise<AppSettings> {
 
 export async function updateSettings(settings: AppSettings): Promise<AppSettings> {
   return isTauriRuntime() ? invoke<AppSettings>('update_settings', { settings }) : settings;
+}
+
+export async function configurePrivacyDownload(enabled: boolean, password?: string): Promise<AppSettings> {
+  if (!isTauriRuntime()) return { ...defaultSettings, privacyDownloadEnabled: enabled, privacyPasswordConfigured: Boolean(password) };
+  return invoke<AppSettings>('configure_privacy_download', { enabled, password: password || null });
+}
+
+export async function getPrivacyTaskVisibility(): Promise<PrivacyTaskVisibility> {
+  return isTauriRuntime() ? invoke<PrivacyTaskVisibility>('get_privacy_task_visibility') : { enabled: false, unlocked: false };
+}
+
+export async function unlockPrivacyTasks(password: string): Promise<PrivacyTaskVisibility> {
+  return isTauriRuntime() ? invoke<PrivacyTaskVisibility>('unlock_privacy_tasks', { password }) : { enabled: true, unlocked: password.length > 0 };
+}
+
+export async function lockPrivacyTasks(): Promise<PrivacyTaskVisibility> {
+  return isTauriRuntime() ? invoke<PrivacyTaskVisibility>('lock_privacy_tasks') : { enabled: false, unlocked: false };
 }
 
 export async function updateAiSettings(settings: AiSettingsInput): Promise<AiSettings> {
