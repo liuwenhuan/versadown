@@ -1,5 +1,4 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -117,7 +116,8 @@ it('uses the dark mint graphic in dark theme', () => {
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
-  expect(trigger.querySelector('img')).toHaveAttribute('src', expect.stringContaining('dark_mint'));
+  expect(trigger.querySelector('.launcher-mark-shell')).toHaveAttribute('fill', '#2e3239');
+  expect(trigger.querySelector('.launcher-mark-chevron')).toHaveAttribute('fill', '#c4e3d1');
 });
 
 it('switches the launcher graphic when the theme changes', () => {
@@ -133,16 +133,14 @@ it('switches the launcher graphic when the theme changes', () => {
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
 });
 
-it('renders the transparent launcher image without a second hexagon crop edge', () => {
-  const stylesheet = document.createElement('style');
-  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
-  document.head.appendChild(stylesheet);
-  try {
-    render(<FloatingLauncher onParse={vi.fn()} />);
+it('renders vector launcher artwork without a raster matte or outline', () => {
+  theme.resolved = 'light';
+  render(<FloatingLauncher onParse={vi.fn()} />);
 
-    const image = screen.getByRole('button', { name: '打开下载输入' }).querySelector('img');
-    expect(getComputedStyle(image!).clipPath).not.toContain('polygon');
-  } finally {
-    stylesheet.remove();
-  }
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  const shell = trigger.querySelector('.launcher-mark-shell');
+  expect(trigger.querySelector('img')).not.toBeInTheDocument();
+  expect(trigger.querySelector('svg.launcher-mark')).toBeInTheDocument();
+  expect(shell).toHaveAttribute('fill', '#8bc2b3');
+  expect(shell).toHaveAttribute('stroke', 'none');
 });

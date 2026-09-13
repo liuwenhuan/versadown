@@ -1,7 +1,5 @@
 import { MouseEvent, useRef, useState, useSyncExternalStore } from 'react';
 import { NewDownloadDialog } from './NewDownloadDialog';
-import darkMintIcon from '../assets/launcher/dark_mint_128.png';
-import mintWhiteIcon from '../assets/launcher/mint_white_128.png';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 
 interface FloatingLauncherProps {
@@ -13,6 +11,17 @@ interface FloatingLauncherProps {
 }
 
 const dragThreshold = 5;
+
+function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
+  const shell = variant === 'dark' ? '#2e3239' : '#8bc2b3';
+  const chevron = variant === 'dark' ? '#c4e3d1' : '#ffffff';
+  return (
+    <svg className="launcher-mark" viewBox="0 0 128 128" aria-hidden="true" focusable="false">
+      <path className="launcher-mark-shell" d="M64 10 112 37.5v53L64 118 16 90.5v-53Z" fill={shell} stroke="none" />
+      <path className="launcher-mark-chevron" d="M38 49.5 64 64.5l26-15v9L64 73.5l-26-15Zm0 19L64 83.5l26-15v9L64 92.5l-26-15Z" fill={chevron} stroke="none" />
+    </svg>
+  );
+}
 
 export function FloatingLauncher({ onParse, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
   const [expanded, setExpanded] = useState(false);
@@ -63,7 +72,7 @@ export function FloatingLauncher({ onParse, onOpenTaskList, onExpandedChange, on
         }}
       >
         <button className="launcher-trigger" data-size="64" data-icon-variant={resolvedTheme} aria-label="打开下载输入">
-          <img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" />
+          <LauncherMark variant={resolvedTheme} />
         </button>
       </div>
       {expanded && <NewDownloadDialog open onParse={onParse} onClose={() => setLauncherExpanded(false)} onOpenTaskList={() => { void onOpenTaskList?.(); setLauncherExpanded(false); }} />}

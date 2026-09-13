@@ -10,7 +10,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         'cloud-authorization': resolve(__dirname, 'visual-tests/cloud-authorization.html'),
-        'download-queue': resolve(__dirname, 'visual-tests/download-queue.html')
+        'download-queue': resolve(__dirname, 'visual-tests/download-queue.html'),
+        'launcher-black': resolve(__dirname, 'visual-tests/launcher-black.html')
       }
     }
   }
