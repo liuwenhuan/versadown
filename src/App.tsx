@@ -1149,7 +1149,7 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
       <header className="app-header">
         <div className="app-header-drag-space" data-tauri-drag-region aria-hidden="true" />
         <div className="brand" data-tauri-drag-region="deep">
@@ -1160,6 +1160,7 @@ export function App() {
           <label className="global-search">
             <span aria-hidden="true">⌕</span>
             <textarea
+              style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
               rows={1}
               aria-label="搜索任务或粘贴下载链接"
               placeholder="搜索本地任务，或粘贴下载链接"

@@ -43,6 +43,18 @@ it('renders the compact download-manager layout without browser navigation contr
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
+it('prevents selecting application chrome while keeping editable text selectable', async () => {
+  render(<App />);
+
+  const appShell = document.querySelector('.app-shell');
+  const searchIcon = document.querySelector('.global-search > span');
+  expect(appShell).toHaveStyle({ userSelect: 'none' });
+  expect(appShell).toContainElement(within(screen.getByRole('navigation', { name: '主导航' })).getByText('任务'));
+  expect(appShell).toContainElement(searchIcon);
+  expect(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' })).toHaveStyle({ userSelect: 'text' });
+  await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
+});
+
 it('leaves quick input to the independent native launcher window', async () => {
   render(<App />);
   expect(screen.queryByRole('button', { name: '打开下载输入' })).not.toBeInTheDocument();
