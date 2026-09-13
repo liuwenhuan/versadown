@@ -121,12 +121,11 @@ mod tests {
         json!({"share_status":"OK","files":[{"id":"f1","kind":"drive#file","name":"verify.mp4","size":"7"}],"next_page_token":""})
     }
     #[test]
-    fn pikpak_share_web_context_and_current_identity_reach_direct_download() {
+    fn pikpak_share_reuses_the_inspected_pass_token_with_the_current_identity() {
         let store = credentials();
         let http = Http::new(vec![
             pass(),
             listing(),
-            pass(),
             json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":"http://cdn.example/file"}}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
@@ -147,15 +146,45 @@ mod tests {
             .headers
             .contains(&("X-Captcha-Token".into(), "personal-captcha".into())));
         let requests = http.requests.lock().unwrap();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].method, "GET");
         assert!(requests[0]
             .url
             .starts_with("https://api-drive.mypikpak.com/"));
         assert!(requests[0].url.contains("/drive/v1/share?"));
         assert_eq!(requests[0].headers["X-Captcha-Token"], "personal-captcha");
-        assert!(requests[3].url.contains("/drive/v1/share/file_info?"));
-        assert!(requests[3].url.contains("pass_code_token=pass-secret"));
+        assert!(requests[2].url.contains("/drive/v1/share/file_info?"));
+        assert!(requests[2].url.contains("pass_code_token=pass-secret"));
+    }
+
+    #[test]
+    fn pikpak_share_refreshes_an_expired_inspected_pass_token_once() {
+        let store = credentials();
+        let http = Http::new(vec![
+            json!({"share_status":"PASS_CODE_ERROR"}),
+            pass(),
+            json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":"https://cdn.example/file"}}),
+        ]);
+        let plan = CloudSharePlan::new(
+            CloudProvider::Pikpak,
+            "share123".into(),
+            Some("a123".into()),
+            vec![CloudShareEntry::new(
+                "share123",
+                "f1".into(),
+                "file.txt".into(),
+                vec![],
+                Some(7),
+            )],
+            json!({"pass_code_token":"expired-pass"}),
+        );
+        let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
+
+        let resolved = adapter.resolve_with_context(&entry(plan)).unwrap();
+
+        assert!(matches!(resolved.result, Ok(ShareResolution::Direct(_))));
+        assert_eq!(resolved.updated_context.unwrap()["pass_code_token"], "pass-secret");
+        assert_eq!(http.requests.lock().unwrap().len(), 3);
     }
     #[test]
     fn pikpak_share_accepts_password_and_web_token_sessions() {
@@ -232,7 +261,6 @@ mod tests {
         let http = Http::new(vec![
             pass(),
             listing(),
-            pass(),
             json!({
                 "share_status":"OK",
                 "file_info":{
@@ -374,7 +402,7 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .extend(error.as_object().unwrap().clone());
-            let http = Http::new(vec![pass(), listing(), pass(), response]);
+            let http = Http::new(vec![pass(), listing(), response]);
             let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
             let ShareInspection::Plan(plan) =
                 adapter.inspect(&candidate(CloudProvider::Pikpak)).unwrap()
@@ -382,7 +410,7 @@ mod tests {
                 panic!()
             };
             assert!(adapter.resolve(&entry(plan)).is_err());
-            assert_eq!(http.requests.lock().unwrap().len(), 4);
+            assert_eq!(http.requests.lock().unwrap().len(), 3);
         }
     }
 
@@ -398,7 +426,6 @@ mod tests {
             let http = Http::new(vec![
                 pass(),
                 listing(),
-                pass(),
                 json!({"share_status":"OK","file_info":file}),
             ]);
             let adapter = provider_share_adapter(CloudProvider::Pikpak, &store, &http).unwrap();
@@ -408,7 +435,7 @@ mod tests {
                 panic!()
             };
             assert!(adapter.resolve(&entry(plan)).is_err());
-            assert_eq!(http.requests.lock().unwrap().len(), 4);
+            assert_eq!(http.requests.lock().unwrap().len(), 3);
             assert_eq!(store.load("pikpak").unwrap().unwrap(), original);
         }
         let http = Http::new(vec![
@@ -1255,7 +1282,7 @@ fn root(p: &str) -> &str {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspect,
-    ShareInspection, ShareResolution, ShareResolve,
+    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve,
 };
 impl<'a, T: CloudHttpTransport + CloudUploadTransport, S: CredentialStore> PikPakClient<'a, T, S> {
     pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
@@ -1509,6 +1536,49 @@ fn pikpak_share_status(value: &Value) -> Result<(), QuarkError> {
         None => Err(QuarkError::InvalidResponse),
     }
 }
+
+fn pikpak_share_pass_token(value: &Value, code: Option<&str>) -> Result<String, QuarkError> {
+    pikpak_share_status(value)?;
+    let token = value
+        .get("pass_code_token")
+        .map(|value| value.as_str().ok_or(QuarkError::InvalidResponse))
+        .transpose()?
+        .unwrap_or("");
+    if code.is_some() && token.is_empty() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(token.into())
+}
+
+fn stored_pikpak_share_pass_token(
+    context: &Value,
+    code: Option<&str>,
+) -> Result<Option<String>, QuarkError> {
+    let Some(value) = context.get("pass_code_token") else {
+        return Ok(None);
+    };
+    let token = value.as_str().ok_or(QuarkError::InvalidResponse)?;
+    if token.chars().any(char::is_control) {
+        return Err(QuarkError::InvalidResponse);
+    }
+    if code.is_some() && token.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(token.into()))
+}
+
+fn pikpak_share_token_needs_refresh(value: &Value) -> bool {
+    value["share_status"].as_str() == Some("PASS_CODE_ERROR")
+}
+
+fn with_pikpak_share_pass_token(mut context: Value, token: &str) -> Value {
+    if let Some(values) = context.as_object_mut() {
+        values.insert("pass_code_token".into(), token.into());
+        context
+    } else {
+        json!({"pass_code_token":token})
+    }
+}
 impl ShareInspect for PikPakShareAdapter<'_> {
     fn inspect(
         &self,
@@ -1599,6 +1669,12 @@ impl ShareResolve for PikPakShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_pikpak_share(self.credentials, self.http, entry)
     }
+    fn resolve_with_context(
+        &self,
+        entry: &CloudShareResolvedEntry,
+    ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
+        resolve_pikpak_share_with_context(self.credentials, self.http, entry)
+    }
 }
 impl CloudShareAdapter for PikPakShareAdapter<'_> {}
 pub fn resolve_pikpak_share(
@@ -1606,48 +1682,82 @@ pub fn resolve_pikpak_share(
     http: &dyn CloudHttpTransport,
     entry: &CloudShareResolvedEntry,
 ) -> Result<ShareResolution, QuarkError> {
+    resolve_pikpak_share_with_context(credentials, http, entry)?.result
+}
+
+fn resolve_pikpak_share_with_context(
+    credentials: &dyn CredentialStore,
+    http: &dyn CloudHttpTransport,
+    entry: &CloudShareResolvedEntry,
+) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
     if entry.provider != CloudProvider::Pikpak || entry.plan.provider != CloudProvider::Pikpak {
         return Err(QuarkError::InvalidResponse);
     }
     let adapter = PikPakShareAdapter { credentials, http };
     let mut session = adapter.session()?;
-    let pass = session.pass(&entry.plan.canonical_share_id, entry.access_code())?;
-    pikpak_share_status(&pass)?;
-    let token = pass
-        .get("pass_code_token")
-        .map(|value| value.as_str().ok_or(QuarkError::InvalidResponse))
-        .transpose()?
-        .unwrap_or("");
-    if entry.access_code().is_some() && token.is_empty() {
-        return Err(QuarkError::InvalidResponse);
-    }
-    let value = session.request(
+    let mut context = entry.plan.provider_context.clone();
+    let mut rotated_context = false;
+    let mut token = match stored_pikpak_share_pass_token(&context, entry.access_code())? {
+        Some(token) => token,
+        None => {
+            let pass = session.pass(&entry.plan.canonical_share_id, entry.access_code())?;
+            let token = pikpak_share_pass_token(&pass, entry.access_code())?;
+            context = with_pikpak_share_pass_token(context, &token);
+            rotated_context = true;
+            token
+        }
+    };
+    let mut value = session.request(
         "GET",
         format!(
             "{SHARE_DRIVE}/drive/v1/share/file_info?share_id={}&file_id={}&pass_code_token={}",
             encoded(&entry.plan.canonical_share_id),
             encoded(&entry.entry.entry_id),
-            encoded(token)
+            encoded(&token)
         ),
         None,
     )?;
-    pikpak_share_status(&value)?;
-    let file = &value["file_info"];
-    if file["id"].as_str() != Some(entry.entry.entry_id.as_str()) || file["kind"] != "drive#file" {
-        return Err(QuarkError::InvalidResponse);
+    if !rotated_context && pikpak_share_token_needs_refresh(&value) {
+        let pass = session.pass(&entry.plan.canonical_share_id, entry.access_code())?;
+        token = pikpak_share_pass_token(&pass, entry.access_code())?;
+        context = with_pikpak_share_pass_token(context, &token);
+        rotated_context = true;
+        value = session.request(
+            "GET",
+            format!(
+                "{SHARE_DRIVE}/drive/v1/share/file_info?share_id={}&file_id={}&pass_code_token={}",
+                encoded(&entry.plan.canonical_share_id),
+                encoded(&entry.entry.entry_id),
+                encoded(&token)
+            ),
+            None,
+        )?;
     }
-    // Newer share responses can omit `web_content_link` while retaining the
-    // provider-issued source-media link.  Use only that first-party direct
-    // link; do not save the shared item into the user's personal drive.
-    let url = pikpak_share_content_link(file)?;
-    super::share::validate_direct_url(&url)?;
-    Ok(ShareResolution::Direct(
-        super::commands::ResolvedCloudDownload {
-            url,
-            name: entry.entry.name.clone(),
-            headers: session.headers.into_iter().collect(),
-        },
-    ))
+    let result = (|| {
+        pikpak_share_status(&value)?;
+        let file = &value["file_info"];
+        if file["id"].as_str() != Some(entry.entry.entry_id.as_str())
+            || file["kind"] != "drive#file"
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        // Newer share responses can omit `web_content_link` while retaining the
+        // provider-issued source-media link.  Use only that first-party direct
+        // link; do not save the shared item into the user's personal drive.
+        let url = pikpak_share_content_link(file)?;
+        super::share::validate_direct_url(&url)?;
+        Ok(ShareResolution::Direct(
+            super::commands::ResolvedCloudDownload {
+                url,
+                name: entry.entry.name.clone(),
+                headers: session.headers.into_iter().collect(),
+            },
+        ))
+    })();
+    Ok(ShareOperationResult {
+        result,
+        updated_context: rotated_context.then_some(context),
+    })
 }
 fn pikpak_share_content_link(file: &Value) -> Result<String, QuarkError> {
     match file.get("web_content_link") {
