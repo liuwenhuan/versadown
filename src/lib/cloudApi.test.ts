@@ -82,14 +82,28 @@ it('marks cloud file and directory submissions as private only when explicitly r
   native.invoke.mockResolvedValueOnce({ task: { id: 'private-directory' }, queuedCount: 0, failures: [] });
   const api = await import('./cloudApi');
 
-  await api.downloadCloudFile('quark', 'file-1', true);
+  await api.downloadCloudFile('quark', 'file-1', 'file.bin', true);
   await api.downloadCloudDirectory('quark', 'folder-1', '归档', true);
 
   expect(native.invoke).toHaveBeenNthCalledWith(1, 'cloud_download_url', {
-    provider: 'quark', fileId: 'file-1', privateDownload: true
+    provider: 'quark', fileId: 'file-1', fileName: 'file.bin', privateDownload: true
   });
   expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_download_directory', {
     provider: 'quark', directoryId: 'folder-1', directoryName: '归档', privateDownload: true
+  });
+});
+
+it('sends the selected cloud filename with a file download request', async () => {
+  native.invoke.mockClear();
+  native.invoke.mockResolvedValueOnce({ id: 'task-1', name: '05_如何制作动感影集.mp4' });
+  const api = await import('./cloudApi');
+
+  await api.downloadCloudFile('tianyi', '524751232948846473', '05_如何制作动感影集.mp4');
+
+  expect(native.invoke).toHaveBeenCalledWith('cloud_download_url', {
+    provider: 'tianyi',
+    fileId: '524751232948846473',
+    fileName: '05_如何制作动感影集.mp4'
   });
 });
 

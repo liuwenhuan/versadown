@@ -71,9 +71,10 @@ function cloudDownloadResult(result: NativeCloudDownload): TaskActionResult {
     ? { duplicate: { task, state: duplicate }, ...(queueTask ? { queueTask } : {}) }
     : { task, ...(queueTask ? { queueTask } : {}) };
 }
-export const downloadCloudFile = (provider: CloudProvider, fileId: string, privateDownload = false): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', {
+export const downloadCloudFile = (provider: CloudProvider, fileId: string, fileName: string, privateDownload = false): Promise<TaskActionResult> => invoke<NativeCloudDownload>('cloud_download_url', {
   provider,
   fileId,
+  fileName,
   ...(privateDownload ? { privateDownload: true } : {})
 })
   .then(cloudDownloadResult);

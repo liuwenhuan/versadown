@@ -26,7 +26,7 @@ export interface CloudManagerClient {
   trashCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   deleteCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   restoreCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
-  downloadCloudFile(provider: CloudProvider, fileId: string, privateDownload?: boolean): Promise<unknown>;
+  downloadCloudFile(provider: CloudProvider, fileId: string, fileName: string, privateDownload?: boolean): Promise<unknown>;
   downloadCloudDirectory(provider: CloudProvider, directoryId: string, directoryName: string, privateDownload?: boolean): Promise<CloudDirectoryDownloadOutcome>;
   logoutCloud(provider: CloudProvider): Promise<void>;
   pickAndUploadFiles(provider: CloudProvider, parentId: string): Promise<CloudUploadOutcome>;
@@ -921,8 +921,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           return;
         }
         const task = privateDownload === undefined
-          ? await client.downloadCloudFile(provider, item.id)
-          : await client.downloadCloudFile(provider, item.id, privateDownload);
+          ? await client.downloadCloudFile(provider, item.id, item.name)
+          : await client.downloadCloudFile(provider, item.id, item.name, privateDownload);
         onDownloadTask?.(task);
       }));
       if (directoryFailures.length) {

@@ -4,12 +4,17 @@ use serde_json::Value;
 pub struct Http {
     pub requests: Mutex<Vec<CloudHttpRequest>>,
     replies: Mutex<std::collections::VecDeque<Value>>,
+    set_cookies: Vec<String>,
 }
 impl Http {
     pub fn new(replies: Vec<Value>) -> Self {
+        Self::with_cookies(replies, vec!["SESSION=issued; Path=/; Secure".into()])
+    }
+    pub fn with_cookies(replies: Vec<Value>, set_cookies: Vec<String>) -> Self {
         Self {
             requests: Mutex::new(vec![]),
             replies: Mutex::new(replies.into()),
+            set_cookies,
         }
     }
 }
@@ -25,7 +30,7 @@ impl CloudHttpTransport for Http {
                 .pop_front()
                 .expect("unexpected share HTTP request")
                 .to_string(),
-            set_cookies: vec!["SESSION=issued; Path=/; Secure".into()],
+            set_cookies: self.set_cookies.clone(),
         })
     }
 }

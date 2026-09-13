@@ -1311,7 +1311,7 @@ it('requires an ordinary-download confirmation before queuing a cloud file when 
   expect(downloadCloudFile).not.toHaveBeenCalled();
   await user.click(within(confirmation).getByRole('button', { name: '立即下载' }));
 
-  await waitFor(() => expect(downloadCloudFile).toHaveBeenCalledWith('quark', 'file-1', false));
+  await waitFor(() => expect(downloadCloudFile).toHaveBeenCalledWith('quark', 'file-1', '报告.pdf', false));
 });
 
 it('marks a selected cloud folder private only after the private-download confirmation', async () => {
@@ -1369,6 +1369,7 @@ it('keeps the current file list visible when a cloud operation fails', async () 
 
 it.each([
   ['pikpak', 'PikPak'],
+  ['baidu', '百度'],
   ['xunlei', '迅雷']
 ] as const)('offers %s reauthorization after a download requires official web verification', async (provider, label) => {
   const user = userEvent.setup();

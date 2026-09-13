@@ -158,6 +158,127 @@ mod tests {
     }
 
     #[test]
+    fn tianyi_share_recovers_its_web_session_from_a_signed_app_session() {
+        // Break caught: rejecting an empty Cookie here makes a valid native
+        // App session work for personal files but not for the same user's
+        // Tianyi share links.
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "tianyi",
+                br#"{"cookie":"","auth_method":"password","app":{"sessionKey":"app-key","sessionSecret":"app-secret","accessToken":"access-token","loginName":"alice@189.cn"}}"#,
+            )
+            .unwrap();
+        let http = Http::with_cookies(
+            vec![
+                json!({"res_code": 0}),
+                json!({
+                    "res_code": 0,
+                    "shareId": "share-id",
+                    "fileId": "524751232948846473",
+                    "fileName": "05_如何制作动感影集.mp4",
+                    "isFolder": false,
+                    "needAccessCode": 0,
+                    "shareMode": 1
+                }),
+            ],
+            vec![
+                "COOKIE_LOGIN_USER=recovered; Path=/; Secure".into(),
+                "JSESSIONID=share-session; Path=/; Secure".into(),
+            ],
+        );
+        let mut input = candidate(CloudProvider::Tianyi);
+        input.access_code = None;
+
+        let ShareInspection::Plan(plan) =
+            provider_share_adapter(CloudProvider::Tianyi, &store, &http)
+                .unwrap()
+                .inspect(&input)
+                .expect("the native session should recover the web share session")
+        else {
+            panic!("a public file share should yield a plan")
+        };
+
+        assert_eq!(plan.entries[0].name, "05_如何制作动感影集.mp4");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]
+            .url
+            .contains("/ssoLogin.action?sessionKey=app-key"));
+        assert!(requests[1]
+            .url
+            .contains("/getShareInfoByCode.action?shareCode=share123"));
+        drop(requests);
+        let stored: TianyiSession =
+            serde_json::from_slice(&store.load("tianyi").unwrap().unwrap()).unwrap();
+        assert!(stored.cookie.contains("COOKIE_LOGIN_USER=recovered"));
+        assert!(stored.cookie.contains("JSESSIONID=share-session"));
+    }
+
+    #[test]
+    fn tianyi_share_replaces_a_rejected_web_cookie_from_signed_app_session() {
+        // A retained browser cookie may expire independently of the signed App
+        // session. The latter must renew only this safe share GET once instead
+        // of making a password-logged-in account appear unauthorized.
+        let store = MemoryCredentialStore::default();
+        store
+            .save(
+                "tianyi",
+                br#"{"cookie":"COOKIE_LOGIN_USER=stale; JSESSIONID=stale-session","auth_method":"password","app":{"sessionKey":"app-key","sessionSecret":"app-secret","accessToken":"access-token","loginName":"alice@189.cn"}}"#,
+            )
+            .unwrap();
+        let http = Http::with_cookies(
+            vec![
+                json!({"res_code": -1}),
+                json!({"res_code": 0}),
+                json!({
+                    "res_code": 0,
+                    "shareId": "share-id",
+                    "fileId": "524751232948846473",
+                    "fileName": "05_如何制作动感影集.mp4",
+                    "isFolder": false,
+                    "needAccessCode": 0,
+                    "shareMode": 1
+                }),
+            ],
+            vec![
+                "COOKIE_LOGIN_USER=recovered; Path=/; Secure".into(),
+                "JSESSIONID=share-session; Path=/; Secure".into(),
+            ],
+        );
+        let mut input = candidate(CloudProvider::Tianyi);
+        input.access_code = None;
+
+        let ShareInspection::Plan(plan) =
+            provider_share_adapter(CloudProvider::Tianyi, &store, &http)
+                .unwrap()
+                .inspect(&input)
+                .expect("the signed App session should replace the expired share cookie")
+        else {
+            panic!("a public file share should yield a plan")
+        };
+
+        assert_eq!(plan.entries[0].name, "05_如何制作动感影集.mp4");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0]
+            .url
+            .contains("/getShareInfoByCode.action?shareCode=share123"));
+        assert!(requests[1]
+            .url
+            .contains("/ssoLogin.action?sessionKey=app-key"));
+        assert!(requests[2]
+            .url
+            .contains("/getShareInfoByCode.action?shareCode=share123"));
+        drop(requests);
+        let stored: TianyiSession =
+            serde_json::from_slice(&store.load("tianyi").unwrap().unwrap()).unwrap();
+        assert!(stored.cookie.contains("COOKIE_LOGIN_USER=recovered"));
+        assert!(stored.cookie.contains("JSESSIONID=share-session"));
+        assert!(stored.app.is_some());
+    }
+
+    #[test]
     fn tianyi_share_accepts_zero_count_directory_without_list_fields() {
         let store = credentials();
         let directory = json!({
@@ -1228,7 +1349,9 @@ pub struct TianyiShareAdapter<'a> {
 struct TianyiShareSession<'a> {
     cookie: String,
     browser_session: TianyiSession,
+    credentials: &'a dyn CredentialStore,
     http: &'a dyn CloudHttpTransport,
+    renewed_cookie: bool,
 }
 impl TianyiShareAdapter<'_> {
     fn session(&self) -> Result<TianyiShareSession<'_>, QuarkError> {
@@ -1236,15 +1359,26 @@ impl TianyiShareAdapter<'_> {
             .credentials
             .load("tianyi")?
             .ok_or(QuarkError::NotAuthorized)?;
-        let session: TianyiSession =
+        let mut session: TianyiSession =
             serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
         if session.cookie.trim().is_empty() {
-            return Err(QuarkError::NotAuthorized);
+            let app = session.app.as_ref().ok_or(QuarkError::NotAuthorized)?;
+            let cookie = tianyi_app::refresh_web_cookie(app, self.http)?;
+            if cookie.is_empty() {
+                return Err(QuarkError::WebAuthorizationRequired);
+            }
+            session.cookie = cookie;
+            self.credentials.save(
+                "tianyi",
+                &serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
+            )?;
         }
         Ok(TianyiShareSession {
             cookie: session.cookie.clone(),
             browser_session: session,
+            credentials: self.credentials,
             http: self.http,
+            renewed_cookie: false,
         })
     }
 }
@@ -1311,7 +1445,7 @@ impl TianyiShareSession<'_> {
         headers.insert("Cookie".into(), self.cookie.clone());
         headers
     }
-    fn request(&mut self, path: &str, query: &str) -> Result<Value, QuarkError> {
+    fn send_request(&mut self, path: &str, query: &str) -> Result<Value, QuarkError> {
         let response = self.http.send(CloudHttpRequest {
             method: "GET",
             url: format!("{CLOUD}{path}?{query}"),
@@ -1329,7 +1463,37 @@ impl TianyiShareSession<'_> {
         .find(|(name, _)| name == "Cookie")
         .ok_or(QuarkError::InvalidResponse)?
         .1;
+        self.browser_session.cookie = self.cookie.clone();
         Ok(value)
+    }
+    fn renew_cookie_from_app_session(&mut self) -> Result<bool, QuarkError> {
+        let Some(app) = self.browser_session.app.clone() else {
+            return Ok(false);
+        };
+        let cookie = tianyi_app::refresh_web_cookie(&app, self.http)?;
+        if cookie.trim().is_empty() {
+            return Ok(false);
+        }
+        self.cookie = cookie.clone();
+        self.browser_session.cookie = cookie;
+        self.credentials.save(
+            "tianyi",
+            &serde_json::to_vec(&self.browser_session).map_err(|_| QuarkError::Storage)?,
+        )?;
+        Ok(true)
+    }
+    fn request(&mut self, path: &str, query: &str) -> Result<Value, QuarkError> {
+        match self.send_request(path, query) {
+            Err(error @ QuarkError::AuthorizationExpired) if !self.renewed_cookie => {
+                self.renewed_cookie = true;
+                if self.renew_cookie_from_app_session()? {
+                    self.send_request(path, query)
+                } else {
+                    Err(error)
+                }
+            }
+            result => result,
+        }
     }
     fn check(&mut self, code: &str, access: &str, expected: &str) -> Result<(), QuarkError> {
         let value = self.request(

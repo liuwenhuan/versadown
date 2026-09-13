@@ -11,10 +11,9 @@ pub async fn inspect_cloud_share(
     app: AppHandle,
     candidate: crate::parser::CloudShareCandidate,
 ) -> Result<share::ShareConfirmationOutcome, QuarkError> {
-    // Share challenges must not trigger password recovery. An already-open
-    // official authorization WebView may, however, safely refresh a rejected
-    // read-only inspection cookie once.
-    run_web_session_read_work(app, candidate.provider, move |state, http| {
+    // Only genuine authentication expiry uses the shared recovery order. Share
+    // access codes, CAPTCHA and risk checks retain their direct user flows.
+    run_share_session_read_work(app, candidate.provider, move |state, http| {
         let adapter = share::provider_share_adapter(candidate.provider, &state.store, http)?;
         share::inspect_share_with_adapter(&state.share_plans, adapter.as_ref(), &candidate)
     })

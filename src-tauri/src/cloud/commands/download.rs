@@ -460,6 +460,11 @@ pub(crate) async fn submit_cloud_file(
     }
     let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     require_download_account(&app, provider, &account_id)?;
+    let task_name = configured
+        .output_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&resolved.name);
     let task = if let Some(context) = directory_context {
         state
             .store
@@ -470,7 +475,7 @@ pub(crate) async fn submit_cloud_file(
                 &account_id,
                 NewTask {
                     source: stable_source,
-                    name: safe_filename(&resolved.name),
+                    name: safe_filename(task_name),
                     kind: "cloud".into(),
                     is_private: private_download,
                 },
@@ -478,7 +483,7 @@ pub(crate) async fn submit_cloud_file(
             .map_err(|_| QuarkError::Storage)?
             .ok_or_else(|| QuarkError::InvalidInput("目录已回收或文件已入队".into()))?
     } else {
-        let task = create_cloud_task(&state.store, provider, &file_id, &resolved.name)?;
+        let task = create_cloud_task(&state.store, provider, &file_id, task_name)?;
         let task = state
             .store
             .set_private(task.id, private_download)
@@ -961,12 +966,16 @@ pub async fn cloud_download_url(
     app: AppHandle,
     provider: CloudProvider,
     file_id: String,
+    file_name: String,
     private_download: Option<bool>,
 ) -> Result<TaskActionOutcome, QuarkError> {
     let app_handle = app.clone();
     let state = app_handle.state::<AppState>();
-    let configured =
+    let mut configured =
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
+    if !file_name.trim().is_empty() {
+        configured.output_name = Some(safe_filename(&file_name));
+    }
     let private_download = private_download.unwrap_or(false);
     ensure_private_download_enabled(&state, private_download).map_err(QuarkError::InvalidInput)?;
     match submit_cloud_file(

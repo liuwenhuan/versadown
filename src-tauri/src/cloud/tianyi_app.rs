@@ -343,9 +343,9 @@ pub(crate) fn login_password(
     })
 }
 
-fn refresh_web_cookie(
+pub(crate) fn refresh_web_cookie(
     session: &TianyiAppSession,
-    http: &impl CloudHttpTransport,
+    http: &(impl CloudHttpTransport + ?Sized),
 ) -> Result<String, QuarkError> {
     let response = http.send(CloudHttpRequest {
         method: "GET",
@@ -356,16 +356,26 @@ fn refresh_web_cookie(
         headers: BTreeMap::from([("Accept-Language".into(), "zh-CN,zh;q=0.9,en;q=0.8".into())]),
         body: None,
     })?;
-    Ok(response
+    let cookies = response
         .set_cookies
         .iter()
         .filter_map(|cookie| cookie.split(';').next())
         .filter_map(|pair| pair.trim().split_once('='))
         .filter(|(name, value)| {
-            matches!(*name, "COOKIE_LOGIN_USER" | "SSON")
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
                 && !value.is_empty()
                 && !value.chars().any(char::is_control)
         })
+        .map(|(name, value)| (name, value))
+        .collect::<BTreeMap<_, _>>();
+    if !cookies.contains_key("COOKIE_LOGIN_USER") && !cookies.contains_key("SSON") {
+        return Ok(String::new());
+    }
+    Ok(cookies
+        .into_iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<_>>()
         .join("; "))

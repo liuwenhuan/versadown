@@ -177,7 +177,7 @@ pub(crate) async fn run_session_work_checked<T: Send + 'static>(
     .await
 }
 
-pub(crate) async fn run_web_session_read_work<T: Send + 'static>(
+pub(crate) async fn run_share_session_read_work<T: Send + 'static>(
     app: AppHandle,
     provider: CloudProvider,
     work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>

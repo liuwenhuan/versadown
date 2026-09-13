@@ -528,6 +528,9 @@ pub async fn resubmit_current_cloud_download(
                 .and_then(|name| name.to_str())
                 .map(str::to_owned);
         }
+        if configured.output_name.is_none() {
+            configured.output_name = Some(expected.name.clone());
+        }
     }
     let (signed_url, options) = share_submission_options(resolved, configured)?;
     service

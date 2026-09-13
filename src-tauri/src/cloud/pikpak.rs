@@ -158,6 +158,35 @@ mod tests {
         assert!(requests[3].url.contains("pass_code_token=pass-secret"));
     }
     #[test]
+    fn pikpak_share_accepts_password_and_web_token_sessions() {
+        for auth_method in [CloudAuthMethod::Password, CloudAuthMethod::Web] {
+            let store = credentials();
+            let mut session: PikPakSession =
+                serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+            session.auth_method = auth_method;
+            store
+                .save("pikpak", &serde_json::to_vec(&session).unwrap())
+                .unwrap();
+            let http = Http::new(vec![pass(), listing()]);
+
+            let ShareInspection::Plan(plan) =
+                provider_share_adapter(CloudProvider::Pikpak, &store, &http)
+                    .unwrap()
+                    .inspect(&candidate(CloudProvider::Pikpak))
+                    .unwrap()
+            else {
+                panic!("a valid token session should inspect a public share")
+            };
+
+            assert_eq!(plan.entries[0].entry_id, "f1");
+            assert_eq!(
+                http.requests.lock().unwrap()[0].headers["Authorization"],
+                "Bearer current-user"
+            );
+        }
+    }
+
+    #[test]
     fn pikpak_share_refreshes_action_captcha_and_retries_once() {
         let store = credentials();
         let http = Http::new(vec![
