@@ -83,6 +83,13 @@ pub struct Aria2File {
     pub selected: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Aria2Peer {
+    pub ip: String,
+    pub port: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Aria2Status {
