@@ -244,6 +244,9 @@ fn provider_error_kind(error: &QuarkError) -> &'static str {
         QuarkError::AuthorizationExpired => "authorization-expired",
         QuarkError::WebAuthorizationRequired => "web-authorization-required",
         QuarkError::CaptchaRequired => "captcha-required",
+        QuarkError::PikpakOperationVerificationRequired(_) => {
+            "pikpak-operation-verification-required"
+        }
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak-regional-membership-restricted",
         QuarkError::AuthorizationPending => "authorization-pending",
         QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
@@ -287,6 +290,56 @@ fn session_store() -> LiveResult<DpapiCredentialStore> {
             .join("com.alldownloader.desktop")
             .join("cloud-sessions"),
     )?)
+}
+
+#[test]
+#[ignore = "requires saved Baidu authorization; read-only file metadata and 1 KiB download probe"]
+fn live_baidu_personal_download_bytes() -> LiveResult<()> {
+    require_live_authorization()?;
+    let store = session_store()?;
+    let session: BaiduSession = serde_json::from_slice(
+        &store
+            .load("baidu")?
+            .ok_or_else(|| failure("Baidu session missing"))?,
+    )?;
+    let http = LiveTransport::new()?;
+    let client = BaiduClient::new(session, &http);
+    let result = (|| -> LiveResult<()> {
+        client.account()?;
+        let root = client.directory("/")?;
+        let file = root
+            .items
+            .iter()
+            .find(|file| file.kind == "file" && file.size.unwrap_or(0) > 0)
+            .ok_or_else(|| failure("No nonempty file in root for read-only probe"))?;
+        let download = client.download(&file.id)?;
+        let network = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()?;
+        let mut request = network.get(&download.url).header("Range", "bytes=0-1023");
+        for (name, value) in &download.headers {
+            request = request.header(name, value);
+        }
+        let response = request
+            .send()
+            .map_err(|_| failure("Download network failure"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(failure(format!("Download HTTP {status}")));
+        }
+        let mut bytes = Vec::new();
+        response.take(1024).read_to_end(&mut bytes)?;
+        if bytes.is_empty() || bytes.starts_with(b"{\"error") || bytes.starts_with(b"<!DOCTYPE") {
+            return Err(failure("Download returned error/empty payload"));
+        }
+        eprintln!(
+            "Baidu personal file: HTTP {status}, {} bytes received",
+            bytes.len()
+        );
+        Ok(())
+    })();
+    http.report();
+    result
 }
 
 fn supervised_directory(provider: CloudProvider, root: &str) -> Result<(), QuarkError> {

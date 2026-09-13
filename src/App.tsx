@@ -922,6 +922,7 @@ export function App() {
     try {
       if (command === 'reauthorize') {
         if (taskAuthorizationActive.current) return;
+        setNotice({ kind: 'success', message: '正在打开网盘授权窗口…' });
         taskAuthorizationActive.current = true;
         const generation = ++taskAuthorizationGeneration.current;
         let authorization: CloudAuthorization;
@@ -968,20 +969,23 @@ export function App() {
         return;
       }
       const result = await runTaskAction(id, command);
-      if (result.queueTask) {
-        recordTaskEvent(result.queueTask);
-        setTasks((current) => upsertTask(current, result.queueTask!));
-      } else if (result.duplicate) {
-        recordTaskEvent(result.duplicate.task);
-        setTasks((current) => upsertTask(current, result.duplicate!.task));
+      if (result.duplicate) {
+        const projection = result.queueTask ?? result.duplicate.task;
+        recordTaskEvent(projection);
+        setTasks((current) => upsertTask(current, projection));
         setSelectedTaskId(id);
         enqueueDuplicate(result.duplicate);
+      } else if (result.queueTask) {
+        recordTaskEvent(result.queueTask);
+        setTasks((current) => upsertTask(current, result.queueTask!));
       } else if (result.task) {
         recordTaskEvent(result.task);
         setTasks((current) => upsertTask(current, result.task!));
       }
     } catch (error) {
-      setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+      const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+        ? error.message : String(error);
+      setNotice({ kind: 'error', message });
     }
   }
 
@@ -1179,18 +1183,19 @@ export function App() {
 
   function acceptCloudDownload(value: unknown) {
     const outcome = value as TaskActionResult | undefined;
+    if (outcome?.duplicate) {
+      const task = outcome.queueTask ?? outcome.duplicate.task;
+      recordTaskEvent(task);
+      setTasks((current) => upsertTask(current, task));
+      setSelectedTaskId(outcome.duplicate.task.id);
+      enqueueDuplicate(outcome.duplicate);
+      return;
+    }
     if (outcome?.queueTask) {
       recordTaskEvent(outcome.queueTask);
       setTasks((current) => upsertTask(current, outcome.queueTask!));
       setSelectedTaskId(outcome.queueTask.id);
       setNotice({ kind: 'success', message: `已将「${outcome.queueTask.name}」加入下载队列` });
-      return;
-    }
-    if (outcome?.duplicate) {
-      recordTaskEvent(outcome.duplicate.task);
-      setTasks((current) => upsertTask(current, outcome.duplicate!.task));
-      setSelectedTaskId(outcome.duplicate.task.id);
-      enqueueDuplicate(outcome.duplicate);
       return;
     }
     const task = outcome?.task ?? value;

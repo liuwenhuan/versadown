@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { QueueTask } from './lib/types';
 import { getThemeMode, setThemeMode } from './lib/theme';
+import { cloudCatalog } from './test/cloudCatalog';
 
 const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
@@ -14,7 +15,7 @@ const state = vi.hoisted(() => ({
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
   privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
-  updateCheck: vi.fn(), openExternalUrl: vi.fn()
+  updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
@@ -47,8 +48,8 @@ vi.mock('./lib/cloudApi', async (importOriginal) => {
 vi.mock('@tauri-apps/api/event', () => ({ listen: state.listen }));
 vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
   ...await importOriginal<typeof import('@tauri-apps/api/core')>(),
-  invoke: (command: string) => command === 'main_window_interaction_state'
-    ? state.windowSnapshot() : Promise.reject(new Error(`Unexpected command: ${command}`)),
+  invoke: (command: string, args: unknown) => command === 'main_window_interaction_state'
+    ? state.windowSnapshot() : state.cloudInvoke(command, args),
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
@@ -71,6 +72,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  state.cloudInvoke.mockReset().mockImplementation((command: string) => Promise.reject(new Error(`Unexpected command: ${command}`)));
   state.windowSnapshot.mockReset();
   state.windowSnapshot.mockResolvedValue({ active: false, nativeDrag: false });
   state.list.mockReset();
@@ -305,6 +307,31 @@ it('review shares overlapping task reauthorization requests', async () => {
   await act(async () => { begin.resolve({ provider: 'baidu', windowLabel: 'auth', instructions: '等待' }); });
   fireEvent.click(button);
   expect(state.reauthorizeFailedCloudTask).toHaveBeenCalledTimes(1);
+});
+
+it('shows a native authorization failure and allows the Baidu authorization button to be retried', async () => {
+  const failed: QueueTask = { id: 'auth-error', name: 'book.pdf', kind: 'cloud', status: 'failed', progress: 0,
+    source: 'cloud://baidu/file', reauthorization_required: true };
+  state.list.mockResolvedValue([failed]);
+  state.reauthorizeFailedCloudTask.mockRejectedValue({ code: 'storage', message: '授权窗口打开失败，请重试' });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(await screen.findByRole('button', { name: '重新授权 book.pdf' }));
+  expect(await screen.findByRole('status')).toHaveTextContent('授权窗口打开失败，请重试');
+  await user.click(screen.getByRole('button', { name: '重新授权 book.pdf' }));
+  expect(state.reauthorizeFailedCloudTask).toHaveBeenCalledTimes(2);
+});
+
+it('shows the duplicate decision when retry returns a queue projection', async () => {
+  const failed: QueueTask = { id: 'retry-existing', name: 'book.pdf', kind: 'cloud', status: 'failed', progress: 0 };
+  state.list.mockResolvedValue([failed]);
+  state.taskAction.mockResolvedValue({ queueTask: failed, duplicate: { task: failed, state: 'overwrite_required' } });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(await screen.findByRole('button', { name: '重新下载 book.pdf' }));
+  expect(await screen.findByRole('dialog', { name: '检测到重复下载' })).toBeVisible();
 });
 
 it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorization via %s', async (delivery) => {
@@ -906,6 +933,25 @@ it('closes and selects the named share root as soon as creation is acknowledged,
   const row = within(screen.getByRole('region', { name: '下载队列' })).getByTitle('原始分享目录').closest('article');
   expect(row).toHaveAttribute('aria-selected', 'true');
   await act(async () => { submission.resolve({ outcomes: [], failures: [] }); });
+});
+
+it('shows the duplicate decision when downloading an existing Baidu file with a queue projection', async () => {
+  const failed: QueueTask = { id: 'existing-baidu', name: 'book.pdf', kind: 'cloud', status: 'failed', progress: 0 };
+  state.cloudInvoke.mockImplementation(async (command: string) => {
+    if (command === 'cloud_provider_catalog') return cloudCatalog.filter(d => d.provider === 'baidu');
+    if (command === 'cloud_account') return { provider: 'baidu', id: '7', displayName: 'Baidu', authMethod: 'web' };
+    if (command === 'cloud_list_directory') return { id: '/', items: [{ id: 'file-7', parentId: '/', name: 'book.pdf', kind: 'file', size: 123 }] };
+    if (command === 'cloud_saved_credentials') return null;
+    if (command === 'cloud_download_url') return { ...failed, duplicate: 'overwrite_required', queueTask: failed };
+    throw new Error(`Unexpected command: ${command}`);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: '我的网盘' }));
+  await user.click(await screen.findByRole('button', { name: '百度网盘' }));
+  await user.click(await screen.findByRole('checkbox', { name: '选择 book.pdf' }));
+  await user.click(screen.getByRole('button', { name: '下载', exact: true }));
+  expect(await screen.findByRole('dialog', { name: '检测到重复下载' })).toHaveTextContent('book.pdf');
 });
 
 it('uses the single directory root returned for a confirmed share folder', async () => {

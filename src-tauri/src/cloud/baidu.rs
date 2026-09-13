@@ -73,13 +73,61 @@ mod tests {
             "b6bb7a6f46899e181baea58798d4fdb889775c2c"
         );
     }
+
+    #[test]
+    #[ignore = "read-only: saved Baidu session and 1 KiB native download probe"]
+    fn live_baidu_native_download_probe() {
+        assert_eq!(
+            std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+            Ok("1")
+        );
+        let store = crate::cloud::DpapiCredentialStore::new(
+            std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
+                .join("com.alldownloader.desktop/cloud-sessions"),
+        )
+        .unwrap();
+        let session: BaiduSession =
+            serde_json::from_slice(&store.load("baidu").unwrap().unwrap()).unwrap();
+        let http = crate::cloud::ReqwestTransport::new().unwrap();
+        let client = BaiduClient::new(session, &http);
+        let root = client.directory("/").unwrap();
+        let file = root
+            .items
+            .iter()
+            .find(|f| f.kind == "file" && f.size.unwrap_or(0) > 0)
+            .unwrap();
+        let download = client
+            .locatedownload(&parse_file_reference(&file.id).unwrap())
+            .unwrap();
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let mut request = http.get(&download.url).header("Range", "bytes=0-1023");
+        for (key, value) in download.headers {
+            request = request.header(key, value);
+        }
+        let response = request
+            .send()
+            .map_err(|_| "native transfer network failure")
+            .unwrap();
+        let status = response.status();
+        assert!(status.is_success(), "native transfer HTTP {status}");
+        let mut bytes = Vec::new();
+        response.take(1024).read_to_end(&mut bytes).unwrap();
+        assert!(!bytes.is_empty());
+        eprintln!(
+            "Native Baidu download: HTTP {status}, {} bytes",
+            bytes.len()
+        );
+    }
     fn listing() -> Value {
         json!({"errno":0,"data":{"shareid":22,"uk":33,"seckey":"secret-key","has_more":false,"list":[{"fs_id":11,"server_filename":"movie.mp4","path":"/movie.mp4","isdir":0,"size":123}]}})
     }
     #[test]
     fn share_cleanup_resolves_only_exact_recorded_ids_before_deleting() {
         let http = Http::new(vec![
-            json!({"errno":0,"list":[{"fs_id":99,"path":"/created.txt","isdir":0}]}),
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/created.txt","isdir":0},{"fs_id":100,"path":"/unrelated.txt","isdir":0}]}),
             json!({"errno":0,"result":{"bdstoken":"token"}}),
             json!({"errno":0}),
         ]);
@@ -89,7 +137,7 @@ mod tests {
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let url = url::Url::parse(&requests[0].url).unwrap();
-        assert!(url.query_pairs().any(|(k, v)| k == "fsids" && v == "[99]"));
+        assert_eq!(url.path(), "/api/list");
         assert!(requests[2].url.contains("opera=delete"));
         assert!(
             url::form_urlencoded::parse(requests[2].body.as_ref().unwrap().as_bytes())
@@ -102,7 +150,6 @@ mod tests {
         for files in [
             json!([]),
             json!([{"fs_id":100,"path":"/other","isdir":0}]),
-            json!([{"fs_id":99,"path":"/created","isdir":0},{"fs_id":100,"path":"/other","isdir":0}]),
             json!([{"fs_id":99,"path":"/folder","isdir":1}]),
             json!([{"fs_id":99,"path":"/","isdir":0}]),
             json!([{"fs_id":99,"path":"/../other","isdir":0}]),
@@ -530,7 +577,9 @@ mod tests {
             json!({"user":{"uk":"account-7"}}),
             json!({"errno":0,"result":{"bdstoken":"write-token"}}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/movie.mp4","to":"/movie (1).mp4"}]}}),
-            json!({"errno":0,"list":[{"fs_id":99,"server_filename":"movie (1).mp4","dlink":"https://d.pcs.baidu.com/file?sign=personal"}]}),
+            json!({"errno":0,"uk":7}),
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (1).mp4","isdir":0}]}),
+            json!({"urls":[{"url":"https://d.pcs.baidu.com/file?sign=personal","encrypt":0}]}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
         let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
@@ -550,14 +599,18 @@ mod tests {
         );
         let requests = http.requests.lock().unwrap();
         assert!(requests[5].url.contains("ondup=newcopy"));
-        assert!(requests[6].url.contains("fsids=%5B99%5D"));
+        assert!(requests[8].url.contains("method=locatedownload"));
+        assert!(requests[8].url.contains("path=%2Fmovie+%281%29.mp4"));
     }
     #[test]
     fn baidu_recorded_transfer_refreshes_personal_file_without_share_transfer() {
         let credentials = credentials();
         let http = Http::new(vec![
             listing(),
-            json!({"errno":0,"list":[{"fs_id":99,"server_filename":"movie (1).mp4","dlink":"https://d.pcs.baidu.com/file?sign=personal"}]}),
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (1).mp4","isdir":0}]}),
+            json!({"errno":0,"uk":7}),
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (1).mp4","isdir":0}]}),
+            json!({"urls":[{"url":"https://d.pcs.baidu.com/file?sign=personal","encrypt":0}]}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
         let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
@@ -576,8 +629,9 @@ mod tests {
         };
         assert_eq!(download.url, "https://d.pcs.baidu.com/file?sign=personal");
         let requests = http.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[1].url.contains("filemetas"));
+        assert_eq!(requests.len(), 5);
+        assert!(requests[1].url.contains("/api/list"));
+        assert!(requests[4].url.contains("method=locatedownload"));
         assert!(!requests
             .iter()
             .any(|request| request.url.contains("/share/transfer")));
@@ -624,7 +678,9 @@ mod tests {
             json!({"user":{"uk":"account-7"}}),
             json!({"errno":0,"result":{"bdstoken":"write-token"}}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/verify.mp4","to":"/verify.mp4"}]}}),
-            json!({"errno":0,"list":[{"fs_id":99,"server_filename":"verify.mp4","dlink":"http://d.pcs.baidu.com/file?sign=personal"}]}),
+            json!({"errno":0,"uk":7}),
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/verify.mp4","isdir":0}]}),
+            json!({"urls":[{"url":"http://d.pcs.baidu.com/file?sign=personal","encrypt":0}]}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
         let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
@@ -638,12 +694,12 @@ mod tests {
         let source = plan.source_for("11");
         let download = resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
         assert_eq!(download.name, "verify.mp4");
-        assert_eq!(download.url, "http://d.pcs.baidu.com/file?sign=personal");
+        assert_eq!(download.url, "https://d.pcs.baidu.com/file?sign=personal");
         let transfers = store.resolve_entry(&source).unwrap().plan.transfers;
         assert_eq!(transfers.len(), 1);
         assert_eq!(transfers[0].created_file_id, "99");
         assert_eq!(transfers[0].cleanup_state, CloudShareCleanupState::Pending);
-        assert_eq!(http.requests.lock().unwrap().len(), 7);
+        assert_eq!(http.requests.lock().unwrap().len(), 9);
     }
     #[test]
     fn baidu_share_errors_never_become_transfer_requests() {
@@ -1111,18 +1167,39 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         // listing route (not xpan/file) with this small, fixed query shape.
         // Keeping the native Netdisk header profile is required for the
         // browser-issued cookie jar to be accepted by that route.
-        let value = self.request(
-            "GET",
-            format!(
-                "{PAN}/api/list?dir={}&order=name&desc=0&clienttype=0&num=100&page=1",
-                encoded(&parent.path)
-            ),
-            None,
-        )?;
-        let files = value
-            .get("list")
-            .and_then(Value::as_array)
-            .ok_or(QuarkError::InvalidResponse)?;
+        let mut files = Vec::new();
+        let mut seen = BTreeSet::new();
+        for page in 1..=10_000 {
+            let value = self.request(
+                "GET",
+                format!(
+                    "{PAN}/api/list?dir={}&order=name&desc=0&clienttype=0&num=100&page={page}",
+                    encoded(&parent.path)
+                ),
+                None,
+            )?;
+            let batch = value
+                .get("list")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            for file in batch {
+                let id = file
+                    .get("fs_id")
+                    .or_else(|| file.get("fsid"))
+                    .and_then(string_or_number)
+                    .ok_or(QuarkError::InvalidResponse)?;
+                if !seen.insert(id) {
+                    return Err(QuarkError::InvalidResponse);
+                }
+                files.push(file.clone());
+            }
+            if batch.len() < 100 {
+                break;
+            }
+            if page == 10_000 {
+                return Err(QuarkError::Provider("百度目录超过分页上限".into()));
+            }
+        }
         let directory_id = if parent.path == "/" {
             "/".into()
         } else {
@@ -1300,40 +1377,33 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         {
             return Err(QuarkError::InvalidResponse);
         }
-        let response = self.share_http(
-            "GET",
-            &format!(
-                "/rest/2.0/xpan/multimedia?method=filemetas&web=1&fsids={}",
-                encoded(&format!("[{}]", ids.join(",")))
-            ),
-            None,
-            "",
-        )?;
-        let value = share_json(&response)?;
-        let files = value["list"]
-            .as_array()
-            .filter(|files| files.len() == expected.len())
-            .ok_or(QuarkError::InvalidResponse)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut paths = Vec::new();
-        for file in files {
-            let id = numeric_field(file, "fs_id")?;
-            let path = required(file, "path")?;
-            if !expected.contains(&id)
-                || !seen.insert(id)
-                || file["isdir"].as_u64() != Some(0)
-                || path == "/"
-            {
-                return Err(QuarkError::InvalidResponse);
+        for file in self.directory("/")?.items {
+            if file.kind != "file" {
+                continue;
             }
-            validate_path(&path)?;
-            paths.push(path);
+            let reference = parse_file_reference(&file.id)?;
+            if expected.contains(&reference.fsid) && seen.insert(reference.fsid) {
+                paths.push(reference.path);
+            }
         }
         if seen != expected {
             return Err(QuarkError::InvalidResponse);
         }
         let token = self.web_token()?;
         self.web_file_manager("delete", &token, json!(paths))
+    }
+
+    fn transferred_file_reference(&self, fsid: &str) -> Result<String, QuarkError> {
+        for file in self.directory("/")?.items {
+            if file.kind == "file" && parse_file_reference(&file.id)?.fsid == fsid {
+                return Ok(file.id);
+            }
+        }
+        Err(QuarkError::Provider(
+            "转存文件已移动或不存在，无法继续下载；请重新选择分享文件".into(),
+        ))
     }
 
     fn file_manager_operation(
@@ -1468,42 +1538,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
 
     pub fn download(&self, id: &str) -> Result<BaiduDownload, QuarkError> {
         let file = parse_file_reference(id)?;
-        match self.filemetas_download(&file) {
-            Ok(download) => Ok(download),
-            Err(
-                error @ (QuarkError::AuthorizationExpired
-                | QuarkError::NotAuthorized
-                | QuarkError::WebAuthorizationRequired
-                | QuarkError::CaptchaRequired),
-            ) => Err(error),
-            Err(_) => self.locatedownload(&file),
-        }
-    }
-
-    fn filemetas_download(&self, file: &BaiduFileReference) -> Result<BaiduDownload, QuarkError> {
-        let value = self.request(
-            "GET",
-            format!(
-                "{PAN}/rest/2.0/xpan/multimedia?method=filemetas&web=1&dlink=1&fsids={}",
-                encoded(&format!("[{}]", file.fsid))
-            ),
-            None,
-        )?;
-        let item = value
-            .get("list")
-            .and_then(Value::as_array)
-            .and_then(|list| list.first())
-            .ok_or(QuarkError::InvalidResponse)?;
-        let url = super::https_transfer_url(&required(item, "dlink")?)?;
-        Ok(BaiduDownload {
-            url,
-            name: item
-                .get("server_filename")
-                .and_then(Value::as_str)
-                .unwrap_or(&file.path)
-                .into(),
-            headers: self.pan_headers(),
-        })
+        // This driver stores BDUSS cookies, not OAuth access tokens. The
+        // OAuth filemetas dlink flow returns 9019 for otherwise valid web
+        // sessions. Use the authenticated PCS protocol (BaiduPCS-Go).
+        self.locatedownload(&file)
     }
 
     fn locatedownload(&self, file: &BaiduFileReference) -> Result<BaiduDownload, QuarkError> {
@@ -1519,6 +1557,39 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .stable_account_id()?
             .and_then(|value| value.parse::<u64>().ok())
             .ok_or(QuarkError::InvalidResponse)?;
+        // PCS resolves by path, while queued downloads are bound to fs_id.
+        // Re-read the original parent before handing it a persisted path:
+        // never download a different file that has since reused that name.
+        let parent_path = file
+            .path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        let parent = if parent_path.is_empty() {
+            "/".to_owned()
+        } else {
+            // Directory listing is path-addressed; this reference stays local
+            // and is used only to obtain the current child identities.
+            encode_reference(BaiduFileReference {
+                fsid: "0".into(),
+                path: parent_path.into(),
+            })?
+        };
+        let current = self
+            .directory(&parent)?
+            .items
+            .into_iter()
+            .filter(|item| item.kind == "file")
+            .map(|item| parse_file_reference(&item.id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .find(|current| current.fsid == file.fsid)
+            .ok_or_else(|| {
+                QuarkError::Provider(
+                    "原文件已移动、删除或身份不一致，请刷新网盘后重新选择下载".into(),
+                )
+            })?;
+        let file = &current;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| QuarkError::InvalidResponse)?
@@ -1962,9 +2033,13 @@ fn baidu_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if challenge(&value) {
         return Err(QuarkError::WebAuthorizationRequired);
     }
-    let errno = value.get("errno").and_then(Value::as_i64).unwrap_or(0);
+    let errno = ["errno", "error_code", "err_no"]
+        .iter()
+        .filter_map(|key| value.get(key).and_then(baidu_error_number))
+        .find(|code| *code != 0)
+        .unwrap_or(0);
     if errno != 0 {
-        if matches!(errno, -6 | -7 | -9 | 111) {
+        if matches!(errno, -6 | -7 | 110 | 111 | 31045) {
             if std::env::var("ALLDOWNLOADER_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
                 return Err(QuarkError::Provider(format!(
                     "百度授权拒绝（errno {errno}，HTTP {}）",
@@ -1973,7 +2048,10 @@ fn baidu_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
             }
             return Err(QuarkError::AuthorizationExpired);
         }
-        return Err(QuarkError::Provider("百度网盘拒绝请求".into()));
+        return Err(QuarkError::Provider(format!(
+            "百度网盘拒绝请求（错误码 {errno}，HTTP {}）",
+            response.status
+        )));
     }
     if !(200..300).contains(&response.status) {
         return Err(QuarkError::Provider("百度网盘请求失败".into()));
@@ -1982,17 +2060,28 @@ fn baidu_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
 }
 
 fn challenge(value: &Value) -> bool {
-    matches!(
-        value.get("err_no").and_then(Value::as_i64),
-        Some(6 | 16 | 257 | 120021 | 400031)
-    ) || ["captcha", "sms", "verify", "risk", "codeString"]
-        .iter()
-        .any(|needle| {
-            value
-                .to_string()
-                .to_ascii_lowercase()
-                .contains(&needle.to_ascii_lowercase())
-        })
+    ["errno", "err_no", "error_code"].iter().any(|key| {
+        matches!(
+            value.get(key).and_then(baidu_error_number),
+            Some(-20 | 6 | 16 | 257 | 9019 | 120021 | 400031 | 400023 | 400101 | 500001 | 500002)
+        )
+    }) || [
+        "captcha",
+        "vcode",
+        "vcode_str",
+        "codeString",
+        "verify_url",
+        "captcha_url",
+    ]
+    .iter()
+    .any(|key| {
+        value
+            .get(key)
+            .is_some_and(|field| field.as_str().is_some_and(|s| !s.is_empty()))
+    })
+}
+fn baidu_error_number(value: &Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_str()?.parse().ok())
 }
 fn string_or_number(value: &Value) -> Option<String> {
     value
@@ -2507,37 +2596,15 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
         } else {
             store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), &id)?;
         }
-        validate_path(&required(file, "to")?)?;
-        // Share fallback must not pass the personal file metadata through
-        // baidu_json's legacy body-wide challenge scan: filenames are data.
-        let response = client.share_http(
-            "GET",
-            &format!(
-                "/rest/2.0/xpan/multimedia?method=filemetas&web=1&dlink=1&fsids={}",
-                encoded(&format!("[{id}]"))
-            ),
-            None,
-            "",
-        )?;
-        let value = share_json(&response)?;
-        let files = value["list"]
-            .as_array()
-            .filter(|files| files.len() == 1)
-            .ok_or(QuarkError::InvalidResponse)?;
-        if numeric_field(&files[0], "fs_id")? != id {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let url = required(&files[0], "dlink")?;
-        super::share::validate_direct_url(&url)?;
+        let reference = encode_reference(BaiduFileReference {
+            fsid: id,
+            path: required(file, "to")?,
+        })?;
+        let download = client.download(&reference)?;
         Ok(super::commands::ResolvedCloudDownload {
-            url,
+            url: download.url,
             name: entry.entry.name.clone(),
-            headers: super::share::download_headers(
-                &client.session.cookie,
-                &response.set_cookies,
-                BAIDU_PAN_USER_AGENT,
-                None,
-            ),
+            headers: download.headers.into_iter().collect(),
         })
     }
 }
@@ -2555,36 +2622,17 @@ impl RecordedTransferResolver for BaiduShareAdapter<'_> {
             return Err(QuarkError::InvalidResponse);
         }
         let client = self.client()?;
-        let response = client.share_http(
-            "GET",
-            &format!(
-                "/rest/2.0/xpan/multimedia?method=filemetas&web=1&dlink=1&fsids={}",
-                encoded(&format!("[{created_file_id}]"))
-            ),
-            None,
-            "",
-        )?;
-        let value = share_json(&response)?;
-        let files = value["list"]
-            .as_array()
-            .filter(|files| files.len() == 1)
-            .ok_or(QuarkError::InvalidResponse)?;
-        if numeric_field(&files[0], "fs_id")? != created_file_id {
-            return Err(QuarkError::InvalidResponse);
-        }
-        let url = required(&files[0], "dlink")?;
-        super::share::validate_direct_url(&url)?;
+        // Transfers are created in root. Resolve the journalled fs_id from
+        // that directory, never by the share's original name (ondup=newcopy
+        // may have renamed it), and never perform another transfer here.
+        let reference = client.transferred_file_reference(created_file_id)?;
+        let download = client.download(&reference)?;
         Ok(ShareOperationResult {
             result: Ok(RecordedTransferDownload::Available(
                 super::commands::ResolvedCloudDownload {
-                    url,
+                    url: download.url,
                     name: entry.entry.name.clone(),
-                    headers: super::share::download_headers(
-                        &client.session.cookie,
-                        &response.set_cookies,
-                        BAIDU_PAN_USER_AGENT,
-                        None,
-                    ),
+                    headers: download.headers.into_iter().collect(),
                 },
             )),
             updated_context: None,

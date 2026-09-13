@@ -1282,7 +1282,7 @@ fn baidu_web_authorization_keeps_the_window_open_until_the_root_directory_is_rea
     credentials.save("baidu", previous).unwrap();
     let transport = SequenceTransport(Mutex::new(VecDeque::from([
         r#"{"errno":0,"user":{"uk":"b1","netdisk_name":"baidu"}}"#,
-        r#"{"errno":-9}"#,
+        r#"{"errno":-6}"#,
     ])));
 
     let result = super::finalize_baidu_web_authorization(

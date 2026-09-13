@@ -20,6 +20,112 @@ struct RecordingHttp {
     cookie_snapshot: Vec<String>,
 }
 
+#[test]
+fn successful_download_metadata_is_not_a_login_challenge() {
+    let file_id = format!(
+        "bdr_{}",
+        URL_SAFE_NO_PAD.encode(r#"{"fsid":"123","path":"/verify.pdf"}"#)
+    );
+    for field in ["verify", "risk", "captcha", "sms", "codeString"] {
+        let body = serde_json::json!({"urls":[{
+            "url":format!("https://d.pcs.baidu.com/file?{field}=signed"), "encrypt":0
+        }]})
+        .to_string();
+        let http = RecordingHttp::sequence(&[
+            r#"{"errno":0,"uk":123}"#,
+            r#"{"errno":0,"list":[{"fs_id":123,"path":"/verify.pdf","isdir":0}]}"#,
+            &body,
+        ]);
+        let result = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http).download(&file_id);
+        assert!(
+            result.is_ok(),
+            "successful file metadata misclassified for {field}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn baidu_download_reports_pcs_error_codes_instead_of_invalid_response() {
+    let file_id = format!(
+        "bdr_{}",
+        URL_SAFE_NO_PAD.encode(r#"{"fsid":"123","path":"/file.pdf"}"#)
+    );
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"uk":123}"#,
+        r#"{"errno":0,"list":[{"fs_id":123,"path":"/file.pdf","isdir":0}]}"#,
+        r#"{"error_code":31066,"error_msg":"file does not exist"}"#,
+    ]);
+    let error = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http)
+        .download(&file_id)
+        .unwrap_err();
+    assert!(
+        matches!(&error, QuarkError::Provider(message) if message.contains("31066")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn baidu_directory_collects_all_pages_and_ignores_challenge_words_in_names() {
+    let first = serde_json::json!({"errno":0,"list":(1..=100).map(|id|
+        serde_json::json!({"fs_id":id,"path":format!("/verify-{id}.txt"),"isdir":0})
+    ).collect::<Vec<_>>()})
+    .to_string();
+    let http = RecordingHttp::sequence(&[
+        &first,
+        r#"{"errno":0,"list":[{"fs_id":101,"path":"/risk-last.txt","isdir":0}]}"#,
+    ]);
+    let result = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http)
+        .directory("/")
+        .unwrap();
+    assert_eq!(
+        result.items.iter().filter(|f| f.kind == "file").count(),
+        101
+    );
+    assert!(http.requests()[1].url.contains("page=2"));
+}
+
+#[test]
+fn baidu_download_rejects_a_reused_path_before_requesting_file_bytes() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"uk":123}"#,
+        r#"{"errno":0,"list":[{"fs_id":999,"path":"/movie.mkv","isdir":0}]}"#,
+    ]);
+    let error = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http)
+        .download(&opaque_reference("/movie.mkv"))
+        .unwrap_err();
+    assert!(
+        matches!(error, QuarkError::Provider(ref message) if message.contains("已移动") || message.contains("不一致"))
+    );
+    assert!(!http
+        .requests()
+        .iter()
+        .any(|r| r.url.contains("method=locatedownload")));
+}
+
+#[test]
+fn baidu_download_tracks_the_same_file_id_after_a_rename_in_its_parent() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"uk":123}"#,
+        r#"{"errno":0,"list":[{"fs_id":999,"path":"/folder/old.mkv","isdir":0},{"fs_id":7,"path":"/folder/new.mkv","isdir":0}]}"#,
+        r#"{"urls":[{"url":"https://d.pcs.baidu.com/file","encrypt":0}]}"#,
+    ]);
+    let download = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http)
+        .download(&opaque_reference("/folder/old.mkv"))
+        .unwrap();
+    assert_eq!(download.name, "new.mkv");
+    assert!(http.requests()[1].url.contains("dir=%2Ffolder"));
+    assert!(http.requests()[2].url.contains("path=%2Ffolder%2Fnew.mkv"));
+}
+
+#[test]
+fn missing_baidu_path_does_not_invalidate_the_login_session() {
+    let http = RecordingHttp::sequence(&[r#"{"errno":-9}"#]);
+    let error = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http)
+        .directory("/")
+        .unwrap_err();
+    assert!(matches!(error, QuarkError::Provider(ref message) if message.contains("-9")));
+}
+
 impl RecordingHttp {
     fn sequence(bodies: &[&str]) -> Self {
         Self {
@@ -456,7 +562,9 @@ fn reqwest_transport_retains_rotated_cookies_inside_the_explicit_session_only() 
 fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     let http = RecordingHttp::sequence(&[
         r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
-        r#"{"errno":0,"list":[{"dlink":"https://download.example/file","server_filename":"movie.mkv"}]}"#,
+        r#"{"errno":0,"uk":123}"#,
+        r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0,"size":12}]}"#,
+        r#"{"urls":[{"url":"https://download.example/file","encrypt":0}]}"#,
     ]);
     let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local; STOKEN=token"), &http);
 
@@ -471,10 +579,12 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
     assert!(requests[0].url.starts_with(
         "https://pan.baidu.com/api/list?dir=%2F&order=name&desc=0&clienttype=0&num=100&page=1"
     ));
-    assert!(requests[1]
-        .url
-        .contains("/rest/2.0/xpan/multimedia?method=filemetas"));
-    assert!(requests[1].url.contains("fsids=%5B7%5D"));
+    assert!(requests[3].url.contains("method=locatedownload"));
+    assert!(requests[3].url.contains("path=%2Fmovie.mkv"));
+    assert!(
+        !requests.iter().any(|r| r.url.contains("dlink=1")),
+        "cookie sessions must not use OAuth dlink resolution"
+    );
     assert!(requests[0].headers["Cookie"].contains("BDUSS=local"));
     assert_eq!(
         requests[1].headers["User-Agent"],
@@ -485,10 +595,10 @@ fn baidu_lists_with_session_cookie_and_resolves_an_https_dlink() {
 }
 
 #[test]
-fn baidu_download_falls_back_to_signed_locatedownload_and_filters_unsafe_candidates() {
+fn baidu_download_uses_signed_locatedownload_and_filters_unsafe_candidates() {
     let http = RecordingHttp::sequence(&[
-        r#"{"errno":0,"list":[{"fs_id":7,"server_filename":"movie.mkv"}]}"#,
         r#"{"errno":0,"user":{"uk":"10086","netdisk_name":"fixture"}}"#,
+        r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0}]}"#,
         r#"{"errno":0,"urls":[{"url":"https://encrypted.example/file","encrypt":1},{"url":"http://plain.example/file","encrypt":0},{"url":"https://nb.cache.baidu.com/file","encrypt":0},{"url":"http://d.pcs.baidu.com/file","encrypt":0},{"url":"https://cdn.example/file","encrypt":0}]}"#,
     ]);
     let client = BaiduClient::new(BaiduSession::cookie("BDUSS=test_bduss"), &http);
@@ -540,8 +650,8 @@ fn baidu_download_does_not_hide_expired_authorization_with_locatedownload() {
 #[test]
 fn baidu_locatedownload_uses_nb_cache_when_it_is_the_only_safe_candidate() {
     let http = RecordingHttp::sequence(&[
-        r#"{"errno":0,"list":[{"fs_id":7,"server_filename":"movie.mkv"}]}"#,
         r#"{"errno":0,"user":{"uk":"10086","netdisk_name":"fixture"}}"#,
+        r#"{"errno":0,"list":[{"fs_id":7,"path":"/movie.mkv","isdir":0}]}"#,
         r#"{"errno":0,"urls":[{"url":"https://nb.cache.baidu.com/file","encrypt":0}]}"#,
     ]);
     let client = BaiduClient::new(BaiduSession::cookie("BDUSS=test_bduss"), &http);

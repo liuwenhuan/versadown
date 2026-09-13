@@ -382,6 +382,13 @@ pub async fn cloud_reauthorize_failed_task(
 
     let requested_provider = reauthorization_provider(&state.store, id)?;
 
+    // Explicit action verification is different from background cookie
+    // recovery. A valid directory session cannot prove downloads work.
+    // Always open the official page when the user asks to reauthorize Baidu.
+    if requested_provider == CloudProvider::Baidu {
+        return cloud_begin_authorization(app, requested_provider).await;
+    }
+
     if browser_login::supports_browser_password(requested_provider) {
         let browser_app = app.clone();
         let recovered = run(app.clone(), requested_provider, move |state, http| {
