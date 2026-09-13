@@ -399,7 +399,7 @@ export function App() {
     const requestStartEpoch = taskEventEpoch.current;
     const snapshot = scope ? listPersistedTasks(scope) : listPersistedTasks();
     return snapshot.then((saved) => {
-      if (disposed()) return;
+      if (disposed()) return [] as QueueTask[];
       const protectedIds = new Set([...taskEventVersions.current]
         .flatMap(([id, epoch]) => epoch > requestStartEpoch ? [id] : []));
       for (const id of permanentlyPurgedTaskIds.current) protectedIds.add(id);
@@ -407,8 +407,10 @@ export function App() {
         for (const id of purgingTaskIds.current) protectedIds.add(id);
       }
       setTasks((current) => mergeTaskSnapshot(current, saved, protectedIds));
+      return saved;
     }).catch((error: unknown) => {
       if (!disposed()) setNotice({ kind: 'error', message: String(error) });
+      return [] as QueueTask[];
     });
   }
 
@@ -594,6 +596,32 @@ export function App() {
       stopFocus?.();
     };
   }, [eventsReady]);
+
+  useEffect(() => {
+    if (!isTauriRuntime() || !eventsReady || activeTasks.length === 0) return;
+    let disposed = false;
+    let refreshing = false;
+    const refreshActiveProgress = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const activeSnapshot = await refreshTaskSnapshot(() => disposed, 'active');
+        if (disposed) return;
+        const activeIds = new Set(activeSnapshot.map((task) => task.id));
+        const hasMissingActiveTask = tasksRef.current.some((task) => (
+          !inactiveStatuses.has(task.status) && !activeIds.has(task.id)
+        ));
+        if (hasMissingActiveTask) await refreshTaskSnapshot(() => disposed, 'terminal');
+      } finally {
+        refreshing = false;
+      }
+    };
+    const timer = window.setInterval(() => { void refreshActiveProgress(); }, 1_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTasks.length, eventsReady]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
