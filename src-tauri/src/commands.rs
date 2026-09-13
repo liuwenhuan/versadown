@@ -299,7 +299,18 @@ fn fail_invalid_task_submission(store: &TaskStore, task: &DownloadTask) -> Resul
 fn download_engine_submission_message(error: &DownloadServiceError) -> String {
     match error {
         DownloadServiceError::Input(error) => error.to_string(),
-        _ => safe_engine_submission_message(&error.to_string()),
+        DownloadServiceError::Aria2(crate::Aria2Error::HttpStatus(400)) => {
+            "下载引擎拒绝请求（HTTP 400）".into()
+        }
+        DownloadServiceError::Aria2(crate::Aria2Error::Rpc(fault))
+            if fault.code == -32602
+                && ["uri", "magnet"]
+                    .iter()
+                    .any(|term| fault.message.to_ascii_lowercase().contains(term)) =>
+        {
+            "下载引擎拒绝该链接：链接格式无效".into()
+        }
+        _ => "下载引擎未能接受下载任务".into(),
     }
 }
 
@@ -307,12 +318,6 @@ fn safe_engine_submission_message(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("http status 400") {
         return "下载引擎拒绝请求（HTTP 400）".into();
-    }
-    if ["uri", "magnet", "parameter", "invalid"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        return "下载引擎拒绝该链接：链接格式无效".into();
     }
     "下载引擎未能接受下载任务".into()
 }
@@ -479,7 +484,9 @@ pub async fn parse_download(
             {
                 Ok(task) => outcome.task = task,
                 Err(DownloadServiceError::MetadataTimeout) => {}
-                Err(error) => return Err(error.to_string()),
+                Err(error) => {
+                    return Err(fail_engine_submission(&state.store, &outcome.task, error))
+                }
             }
         }
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
@@ -732,7 +739,7 @@ pub async fn confirm_download_command(
         let task = service
             .select_files_with_options(id, indices, options)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fail_engine_submission(&state.store, &current, error))?;
         return task_payload(&state.store, task);
     }
     if let Some(error) = unbound_torrent_confirmation_error(&current) {
@@ -740,9 +747,9 @@ pub async fn confirm_download_command(
     }
     let task = confirm_download(id, &state.store).map_err(|error| error.to_string())?;
     let task = service
-        .submit_uri_with_options(task.id, vec![task.source], options)
+        .submit_uri_with_options(task.id, vec![task.source.clone()], options)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| fail_engine_submission(&state.store, &task, error))?;
     task_payload(&state.store, task)
 }
 
@@ -2873,12 +2880,27 @@ pub async fn update_settings(
 mod tests {
     use super::*;
     use crate::{
+        aria2::{Aria2Error, RpcFault},
         cloud::{
             share::CloudShareEntry, share::CloudSharePlan, CloudProvider, MemoryCredentialStore,
         },
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
         DuplicateDownloadState, NewTask,
     };
+
+    #[test]
+    fn engine_submission_mapper_only_labels_structured_link_rejections_as_invalid_links() {
+        assert_eq!(
+            download_engine_submission_message(&DownloadServiceError::InvalidUriOption("proxy")),
+            "下载引擎未能接受下载任务"
+        );
+        assert_eq!(
+            download_engine_submission_message(&DownloadServiceError::Aria2(Aria2Error::Rpc(
+                RpcFault { code: -32602, message: "Invalid URI".into() }
+            ))),
+            "下载引擎拒绝该链接：链接格式无效"
+        );
+    }
 
     #[test]
     fn private_visibility_requires_the_configured_password_for_this_session() {

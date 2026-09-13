@@ -180,7 +180,10 @@ impl DownloadService {
 
     fn task_for_uri_submission(&self, task_id: Uuid) -> Result<DownloadTask, DownloadServiceError> {
         let task = self.store.find(task_id)?;
-        validate_task_source(&task.kind, &task.source)?;
+        if let Err(error) = validate_task_source(&task.kind, &task.source) {
+            let _ = self.store.fail(task.id, error.to_string());
+            return Err(error.into());
+        }
         Ok(task)
     }
 
@@ -729,11 +732,18 @@ impl DownloadService {
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        let task = self.store.find(task_id)?;
-        validate_task_source(&task.kind, &task.source)?;
-        let requested = validate_download_input(&magnet)?;
+        let task = self.task_for_uri_submission(task_id)?;
+        let requested = match validate_download_input(&magnet) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                let _ = self.store.fail(task.id, error.to_string());
+                return Err(error.into());
+            }
+        };
         if requested.kind != crate::CandidateKind::Magnet || requested.source != task.source {
-            return Err(InputValidationError::InvalidMagnet.into());
+            let error = InputValidationError::InvalidMagnet;
+            let _ = self.store.fail(task.id, error.to_string());
+            return Err(error.into());
         }
         if task.aria_gid.is_some() {
             return self.reconcile_task_unlocked(task_id).await;

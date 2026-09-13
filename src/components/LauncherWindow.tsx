@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { FloatingLauncher } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
 import { anchorLauncherToWorkArea, getLauncherManagerVisible, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
-import { getDownloadGlobalStat, getSettings, isTauriRuntime, updateSettings } from '../lib/api';
+import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, updateSettings } from '../lib/api';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
 
@@ -136,6 +136,7 @@ export function LauncherWindow() {
     <main className={`launcher-shell ${expanded ? 'launcher-expanded' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''} ${expandedTransitioning || contextMenuTransitioning ? 'launcher-viewport-transitioning' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
         onParse={(input) => { void sendLauncherInput(input); }}
+        onScan={scanDownloadInputs}
         onOpenTaskList={() => { void openLauncherManager(); }}
         onExpandedChange={changeExpanded}
         onDragStart={() => { void startLauncherDragging(); }}

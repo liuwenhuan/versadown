@@ -226,7 +226,7 @@ async fn legacy_invalid_magnet_never_reaches_aria2() {
 
     assert_eq!(error.to_string(), "磁链格式无效");
     assert!(api.calls().is_empty());
-    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Parsing);
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Failed);
 }
 
 #[tokio::test]
@@ -250,7 +250,7 @@ async fn legacy_invalid_direct_source_never_reaches_aria2() {
 
     assert_eq!(error.to_string(), "磁链格式无效");
     assert!(api.calls().is_empty());
-    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Parsing);
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Failed);
 }
 
 #[tokio::test]
@@ -274,6 +274,7 @@ async fn legacy_cloud_share_page_never_reaches_aria2_as_a_direct_file() {
 
     assert_eq!(error.to_string(), "未发现受支持的有效下载链接");
     assert!(api.calls().is_empty());
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Failed);
 }
 
 #[tokio::test]

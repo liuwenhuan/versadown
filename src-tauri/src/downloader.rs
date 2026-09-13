@@ -318,6 +318,19 @@ mod tests {
     }
 
     #[test]
+    fn malformed_ftp_source_creates_no_task() {
+        let store = TaskStore::open_in_memory().unwrap();
+
+        assert_eq!(
+            prepare_download("ftp://example.test/", &store)
+                .unwrap_err()
+                .to_string(),
+            "FTP 链接格式无效"
+        );
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
     fn protocol_specific_inputs_keep_a_stable_task_kind() {
         let store = TaskStore::open_in_memory().unwrap();
         for (source, expected) in [

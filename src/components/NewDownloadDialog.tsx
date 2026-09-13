@@ -29,7 +29,7 @@ type DownloadBatch = { entries: ScanDownloadResult[]; index: number };
 function directAutoStarts(entry: ScanDownloadResult, text: string): boolean {
   return entry.valid
     && entry.input === text
-    && ['direct', 'ed2k', 'ftp', 'hls', 'dash', 'thunder'].includes(entry.kind);
+    && entry.kind === 'direct';
 }
 
 export function NewDownloadDialog({ open, placement = 'launcher', onParse, onScan, onClose, onOpenTaskList, initialInput }: NewDownloadDialogProps) {

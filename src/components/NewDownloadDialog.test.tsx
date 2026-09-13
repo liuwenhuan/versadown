@@ -79,6 +79,21 @@ it('confirms scanned candidates in order and skips invalid input without submitt
   expect(onClose).toHaveBeenCalledOnce();
 });
 
+it('requires confirmation for a standalone non-direct candidate', async () => {
+  const user = userEvent.setup();
+  const onParse = vi.fn().mockResolvedValue(undefined);
+  render(<NewDownloadDialog open placement="modal" onParse={onParse} onClose={vi.fn()} onScan={async () => [
+    { input: 'ftp://example.test/pub/archive.iso', valid: true, kind: 'ftp' }
+  ]} />);
+
+  await user.type(screen.getByLabelText('下载内容'), 'ftp://example.test/pub/archive.iso');
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  expect(onParse).not.toHaveBeenCalled();
+  expect(screen.getByRole('status')).toHaveTextContent('正在处理 1/1');
+  expect(screen.getByRole('button', { name: '确认并完成' })).toBeEnabled();
+});
+
 it('closes the modal through Escape, its backdrop, and its modal close button', async () => {
   const user = userEvent.setup();
   const onClose = vi.fn();

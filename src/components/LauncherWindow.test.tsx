@@ -6,6 +6,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
   getGlobalStat: vi.fn(),
   getSettings: vi.fn(),
+  scanDownloadInputs: vi.fn(),
   updateSettings: vi.fn(),
   getManagerVisible: vi.fn(),
   onGlobalStat: undefined as undefined | ((stat: { download_speed: number; num_active: number }) => void)
@@ -15,6 +16,7 @@ vi.mock('../lib/api', () => ({
   isTauriRuntime: () => true,
   getDownloadGlobalStat: state.getGlobalStat,
   getSettings: state.getSettings,
+  scanDownloadInputs: state.scanDownloadInputs,
   updateSettings: state.updateSettings
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
@@ -45,6 +47,7 @@ beforeEach(() => {
   state.onGlobalStat = undefined;
   state.getGlobalStat.mockReset();
   state.getSettings.mockReset();
+  state.scanDownloadInputs.mockReset();
   state.updateSettings.mockReset();
   state.getManagerVisible.mockReset();
   state.getSettings.mockResolvedValue({

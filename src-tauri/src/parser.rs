@@ -276,10 +276,11 @@ pub fn extract_candidates(text: &str) -> Vec<Candidate> {
 pub fn scan_download_inputs(text: &str) -> Vec<ScannedInput> {
     let values = extract_raw_candidates(text);
     if values.is_empty() {
-        return vec![ScannedInput::invalid(
-            text.trim().to_string(),
-            InputValidationError::Unsupported,
-        )];
+        let input = text.trim().to_string();
+        return match validate_download_input(&input) {
+            Ok(candidate) => vec![ScannedInput::valid(candidate)],
+            Err(error) => vec![ScannedInput::invalid(input, error)],
+        };
     }
     values
         .into_iter()
@@ -397,18 +398,27 @@ fn validated(kind: CandidateKind, source: String) -> ValidatedCandidate {
 
 fn extract_raw_candidates(text: &str) -> Vec<String> {
     let pattern = Regex::new(
-        r"(?i)(ed2k:[^\s<>]+|magnet:[^\s<>]*|thunder://[^\s<>]*|ftp:[^\s<>]+|https?://[^\s<>]+)",
+        r"(?i)(ed2k:[^\s<>]+|magnet:[^\s<>]*|thunder://[^\s<>]*|ftp:[^\s<>]+|https?://[^\s<>]+|file://[^\s<>]+|[a-z]:\\[^\r\n<>]*?\.torrent)",
     )
     .expect("static candidate pattern");
     pattern
         .find_iter(text)
-        .map(|match_| {
-            match_
-                .as_str()
-                .trim_end_matches(|character: char| ".,;；，。)】]}".contains(character))
-                .to_string()
-        })
+        .map(|match_| trim_extracted_candidate(match_.as_str()))
         .collect()
+}
+
+fn trim_extracted_candidate(value: &str) -> String {
+    let has_signed_component = Url::parse(value).ok().is_some_and(|url| {
+        matches!(url.scheme(), "http" | "https" | "ftp")
+            && (url.query().is_some() || url.fragment().is_some())
+    });
+    if has_signed_component {
+        value.to_string()
+    } else {
+        value
+            .trim_end_matches(|character: char| ".,;；，。)】]}".contains(character))
+            .to_string()
+    }
 }
 
 fn validate_magnet(source: &str) -> Result<(), InputValidationError> {
@@ -453,6 +463,9 @@ pub(crate) fn decode_thunder_target(source: &str) -> Result<String, InputValidat
 }
 
 fn validate_network_url(source: &str, scheme: &str) -> Result<String, InputValidationError> {
+    if scheme == "ftp" {
+        crate::parse_ftp_url(source).map_err(|_| InputValidationError::InvalidFtp)?;
+    }
     let url = Url::parse(source).map_err(|_| InputValidationError::InvalidFtp)?;
     if url.scheme() != scheme || url.host_str().is_none() {
         return Err(InputValidationError::InvalidFtp);
@@ -603,6 +616,25 @@ mod tests {
         assert!(!values[0].valid);
         assert!(values[1].valid);
         assert_eq!(values[1].kind, Some(CandidateKind::Direct));
+    }
+
+    #[test]
+    fn scan_recognizes_a_local_torrent_inside_mixed_text() {
+        let values = scan_download_inputs(r"复制 C:\Downloads\release.torrent 完成");
+
+        assert_eq!(values.len(), 1);
+        assert!(values[0].valid);
+        assert_eq!(values[0].kind, Some(CandidateKind::Torrent));
+        assert_eq!(values[0].input, r"C:\Downloads\release.torrent");
+    }
+
+    #[test]
+    fn scan_never_strips_a_signed_url_query_value() {
+        let input = "https://example.test/release.iso?signature=ends-in-a-period.";
+        let values = scan_download_inputs(input);
+
+        assert_eq!(values[0].input, input);
+        assert!(values[0].valid);
     }
 
     #[test]
