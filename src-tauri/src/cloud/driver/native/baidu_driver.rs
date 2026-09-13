@@ -46,8 +46,14 @@ impl DriveOps for BaiduDriver<'_> {
         {
             let client =
                 baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, h);
+            let previous_ids = client
+                .directory(&parent_id)?
+                .items
+                .into_iter()
+                .map(|file| file.id)
+                .collect();
             client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
+            find_created_directory(client.directory(&parent_id)?, &name, &previous_ids)
         }
     }
     fn rename(&mut self, file_id: &str, name: &str) -> Result<(), CloudError> {

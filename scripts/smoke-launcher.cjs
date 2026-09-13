@@ -254,16 +254,20 @@ async function run() {
       const image = button.querySelector('img');
       const rect = button.getBoundingClientRect();
       const style = getComputedStyle(button);
-      return { width: innerWidth, height: innerHeight, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, display: style.display, visibility: style.visibility, opacity: style.opacity, background: style.background, imageLoaded: Boolean(image?.complete && image?.naturalWidth > 0) };
+      return { width: innerWidth, height: innerHeight, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, display: style.display, visibility: style.visibility, opacity: style.opacity, background: style.background, scale: devicePixelRatio, clipPath: getComputedStyle(image).clipPath, imageLoaded: Boolean(image?.complete && image?.naturalWidth > 0) };
     })())`));
     assert(compact.display !== 'none' && compact.visibility === 'visible' && compact.opacity === '1', 'Compact launcher button is not visible.');
     assert(compact.left >= 0 && compact.top >= 0 && compact.right <= compact.width + 0.5 && compact.bottom <= compact.height + 0.5, `Compact launcher is outside its viewport: ${JSON.stringify(compact)}`);
     assert(compact.imageLoaded, 'Compact launcher icon image did not load.');
+    const outline = JSON.parse(fs.readFileSync(path.join(projectRoot, 'src/assets/launcher/hexagon.json'), 'utf8'));
+    const expectedClip = `polygon(${outline.map(([x, y]) => `${x}% ${y}%`).join(',')})`;
+    assert(compact.clipPath.replaceAll(' ', '') === expectedClip.replaceAll(' ', ''), `Launcher clip differs from native geometry: ${compact.clipPath}`);
     assert(!compact.background.includes('linear-gradient'), 'Compact launcher unexpectedly restored the removed rectangular gradient background.');
     assert(!await evaluate(launcher, 'Boolean(document.querySelector(".launcher-live-indicator"))'), 'Zero-speed launcher unexpectedly shows a traffic capsule.');
 
     const nativeCompact = JSON.parse(await evaluate(launcher, `(async () => JSON.stringify({
       position: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_position', { label: 'launcher' }),
+      clientPosition: await window.__TAURI_INTERNALS__.invoke('plugin:window|inner_position', { label: 'launcher' }),
       size: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_size', { label: 'launcher' }),
       monitor: await window.__TAURI_INTERNALS__.invoke('plugin:window|current_monitor')
     }))()`));
@@ -275,6 +279,15 @@ async function run() {
     const nativeRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
     assert(nativeRegion && nativeRegion.width === nativeRegion.height && nativeRegion.width > 0, `Windows launcher region is not circular: ${JSON.stringify(nativeRegion)}`);
     assert(nativeRegion.x >= 0 && nativeRegion.y >= 0, `Windows launcher region starts outside its native window: ${JSON.stringify(nativeRegion)}`);
+    assert(Math.abs(nativeRegion.x - (nativeCompact.clientPosition.x - nativeCompact.position.x + compact.left * compact.scale)) <= 1,
+      `Launcher native/client horizontal origins disagree: ${JSON.stringify({ nativeRegion, nativeCompact, compact })}`);
+    assert(Math.abs(nativeRegion.y - (nativeCompact.clientPosition.y - nativeCompact.position.y + compact.top * compact.scale)) <= 1,
+      `Launcher native/client vertical origins disagree: ${JSON.stringify({ nativeRegion, nativeCompact, compact })}`);
+
+    if (process.argv.includes('--geometry-only')) {
+      process.stdout.write(`Launcher geometry smoke passed: ${JSON.stringify({ scale: compact.scale, clipPath: compact.clipPath, nativeRegion, clientPosition: nativeCompact.clientPosition, outerPosition: nativeCompact.position })}\n`);
+      return;
+    }
 
     await evaluate(launcher, `(() => {
       window.__launcherSmokeEvents = [];

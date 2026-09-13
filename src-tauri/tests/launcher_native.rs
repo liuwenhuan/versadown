@@ -27,13 +27,14 @@ fn compact_launcher_style_removes_all_native_window_decorations() {
 
 #[test]
 fn compact_region_follows_the_icon_inside_a_larger_windows_webview() {
-    let region = launcher_hexagon_region((365, 202), (343, 182), 1.75);
+    // The actual client origin need not be half the outer/inner size difference.
+    let region = launcher_hexagon_region((7, 13), (343, 182), 1.75);
 
     assert_eq!(
         region,
         LauncherRegion {
-            x: 242,
-            y: 80,
+            x: 238,
+            y: 83,
             width: 112,
             height: 112
         }
@@ -52,18 +53,18 @@ fn compact_region_matches_the_icon_hexagon_edge() {
     assert_eq!(
         launcher_hexagon_points(region),
         [
-            LauncherPoint { x: 183, y: 15 },
-            LauncherPoint { x: 215, y: 34 },
-            LauncherPoint { x: 215, y: 66 },
-            LauncherPoint { x: 183, y: 85 },
-            LauncherPoint { x: 152, y: 66 },
-            LauncherPoint { x: 152, y: 34 },
+            LauncherPoint { x: 183, y: 17 },
+            LauncherPoint { x: 212, y: 36 },
+            LauncherPoint { x: 212, y: 64 },
+            LauncherPoint { x: 183, y: 83 },
+            LauncherPoint { x: 154, y: 64 },
+            LauncherPoint { x: 154, y: 36 },
         ]
     );
 }
 
 #[test]
-fn compact_region_keeps_the_launcher_icon_antialiasing_inside_the_native_shape() {
+fn compact_region_does_not_expose_pixels_outside_the_css_clip() {
     let region = LauncherRegion {
         x: 0,
         y: 0,
@@ -74,12 +75,12 @@ fn compact_region_keeps_the_launcher_icon_antialiasing_inside_the_native_shape()
     assert_eq!(
         launcher_hexagon_points(region),
         [
-            LauncherPoint { x: 64, y: 10 },
-            LauncherPoint { x: 112, y: 39 },
-            LauncherPoint { x: 112, y: 89 },
-            LauncherPoint { x: 64, y: 118 },
-            LauncherPoint { x: 16, y: 89 },
-            LauncherPoint { x: 16, y: 39 },
+            LauncherPoint { x: 64, y: 13 },
+            LauncherPoint { x: 109, y: 41 },
+            LauncherPoint { x: 109, y: 87 },
+            LauncherPoint { x: 64, y: 115 },
+            LauncherPoint { x: 19, y: 87 },
+            LauncherPoint { x: 19, y: 41 },
         ]
     );
 }
@@ -87,7 +88,7 @@ fn compact_region_keeps_the_launcher_icon_antialiasing_inside_the_native_shape()
 #[test]
 fn live_region_contains_only_the_hexagon_and_short_speed_strip() {
     assert_eq!(
-        launcher_live_regions((146, 64), (146, 64), 1.0),
+        launcher_live_regions((0, 0), (146, 64), 1.0),
         LauncherLiveRegions {
             hexagon: LauncherRegion {
                 x: 0,
@@ -103,6 +104,38 @@ fn live_region_contains_only_the_hexagon_and_short_speed_strip() {
             },
         }
     );
+}
+
+#[test]
+fn launcher_clip_stays_inside_the_visible_polygon_at_common_dpi_scales() {
+    // Independently specified CSS geometry; native points must never expand it.
+    let polygon = [
+        (50.0, 9.0),
+        (86.0, 31.0),
+        (86.0, 69.0),
+        (50.0, 91.0),
+        (14.0, 69.0),
+        (14.0, 31.0),
+    ];
+    for scale in [1.0, 1.01, 1.1, 1.25, 1.3, 1.5, 1.55, 1.75, 2.0, 2.5, 3.0] {
+        let region = launcher_hexagon_region((3, 7), (640, 480), scale);
+        for point in launcher_hexagon_points(region) {
+            // CSS retains the fractional 64 * scale size and anchors bottom/right.
+            let diameter = 64.0 * scale;
+            let left = f64::from(region.x + region.width) - diameter;
+            let top = f64::from(region.y + region.height) - diameter;
+            let x = (f64::from(point.x) - left) * 100.0 / diameter;
+            let y = (f64::from(point.y) - top) * 100.0 / diameter;
+            for edge in 0..6 {
+                let (ax, ay) = polygon[edge];
+                let (bx, by) = polygon[(edge + 1) % 6];
+                assert!(
+                    (bx - ax) * (y - ay) - (by - ay) * (x - ax) >= -0.000001,
+                    "native point {point:?} leaks past clip at scale {scale}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -11,6 +11,7 @@ mod duplicates;
 mod engine_runtime;
 mod ftp;
 mod launcher;
+mod local_upload_picker;
 mod magnet_metadata;
 mod models;
 mod parser;
@@ -19,6 +20,8 @@ mod privacy;
 mod processing;
 mod store;
 mod update;
+#[cfg(windows)]
+mod window_interaction;
 mod window_lifecycle;
 
 pub use aria2::*;
@@ -116,6 +119,19 @@ async fn check_for_app_update() -> Result<Option<update::AppUpdate>, String> {
     tauri::async_runtime::spawn_blocking(move || update::fetch_app_update(&current_version))
         .await
         .map_err(|error| format!("版本检测任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn main_window_interaction_state(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    #[cfg(windows)]
+    {
+        window_interaction::snapshot(app).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(serde_json::json!({ "active": false, "nativeDrag": false }))
+    }
 }
 
 pub fn run() {
@@ -234,6 +250,10 @@ pub fn run() {
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
             ));
+            #[cfg(windows)]
+            if let Some(main) = app.get_webview_window("main") {
+                window_interaction::install(&main).map_err(std::io::Error::other)?;
+            }
             if should_show_windows(background_ui_test.as_deref()) {
                 launcher::setup_manager_tray(app.handle()).map_err(std::io::Error::other)?;
                 if let Some(main) = app.get_webview_window("main") {
@@ -256,6 +276,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version_command,
             check_for_app_update,
+            local_upload_picker::local_upload_entries,
+            main_window_interaction_state,
             commands::parse_download,
             commands::confirm_cloud_share_download,
             commands::confirm_download_command,
@@ -305,6 +327,7 @@ pub fn run() {
             cloud::commands::cloud_download_url,
             cloud::commands::cloud_download_directory,
             cloud::commands::cloud_upload_files,
+            cloud::commands::cloud_upload_directory,
             cloud::commands::cloud_logout,
             launcher::set_launcher_compact_shape,
             launcher::set_launcher_bounds,

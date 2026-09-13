@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { App } from './App';
 import './styles.css';
 
@@ -9,6 +10,8 @@ const cloudApiMocks = vi.hoisted(() => ({
   getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({ provider, web: true, password: false })),
   beginCloudAuthorization: vi.fn(),
   completeCloudAuthorization: vi.fn(),
+  subscribeCloudAuthorization: vi.fn().mockResolvedValue(() => {}),
+  getCompletedCloudAuthorization: vi.fn().mockResolvedValue(null),
   reauthorizeFailedCloudTask: vi.fn(),
   loginCloudWithPassword: vi.fn(),
   getSavedCloudCredentials: vi.fn().mockResolvedValue(null),
@@ -23,10 +26,77 @@ const cloudApiMocks = vi.hoisted(() => ({
   downloadCloudFile: vi.fn(),
   downloadCloudDirectory: vi.fn(),
   logoutCloud: vi.fn(),
-  pickAndUploadFiles: vi.fn()
+  pickAndUploadFiles: vi.fn(),
+  pickAndUploadDirectory: vi.fn()
 }));
 
 vi.mock('./lib/cloudApi', () => cloudApiMocks);
+
+it('places authorized cloud submenus below My Cloud and opens their files from any main view', async () => {
+  const user = userEvent.setup();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  cloudApiMocks.getCloudAccount.mockClear();
+  cloudApiMocks.getCloudAccount.mockImplementation((provider: string) => ['quark', 'pikpak'].includes(provider)
+    ? Promise.resolve({ provider, id: `${provider}-account`, displayName: provider, authMethod: 'web' })
+    : Promise.reject({ code: 'not_authorized' }));
+  cloudApiMocks.listCloudDirectory.mockImplementation((provider: string) => Promise.resolve({ id: '0', items: [{ id: `${provider}-file`, parentId: '0', name: `${provider}-sample.txt`, kind: 'file', size: 10 }] }));
+  try {
+    render(<App />);
+    const navigation = screen.getByRole('navigation', { name: '主导航' });
+    const quark = await within(navigation).findByRole('button', { name: '夸克网盘' });
+    const pikpak = within(navigation).getByRole('button', { name: 'PikPak网盘' });
+    const labels = within(navigation).getAllByRole('button').map(button => button.textContent);
+    expect(labels.indexOf('夸克网盘')).toBeGreaterThan(labels.indexOf('我的网盘'));
+    expect(labels.indexOf('PikPak网盘')).toBeLessThan(labels.indexOf('设置'));
+    expect(quark.querySelector('svg')).toBeNull();
+    expect(quark).toHaveStyle({ fontSize: '13px', paddingLeft: '44px' });
+    expect(within(navigation).getByRole('button', { name: '我的网盘' })).toHaveStyle({ fontSize: '15px', gridTemplateColumns: '28px 1fr auto', gap: '6px', paddingLeft: '10px' });
+    expect(quark).not.toHaveAttribute('aria-current');
+
+    await user.click(quark);
+    expect(await screen.findByText('quark-sample.txt')).toBeVisible();
+    expect(quark).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('tablist', { name: '我的网盘标签' })).not.toBeInTheDocument();
+    await user.click(pikpak);
+    expect(await screen.findByText('pikpak-sample.txt')).toBeVisible();
+    expect(pikpak).toHaveAttribute('aria-current', 'page');
+    expect(quark).not.toHaveAttribute('aria-current');
+
+    await user.click(within(navigation).getByRole('button', { name: /任务/ }));
+    expect(pikpak).toBeVisible();
+    expect(pikpak).not.toHaveAttribute('aria-current');
+    await user.click(within(navigation).getByRole('button', { name: '我的网盘' }));
+    expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
+    expect(within(navigation).getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
+    expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(7);
+  } finally {
+    stylesheet.remove();
+    cloudApiMocks.getCloudAccount.mockRejectedValue({ code: 'not_authorized', message: '未授权' });
+  }
+});
+
+it('adds a sidebar cloud submenu after authorization and removes it after logout', async () => {
+  const user = userEvent.setup();
+  cloudApiMocks.getCloudAccount.mockRejectedValue({ code: 'not_authorized' });
+  cloudApiMocks.beginCloudAuthorization.mockResolvedValue({ provider: 'quark', windowLabel: '登录', instructions: '完成登录' });
+  cloudApiMocks.completeCloudAuthorization.mockResolvedValue({ provider: 'quark', id: 'new-account', displayName: 'new-user', authMethod: 'web' });
+  cloudApiMocks.logoutCloud.mockResolvedValue(undefined);
+  render(<App />);
+  const navigation = screen.getByRole('navigation', { name: '主导航' });
+  await user.click(within(navigation).getByRole('button', { name: '我的网盘' }));
+  expect(within(navigation).queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
+  const card = await screen.findByRole('region', { name: '夸克账号授权' });
+  await user.click(within(card).getByRole('button', { name: '使用网页授权' }));
+  await user.click(await screen.findByRole('button', { name: '我已完成授权' }));
+  expect(await within(navigation).findByRole('button', { name: '夸克网盘' })).toBeVisible();
+  expect(within(navigation).getAllByRole('button', { name: '夸克网盘' })).toHaveLength(1);
+  await user.click(screen.getByRole('button', { name: '退出授权' }));
+  await user.click(screen.getByRole('button', { name: '确认退出授权' }));
+  await waitFor(() => expect(within(navigation).queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument());
+  expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
+});
 
 it('renders the compact download-manager layout without browser navigation controls', async () => {
   render(<App />);
@@ -123,7 +193,7 @@ it('opens the cloud management workspace and restores each provider once', async
   await user.click(screen.getByRole('button', { name: /我的网盘/ }));
 
   expect(await screen.findByRole('region', { name: '网盘管理' })).toBeVisible();
-  expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(7);
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('quark');
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('pikpak');
@@ -146,7 +216,7 @@ it('preloads cloud authorization before the user opens My Cloud', async () => {
   await user.click(screen.getByRole('button', { name: /我的网盘/ }));
 
   expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
-  expect(screen.getByRole('tab', { name: '夸克网盘' })).toBeVisible();
+  expect(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '夸克网盘' })).toBeVisible();
   expect(screen.getByRole('button', { name: '已经完成授权' })).toBeDisabled();
 });
 
@@ -160,7 +230,7 @@ it('adds a native cloud download result to the visible download queue', async ()
   render(<App />);
 
   await user.click(screen.getByRole('button', { name: /我的网盘/ }));
-  await user.click(await screen.findByRole('tab', { name: '夸克网盘' }));
+  await user.click(await screen.findByRole('button', { name: '夸克网盘' }));
   await user.click(await screen.findByRole('treeitem', { name: /网盘电影\.mkv/ }));
   await user.click(screen.getByRole('button', { name: '下载', exact: true }));
 

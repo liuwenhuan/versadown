@@ -1,5 +1,33 @@
 # 窗口最小尺寸与缩放性能验证（2026-09-12）
 
+## 原生交互测试版（本轮）
+
+本轮在原生窗口链路上修复，不再把程序化 `set_size` 的耗时等同于鼠标帧率。
+
+- Windows 标题、图标、空白区域使用 WebView2 `app-region: drag`；搜索与控制按钮为 `no-drag`。先通过 COM `ICoreWebView2Settings9` 确认实际启用状态，再移除 Tauri JavaScript 拖动区域；旧运行库或查询失败时保留旧路径。图标关闭 HTML 图片拖拽。
+- 主窗口只在 `WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` 发送交互边界事件，不为每次 `WM_SIZE` 新增前端通知。销毁时清理子类钩子；不截断系统尺寸、命中测试及最小值消息。
+- 前端先订阅再查询当前交互状态，事件计数防止旧启动快照覆盖新事件。焦点快照合并到交互结束后，下载实时事件不暂停。缩放期间即使鼠标静止超过 120ms，也不会中途恢复昂贵效果；普通程序化缩放保留超时回退。
+- 本地回补 Tao 0.35.3 的 [官方 DPI 修复](https://github.com/tauri-apps/tao/pull/1252/files)，不升级整个 Tauri 依赖链、不修改全局 Cargo 缓存。旧代码在定向 invalid-HWND 测试中因不必要的 `GetDC` 失败；回补后通过。该测试证明修复路径，不证明本机卡顿全部来自资源泄漏。
+
+实际验证命令（Node/Vitest 与 Cargo 使用本机配置路径调用）：
+
+```text
+vitest run src/App.test.tsx src/App.live.test.tsx src/lib/windowInteraction.test.ts src/lib/windowResizePerformance.test.ts --exclude '.worktrees/**' --exclude '.pnpm-store/**'
+cargo test --manifest-path src-tauri/Cargo.toml --lib window_interaction::tests --offline
+cargo test --manifest-path src-tauri/Cargo.toml --test window_config --test window_lifecycle --offline
+cargo test --manifest-path src-tauri/vendor/tao/Cargo.toml --lib modern_invalid_window_dpi --offline
+./scripts/build-windows.ps1
+node scripts/measure-window-resize.cjs artifacts/window-native-interaction/alldownloader.exe --verify-minimum --interaction-smoke
+```
+
+前端 75 项通过；DPI 回归 1 项通过；窗口配置与关闭生命周期 5 项通过；原生交互模块 2 项通过。最终发布构建与发布文件烟测均退出 0。构建保留原有的混合导入及未使用函数警告，没有执行全量前端或 Rust 测试。独立只读审查提出的启动状态遗漏与旧 WebView2 兼容性问题均已补测修复。
+
+交付：`artifacts/window-native-interaction/alldownloader.exe`，引擎在同目录 `binaries`。SHA-256：`AE681C2F80E23150C6DFE9E0B504CB472765774008B0CDDDEEC43CE8925EDECB`。175% DPI 下最小跟踪尺寸 1680×1120，除以 1.75 后为 960×640。真实 WebView2 的四处 caption 样式均为 `drag`，搜索框和三个控制按钮均为 `no-drag`，JavaScript 拖动调用计数为 0；原生快照与开始/保持/结束状态验证通过。
+
+烟测使用隔离数据库和 WebView2 数据目录，检查真实计算样式、没有重复 JavaScript 拖动调用、原生开始/保持/结束事件和原生最小跟踪尺寸。它通过测试消息验证生命周期，**不是实际鼠标拖动性能基准**。人工验收应从托盘完全退出旧版，再检查冷启动首次移动、图标/标题拖动、四边四角连续缩放、按住静止后继续拖动、双击最大化/还原，以及搜索框和窗口按钮。
+
+下文保留旧版本的测量与历史二进制信息，不能当作本轮性能结果。
+
 ## 当前尺寸约定
 
 用户后续明确指定最小尺寸为 **960×640**。最终配置的 `width`、`height`、`minWidth`、`minHeight` 采用 960、640、960、640，不再追加截图推算的边框补偿。以下截图换算和性能数据记录的是此前测试版；其二进制及 SHA-256 不代表最终 master 版本。

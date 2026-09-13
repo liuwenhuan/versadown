@@ -1,7 +1,9 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { LocalUploadPicker } from './LocalUploadPicker';
+import type { LocalUploadListing } from '../lib/localUpload';
 import type { CloudAuthorizationStateEvent } from '../lib/cloudTypes';
-import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
+import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudUploadOutcome } from '../lib/cloudTypes';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
@@ -26,7 +28,13 @@ export interface CloudManagerClient {
   downloadCloudFile(provider: CloudProvider, fileId: string, privateDownload?: boolean): Promise<unknown>;
   downloadCloudDirectory(provider: CloudProvider, directoryId: string, directoryName: string, privateDownload?: boolean): Promise<CloudDirectoryDownloadOutcome>;
   logoutCloud(provider: CloudProvider): Promise<void>;
-  pickAndUploadFiles(provider: CloudProvider, parentId: string): Promise<readonly CloudFile[] | void>;
+  pickAndUploadFiles(provider: CloudProvider, parentId: string): Promise<CloudUploadOutcome>;
+  pickAndUploadDirectory(provider: CloudProvider, parentId: string): Promise<CloudUploadOutcome>;
+  pickCloudUploadFiles?(): Promise<string[]>;
+  pickCloudUploadDirectory?(): Promise<string | null>;
+  uploadCloudFiles?(provider: CloudProvider, parentId: string, paths: string[]): Promise<CloudUploadOutcome>;
+  uploadCloudDirectory?(provider: CloudProvider, parentId: string, path: string): Promise<CloudUploadOutcome>;
+  listLocalUploadEntries?(path?: string): Promise<LocalUploadListing>;
 }
 
 export interface CloudManagerProps {
@@ -47,6 +55,7 @@ type DirectoryState = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'expire
 type Editor = 'create' | 'rename' | null;
 type DestinationAction = 'move' | 'copy';
 type OperationState = { kind: 'working' | 'success' | 'error'; message: string } | null;
+type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'details' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
@@ -73,7 +82,8 @@ const unavailableClient: CloudManagerClient = {
   downloadCloudFile: () => Promise.reject(new Error('网盘连接器尚未接入')),
   downloadCloudDirectory: () => Promise.reject(new Error('网盘连接器尚未接入')),
   logoutCloud: () => Promise.reject(new Error('网盘连接器尚未接入')),
-  pickAndUploadFiles: () => Promise.reject(new Error('网盘连接器尚未接入'))
+  pickAndUploadFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  pickAndUploadDirectory: () => Promise.reject(new Error('网盘连接器尚未接入'))
 };
 
 function isCredentialExpired(error: unknown) {
@@ -224,7 +234,7 @@ function CloudActionIcon({ action }: { action: CloudMenuAction | 'back' | 'clear
 function CloudContextMenu({ state, selectedCount, recycleBin, virtualRecycleBin, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualRecycleBin: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudMenuAction; label: string; danger?: boolean; separated?: boolean }> = state.kind === 'background'
-    ? recycleBin ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传文件' }, { action: 'refresh', label: '刷新', separated: true }]
+    ? recycleBin ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传' }, { action: 'refresh', label: '刷新', separated: true }]
     : virtualRecycleBin
       ? [{ action: 'open', label: '打开' }]
       : recycleBin
@@ -442,11 +452,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
+  const [pendingAuthorizationName, setPendingAuthorizationName] = useState<string | null>(null);
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
   const [editorValue, setEditorValue] = useState('');
   const [pendingTrash, setPendingTrash] = useState(false);
   const [pendingDownload, setPendingDownload] = useState<readonly CloudFile[] | null>(null);
+  const [uploadPickerOpen, setUploadPickerOpen] = useState(false);
   const [pendingLogout, setPendingLogout] = useState(false);
   const [operation, setOperation] = useState<OperationState>(null);
   const [contextMenu, setContextMenu] = useState<CloudContextMenuState | null>(null);
@@ -460,6 +472,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const authorizationWake = useRef<(() => void) | null>(null);
   const authorizationWakePending = useRef(false);
   const operationInFlight = useRef(false);
+  const pendingAuthorizationAction = useRef<PendingAuthorizationAction | null>(null);
   const selectionAnchor = useRef<string | null>(null);
   const selectAllCheckbox = useRef<HTMLInputElement>(null);
   const selectionMenuTrigger = useRef<HTMLButtonElement>(null);
@@ -477,6 +490,20 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
   const logoutLabel = passwordSession ? '退出登录' : '退出授权';
   const allSelected = Boolean(selectableItems.length) && selected.length === selectableItems.length;
+
+  function queueAuthorizationContinuation(name: string, resume: () => Promise<void>, message: string, showOperation = true, expectedAccountId = activeAccount?.id) {
+    if (!expectedAccountId) return;
+    pendingAuthorizationAction.current = { accountId: expectedAccountId, name, resume, showOperation };
+    setPendingAuthorizationName(name);
+    setReauthorizationRequired(true);
+    setAuthorizationStatus(message);
+    if (showOperation) setOperation({ kind: 'error', message });
+  }
+
+  function needsInPlaceWebAuthorization(error: unknown) {
+    return requiresOfficialWebAuthorization(error)
+      || (isCredentialExpired(error) && effectiveAuthorizationCapabilities.web);
+  }
 
   useEffect(() => {
     if (selectAllCheckbox.current) selectAllCheckbox.current.indeterminate = selected.length > 0 && !allSelected;
@@ -516,11 +543,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setBreadcrumbs(nextBreadcrumbs);
       setDirectoryState(items.length ? 'ready' : 'empty');
     } catch (error) {
-      if (requiresOfficialWebAuthorization(error) || (provider === 'xunlei' && isCredentialExpired(error))) {
-        setReauthorizationRequired(true);
-        setAuthorizationStatus(errorMessage(error, '读取目录需要网页验证。'));
+      if (needsInPlaceWebAuthorization(error)) {
+        const detail = errorMessage(error, '');
+        const message = `读取目录需要网页验证。${detail ? ` ${detail}` : ''}`;
+        queueAuthorizationContinuation('加载目录', () => loadDirectory(account, parentId, nextBreadcrumbs), message, Boolean(directory), account.id);
         setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
-        if (directory) setOperation({ kind: 'error', message: '读取目录需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重试。' });
         return;
       }
       setDirectory(null);
@@ -555,12 +582,29 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   async function acceptAccount(account: CloudAccount) {
     ensureProviderAccount(account);
+    const pending = pendingAuthorizationAction.current;
+    const sameAccount = !pending
+      || pending.accountId === account.id
+      || (provider === 'tianyi' && (pending.accountId === 'tianyi-web' || account.id === 'tianyi-web'));
+    if (pending && !sameAccount) {
+      const message = '授权账号与当前会话不一致，已停止继续原操作。请使用原账号重新授权。';
+      webAuthorizationActive.current = false;
+      setWebAuthorization(null);
+      setReauthorizationRequired(true);
+      setAuthorizationStatus(message);
+      if (pending.showOperation) setOperation({ kind: 'error', message });
+      return false;
+    }
     setActiveAccount(account);
     setWebAuthorization(null);
     setReauthorizationRequired(false);
-    if (reauthorizationRequired) setOperation(null);
+    pendingAuthorizationAction.current = null;
+    setPendingAuthorizationName(null);
+    if (pending) setOperation(null);
     onAccountAuthorized?.(account);
-    if (!authorizationOnly) await loadDirectory(account, rootId, [{ id: rootId, name: '根目录' }]);
+    if (pending) await pending.resume();
+    else if (!authorizationOnly) await loadDirectory(account, rootId, [{ id: rootId, name: '根目录' }]);
+    return true;
   }
 
   async function addAccount(authorize: () => Promise<CloudAccount>) {
@@ -633,8 +677,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       const account = await client.completeCloudAuthorization(provider);
       if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
       ensureProviderAccount(account);
-      webAuthorizationActive.current = false;
-      await acceptAccount(account);
+      const accepted = await acceptAccount(account);
+      if (accepted) webAuthorizationActive.current = false;
     } catch (error) {
       if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
       if (isAuthorizationPending(error)) {
@@ -682,9 +726,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       try {
         const account = await client.getCompletedCloudAuthorization?.(provider);
         if (!current() || account?.provider !== provider) return;
-        webAuthorizationActive.current = false;
-        if (timer !== undefined) window.clearTimeout(timer);
-        await acceptAccountRef.current(account);
+        const accepted = await acceptAccountRef.current(account);
+        if (accepted && timer !== undefined) window.clearTimeout(timer);
       } catch { /* Lost wakeups are covered by the watchdog. */ }
       finally { querying = false; }
     };
@@ -711,14 +754,46 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     };
   }, [client, provider, waitingForWebAuthorization]);
 
-  async function runOperation(name: string, action: () => Promise<unknown>, refresh = true) {
+  async function runOperation(name: string, action: () => Promise<unknown>, refresh = true, retryUploadFailures?: (failures: CloudUploadOutcome['failures']) => () => Promise<void>) {
     if (!activeAccount || operationInFlight.current) return;
     operationInFlight.current = true;
     setOperation({ kind: 'working', message: `${name}进行中…` });
     try {
       const result = await action();
-      if (name === '上传' && Array.isArray(result) && result.length === 0) {
-        setOperation(null);
+      if (name.startsWith('上传') && isCloudUploadOutcome(result)) {
+        if (result.uploaded.length === 0 && result.failures.length === 0) {
+          setOperation(null);
+          return;
+        }
+        if (refresh) await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs);
+        if (result.failures.length > 0) {
+          const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
+          if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
+            const authorizationFailures = result.failures.filter(failure => failure.code === 'web_auth_required' || (failure.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web));
+            queueAuthorizationContinuation(name, retryUploadFailures?.(authorizationFailures) ?? (() => runOperation(name, action, refresh, retryUploadFailures)), `${name}需要网页验证。${first.message ? ` ${first.message}` : ''}`);
+            return;
+          }
+          if (first.code === 'credentials_expired') {
+            setDirectory(null);
+            setDirectoryState('expired');
+            setAuthorizationStatus(first.message || '登录凭据已过期。');
+            return;
+          }
+          if (first.code === 'session_renewed_retry_operation') {
+            setOperation({ kind: 'error', message: `已自动恢复登录；成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项，请重试失败项目` });
+            return;
+          }
+          const listedFailures = result.failures.slice(0, 3).map(failure => `${failure.itemName}：${failure.message}`).join('；');
+          const remainingFailures = result.failures.length > 3 ? `；另 ${result.failures.length - 3} 项` : '';
+          setOperation({
+            kind: 'error',
+            message: `${name}完成：成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项：${listedFailures}${remainingFailures}`
+          });
+          return;
+        }
+        setOperation({ kind: 'success', message: `已上传 ${result.uploaded.length} 项` });
+        setEditor(null);
+        setEditorValue('');
         return;
       }
       if (refresh) await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs);
@@ -727,13 +802,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setEditor(null);
       setEditorValue('');
     } catch (error) {
-      if (requiresOfficialWebAuthorization(error) || (provider === 'xunlei' && isCredentialExpired(error))) {
+      if (needsInPlaceWebAuthorization(error)) {
         // Keep the existing account and directory alive while the official
         // browser proves the requested action. `cloud_begin_authorization`
         // only opens the WebView; the saved session is replaced later, after
         // a successful `cloud_complete_authorization` validation.
-        setReauthorizationRequired(true);
-        setOperation({ kind: 'error', message: `${name}需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重试。` });
+        const detail = errorMessage(error, '');
+        queueAuthorizationContinuation(name, () => runOperation(name, action, refresh), `${name}需要网页验证。${detail ? ` ${detail}` : ''}`);
       } else if (isCredentialExpired(error)) {
         setDirectory(null);
         setDirectoryState('expired');
@@ -833,8 +908,18 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function uploadFiles() {
-    if (isRecycleBin) return;
-    void runOperation('上传', () => client.pickAndUploadFiles(provider, currentDirectoryId));
+    if (isRecycleBin || operationBusy) return;
+    setUploadPickerOpen(true);
+  }
+
+  async function uploadSelectedFiles(paths: string[]) {
+    await runOperation('上传', () => client.uploadCloudFiles!(provider, currentDirectoryId, paths), true, (failures) => {
+      const indexed = failures
+        .map((failure) => failure.inputIndex)
+        .filter((index): index is number => typeof index === 'number' && Number.isInteger(index) && index >= 0 && index < paths.length);
+      const retryPaths = indexed.length === failures.length ? indexed.map((index) => paths[index]) : paths;
+      return () => uploadSelectedFiles(retryPaths);
+    });
   }
 
   function refreshDirectory() {
@@ -927,6 +1012,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     </section>;
   }
 
+  function authorizationContinuationButton() {
+    if (!pendingAuthorizationName || !effectiveAuthorizationCapabilities.web) return null;
+    return <button className="secondary cloud-authorization-continuation" disabled={operationBusy || webAuthorization !== null} onClick={() => void beginWebAuthorization()}>打开 {label} 授权并继续{pendingAuthorizationName}</button>;
+  }
+
   function sessionActions() {
     return <div className="cloud-session-actions"><button className="cloud-auth-state" disabled>{authorizedLabel}</button>{reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}<button className="secondary" disabled={operationBusy} onClick={() => setPendingLogout(true)}>{logoutLabel}</button></div>;
   }
@@ -940,13 +1030,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       <header className="cloud-heading"><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2></header>
       {sessionActions()}
       {logoutConfirmation()}
-      {operation && <p className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}>{operation.message}</p>}
+      {operation && <div className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}><span>{operation.message}</span>{operation.kind === 'error' && authorizationContinuationButton()}</div>}
     </section>;
   }
 
   if (authorizationOnly && activeAccount) return accountManagementView();
   if (authorizationOnly || !activeAccount) return authorizationView();
-  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={`${label}文件管理器`}><header className="cloud-heading"><h2>{label}网盘</h2></header><p className="cloud-state cloud-error" role="alert">登录凭据已过期，请前往“网盘管理”重新授权。</p></section>;
+  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={`${label}文件管理器`}><header className="cloud-heading"><h2>{label}网盘</h2></header><div className="cloud-state cloud-error" role="alert"><span>登录凭据已过期。</span>{authorizationContinuationButton()}</div></section>;
   if (directoryState === 'expired') return authorizationView(true);
 
   const parent = breadcrumbs.at(-2);
@@ -961,7 +1051,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         <div className="cloud-breadcrumbs" role="navigation" aria-label="当前目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1} onClick={() => void loadDirectory(activeAccount, crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label="文件操作">
-        {!isRecycleBin && <button className="cloud-toolbar-primary" aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传文件</button>}
+        {!isRecycleBin && <button aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传</button>}
         {!isRecycleBin && <button aria-label="新建目录" disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />新建文件夹</button>}
         <button className="cloud-icon-button cloud-refresh-button" aria-label="刷新" title="刷新" disabled={operationBusy} onClick={refreshDirectory}><CloudActionIcon action="refresh" /></button>
       </div>
@@ -971,10 +1061,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={isRecycleBin ? '确认永久删除' : '确认移入回收站'}><h3>{isRecycleBin ? '确认永久删除' : '确认移入回收站'}</h3><p>{isRecycleBin ? `所选 ${selected.length} 个项目将被永久删除，不可恢复。` : `所选 ${selected.length} 个项目将移入回收站，不会永久删除。`}</p><button className="secondary" onClick={() => setPendingTrash(false)}>取消</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation(isRecycleBin ? '永久删除' : '删除', () => isRecycleBin ? client.deleteCloudFiles(provider, selectedIds.slice()) : client.trashCloudFiles(provider, selectedIds.slice())); }}>{isRecycleBin ? '永久删除' : '移入回收站'}</button></section></div>}
     {pendingDownload && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label="确认下载"><h3>确认下载</h3><p>所选 {pendingDownload.length} 个项目可作为普通任务或隐私任务加入下载队列。</p><button className="secondary" onClick={() => setPendingDownload(null)}>取消</button><button className="primary" onClick={() => confirmPendingDownload(false)}>立即下载</button><button className="secondary" onClick={() => confirmPendingDownload(true)}>隐私下载</button></section></div>}
     {showSessionActions && logoutConfirmation()}
-    {operation && <p className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}>{operation.message}</p>}
+    {operation && <div className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}><span>{operation.message}</span>{operation.kind === 'error' && authorizationContinuationButton()}</div>}
     {!showSessionActions && reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}
     {directoryState === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>正在加载文件…</span></div>}
-    {directoryState === 'error' && <div className="cloud-state cloud-error" role="alert"><b>加载失败</b><span>{authorizationStatus}</span><button className="secondary" onClick={refreshDirectory}>重试</button></div>}
+    {directoryState === 'error' && <div className="cloud-state cloud-error" role="alert"><b>加载失败</b><span>{authorizationStatus}</span>{authorizationContinuationButton()}<button className="secondary" onClick={refreshDirectory}>重试</button></div>}
     {(directoryState === 'ready' || directoryState === 'empty') && <div
       className="cloud-list"
       role="tree"
@@ -1004,9 +1094,20 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         </div>;
       })}
     </div>}
+    {uploadPickerOpen && <LocalUploadPicker listEntries={client.listLocalUploadEntries ?? unavailableLocalUploadListing} onCancel={() => setUploadPickerOpen(false)} onConfirm={paths => { setUploadPickerOpen(false); void uploadSelectedFiles(paths); }} />}
     {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
     {detailsFile && <CloudFileDetails file={detailsFile} path={`/${breadcrumbs.slice(1).map((crumb) => crumb.name).join('/') || ''}`} onClose={() => setDetailsFile(null)} />}
-    {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { setDestinationAction(null); setReauthorizationRequired(true); setAuthorizationStatus(errorMessage(error, '读取目标目录需要网页验证。')); setOperation({ kind: 'error', message: `读取${destinationAction === 'copy' ? '复制' : '移动'}目标目录需要网页验证。请使用“重新网页授权”在官方窗口完成验证后重新执行本次操作。` }); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
+    {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { const action = destinationAction; setDestinationAction(null); queueAuthorizationContinuation(`选择${action === 'copy' ? '复制' : '移动'}目标`, async () => { setDestinationAction(action); }, errorMessage(error, `读取${action === 'copy' ? '复制' : '移动'}目标目录需要网页验证。`)); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
   </section>;
+}
+
+function isCloudUploadOutcome(value: unknown): value is CloudUploadOutcome {
+  return typeof value === 'object' && value !== null
+    && Array.isArray((value as CloudUploadOutcome).uploaded)
+    && Array.isArray((value as CloudUploadOutcome).failures);
+}
+
+function unavailableLocalUploadListing(): Promise<LocalUploadListing> {
+  return Promise.reject(new Error('本地文件选择器不可用，请使用最新版本。'));
 }

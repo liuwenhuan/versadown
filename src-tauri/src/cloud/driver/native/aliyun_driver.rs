@@ -112,7 +112,7 @@ impl ProviderAuth for AliyunDriver<'_> {
     }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
-            token_script: Some(ALIYUN_WEB_TOKENS_JS),
+            token_script: Some(aliyun::ALIYUN_WEB_TOKENS_JS),
             ..Default::default()
         }
     }

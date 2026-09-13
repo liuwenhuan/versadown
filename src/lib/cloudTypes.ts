@@ -29,6 +29,11 @@ export interface CloudAccount { provider: CloudProvider; id: string; displayName
 export interface CloudAuthorizationStateEvent { provider: CloudProvider; state: 'Disconnected' | 'Restoring' | 'Ready' | 'Refreshing' | 'NeedsSilentRelogin' | 'NeedsInteractiveAuth' | 'RiskBlocked'; account: CloudAccount | null; }
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; }
 export interface CloudDirectory { id: string; items: CloudFile[]; }
+export interface CloudUploadFailure { inputIndex?: number; itemName: string; code: string; message: string; }
+export interface CloudUploadOutcome {
+  uploaded: readonly CloudFile[];
+  failures: readonly CloudUploadFailure[];
+}
 export interface CloudAuthorization { provider: CloudProvider; windowLabel: string; instructions: string; completed?: boolean; }
 export type CloudPasswordLoginMode = 'none' | 'rustDirect' | 'officialWebView';
 export interface CloudAuthorizationCapabilities { provider: CloudProvider; web: boolean; password: boolean; passwordLoginMode: CloudPasswordLoginMode; }

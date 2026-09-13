@@ -19,7 +19,12 @@ function page(url: string, extra = '') {
   };
   let submissions = 0;
   dom.window.document.querySelector('button')!.addEventListener('click', () => { submissions += 1; });
-  const run = (provider: string, attempt = 'attempt-1') => dom.window.eval(script)(provider, 'provided-user', 'provided-password', attempt);
+  const run = (provider: string, attempt = 'attempt-1') => {
+    const allowed = provider === 'baidu'
+      ? ['pan.baidu.com', 'passport.baidu.com']
+      : provider === 'tianyi' ? ['cloud.189.cn', 'open.e.189.cn'] : [];
+    return dom.window.eval(script)(provider, allowed, 'provided-user', 'provided-password', attempt);
+  };
   return { dom, run, tick: () => ticks.forEach(tick => tick()), advance: (ms: number) => { now += ms; }, submissions: () => submissions };
 }
 

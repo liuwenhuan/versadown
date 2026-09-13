@@ -23,4 +23,22 @@
     }
     return result;
   };
+  const originalFetch = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      const requestUrl = new URL(
+        typeof input === 'string' || input instanceof URL ? input : input.url,
+        location.href,
+      );
+      const headers = new Headers(
+        init?.headers || (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined),
+      );
+      const browserId = headers.get('browser-id');
+      if (requestUrl.origin === 'https://cloud.189.cn' && requestUrl.pathname.startsWith('/api/') &&
+          typeof browserId === 'string' && /^[a-f0-9]{32}$/i.test(browserId)) {
+        window.__alldownloaderTianyiContext = { browser_id: browserId, user_agent: navigator.userAgent };
+      }
+    } catch (_) {}
+    return originalFetch.apply(this, arguments);
+  };
 })();

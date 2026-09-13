@@ -637,10 +637,105 @@ pub(crate) fn directory_download_failure_fields(
     }
 }
 
+// Separate from source/plan locks: always acquired before the per-source lock.
+// Cancellation records durable intent first, then waits for the current leaf
+// to finish linking, so it cannot miss a task created during URL resolution.
+pub(crate) async fn lock_directory_submission(
+    group_id: uuid::Uuid,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, QuarkError> {
+    static GATES: std::sync::LazyLock<CloudDownloadSourceGate> =
+        std::sync::LazyLock::new(CloudDownloadSourceGate::default);
+    GATES.acquire(&group_id.to_string()).await
+}
+
+fn directory_submission_stopped(
+    store: &TaskStore,
+    group_id: uuid::Uuid,
+) -> Result<bool, QuarkError> {
+    Ok(store
+        .cloud_directory_group(group_id)
+        .map_err(|_| QuarkError::Storage)?
+        .is_none_or(|group| matches!(group.status, TaskStatus::Cancelled | TaskStatus::Recycled)))
+}
+
+/// Shared by user retries and background URL/authorization refreshes.
+pub async fn lock_directory_member_submission(
+    store: &TaskStore,
+    task_id: uuid::Uuid,
+) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, QuarkError> {
+    let Some(group) = store
+        .cloud_directory_group_for_task(task_id)
+        .map_err(|_| QuarkError::Storage)?
+    else {
+        return Ok(None);
+    };
+    let guard = lock_directory_submission(group.id).await?;
+    if directory_submission_stopped(store, group.id)? {
+        return Err(QuarkError::InvalidInput(
+            "目录下载任务已取消或移入回收站".into(),
+        ));
+    }
+    Ok(Some(guard))
+}
+
+pub async fn cancel_cloud_directory_group_with<F, Fut>(
+    store: &TaskStore,
+    group_id: uuid::Uuid,
+    mut cancel: F,
+) -> Result<TaskActionOutcome, String>
+where
+    F: FnMut(uuid::Uuid) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    store
+        .cancel_cloud_directory_group(group_id)
+        .map_err(|error| error.to_string())?;
+    let _submission = lock_directory_submission(group_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let group = store
+        .cloud_directory_group(group_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "网盘目录下载任务不存在".to_string())?;
+    let mut first_error = None;
+    for item in store
+        .cloud_directory_group_items(group.id)
+        .map_err(|error| error.to_string())?
+    {
+        let Some(id) = item.task_id else {
+            continue;
+        };
+        let task = match store.find(id) {
+            Ok(task) => task,
+            Err(error) => {
+                first_error.get_or_insert_with(|| error.to_string());
+                continue;
+            }
+        };
+        if !matches!(
+            task.status,
+            TaskStatus::Completed
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Recycled
+        ) {
+            if let Err(error) = cancel(id).await {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(format!("部分目录文件未能取消，请重试：{error}"));
+    }
+    cloud_directory_group_task_outcome(store, &group).map_err(|error| error.to_string())
+}
+
 pub(crate) fn cloud_directory_group_task_outcome(
     store: &TaskStore,
     group: &CloudDirectoryGroup,
 ) -> Result<TaskActionOutcome, QuarkError> {
+    let queue_task =
+        cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?;
     Ok(TaskActionOutcome {
         payload: crate::commands::DownloadTaskPayload {
             task: DownloadTask {
@@ -648,23 +743,23 @@ pub(crate) fn cloud_directory_group_task_outcome(
                 source: format!("cloud-directory://{}/{}", group.provider.key(), group.id),
                 name: group.relative_directory.clone(),
                 kind: "folder".into(),
-                status: TaskStatus::Queued,
-                progress: 0,
-                error: None,
+                status: queue_task.status,
+                progress: queue_task.progress,
+                error: queue_task.error.clone(),
                 failure_code: None,
                 aria_gid: None,
                 followed_by_gid: None,
                 metadata_gid: None,
-                total_length: None,
-                completed_length: 0,
-                download_speed: 0,
-                upload_speed: 0,
-                connections: 0,
-                eta_seconds: None,
+                total_length: queue_task.total_length,
+                completed_length: queue_task.completed_length,
+                download_speed: queue_task.download_speed,
+                upload_speed: queue_task.upload_speed,
+                connections: queue_task.connections,
+                eta_seconds: queue_task.eta_seconds,
                 aria_error_code: None,
                 created_at: group.created_at,
-                updated_at: group.updated_at,
-                completed_at: None,
+                updated_at: queue_task.updated_at,
+                completed_at: queue_task.completed_at,
                 is_private: group.is_private,
             },
             files: Vec::new(),
@@ -672,9 +767,7 @@ pub(crate) fn cloud_directory_group_task_outcome(
             reauthorization_required: false,
         },
         duplicate: None,
-        queue_task: Some(
-            cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?,
-        ),
+        queue_task: Some(queue_task),
     })
 }
 
@@ -749,6 +842,10 @@ where
     let mut failures = Vec::new();
     let mut queued_count = 0;
     for (file, item) in plan.files.into_iter().zip(items) {
+        let _submission = lock_directory_submission(group.id).await?;
+        if directory_submission_stopped(store, group.id)? {
+            break;
+        }
         let relative_path = planned_relative_path(&file);
         let output_directory =
             match directory_download_output_directory(&base_directory, &file.relative_directory) {
@@ -1116,6 +1213,12 @@ where
         .cloud_directory_group(group_id)
         .map_err(|_| QuarkError::Storage)?
         .ok_or_else(|| QuarkError::InvalidInput("网盘目录下载任务不存在".into()))?;
+    let _submission = lock_directory_submission(group_id).await?;
+    if directory_submission_stopped(store, group_id)? {
+        return Err(QuarkError::InvalidInput(
+            "目录下载任务已取消或移入回收站".into(),
+        ));
+    }
     if matches!(
         group.status,
         TaskStatus::Recycled | TaskStatus::Cancelled | TaskStatus::Completed

@@ -45,6 +45,11 @@ vi.mock('./lib/cloudApi', async (importOriginal) => {
   };
 });
 vi.mock('@tauri-apps/api/event', () => ({ listen: state.listen }));
+vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@tauri-apps/api/core')>(),
+  invoke: (command: string) => command === 'main_window_interaction_state'
+    ? state.windowSnapshot() : Promise.reject(new Error(`Unexpected command: ${command}`)),
+}));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
   onFocusChanged: vi.fn().mockImplementation((handler) => { state.onFocus = handler; return Promise.resolve(() => undefined); }),
@@ -66,6 +71,8 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  state.windowSnapshot.mockReset();
+  state.windowSnapshot.mockResolvedValue({ active: false, nativeDrag: false });
   state.list.mockReset();
   state.list.mockResolvedValue([]);
   state.parse.mockReset();
@@ -166,8 +173,30 @@ it('highlights a newer release and opens its official download page from About',
   expect(state.openExternalUrl).toHaveBeenCalledWith(update.downloadUrl);
 });
 
-it('keeps title-bar controls outside native drag regions', () => {
-  render(<App />);
+it('selects WebView2 caption regions without also registering Tauri JavaScript drag regions', async () => {
+  state.windowSnapshot.mockResolvedValue({ active: false, nativeDrag: true });
+  const platform = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
+  vi.stubGlobal('CSS', { supports: () => true });
+  try {
+    await act(async () => { render(<App />); });
+    const header = document.querySelector('.app-header')!;
+    expect(header).toHaveAttribute('data-native-window-drag', 'true');
+    expect(header.querySelector('[data-tauri-drag-region]')).not.toBeInTheDocument();
+    expect(header.querySelector('.brand img')).toHaveAttribute('draggable', 'false');
+    expect(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }).closest('[data-window-no-drag]')).not.toBeNull();
+  } finally {
+    vi.unstubAllGlobals();
+    platform.mockRestore();
+  }
+});
+
+it('retains the Tauri drag fallback when WebView2 caption support is unavailable', async () => {
+  await act(async () => { render(<App />); });
+  expect(document.querySelector('.brand')).toHaveAttribute('data-tauri-drag-region', 'deep');
+});
+
+it('keeps title-bar controls outside native drag regions', async () => {
+  await act(async () => { render(<App />); });
 
   expect(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' })).not.toHaveAttribute('data-tauri-drag-region');
   expect(screen.getByRole('button', { name: '最小化' })).not.toHaveAttribute('data-tauri-drag-region');
@@ -448,7 +477,10 @@ it('sorts only the active task tab from the menu beside total speed', async () =
   expect(visibleNames()).toEqual(['delta.zip', 'beta.zip']);
 });
 
-it('filters unlocked private tasks from the task sort menu', async () => {
+it.each([
+  { toggleOff: '显示普通任务', keepOn: '显示隐私任务', visible: 'private.zip', hidden: 'ordinary.zip' },
+  { toggleOff: '显示隐私任务', keepOn: '显示普通任务', visible: 'ordinary.zip', hidden: 'private.zip' },
+])('keeps at least one task visibility option selected when toggling $toggleOff', async ({ toggleOff, keepOn, visible, hidden }) => {
   const ordinaryTask: QueueTask = { ...oldTask, id: 'ordinary-task', name: 'ordinary.zip' };
   const privateTask: QueueTask = { ...oldTask, id: 'private-task', name: 'private.zip', is_private: true };
   state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: true });
@@ -461,10 +493,49 @@ it('filters unlocked private tasks from the task sort menu', async () => {
   expect(screen.queryByRole('combobox', { name: '筛选任务' })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole('button', { name: '排序任务' }));
-  await user.click(screen.getByRole('menuitemradio', { name: '仅隐私任务' }));
+  const menu = screen.getByRole('menu', { name: '任务排序' });
+  const toggledOption = within(menu).getByRole('menuitemcheckbox', { name: toggleOff });
+  const remainingOption = within(menu).getByRole('menuitemcheckbox', { name: keepOn });
+  expect(within(menu).getAllByRole('menuitemcheckbox')).toHaveLength(2);
+  expect(toggledOption).toHaveAttribute('aria-checked', 'true');
+  expect(remainingOption).toHaveAttribute('aria-checked', 'true');
+  expect(within(queue).getByTitle(visible)).toBeVisible();
+  expect(within(queue).getByTitle(hidden)).toBeVisible();
 
-  await waitFor(() => expect(within(queue).getByTitle('private.zip')).toBeVisible());
-  expect(within(queue).queryByTitle('ordinary.zip')).not.toBeInTheDocument();
+  await user.click(toggledOption);
+  expect(menu).toBeVisible();
+  expect(toggledOption).toHaveAttribute('aria-checked', 'false');
+  expect(remainingOption).toHaveAttribute('aria-checked', 'true');
+  expect(within(queue).getByTitle(visible)).toBeVisible();
+  expect(within(queue).queryByTitle(hidden)).not.toBeInTheDocument();
+
+  await user.click(remainingOption);
+  expect(remainingOption).toHaveAttribute('aria-checked', 'true');
+  expect(within(queue).getByTitle(visible)).toBeVisible();
+
+  await user.click(toggledOption);
+  expect(toggledOption).toHaveAttribute('aria-checked', 'true');
+  expect(remainingOption).toHaveAttribute('aria-checked', 'true');
+  expect(within(queue).getByTitle(visible)).toBeVisible();
+  expect(within(queue).getByTitle(hidden)).toBeVisible();
+  await user.keyboard('{Escape}');
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
+
+it('does not expose private tasks or visibility options while privacy is locked', async () => {
+  state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: false });
+  state.list.mockResolvedValue([
+    { ...oldTask, id: 'ordinary-task', name: 'ordinary.zip' },
+    { ...oldTask, id: 'private-task', name: 'private.zip', is_private: true },
+  ]);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole('button', { name: '解锁隐私任务' });
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  expect(within(screen.getByRole('menu')).queryByRole('menuitemcheckbox')).not.toBeInTheDocument();
+  const queue = screen.getByRole('region', { name: '下载队列' });
+  expect(within(queue).getByTitle('ordinary.zip')).toBeVisible();
+  expect(within(queue).queryByTitle('private.zip')).not.toBeInTheDocument();
 });
 
 it('uses the shared line icon and input treatment when unlocking private tasks', async () => {
@@ -479,6 +550,12 @@ it('uses the shared line icon and input treatment when unlocking private tasks',
 
   const passwordInput = await screen.findByLabelText('隐私模式密码');
   expect(passwordInput.closest('.cloud-operation-editor')).not.toBeNull();
+  const dialog = screen.getByRole('dialog', { name: '输入隐私密码解锁' });
+  expect(within(dialog).getByRole('heading', { name: '输入隐私密码解锁' })).toBeVisible();
+  expect(within(dialog).queryByText('隐私模式密码')).not.toBeInTheDocument();
+  expect(passwordInput).toHaveFocus();
+  await user.click(within(dialog).getByRole('button', { name: '取消' }));
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
 it('shows all start for paused tasks and resumes every paused task from the active tab', async () => {
@@ -1164,6 +1241,25 @@ it('cancels one expanded torrent file without cancelling the parent task', async
   await waitFor(() => expect(state.cancelFile).toHaveBeenCalledWith('torrent-files', 1));
   expect(state.taskAction).not.toHaveBeenCalledWith('torrent-files', 'cancel');
   expect(screen.getByRole('button', { name: '继续 episode.mkv' })).toBeVisible();
+});
+
+it('keeps live task events working while focus snapshots wait for native dragging to finish', async () => {
+  render(<App />);
+  await waitFor(() => expect(state.onFocus).toBeDefined());
+  await waitFor(() => expect(state.list).toHaveBeenCalledWith('terminal'));
+  state.list.mockClear();
+  act(() => {
+    state.listeners.get('main-window-interaction')?.({ payload: true });
+    state.onFocus?.({ payload: true });
+    state.onFocus?.({ payload: true });
+    state.onTask?.(liveTask);
+  });
+  expect(await screen.findByRole('progressbar', { name: 'archive.iso 下载进度' })).toHaveAttribute('aria-valuenow', '40');
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 220)); });
+  expect(state.list).not.toHaveBeenCalled();
+  act(() => { state.listeners.get('main-window-interaction')?.({ payload: false }); });
+  await waitFor(() => expect(state.list).toHaveBeenCalledWith('terminal'));
+  expect(state.list.mock.calls.filter(([scope]) => scope === 'active')).toHaveLength(1);
 });
 
 it('reconciles an existing task from a later focus snapshot without dropping a new event task', async () => {

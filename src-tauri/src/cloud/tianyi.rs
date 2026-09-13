@@ -13,6 +13,42 @@ use std::{
 };
 
 const CLOUD: &str = "https://cloud.189.cn";
+const CLOUD_HOST: &str = "cloud.189.cn";
+pub(crate) const BROWSER_ORIGIN: &str = CLOUD;
+pub(crate) const BROWSER_CONTEXT_READER_JS: &str =
+    "location.origin === 'https://cloud.189.cn' ? (window.__alldownloaderTianyiContext || {}) : {}";
+
+pub(crate) fn accepts_browser_api_request(raw_url: &str) -> bool {
+    validate_browser_api_request("GET", raw_url).is_ok()
+}
+
+pub(crate) fn validate_browser_api_request(
+    method: &str,
+    raw_url: &str,
+) -> Result<url::Url, QuarkError> {
+    if !matches!(method, "GET" | "POST") {
+        return Err(QuarkError::InvalidInput(
+            "天翼授权页请求方法不受支持".into(),
+        ));
+    }
+    let url = url::Url::parse(raw_url).map_err(|_| QuarkError::InvalidResponse)?;
+    let allowed_path = url.path().starts_with("/api/")
+        || url.path().starts_with("/v2/")
+        || url.path() == "/main.action";
+    if url.scheme() != "https"
+        || url.host_str() != Some(CLOUD_HOST)
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || !allowed_path
+    {
+        return Err(QuarkError::InvalidInput(
+            "天翼授权页请求地址不受支持".into(),
+        ));
+    }
+    Ok(url)
+}
 pub const TIANYI_RECYCLE_BIN_ID: &str = "__all_downloader_tianyi_recycle_bin__";
 const TIANYI_RECYCLE_BIN_NAME: &str = "回收站";
 
@@ -425,6 +461,30 @@ impl TianyiSession {
         valid_browser_id(&self.browser_id) && valid_user_agent(&self.user_agent)
     }
 
+    /// A Tianyi account has two independent production transports: signed
+    /// desktop-App credentials for stable reads/downloads and the official
+    /// browser cookie/context for web-only operations. Completing one login
+    /// must not erase the other transport from the persisted session.
+    pub(crate) fn retain_app_transport(&mut self, existing: &Self) {
+        if self.app.is_none() {
+            self.app = existing.app.clone();
+        }
+        if self.app.is_some() {
+            self.auth_method = CloudAuthMethod::Password;
+        }
+    }
+
+    pub(crate) fn retain_web_transport(&mut self, existing: &Self) {
+        if !existing.cookie.trim().is_empty() && existing.has_browser_context() {
+            self.cookie = existing.cookie.clone();
+            self.browser_id = existing.browser_id.clone();
+            self.user_agent = existing.user_agent.clone();
+        }
+        if self.app.is_some() {
+            self.auth_method = CloudAuthMethod::Password;
+        }
+    }
+
     fn headers(&self) -> BTreeMap<String, String> {
         let mut headers = BTreeMap::from([
             ("Accept".into(), "application/json;charset=UTF-8".into()),
@@ -514,6 +574,21 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
     fn headers(&self) -> BTreeMap<String, String> {
         self.session.headers()
     }
+    fn require_web_session(&self) -> Result<(), QuarkError> {
+        if self.session.app.is_some() && self.session.cookie.trim().is_empty() {
+            Err(QuarkError::WebAuthorizationRequired)
+        } else {
+            Ok(())
+        }
+    }
+    fn web_response(&self, response: &CloudHttpResponse) -> Result<Value, QuarkError> {
+        match tianyi_json(response) {
+            Err(QuarkError::AuthorizationExpired) if self.session.app.is_some() => {
+                Err(QuarkError::WebAuthorizationRequired)
+            }
+            result => result,
+        }
+    }
     fn request(
         &self,
         method: &'static str,
@@ -521,13 +596,14 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         query: &str,
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
+        self.require_web_session()?;
         let response = self.http.send(CloudHttpRequest {
             method,
             url: format!("{CLOUD}{path}?{query}"),
             headers: self.headers(),
             body: body.map(|value| value.to_string()),
         })?;
-        tianyi_json(&response)
+        self.web_response(&response)
     }
 
     fn app_request(
@@ -833,6 +909,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         path: &str,
         fields: &[(&str, &str)],
     ) -> Result<Value, QuarkError> {
+        self.require_web_session()?;
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
         for (name, value) in fields {
             serializer.append_pair(name, value);
@@ -848,7 +925,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             headers,
             body: Some(serializer.finish()),
         })?;
-        tianyi_json(&response)
+        self.web_response(&response)
     }
 
     fn entry_info(&self, id: &str) -> Result<TianyiEntryInfo, QuarkError> {
@@ -984,6 +1061,7 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
     }
 
     fn page_session_key(&self) -> Result<String, QuarkError> {
+        self.require_web_session()?;
         let response = self.http.send(CloudHttpRequest {
             method: "GET",
             url: format!("{CLOUD}/main.action"),

@@ -5,7 +5,8 @@ const path = require('node:path');
 const WebSocket = require('ws');
 
 const projectRoot = path.resolve(__dirname, '..');
-const executable = path.join(projectRoot, 'artifacts', 'alldownloader.exe');
+const executable = process.env.ALLDOWNLOADER_LIVE_EXECUTABLE
+  || path.join(projectRoot, 'artifacts', 'alldownloader.exe');
 const dataDirectory = process.env.ALLDOWNLOADER_LIVE_DATA_DIR
   || path.join(process.env.APPDATA || '', 'com.alldownloader.desktop');
 

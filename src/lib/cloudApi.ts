@@ -1,8 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { LocalUploadListing } from './localUpload';
 import type { CloudAuthorizationStateEvent } from './cloudTypes';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
-import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from './cloudTypes';
+import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudUploadOutcome } from './cloudTypes';
 
 export const getCloudProviderCatalog = () => invoke<ProviderDescriptor[]>('cloud_provider_catalog');
 
@@ -83,5 +84,21 @@ export const downloadCloudDirectory = (provider: CloudProvider, directoryId: str
 })
   .then((result) => ({ ...result, task: cloudDownloadResult(result.task) }));
 export const logoutCloud = (provider: CloudProvider) => invoke<void>('cloud_logout', { provider });
-export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[]) => invoke<CloudFile[]>('cloud_upload_files', { provider, parentId, paths: paths ?? null });
+export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[]) => invoke<CloudUploadOutcome>('cloud_upload_files', { provider, parentId, paths: paths ?? null });
+export const listLocalUploadEntries = (path?: string) => invoke<LocalUploadListing>('local_upload_entries', { path: path ?? null });
 export const pickAndUploadFiles = (provider: CloudProvider, parentId: string) => uploadCloudFiles(provider, parentId);
+export const uploadCloudDirectory = (provider: CloudProvider, parentId: string, path?: string) => invoke<CloudUploadOutcome>('cloud_upload_directory', { provider, parentId, path: path ?? null });
+export const pickAndUploadDirectory = (provider: CloudProvider, parentId: string) => uploadCloudDirectory(provider, parentId);
+
+export async function pickCloudUploadFiles(): Promise<string[]> {
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({ directory: false, multiple: true, title: '选择上传文件' });
+  if (Array.isArray(selected)) return selected;
+  return selected ? [selected] : [];
+}
+
+export async function pickCloudUploadDirectory(): Promise<string | null> {
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({ directory: true, multiple: false, title: '选择上传目录' });
+  return typeof selected === 'string' ? selected : null;
+}

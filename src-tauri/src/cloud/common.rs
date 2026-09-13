@@ -85,12 +85,61 @@ pub(crate) fn is_provider_recycle_bin(provider: CloudProvider, directory_id: &st
 pub(crate) fn find_created_directory(
     directory: CloudDirectory,
     name: &str,
+    previous_ids: &HashSet<String>,
 ) -> Result<CloudFile, QuarkError> {
-    directory
-        .items
-        .into_iter()
-        .find(|file| file.kind == "folder" && file.name == name)
-        .ok_or(QuarkError::InvalidResponse)
+    let mut created = directory.items.into_iter().filter(|file| {
+        file.kind == "folder" && file.name == name && !previous_ids.contains(&file.id)
+    });
+    let result = created.next().ok_or(QuarkError::InvalidResponse)?;
+    if created.next().is_some() {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod created_directory_tests {
+    use super::*;
+
+    fn folder(id: &str, name: &str) -> CloudFile {
+        CloudFile {
+            id: id.into(),
+            parent_id: "parent".into(),
+            name: name.into(),
+            kind: "folder".into(),
+            size: None,
+            modified_at: None,
+        }
+    }
+
+    #[test]
+    fn created_directory_is_the_only_new_matching_id() {
+        let before = HashSet::from(["existing".to_owned()]);
+        let directory = CloudDirectory {
+            id: "parent".into(),
+            items: vec![folder("existing", "photos"), folder("created", "photos")],
+        };
+
+        assert_eq!(
+            find_created_directory(directory, "photos", &before)
+                .unwrap()
+                .id,
+            "created"
+        );
+    }
+
+    #[test]
+    fn created_directory_rejects_ambiguous_new_matching_ids() {
+        let directory = CloudDirectory {
+            id: "parent".into(),
+            items: vec![folder("created-a", "photos"), folder("created-b", "photos")],
+        };
+
+        assert!(matches!(
+            find_created_directory(directory, "photos", &HashSet::new()),
+            Err(QuarkError::InvalidResponse)
+        ));
+    }
 }
 
 pub(crate) fn save_provider_session<T: Serialize>(
@@ -190,11 +239,16 @@ pub(crate) fn finalize_tianyi_web_authorization(
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
-    let client = tianyi::TianyiClient::new(session.clone(), http);
+    let mut web_candidate = session.clone();
+    web_candidate.app = None;
+    web_candidate.auth_method = CloudAuthMethod::Web;
+    let web_client = tianyi::TianyiClient::new(web_candidate, http);
     // The web window owns login, but a candidate session must prove it can
     // read the drive before replacing a previously usable stored session.
-    // The caller only closes the authorization window after this succeeds.
-    client
+    // Validate with App credentials removed: a valid signed App read must not
+    // mask an InvalidSessionKey from the new browser cookie and close the
+    // authorization window with a session that cannot perform web writes.
+    web_client
         .directory(descriptor.root_directory_id)
         .map_err(|error| match error {
             QuarkError::AuthorizationExpired
@@ -202,8 +256,35 @@ pub(crate) fn finalize_tianyi_web_authorization(
             | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
             other => other,
         })?;
-    let account = client.web_account()?;
-    select_password_credential_account(store, CloudProvider::Tianyi, &account.id)?;
+    let web_account = if session.app.is_some() {
+        Some(web_client.account().map_err(|error| match error {
+            QuarkError::AuthorizationExpired
+            | QuarkError::WebAuthorizationRequired
+            | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
+            other => other,
+        })?)
+    } else {
+        None
+    };
+    let client = tianyi::TianyiClient::new(session.clone(), http);
+    let account = if session.app.is_some() {
+        client.account()?
+    } else {
+        client.web_account()?
+    };
+    if web_account
+        .as_ref()
+        .is_some_and(|web_account| web_account.id != account.id)
+    {
+        return Err(QuarkError::AuthorizationPending);
+    }
+    // `tianyi-web` is deliberately only a generic browser identity. It must
+    // never be fed to the password-account selector because that would erase
+    // a saved password simply because a Web-only session cannot expose the
+    // stable account id. A merged App+Web session does have that stable id.
+    if account.id != "tianyi-web" {
+        select_password_credential_account(store, CloudProvider::Tianyi, &account.id)?;
+    }
     save_provider_session(CloudProvider::Tianyi, store, &session)?;
     Ok(account)
 }
@@ -322,52 +403,6 @@ pub(crate) fn parse_aliyun_web_session(
         expires_at: value["expires_at"].as_u64(),
     })
 }
-
-pub(crate) const XUNLEI_WEB_TOKENS_JS: &str = include_str!("xunlei-web-session.js");
-
-pub(crate) const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
- if (location.protocol !== 'https:' || !(['aliyundrive.com','alipan.com'].some(h => location.hostname === h || location.hostname.endsWith('.' + h)))) return null;
- const out = {}; const seen = new Set();
- const fields = {
-  access_token: ['access_token', 'accessToken'], refresh_token: ['refresh_token', 'refreshToken'],
-  default_drive_id: ['default_drive_id', 'defaultDriveId', 'drive_id', 'driveId']
- };
- function inspect(v, depth) {
-  if (!v || depth > 6) return;
-  if (typeof v === 'string') { try { inspect(JSON.parse(v), depth + 1); } catch (_) {} return; }
-  if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
-  for (const [k, x] of Object.entries(v)) {
-   if (['expires_at','expiresAt'].includes(k) && Number.isFinite(Number(x))) out.expires_at = Number(x);
-   if (['expire_time','expireTime'].includes(k) && typeof x === 'string' && Number.isFinite(Date.parse(x))) out.expires_at = Math.floor(Date.parse(x) / 1000);
-   const target = Object.entries(fields).find(([, names]) => names.includes(k));
-   if (target && typeof x === 'string' && x) out[target[0]] = x;
-   else if (!/password/i.test(k)) inspect(x, depth + 1);
-  }
- }
- for (const storage of [localStorage, sessionStorage]) for (let i = 0; i < storage.length; i++) inspect({[storage.key(i)]: storage.getItem(storage.key(i))}, 0);
- return out.access_token && out.refresh_token && out.default_drive_id ? out : null;
-})()"#;
-
-pub(crate) const WEB_TOKENS_JS: &str = r#"(() => {
- if (location.protocol !== 'https:' || !(location.hostname === 'mypikpak.com' || location.hostname.endsWith('.mypikpak.com'))) return null;
- const out = {}; const seen = new Set();
- function inspect(v, depth) {
-  if (!v || depth > 6) return;
-  if (typeof v === 'string') { try { inspect(JSON.parse(v),depth+1); } catch (_) {} return; }
-  if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
-  for (const [k,x] of Object.entries(v)) {
-   if (['expires_at','expiresAt'].includes(k) && Number.isFinite(Number(x))) out.expires_at = Number(x);
-   if (['access_token','accessToken'].includes(k) && typeof x === 'string') out.access_token=x;
-   else if (['refresh_token','refreshToken'].includes(k) && typeof x === 'string') out.refresh_token=x;
-   else if (['device_id','deviceId','deviceid'].includes(k) && typeof x === 'string') out.device_id=x;
-   else if (['captcha_token','captchaToken'].includes(k) && typeof x === 'string') out.captcha_token=x;
-   else if (!/password/i.test(k)) inspect(x,depth+1);
-  }
- }
- for (let i=0;i<localStorage.length;i++) {const k=localStorage.key(i); inspect({[k]:localStorage.getItem(k)},0);}
- for (let i=0;i<localStorage.length;i++) {const k=localStorage.key(i); if(k.startsWith('credentials_')) {try {const v=JSON.parse(localStorage.getItem(k)); if(v.access_token && v.refresh_token) {inspect(v,0);out.client_id=k.slice(12);break;}} catch (_) {}}}
- return out.access_token && out.refresh_token ? out : null;
-})()"#;
 
 pub(crate) fn xunlei_web_context_from_selected_tokens(
     value: &serde_json::Value,

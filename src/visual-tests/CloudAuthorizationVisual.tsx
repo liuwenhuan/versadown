@@ -30,7 +30,8 @@ const client = {
   downloadCloudFile: async () => undefined,
   downloadCloudDirectory: async () => ({ task: { task: { id: 'visual-directory-download', name: '游戏备份', kind: 'folder' as const, status: 'queued' as const, progress: 0 } }, queuedCount: 0, failures: [] }),
   logoutCloud: async () => undefined,
-  pickAndUploadFiles: async () => undefined,
+  pickAndUploadFiles: async () => ({ uploaded: [], failures: [] }),
+  pickAndUploadDirectory: async () => ({ uploaded: [], failures: [] }),
 };
 
 document.documentElement.dataset.theme = 'dark';

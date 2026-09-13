@@ -124,7 +124,7 @@ impl ProviderAuth for PikpakDriver<'_> {
     }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
-            token_script: Some(WEB_TOKENS_JS),
+            token_script: Some(pikpak::PIKPAK_WEB_TOKENS_JS),
             ..Default::default()
         }
     }

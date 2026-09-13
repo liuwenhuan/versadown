@@ -324,6 +324,72 @@ fn quark_upload_runs_pre_hash_authorize_multipart_and_finish() {
 }
 
 #[test]
+fn quark_upload_upgrades_the_provider_http_object_endpoint_to_https() {
+    // The current Quark pre-upload API returns the fixed pds.quark.cn endpoint
+    // with an http scheme. Bytes and one-shot authorization must still be sent
+    // only over HTTPS, after validating the exact provider host.
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"http://pds.quark.cn","callback":"callback"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-put"}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-complete"}}"#,
+        r#"{"code":0,"data":{"fid":"uploaded-1","file_name":"upload.txt","size":20}}"#,
+    ]);
+    let upload = RecordingUpload::new([
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "\"part-1\"".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "<CompleteMultipartUploadResult/>".into(),
+        },
+    ]);
+    let fixture = upload_fixture();
+
+    QuarkClient::new("sid=local-session".into(), &http)
+        .upload_file("0", fixture.path(), &upload)
+        .unwrap();
+
+    assert!(upload
+        .requests()
+        .iter()
+        .all(|request| request.url.starts_with("https://ul-zb.pds.quark.cn/")));
+}
+
+#[test]
+fn quark_upload_accepts_current_json_multipart_completion() {
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"https://pds.quark.cn","callback":"callback"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-put"}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-complete"}}"#,
+        r#"{"code":0,"data":{"fid":"uploaded-1","file_name":"upload.txt","size":20}}"#,
+    ]);
+    let upload = RecordingUpload::new([
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "\"part-1\"".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: r#"{"Status":"OK"}"#.into(),
+        },
+    ]);
+    let fixture = upload_fixture();
+
+    let uploaded = QuarkClient::new("sid=local-session".into(), &http)
+        .upload_file("0", fixture.path(), &upload)
+        .unwrap();
+
+    assert_eq!(uploaded.id, "uploaded-1");
+}
+
+#[test]
 fn quark_upload_returns_hash_completed_file_without_object_transfer() {
     // Break caught: treating a hash-complete response as an incomplete upload
     // unnecessarily sends file bytes with a temporary object-store credential.
@@ -566,4 +632,25 @@ fn quark_upload_rejects_an_invalid_object_store_endpoint_before_sending_bytes() 
         Err(QuarkError::InvalidResponse)
     ));
     assert!(upload.requests().is_empty());
+}
+
+#[test]
+fn quark_upload_rejects_an_untrusted_http_object_host_before_sending_bytes() {
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"http://evil.example","callback":"callback"}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+    ]);
+    let upload = RecordingUpload::new([]);
+    let fixture = upload_fixture();
+
+    assert!(matches!(
+        QuarkClient::new("sid=local-session".into(), &http).upload_file(
+            "0",
+            fixture.path(),
+            &upload
+        ),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert!(upload.requests().is_empty());
+    assert_eq!(http.requests().len(), 2);
 }

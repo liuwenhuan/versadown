@@ -1,10 +1,10 @@
 use alldownloader_lib::cloud::{
     commands::{
-        cloud_directory_member_retry_options, plan_cloud_directory_download,
-        plan_cloud_share_directory_download, retry_cloud_directory_group_item_with,
-        retry_cloud_directory_group_with, submit_cloud_directory_plan,
-        submit_cloud_directory_plan_with_group_event, CloudDownloadSourceGate,
-        DirectoryLeafSubmission,
+        cancel_cloud_directory_group_with, cloud_directory_member_retry_options,
+        plan_cloud_directory_download, plan_cloud_share_directory_download,
+        retry_cloud_directory_group_item_with, retry_cloud_directory_group_with,
+        submit_cloud_directory_plan, submit_cloud_directory_plan_with_group_event,
+        CloudDownloadSourceGate, DirectoryLeafSubmission,
     },
     share::{CloudShareDownloadEntry, CloudShareDownloadSelection},
     CloudDirectory, CloudFile, CloudProvider, QuarkError,
@@ -316,6 +316,342 @@ async fn review_late_duplicate_retry_never_erases_the_successful_leaf_link() {
         store.recycle_cloud_directory_group(group.id).is_err(),
         "a claimed Parsing task must prevent recycling before submission completes"
     );
+}
+
+fn cancellation_group(store: &TaskStore, output: &std::path::Path) -> uuid::Uuid {
+    use alldownloader_lib::cloud::commands::{
+        create_cloud_directory_group_for_download, CloudDirectoryDownloadPlan, PlannedCloudFile,
+    };
+    let plan = CloudDirectoryDownloadPlan {
+        files: vec![
+            PlannedCloudFile {
+                file_id: "first".into(),
+                relative_directory: vec!["Series".into(), "Season".into()],
+                output_name: "first.mp4".into(),
+                size: Some(100),
+            },
+            PlannedCloudFile {
+                file_id: "second".into(),
+                relative_directory: vec!["Series".into(), "Season".into()],
+                output_name: "second.mp4".into(),
+                size: Some(200),
+            },
+            PlannedCloudFile {
+                file_id: "third".into(),
+                relative_directory: vec!["Series".into()],
+                output_name: "third.mp4".into(),
+                size: Some(300),
+            },
+        ],
+    };
+    create_cloud_directory_group_for_download(
+        store,
+        CloudProvider::Quark,
+        "cancel-root",
+        &plan,
+        output,
+        false,
+    )
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn cancellation_of_unsubmitted_directory_is_durable_and_keeps_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("tasks.sqlite");
+    let group_id;
+    let existing_file = temp.path().join("existing.mp4");
+    std::fs::write(&existing_file, b"keep partial download").unwrap();
+    {
+        let store = TaskStore::open_path(&database).unwrap();
+        let group = store
+            .cloud_directory_group(cancellation_group(&store, temp.path()))
+            .unwrap()
+            .unwrap();
+        group_id = group.id;
+        let result = cancel_cloud_directory_group_with(&store, group.id, |_| async {
+            panic!("unsubmitted files must not contact the download engine");
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.payload.task.status, TaskStatus::Cancelled);
+        let root = result.queue_task.unwrap();
+        assert_eq!(root.status, TaskStatus::Cancelled);
+        assert_eq!(root.children[0].status, TaskStatus::Cancelled);
+        assert_eq!(root.children[0].children[0].status, TaskStatus::Cancelled);
+        assert_eq!(root.progress, 0);
+        assert!(
+            store.list().unwrap().is_empty(),
+            "do not fabricate local tasks"
+        );
+    }
+    let reopened = TaskStore::open_path(&database).unwrap();
+    assert_eq!(
+        reopened
+            .cloud_directory_group(group_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Cancelled
+    );
+    assert!(list_queue_tasks_for_scope(&reopened, Some("active"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        list_queue_tasks_for_scope(&reopened, Some("terminal")).unwrap()[0].status,
+        TaskStatus::Cancelled
+    );
+    assert_eq!(
+        std::fs::read(existing_file).unwrap(),
+        b"keep partial download"
+    );
+    cancel_cloud_directory_group_with(&reopened, group_id, |_| async {
+        panic!("idempotent cancellation")
+    })
+    .await
+    .unwrap();
+    let retry = retry_cloud_directory_group_item_with(
+        &reopened,
+        group_id,
+        reopened.cloud_directory_group_items(group_id).unwrap()[0].id,
+        UriSubmissionOptions::default(),
+        |_, _, _, _| async { panic!("cancelled directory must not auto-retry") },
+    )
+    .await;
+    assert!(retry.is_err());
+}
+
+#[tokio::test]
+async fn cancellation_of_mixed_directory_stops_active_members_only() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let group = store
+        .cloud_directory_group(cancellation_group(&store, temp.path()))
+        .unwrap()
+        .unwrap();
+    let items = store.cloud_directory_group_items(group.id).unwrap();
+    let completed = store
+        .create(NewTask::direct("https://example.test/completed"))
+        .unwrap();
+    let completed = store
+        .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+            status: TaskStatus::Completed,
+            progress: 100,
+            completed_length: 100,
+            total_length: Some(100),
+            ..completed
+        })
+        .unwrap();
+    let active = store
+        .create(NewTask::direct("https://example.test/active"))
+        .unwrap();
+    store
+        .link_cloud_directory_group_item_task(group.id, items[0].id, completed.id)
+        .unwrap();
+    store
+        .link_cloud_directory_group_item_task(group.id, items[1].id, active.id)
+        .unwrap();
+    let result = cancel_cloud_directory_group_with(&store, group.id, |id| {
+        assert_eq!(id, active.id);
+        std::future::ready(
+            store
+                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                    status: TaskStatus::Cancelled,
+                    ..store.find(id).unwrap()
+                })
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(result.queue_task.unwrap().status, TaskStatus::Cancelled);
+    assert_eq!(
+        store.find(completed.id).unwrap().status,
+        TaskStatus::Completed
+    );
+    assert_eq!(store.find(active.id).unwrap().status, TaskStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancellation_failure_does_not_skip_siblings_or_hide_active_members() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let group = store
+        .cloud_directory_group(cancellation_group(&store, temp.path()))
+        .unwrap()
+        .unwrap();
+    let items = store.cloud_directory_group_items(group.id).unwrap();
+    let first = store
+        .create(NewTask::direct("https://example.test/first"))
+        .unwrap();
+    let second = store
+        .create(NewTask::direct("https://example.test/second"))
+        .unwrap();
+    store
+        .link_cloud_directory_group_item_task(group.id, items[0].id, first.id)
+        .unwrap();
+    store
+        .link_cloud_directory_group_item_task(group.id, items[1].id, second.id)
+        .unwrap();
+    let result = cancel_cloud_directory_group_with(&store, group.id, |id| {
+        std::future::ready(if id == first.id {
+            Err("engine unavailable".to_string())
+        } else {
+            store
+                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                    status: TaskStatus::Cancelled,
+                    ..store.find(id).unwrap()
+                })
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    })
+    .await;
+    assert!(result.is_err());
+    assert_eq!(store.find(second.id).unwrap().status, TaskStatus::Cancelled);
+    let active = list_queue_tasks_for_scope(&store, Some("active")).unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].status, TaskStatus::Parsing);
+    assert_eq!(active[0].children[1].status, TaskStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancellation_during_submission_stops_the_inflight_leaf_and_skips_remaining_files() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Quark, "root", "Series", |id| {
+        Ok(directory(
+            id,
+            vec![
+                file("first", id, "first.mp4"),
+                file("second", id, "second.mp4"),
+            ],
+        ))
+    })
+    .unwrap();
+    let group_id = std::cell::Cell::new(None);
+    let submitted = std::cell::Cell::new(0);
+    let release = tokio::sync::Notify::new();
+    let submission = submit_cloud_directory_plan_with_group_event(
+        &store,
+        CloudProvider::Quark,
+        "root",
+        plan,
+        UriSubmissionOptions {
+            directory: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        },
+        false,
+        |root| {
+            group_id.set(Some(uuid::Uuid::parse_str(&root.id).unwrap()));
+            Ok(())
+        },
+        |_, _, _, _| {
+            submitted.set(submitted.get() + 1);
+            assert_eq!(
+                submitted.get(),
+                1,
+                "no sibling may start after cancellation"
+            );
+            let store = &store;
+            let release = &release;
+            async move {
+                release.notified().await;
+                let task = store
+                    .create(NewTask::direct("https://example.test/inflight"))
+                    .unwrap();
+                Ok(DirectoryLeafSubmission::Queued(task.id))
+            }
+        },
+    );
+    tokio::pin!(submission);
+    assert!(futures_util::poll!(&mut submission).is_pending());
+    let cancellation = cancel_cloud_directory_group_with(&store, group_id.get().unwrap(), |id| {
+        std::future::ready(
+            store
+                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                    status: TaskStatus::Cancelled,
+                    ..store.find(id).unwrap()
+                })
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+        )
+    });
+    tokio::pin!(cancellation);
+    assert!(
+        futures_util::poll!(&mut cancellation).is_pending(),
+        "wait for the in-flight submission before acknowledging cancellation"
+    );
+    release.notify_one();
+    let (_, cancelled) = tokio::join!(submission, cancellation);
+    assert_eq!(
+        cancelled.unwrap().queue_task.unwrap().status,
+        TaskStatus::Cancelled
+    );
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert_eq!(store.list().unwrap()[0].status, TaskStatus::Cancelled);
+    assert!(list_queue_tasks_for_scope(&store, Some("active"))
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_blocks_linked_failed_member_refresh_and_waits_for_existing_refresh() {
+    use alldownloader_lib::cloud::commands::lock_directory_member_submission;
+    let store = TaskStore::open_in_memory().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let group_id = cancellation_group(&store, temp.path());
+    let failed = store
+        .create(NewTask::direct("cloud://quark/refresh"))
+        .unwrap();
+    let failed = store.fail(failed.id, "authorization expired").unwrap();
+    store
+        .link_cloud_directory_group_item_task(
+            group_id,
+            store.cloud_directory_group_items(group_id).unwrap()[0].id,
+            failed.id,
+        )
+        .unwrap();
+    // An already-started refresh holds this guard through provider resolution
+    // and engine submission, exactly as both production refresh entry points do.
+    let refresh = lock_directory_member_submission(&store, failed.id)
+        .await
+        .unwrap();
+    let cancellation = cancel_cloud_directory_group_with(&store, group_id, |id| {
+        std::future::ready(
+            store
+                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                    status: TaskStatus::Cancelled,
+                    ..store.find(id).unwrap()
+                })
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        )
+    });
+    tokio::pin!(cancellation);
+    assert!(futures_util::poll!(&mut cancellation).is_pending());
+    store
+        .rebind_for_resubmission(failed.id, "refreshed-gid")
+        .unwrap();
+    drop(refresh);
+    assert_eq!(
+        cancellation.await.unwrap().queue_task.unwrap().status,
+        TaskStatus::Cancelled
+    );
+    assert_eq!(store.find(failed.id).unwrap().status, TaskStatus::Cancelled);
+    assert!(lock_directory_member_submission(&store, failed.id)
+        .await
+        .is_err());
+
+    let unrelated = store
+        .create(NewTask::direct("https://example.test/unrelated"))
+        .unwrap();
+    assert!(lock_directory_member_submission(&store, unrelated.id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[test]

@@ -1,9 +1,7 @@
 // Executed only in the provider's official document. The official form owns
 // encryption, dynamic login parameters and any verification challenge.
-(function (provider, username, password, attemptId) {
-  const allowed = provider === 'baidu'
-    ? ['pan.baidu.com', 'passport.baidu.com']
-    : provider === 'tianyi' ? ['cloud.189.cn', 'open.e.189.cn'] : [];
+(function (provider, allowed, username, password, attemptId) {
+  if (!Array.isArray(allowed) || !allowed.every(host => typeof host === 'string' && host)) return;
   if (location.protocol !== 'https:' || (location.port && location.port !== '443') || !allowed.includes(location.hostname)) return;
   const submittedKey = 'alldownloader-login-' + attemptId;
   if (sessionStorage.getItem(submittedKey)) return;

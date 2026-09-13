@@ -783,6 +783,33 @@ fn tianyi_password_login_prefers_the_signed_desktop_session_without_a_web_cookie
 }
 
 #[test]
+fn tianyi_app_session_routes_web_only_mutations_to_official_authorization() {
+    let without_cookie: TianyiSession = serde_json::from_str(
+        r#"{"cookie":"","auth_method":"password","app":{"sessionKey":"app-key","sessionSecret":"app-secret","accessToken":"access-token","loginName":"alice@189.cn"}}"#,
+    )
+    .unwrap();
+    let no_request = RecordingHttp::sequence(&[]);
+    assert!(matches!(
+        TianyiClient::new(without_cookie, &no_request).mkdir("-11", "new"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert!(no_request.requests().is_empty());
+
+    let stale_cookie: TianyiSession = serde_json::from_str(
+        r#"{"cookie":"SSON=stale","auth_method":"password","app":{"sessionKey":"app-key","sessionSecret":"app-secret","accessToken":"access-token","loginName":"alice@189.cn"}}"#,
+    )
+    .unwrap();
+    let rejected = RecordingHttp::sequence(&[
+        r#"{"errorCode":"InvalidSessionKey","errorMsg":"expired","success":false}"#,
+    ]);
+    assert!(matches!(
+        TianyiClient::new(stale_cookie, &rejected).mkdir("-11", "new"),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    assert_eq!(rejected.requests().len(), 1);
+}
+
+#[test]
 fn tianyi_app_download_signs_the_final_cdn_request() {
     // AppGetFileDownloadUrl is only half of Tianyi's desktop protocol. The
     // actual CDN request also needs the desktop client suffix and an HMAC

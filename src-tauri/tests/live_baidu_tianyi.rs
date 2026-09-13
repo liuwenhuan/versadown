@@ -2,17 +2,20 @@
 //! Tianyi drives.
 //!
 //! The tests deliberately create only one freshly generated
-//! `AllDownloader-IT-*` directory per provider.  It is the sole remote item
+//! `AllDownloader-E2E-*` directory per provider.  It is the sole remote item
 //! moved to the provider recycle bin during cleanup.  Session bytes, cookies,
 //! signed URLs and account details are never printed.
 
 use alldownloader_lib::cloud::{
+    auth_supervisor::{recover_in_order, AuthSupervisor},
     baidu::{BaiduClient, BaiduSession},
-    share::{CloudShareResolvedEntry, ShareInspection, ShareResolution},
+    share::{
+        CloudShareResolvedEntry, ShareInspect, ShareInspection, ShareResolution, ShareResolve,
+    },
     tianyi::{TianyiClient, TianyiSession},
-    CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport,
-    CredentialStore, DpapiCredentialStore, QuarkError, ReqwestTransport, UploadHttpRequest,
-    UploadHttpResponse,
+    CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
+    CloudUploadTransport, CredentialStore, DpapiCredentialStore, ProviderRegistry, QuarkError,
+    ReqwestTransport, SessionWorkKind, UploadHttpRequest, UploadHttpResponse,
 };
 use alldownloader_lib::extract_cloud_share_candidate;
 use std::{
@@ -286,12 +289,35 @@ fn session_store() -> LiveResult<DpapiCredentialStore> {
     )?)
 }
 
+fn supervised_directory(provider: CloudProvider, root: &str) -> Result<(), QuarkError> {
+    let store = session_store().map_err(|_| QuarkError::Storage)?;
+    let http = ReqwestTransport::new()?;
+    let supervisor = AuthSupervisor::default();
+    supervisor.restore(&store, provider)?;
+    supervisor.run_checked(
+        &store,
+        provider,
+        SessionWorkKind::Read,
+        |snapshot| {
+            ProviderRegistry::global()
+                .driver(provider, snapshot, &http)
+                .list_directory(root)
+                .map(|_| ())
+        },
+        |phase| {
+            let mut driver = ProviderRegistry::global().driver(provider, &store, &http);
+            recover_in_order(provider, &store, driver.auth(), phase, || Ok(false))
+        },
+        || Ok(()),
+    )
+}
+
 fn test_name(provider: &str, suffix: &str) -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("AllDownloader-IT-{provider}-{millis}-{suffix}")
+    format!("AllDownloader-E2E-{provider}-{millis}-{suffix}")
 }
 
 fn local_artifact(provider: &str) -> LiveResult<(PathBuf, PathBuf, Vec<u8>)> {
@@ -348,6 +374,18 @@ fn cookie_names(cookie: &str) -> String {
     names.sort_unstable();
     names.dedup();
     names.join(",")
+}
+
+fn without_cookie_name(cookie: &str, rejected: &str) -> String {
+    cookie
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(name, _)| name != rejected)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Opens a real direct-download response but consumes at most the first KiB.
@@ -1002,7 +1040,35 @@ fn tianyi_unauthenticated_response_shape(cookie: &str) -> LiveResult<String> {
 /// API.  Baidu is intentionally the only provider that uses its `netdisk`
 /// client identity: the client implementation owns that distinction.
 #[test]
-#[ignore = "requires an explicitly authorized Baidu account and creates only AllDownloader-IT-* test data"]
+#[ignore = "requires saved Baidu credentials and performs only a production-supervised root read"]
+fn live_baidu_production_supervised_session_recovery() -> LiveResult<()> {
+    require_live_authorization()?;
+    provider_step("Baidu", "production supervised root read", || {
+        supervised_directory(CloudProvider::Baidu, "/")
+    })
+}
+
+#[test]
+#[ignore = "requires saved Baidu credentials and performs a read-only BFESS compatibility probe"]
+fn live_baidu_bfess_compatibility_probe() -> LiveResult<()> {
+    require_live_authorization()?;
+    let store = session_store()?;
+    let mut session: BaiduSession = serde_json::from_slice(
+        &store
+            .load("baidu")?
+            .ok_or_else(|| failure("Baidu is not currently authorized"))?,
+    )?;
+    session.cookie = without_cookie_name(&session.cookie, "BDUSS");
+    let http = LiveTransport::new()?;
+    let result = provider_step("Baidu", "BFESS compatibility root read", || {
+        BaiduClient::new(session, &http).directory("/").map(|_| ())
+    });
+    http.report();
+    result
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Baidu account and creates only AllDownloader-E2E-* test data"]
 fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;
@@ -1031,6 +1097,7 @@ fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()
         Ok(directory) => directory,
         Err(error) => {
             http.report();
+            remove_local(&local_root);
             return Err(error);
         }
     };
@@ -1121,7 +1188,16 @@ fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()
 /// configured profile end-to-end; it deliberately never substitutes Baidu's
 /// `netdisk` identity into a different provider's API.
 #[test]
-#[ignore = "requires an explicitly authorized Tianyi account and creates only AllDownloader-IT-* test data"]
+#[ignore = "requires saved Tianyi credentials and performs only a production-supervised root read"]
+fn live_tianyi_production_supervised_session_recovery() -> LiveResult<()> {
+    require_live_authorization()?;
+    provider_step("Tianyi", "production supervised root read", || {
+        supervised_directory(CloudProvider::Tianyi, "-11")
+    })
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized Tianyi account and creates only AllDownloader-E2E-* test data"]
 fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;
@@ -1131,12 +1207,13 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
             .ok_or_else(|| failure("Tianyi is not currently authorized"))?,
     )?;
     eprintln!(
-        "Tianyi live session: web_auth={}, cookie_present={}, cookie_names={}",
+        "Tianyi live session: web_auth={}, cookie_present={}, browser_context={}, cookie_names={}",
         matches!(
             session.auth_method,
             alldownloader_lib::cloud::CloudAuthMethod::Web
         ),
         !session.cookie.is_empty(),
+        session.has_browser_context(),
         cookie_names(&session.cookie),
     );
     let http = LiveTransport::new()?;
@@ -1155,6 +1232,7 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
                 tianyi_unauthenticated_response_shape(&session.cookie)
                     .unwrap_or_else(|_| "transport-failed".into())
             );
+            remove_local(&local_root);
             return Err(error);
         }
     };
@@ -1262,7 +1340,7 @@ fn wait_for_named(
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized Tianyi account and creates only AllDownloader-IT-* test data"]
+#[ignore = "requires an explicitly authorized Tianyi account and creates only AllDownloader-E2E-* test data"]
 fn live_tianyi_folder_rename_move_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;

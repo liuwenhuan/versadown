@@ -2,7 +2,8 @@
 mod upload_support;
 use alldownloader_lib::cloud::{
     uc::{parse_uc_web_session, UcClient, UcSession, UC_DESKTOP_USER_AGENT},
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
+    CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
+    CloudUploadTransport, CredentialStore, MemoryCredentialStore, ProviderRegistry, QuarkError,
     UploadHttpRequest, UploadHttpResponse,
 };
 use std::{collections::VecDeque, io::Write, sync::Mutex};
@@ -43,6 +44,40 @@ impl CloudHttpTransport for RecordingHttp {
             .pop_front()
             .ok_or(QuarkError::InvalidResponse)
     }
+}
+
+#[test]
+fn uc_driver_waits_until_the_created_directory_is_ready_for_child_operations() {
+    // UC acknowledges mkdir with data.fid before the new folder is guaranteed
+    // to appear in file/sort. The production driver must wait through that
+    // short consistency window before callers upload or create children.
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "uc",
+            &serde_json::to_vec(&UcSession::cookie("__puus=session")).unwrap(),
+        )
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"code":0,"status":200,"data":{"fid":"folder-live","finish":true}}"#,
+        r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+        r#"{"code":0,"status":200,"data":{"list":[{"fid":"folder-live","file_name":"new-folder","dir":true}]},"metadata":{"_total":1}}"#,
+    ]);
+
+    let created = ProviderRegistry::global()
+        .driver(CloudProvider::Uc, &store, &http)
+        .create_directory("0", "new-folder")
+        .expect("the driver should wait for the created directory to become visible");
+
+    assert_eq!(created.id, "folder-live");
+    assert_eq!(created.parent_id, "0");
+    assert_eq!(created.name, "new-folder");
+    assert_eq!(created.kind, CloudFileKind::Folder);
+    assert_eq!(
+        http.requests().len(),
+        3,
+        "mkdir must poll until the new parent can be used"
+    );
 }
 
 #[test]
@@ -301,11 +336,41 @@ fn upload_fixture() -> tempfile::NamedTempFile {
 }
 
 #[test]
+fn uc_real_name_upload_rejection_has_a_stable_actionable_error() {
+    let http = RecordingHttp {
+        responses: Mutex::new(
+            [CloudHttpResponse {
+                status: 400,
+                body: r#"{"code":32011,"status":400,"message":"user NOT real name [{0}]"}"#.into(),
+                ..Default::default()
+            }]
+            .into_iter()
+            .collect(),
+        ),
+        requests: Mutex::new(Vec::new()),
+    };
+    let upload = RecordingUpload::new([]);
+    let fixture = upload_fixture();
+
+    let error = UcClient::new(UcSession::cookie("__puus=session"), &http)
+        .upload_file("0", fixture.path(), &upload)
+        .expect_err("UC must reject uploads for an account without real-name verification");
+    let serialized = serde_json::to_value(&error).unwrap();
+
+    assert_eq!(serialized["code"], "provider_error");
+    assert_eq!(
+        serialized["message"],
+        "网盘请求失败：UC 网盘账号未实名，请先在 UC 官方页面完成实名认证后重试"
+    );
+    assert!(upload.requests().is_empty());
+}
+
+#[test]
 fn uc_upload_preserves_uc_headers_and_completes_cloud_drive_task() {
     // Break caught: reusing Quark's authenticated request profile for UC
     // silently changes the account/session that owns the CloudDrive task.
     let http = RecordingHttp::sequence([
-        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"https://pds.quark.cn","callback":"callback"}}"#,
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.txt","bucket":"ul-zb","upload_url":"http://pds.uc.cn","callback":"callback"}}"#,
         r#"{"code":0,"data":{"finish":false}}"#,
         r#"{"code":0,"data":{"auth_key":"OSS temporary-put"}}"#,
         r#"{"code":0,"data":{"auth_key":"OSS temporary-complete"}}"#,
@@ -344,7 +409,7 @@ fn uc_upload_preserves_uc_headers_and_completes_cloud_drive_task() {
     assert!(upload
         .requests()
         .iter()
-        .all(|request| request.url.starts_with("https://ul-zb.pds.quark.cn/")));
+        .all(|request| request.url.starts_with("https://ul-zb.pds.uc.cn/")));
 }
 
 #[test]

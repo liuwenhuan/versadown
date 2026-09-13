@@ -372,14 +372,14 @@ fn assert_native_driver_post_login_error(
 
 #[test]
 fn baidu_native_driver_post_login_account_error_preserves_session() {
-    assert_native_driver_post_login_error(CloudProvider::Baidu, 7, || {
+    assert_native_driver_post_login_error(CloudProvider::Baidu, 9, || {
         SessionRecoveryTransport::baidu_password_relogin("account-1")
     });
 }
 
 #[test]
 fn baidu_native_driver_post_login_root_error_preserves_session() {
-    assert_native_driver_post_login_error(CloudProvider::Baidu, 8, || {
+    assert_native_driver_post_login_error(CloudProvider::Baidu, 10, || {
         SessionRecoveryTransport::baidu_password_relogin("account-1")
     });
 }

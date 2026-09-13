@@ -22,6 +22,7 @@ use std::{
     io::Read,
     path::Path,
 };
+pub(crate) const XUNLEI_WEB_TOKENS_JS: &str = include_str!("xunlei-web-session.js");
 
 #[cfg(test)]
 mod tests {

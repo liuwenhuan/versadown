@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
 const WebSocket = require('ws');
+const assert = require('node:assert/strict');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function connect(url) {
@@ -92,6 +93,50 @@ async function run() {
       console.log(JSON.stringify({minimumSizeVerified:minimum}));
     }
     await evaluate(`window.__TAURI_INTERNALS__.invoke('activate_launcher_menu_for_test', {action:'launcher.hide_manager'})`);
+    if (process.argv.includes('--interaction-smoke')) {
+      const initialInteraction = await evaluate(`window.__TAURI_INTERNALS__.invoke('main_window_interaction_state')`);
+      assert.deepEqual(initialInteraction, {active:false,nativeDrag:true});
+      const chrome = await evaluate(`(() => {
+        const header=document.querySelector('.app-header');
+        return { native:header.hasAttribute('data-native-window-drag'),
+          jsRegions:header.querySelectorAll('[data-tauri-drag-region]').length,
+          captions:['.brand','.brand img','.brand h1','.app-header-drag-space'].map(s=>getComputedStyle(header.querySelector(s)).getPropertyValue('app-region')),
+          controls:[...header.querySelectorAll('textarea,.window-controls button')].map(e=>getComputedStyle(e).getPropertyValue('app-region')) };
+      })()`);
+      assert.equal(chrome.native, true);
+      assert.equal(chrome.jsRegions, 0);
+      assert.deepEqual(chrome.captions, ['drag','drag','drag','drag']);
+      assert.ok(chrome.controls.length >= 4 && chrome.controls.every(value => value === 'no-drag'));
+      const jsDragCalls = await evaluate(`(() => {
+        const internals=window.__TAURI_INTERNALS__, original=internals.invoke;
+        let calls=0;
+        internals.invoke=function(command,...args) {
+          if(command==='plugin:window|start_dragging') { calls++; return Promise.resolve(); }
+          return original.call(this,command,...args);
+        };
+        try {
+          for(const selector of ['.brand','.brand img','.brand h1','.app-header-drag-space']) {
+            document.querySelector(selector).dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0,buttons:1,detail:1}));
+          }
+          return calls;
+        } finally { internals.invoke=original; }
+      })()`);
+      assert.equal(jsDragCalls, 0);
+      const phase = (value) => execFileSync('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'probe-window-interaction.ps1'),'-AppProcessId',String(child.pid),'-Phase',value], {windowsHide:true,encoding:'utf8'});
+      phase('enter');
+      try {
+        await delay(100);
+        assert.equal((await evaluate(`window.__TAURI_INTERNALS__.invoke('main_window_interaction_state')`)).active, true);
+        await evaluate(`window.__TAURI_INTERNALS__.invoke('plugin:window|set_size',{label:'main',value:{Logical:{width:1100,height:740}}})`);
+        await delay(600);
+        assert.equal(await evaluate(`document.documentElement.classList.contains('window-resizing')`), true, 'Native hold must outlive the 120ms fallback');
+      } finally { phase('exit'); }
+      await delay(200);
+      assert.equal((await evaluate(`window.__TAURI_INTERNALS__.invoke('main_window_interaction_state')`)).active, false);
+      assert.equal(await evaluate(`document.documentElement.classList.contains('window-resizing')`), false, 'Native release must restore effects');
+      console.log(JSON.stringify({interactionSmoke:'passed',...chrome,jsDragCalls,nativeLifecycle:'enter / hold / exit verified; not a mouse-FPS benchmark'}));
+      return;
+    }
     await cdp.send('Performance.enable');
     // Synthetic, credential-free folder rows use the real production stylesheet.
     for (const rows of [7, 1000]) {

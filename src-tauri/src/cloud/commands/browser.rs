@@ -7,7 +7,7 @@ pub(crate) struct TianyiBrowserValidationTransport<'a, T: CloudHttpTransport> {
 
 impl<T: CloudHttpTransport> CloudHttpTransport for TianyiBrowserValidationTransport<'_, T> {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
-        if request.url.starts_with("https://cloud.189.cn/") {
+        if tianyi::accepts_browser_api_request(&request.url) {
             tianyi_browser_send(self.window, request)
         } else {
             self.native.send(request)
@@ -110,6 +110,8 @@ pub(crate) fn tianyi_browser_request_script(
     request: &CloudHttpRequest,
 ) -> Result<String, QuarkError> {
     let url = validate_tianyi_browser_request(request.method, &request.url)?;
+    let origin =
+        serde_json::to_string(tianyi::BROWSER_ORIGIN).map_err(|_| QuarkError::InvalidResponse)?;
     let payload = serde_json::json!({
         "method": request.method,
         "url": url.as_str(),
@@ -118,7 +120,7 @@ pub(crate) fn tianyi_browser_request_script(
     });
     Ok(format!(
         r#"(() => {{
-          if (location.origin !== 'https://cloud.189.cn') return {{done:false}};
+          if (location.origin !== {origin}) return {{done:false}};
           const key = '__alldownloader_tianyi_request';
           const current = window[key];
           if (current?.done) {{
@@ -296,6 +298,15 @@ fn capture_persistent_authorization(
             .recv_timeout(std::time::Duration::from_secs(15))
             .map_err(|_| CloudError::WebAuthorizationRequired)?;
         let temporary = MemoryCredentialStore::default();
+        // Tianyi's browser candidate and signed App credentials are separate
+        // transports for the same account. Seed only the isolated validation
+        // store so the driver can merge them and prove the stable account id;
+        // the real store remains untouched until every check below succeeds.
+        if provider == CloudProvider::Tianyi {
+            if let Some(existing) = state.store.load(provider.key())? {
+                temporary.save(provider.key(), &existing)?;
+            }
+        }
         let mut driver = ProviderRegistry::global().driver(provider, &temporary, http);
         let recipe = driver.auth().web_authorization_recipe();
         let input = crate::cloud::driver::WebAuthorizationInput {
@@ -331,10 +342,20 @@ fn capture_persistent_authorization(
         if account.id != expected {
             return Err(CloudError::WebAuthorizationRequired);
         }
-        state.store.save(
-            provider.key(),
-            &temporary.load(provider.key())?.ok_or(CloudError::Storage)?,
-        )?;
+        let mut verified = temporary.load(provider.key())?.ok_or(CloudError::Storage)?;
+        if provider == CloudProvider::Tianyi {
+            let mut candidate: tianyi::TianyiSession =
+                serde_json::from_slice(&verified).map_err(|_| CloudError::Storage)?;
+            if let Some(existing) = state
+                .store
+                .load(provider.key())?
+                .and_then(|bytes| serde_json::from_slice::<tianyi::TianyiSession>(&bytes).ok())
+            {
+                candidate.retain_app_transport(&existing);
+                verified = serde_json::to_vec(&candidate).map_err(|_| CloudError::Storage)?;
+            }
+        }
+        state.store.save(provider.key(), &verified)?;
         Ok(true)
     })();
     let _ = window.close();
@@ -353,28 +374,7 @@ pub(crate) fn validate_tianyi_browser_request(
     method: &str,
     raw_url: &str,
 ) -> Result<url::Url, QuarkError> {
-    if !matches!(method, "GET" | "POST") {
-        return Err(QuarkError::InvalidInput(
-            "天翼授权页请求方法不受支持".into(),
-        ));
-    }
-    let url = url::Url::parse(raw_url).map_err(|_| QuarkError::InvalidResponse)?;
-    let allowed_path = url.path().starts_with("/api/")
-        || url.path().starts_with("/v2/")
-        || url.path() == "/main.action";
-    if url.scheme() != "https"
-        || url.host_str() != Some("cloud.189.cn")
-        || url.port().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-        || !allowed_path
-    {
-        return Err(QuarkError::InvalidInput(
-            "天翼授权页请求地址不受支持".into(),
-        ));
-    }
-    Ok(url)
+    tianyi::validate_browser_api_request(method, raw_url)
 }
 
 pub(crate) fn tianyi_browser_request_headers(
@@ -438,7 +438,7 @@ pub(crate) fn browser_password_login(
                 .browser_profile_owner
                 && is_baidu_authorization_page(payload.url())
             {
-                let _ = window.eval(BAIDU_AUTO_OPEN_LOGIN_JS);
+                let _ = window.eval(baidu::BAIDU_AUTO_OPEN_LOGIN_JS);
             }
         }
     });
@@ -588,7 +588,7 @@ pub(crate) fn can_retry_read_with_web_session(error: &QuarkError) -> bool {
 pub(crate) fn tianyi_browser_context(
     window: &tauri::WebviewWindow,
 ) -> Result<serde_json::Value, QuarkError> {
-    web_storage_tokens(window, "location.origin === 'https://cloud.189.cn' ? (window.__alldownloaderTianyiContext || {}) : {}")
+    web_storage_tokens(window, tianyi::BROWSER_CONTEXT_READER_JS)
 }
 
 pub(crate) fn web_session_cookie_urls(provider: CloudProvider) -> &'static [&'static str] {
@@ -680,54 +680,10 @@ pub(crate) const AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS: &str = r#"(() => {
 // "去登录" action.  This is deliberately best-effort: a provider redesign or
 // a slow page must leave the official page usable rather than fail the native
 // authorization command.
-pub(crate) const BAIDU_AUTO_OPEN_LOGIN_JS: &str = r#"(() => {
-  if (window.__allDownloaderBaiduLoginTriggerInstalled) return;
-  window.__allDownloaderBaiduLoginTriggerInstalled = true;
-
-  const expectedLabel = "去登录";
-  const normalize = (value) => String(value || "").replace(/\s+/g, "").trim();
-  const visible = (element) => {
-    const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
-    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-  };
-  const findLoginAction = () => Array.from(document.querySelectorAll(
-    'button, a, [role="button"], input[type="button"], input[type="submit"]'
-  )).find((element) => {
-    const label = element.innerText || element.value || element.getAttribute("aria-label");
-    return normalize(label) === expectedLabel && visible(element) && !element.disabled;
-  });
-
-  let attempts = 0;
-  let timer = 0;
-  const stop = () => {
-    if (timer) window.clearInterval(timer);
-    timer = 0;
-  };
-  const tryOpen = () => {
-    try {
-      const element = findLoginAction();
-      if (!element) return false;
-      element.click();
-      stop();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  };
-
-  timer = window.setInterval(() => {
-    attempts += 1;
-    if (tryOpen() || attempts >= 20) stop();
-  }, 250);
-  window.setTimeout(stop, 6000);
-  tryOpen();
-})()"#;
-
 pub(crate) fn allows_cloud_authorization_popup(url: &url::Url) -> bool {
     url.scheme() == "https" || url.as_str() == "about:blank"
 }
 
 pub(crate) fn is_baidu_authorization_page(url: &url::Url) -> bool {
-    matches!(url.host_str(), Some("pan.baidu.com"))
+    baidu::is_authorization_page(url)
 }

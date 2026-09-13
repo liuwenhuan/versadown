@@ -17,6 +17,28 @@ use std::{collections::BTreeMap, path::Path};
 const TOKEN_URL: &str = "https://api.aliyundrive.com/token/refresh";
 const API: &str = "https://api.aliyundrive.com";
 const WEB_REFERER: &str = "https://www.aliyundrive.com/";
+pub(crate) const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
+ if (location.protocol !== 'https:' || !(['aliyundrive.com','alipan.com'].some(h => location.hostname === h || location.hostname.endsWith('.' + h)))) return null;
+ const out = {}; const seen = new Set();
+ const fields = {
+  access_token: ['access_token', 'accessToken'], refresh_token: ['refresh_token', 'refreshToken'],
+  default_drive_id: ['default_drive_id', 'defaultDriveId', 'drive_id', 'driveId']
+ };
+ function inspect(v, depth) {
+  if (!v || depth > 6) return;
+  if (typeof v === 'string') { try { inspect(JSON.parse(v), depth + 1); } catch (_) {} return; }
+  if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
+  for (const [k, x] of Object.entries(v)) {
+   if (['expires_at','expiresAt'].includes(k) && Number.isFinite(Number(x))) out.expires_at = Number(x);
+   if (['expire_time','expireTime'].includes(k) && typeof x === 'string' && Number.isFinite(Date.parse(x))) out.expires_at = Math.floor(Date.parse(x) / 1000);
+   const target = Object.entries(fields).find(([, names]) => names.includes(k));
+   if (target && typeof x === 'string' && x) out[target[0]] = x;
+   else if (!/password/i.test(k)) inspect(x, depth + 1);
+  }
+ }
+ for (const storage of [localStorage, sessionStorage]) for (let i = 0; i < storage.length; i++) inspect({[storage.key(i)]: storage.getItem(storage.key(i))}, 0);
+ return out.access_token && out.refresh_token && out.default_drive_id ? out : null;
+})()"#;
 pub(crate) const ALIYUN_RECYCLE_BIN_ID: &str = "__all_downloader_aliyun_recycle_bin__";
 const ALIYUN_RECYCLE_BIN_NAME: &str = "回收站";
 

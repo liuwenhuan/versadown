@@ -1003,6 +1003,16 @@ fn baidu_password_login_uses_dynamic_v4_handshake_and_validates_the_session() {
             body: r#"{"errno":0,"list":[]}"#.into(),
             ..Default::default()
         },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"user":{"uk":"7","netdisk_name":"Alice"}}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"list":[]}"#.into(),
+            ..Default::default()
+        },
     ]);
     let http = RecordingHttp::responses_with_cookie_snapshot(
         replies,
@@ -1022,7 +1032,7 @@ fn baidu_password_login_uses_dynamic_v4_handshake_and_validates_the_session() {
     assert!(session.cookie.contains("PANPSC=validation-cookie"));
     assert!(!session.cookie.contains("Domain="));
     let requests = http.requests();
-    assert_eq!(requests.len(), 7);
+    assert_eq!(requests.len(), 9);
     assert_eq!(requests[0].url, "https://www.baidu.com/");
     assert!(requests[1].url.contains("/v2/api/?getapi&"));
     assert!(requests[2].url.contains("/v2/getpublickey?"));
@@ -1052,6 +1062,41 @@ fn baidu_password_login_uses_dynamic_v4_handshake_and_validates_the_session() {
 }
 
 #[test]
+fn baidu_password_login_revalidates_the_exact_cookie_snapshot_it_persists() {
+    let mut replies = baidu_login_preflight_responses(CloudHttpResponse {
+        status: 200,
+        body: r#"{"errInfo":{"no":"0"},"data":{"stoken":"body-stoken"}}"#.into(),
+        set_cookies: vec!["BDUSS=initial-session".into()],
+    });
+    replies.extend([
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"user":{"uk":"7","netdisk_name":"Alice"}}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"list":[]}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":-6}"#.into(),
+            ..Default::default()
+        },
+    ]);
+    let http = RecordingHttp::responses_with_cookie_snapshot(
+        replies,
+        &["BDUSS=stale-final", "BDUSS_BFESS=current-final"],
+    );
+
+    let result = BaiduClient::login_password("alice", "plain-password", &http);
+
+    assert!(matches!(result, Err(QuarkError::AuthorizationExpired)));
+    assert_eq!(http.requests().len(), 8);
+}
+
+#[test]
 fn baidu_password_login_uses_an_isolated_transport_session() {
     let mut replies = baidu_login_preflight_responses(CloudHttpResponse {
         status: 200,
@@ -1059,6 +1104,16 @@ fn baidu_password_login_uses_an_isolated_transport_session() {
         set_cookies: vec!["BDUSS=session".into()],
     });
     replies.extend([
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"user":{"uk":"7"}}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"errno":0,"list":[]}"#.into(),
+            ..Default::default()
+        },
         CloudHttpResponse {
             status: 200,
             body: r#"{"errno":0,"user":{"uk":"7"}}"#.into(),
@@ -1077,7 +1132,7 @@ fn baidu_password_login_uses_an_isolated_transport_session() {
     assert!(session.cookie.contains("BDUSS=session"));
     assert!(session.cookie.contains("PANPSC=validation-cookie"));
     let requests = http.0.requests.lock().unwrap();
-    assert_eq!(requests.len(), 7);
+    assert_eq!(requests.len(), 9);
     assert!(!requests[5].headers.contains_key("Cookie"));
     assert!(!requests[6].headers.contains_key("Cookie"));
 }

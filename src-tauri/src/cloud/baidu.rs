@@ -496,6 +496,11 @@ const REFERENCE_PREFIX: &str = "bdr_";
 pub const BAIDU_RECYCLE_BIN_ID: &str = "__all_downloader_baidu_recycle_bin__";
 const BAIDU_RECYCLE_BIN_NAME: &str = "回收站";
 const BAIDU_UPLOAD_HOST: &str = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2";
+pub(crate) const BAIDU_AUTO_OPEN_LOGIN_JS: &str = include_str!("baidu-auto-open-login.js");
+
+pub(crate) fn is_authorization_page(url: &url::Url) -> bool {
+    matches!(url.host_str(), Some("pan.baidu.com"))
+}
 const BAIDU_UPLOAD_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 const BAIDU_LOCATEDOWNLOAD_SIGNING_SALT: &str = "ebrcUYiuxaZv2XGu7KIYKxUrqfnOfpDF";
 
@@ -1646,13 +1651,23 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         } else {
             BaiduClient::new(session.clone(), http)
         };
-        client.account()?;
+        let validated_account = client.account()?;
         client.directory("/")?;
         let final_cookies = http.cookies_for_url(PAN)?;
         if !final_cookies.is_empty() {
             session = parse_baidu_web_session(&final_cookies)?;
             session.auth_method = CloudAuthMethod::Password;
         }
+        // Validate the exact normalized Cookie header that will be encrypted
+        // and replayed after restart. The managed login jar can contain a
+        // different host/domain duplicate than the final serialized snapshot;
+        // accepting only the jar-backed requests can persist a session that
+        // immediately fails with errno -6 in a fresh production transport.
+        let persisted = BaiduClient::new(session.clone(), http);
+        if persisted.account()?.id != validated_account.id {
+            return Err(QuarkError::AuthorizationExpired);
+        }
+        persisted.directory("/")?;
         Ok(session)
     }
 }

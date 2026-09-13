@@ -1,0 +1,610 @@
+//! Opt-in, destructive-within-fixture live CRUD coverage for Quark and PikPak.
+//!
+//! Every remote object is created below one unique `AllDownloader-E2E-*`
+//! directory. Cleanup permanently deletes only ids proven to belong to that
+//! directory (or its explicitly created descendants).
+
+use alldownloader_lib::cloud::{
+    auth_supervisor::{recover_in_order, RecoveryPhase},
+    commands::CloudState,
+    driver::ProviderDriver,
+    CloudError, CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
+    CloudUploadTransport, ProviderRegistry, ReqwestTransport, ResolvedCloudDownload,
+    SessionWorkKind, UploadHttpRequest, UploadHttpResponse,
+};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fs, io,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+type LiveResult<T> = Result<T, Box<dyn Error>>;
+
+struct LiveHttp(ReqwestTransport);
+
+impl LiveHttp {
+    fn new() -> Result<Self, CloudError> {
+        Ok(Self(ReqwestTransport::new()?))
+    }
+}
+
+impl CloudHttpTransport for LiveHttp {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
+        self.0.send(request)
+    }
+}
+
+impl CloudUploadTransport for LiveHttp {
+    fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, CloudError> {
+        self.0.send_upload(request)
+    }
+}
+
+fn failure(message: impl Into<String>) -> Box<dyn Error> {
+    Box::new(io::Error::other(message.into()))
+}
+
+fn require_live_authorization() -> LiveResult<()> {
+    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+        return Err(failure(
+            "live cloud regression requires ALLDOWNLOADER_LIVE_CLOUD=1",
+        ));
+    }
+    Ok(())
+}
+
+fn session_root() -> LiveResult<PathBuf> {
+    let app_data = std::env::var_os("APPDATA")
+        .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
+    Ok(PathBuf::from(app_data)
+        .join("com.alldownloader.desktop")
+        .join("cloud-sessions"))
+}
+
+fn unique_name(provider: CloudProvider, suffix: &str) -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("AllDownloader-E2E-{}-{millis}-{suffix}", provider.key())
+}
+
+fn error_kind(error: &CloudError) -> &'static str {
+    match error {
+        CloudError::NotAuthorized => "not-authorized",
+        CloudError::AuthorizationExpired => "authorization-expired",
+        CloudError::WebAuthorizationRequired => "web-authorization-required",
+        CloudError::CaptchaRequired => "captcha-required",
+        CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
+        CloudError::AuthorizationPending => "authorization-pending",
+        CloudError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
+        CloudError::InvalidResponse => "invalid-response",
+        CloudError::Storage => "storage",
+        CloudError::Transport(_) => "transport",
+        CloudError::Provider(_) => "provider",
+        CloudError::InvalidInput(_) => "invalid-input",
+        CloudError::UploadUnavailable => "upload-unavailable",
+        CloudError::ProviderUnsupported => "provider-unsupported",
+    }
+}
+
+fn supervised<T>(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    kind: SessionWorkKind,
+    mut operation: impl FnMut(&mut ProviderDriver<'_>) -> Result<T, CloudError>,
+) -> Result<T, CloudError> {
+    state.auth_supervisor.run_checked(
+        &state.store,
+        provider,
+        kind,
+        |snapshot| {
+            let mut driver = ProviderRegistry::global().driver(provider, snapshot, http);
+            operation(&mut driver)
+        },
+        |phase: RecoveryPhase| {
+            let mut driver = ProviderRegistry::global().driver(provider, &state.store, http);
+            recover_in_order(provider, &state.store, driver.auth(), phase, || Ok(false))
+        },
+        || Ok(()),
+    )
+}
+
+fn read<T>(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    operation: impl FnMut(&mut ProviderDriver<'_>) -> Result<T, CloudError>,
+) -> LiveResult<T> {
+    supervised(state, http, provider, SessionWorkKind::Read, operation)
+        .map_err(|error| failure(format!("{} read: {}", provider.key(), error_kind(&error))))
+}
+
+fn mutate<T>(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    operation: impl FnMut(&mut ProviderDriver<'_>) -> Result<T, CloudError>,
+) -> LiveResult<T> {
+    supervised(state, http, provider, SessionWorkKind::Mutation, operation).map_err(|error| {
+        failure(format!(
+            "{} mutation: {}",
+            provider.key(),
+            error_kind(&error)
+        ))
+    })
+}
+
+fn upload(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    parent: &str,
+    path: &Path,
+) -> LiveResult<CloudFile> {
+    let mut driver = ProviderRegistry::global().driver(provider, &state.store, http);
+    driver
+        .upload(state, http, parent, path)
+        .map_err(|error| failure(format!("{} upload: {}", provider.key(), error_kind(&error))))
+}
+
+fn wait_find_name(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    parent: &str,
+    name: &str,
+    kind: &str,
+) -> LiveResult<CloudFile> {
+    for attempt in 0..12 {
+        let listed = read(state, http, provider, |driver| {
+            driver.list_directory(parent)
+        })?;
+        if let Some(item) = listed
+            .items
+            .iter()
+            .find(|item| item.name == name && item.kind == kind)
+        {
+            return Ok(item.clone());
+        }
+        if attempt < 11 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    Err(failure(format!(
+        "created fixture {kind} {name:?} is not listed after provider consistency wait"
+    )))
+}
+
+fn wait_find_id(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    parent: &str,
+    id: &str,
+) -> LiveResult<CloudFile> {
+    for attempt in 0..12 {
+        let listed = read(state, http, provider, |driver| {
+            driver.list_directory(parent)
+        })?;
+        if let Some(item) = listed.items.iter().find(|item| item.id == id) {
+            return Ok(item.clone());
+        }
+        if attempt < 11 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    Err(failure(format!(
+        "created fixture id {id:?} is not listed after provider consistency wait"
+    )))
+}
+
+fn download_bytes(download: &ResolvedCloudDownload) -> LiveResult<Vec<u8>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()?;
+    let mut request = client.get(&download.url);
+    for (key, value) in &download.headers {
+        request = request.header(key, value);
+    }
+    let response = request
+        .send()
+        .map_err(|_| failure("direct download transport failed"))?;
+    if !response.status().is_success() {
+        return Err(failure(format!(
+            "direct download returned HTTP {}",
+            response.status()
+        )));
+    }
+    Ok(response.bytes()?.to_vec())
+}
+
+fn download_tree(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    parent: &str,
+    prefix: &str,
+    out: &mut BTreeMap<String, Vec<u8>>,
+) -> LiveResult<()> {
+    let directory = read(state, http, provider, |driver| {
+        driver.list_directory(parent)
+    })?;
+    for item in directory.items {
+        let relative = if prefix.is_empty() {
+            item.name.clone()
+        } else {
+            format!("{prefix}/{}", item.name)
+        };
+        if item.kind == "folder" {
+            download_tree(state, http, provider, &item.id, &relative, out)?;
+        } else {
+            let download = read(state, http, provider, |driver| {
+                driver.resolve_download(&item.id)
+            })?;
+            out.insert(relative, download_bytes(&download)?);
+        }
+    }
+    Ok(())
+}
+
+fn trash_and_delete(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    id: &str,
+    name: &str,
+) -> LiveResult<()> {
+    mutate(state, http, provider, |driver| {
+        driver.trash(&[id.to_owned()])
+    })?;
+    let recycle = ProviderRegistry::global()
+        .get(provider)
+        .recycle_bin_directory_id;
+    let mut recycle_entry = None;
+    for attempt in 0..12 {
+        let trashed = read(state, http, provider, |driver| {
+            driver.list_directory(recycle)
+        })?;
+        recycle_entry = trashed
+            .items
+            .iter()
+            .find(|item| item.id == id || item.name == name)
+            .cloned();
+        if recycle_entry.is_some() {
+            break;
+        }
+        if attempt < 11 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    let recycle_entry = recycle_entry.ok_or_else(|| {
+        failure("fixture is not listed in recycle bin after provider consistency wait")
+    })?;
+    mutate(state, http, provider, |driver| {
+        driver.delete(&[recycle_entry.id.clone()])
+    })?;
+    let after = read(state, http, provider, |driver| {
+        driver.list_directory(recycle)
+    })?;
+    if after
+        .items
+        .iter()
+        .any(|item| item.id == recycle_entry.id || item.name == name)
+    {
+        return Err(failure(
+            "fixture remained in recycle bin after permanent delete",
+        ));
+    }
+    Ok(())
+}
+
+fn trash_and_confirm_absent(
+    state: &CloudState,
+    http: &LiveHttp,
+    provider: CloudProvider,
+    parent: &str,
+    id: &str,
+) -> LiveResult<()> {
+    mutate(state, http, provider, |driver| {
+        driver.trash(&[id.to_owned()])
+    })?;
+    for attempt in 0..12 {
+        let after = read(state, http, provider, |driver| {
+            driver.list_directory(parent)
+        })?;
+        if !after.items.iter().any(|item| item.id == id) {
+            return Ok(());
+        }
+        if attempt < 11 {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    Err(failure(
+        "fixture remained in its active directory after provider consistency wait",
+    ))
+}
+
+fn run_provider(provider: CloudProvider) -> LiveResult<()> {
+    require_live_authorization()?;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveHttp::new()?;
+    let descriptor = ProviderRegistry::global().get(provider);
+    let root_id = descriptor.root_directory_id;
+
+    // Validate and proactively recover the real persisted session before any mutation.
+    eprintln!("{} E2E phase: validate-session", provider.key());
+    read(&state, &http, provider, |driver| driver.account())?;
+    eprintln!("{} E2E phase: list-root", provider.key());
+    let root_before = read(&state, &http, provider, |driver| {
+        driver.list_directory(root_id)
+    })?;
+
+    let base_name = unique_name(provider, "root");
+    if root_before.items.iter().any(|item| item.name == base_name) {
+        return Err(failure("unexpected unique test root collision"));
+    }
+    eprintln!("{} E2E phase: create-root", provider.key());
+    let base = mutate(&state, &http, provider, |driver| {
+        driver.create_directory(root_id, &base_name)
+    })?;
+
+    let local_root = std::env::temp_dir().join(unique_name(provider, "local"));
+    fs::create_dir_all(local_root.join("directory").join("nested"))?;
+    fs::create_dir_all(local_root.join("directory").join("empty"))?;
+    let single_payload = format!("single-file-payload:{base_name}").into_bytes();
+    let delete_payload = format!("delete-file-payload:{base_name}").into_bytes();
+    let top_payload = format!("top-payload:{base_name}").into_bytes();
+    let nested_payload = format!("nested-payload:{base_name}").into_bytes();
+    fs::write(local_root.join("single.txt"), &single_payload)?;
+    fs::write(local_root.join("delete-file.txt"), &delete_payload)?;
+    fs::write(local_root.join("directory").join("top.txt"), &top_payload)?;
+    fs::write(
+        local_root.join("directory").join("nested").join("leaf.txt"),
+        &nested_payload,
+    )?;
+    let mut base_needs_cleanup = true;
+
+    let result = (|| -> LiveResult<()> {
+        wait_find_id(&state, &http, provider, root_id, &base.id)?;
+
+        eprintln!("{} E2E phase: single-file", provider.key());
+        // Single-file upload, rename, move, and download.
+        let single = upload(
+            &state,
+            &http,
+            provider,
+            &base.id,
+            &local_root.join("single.txt"),
+        )?;
+        let renamed_file = unique_name(provider, "renamed-file.txt");
+        mutate(&state, &http, provider, |driver| {
+            driver.rename(&single.id, &renamed_file)
+        })?;
+        let target = mutate(&state, &http, provider, |driver| {
+            driver.create_directory(&base.id, "move-target")
+        })?;
+        mutate(&state, &http, provider, |driver| {
+            driver.move_files(&[single.id.clone()], &target.id)
+        })?;
+        let moved_single =
+            wait_find_name(&state, &http, provider, &target.id, &renamed_file, "file")?;
+        let single_download = read(&state, &http, provider, |driver| {
+            driver.resolve_download(&moved_single.id)
+        })?;
+        if download_bytes(&single_download)? != single_payload {
+            return Err(failure("single-file download bytes mismatch"));
+        }
+
+        eprintln!("{} E2E phase: directory", provider.key());
+        // Recursive directory upload, folder rename, folder move, and recursive download.
+        let uploaded_dir = mutate(&state, &http, provider, |driver| {
+            driver.create_directory(&base.id, "directory")
+        })?;
+        let nested = mutate(&state, &http, provider, |driver| {
+            driver.create_directory(&uploaded_dir.id, "nested")
+        })?;
+        mutate(&state, &http, provider, |driver| {
+            driver.create_directory(&uploaded_dir.id, "empty")
+        })?;
+        upload(
+            &state,
+            &http,
+            provider,
+            &uploaded_dir.id,
+            &local_root.join("directory").join("top.txt"),
+        )?;
+        upload(
+            &state,
+            &http,
+            provider,
+            &nested.id,
+            &local_root.join("directory").join("nested").join("leaf.txt"),
+        )?;
+        let renamed_folder = unique_name(provider, "renamed-folder");
+        mutate(&state, &http, provider, |driver| {
+            driver.rename(&uploaded_dir.id, &renamed_folder)
+        })?;
+        mutate(&state, &http, provider, |driver| {
+            driver.move_files(&[uploaded_dir.id.clone()], &target.id)
+        })?;
+        let moved_folder = wait_find_name(
+            &state,
+            &http,
+            provider,
+            &target.id,
+            &renamed_folder,
+            "folder",
+        )?;
+        let mut downloaded = BTreeMap::new();
+        download_tree(
+            &state,
+            &http,
+            provider,
+            &moved_folder.id,
+            "",
+            &mut downloaded,
+        )?;
+        let expected = BTreeMap::from([
+            ("nested/leaf.txt".to_owned(), nested_payload.clone()),
+            ("top.txt".to_owned(), top_payload.clone()),
+        ]);
+        if downloaded != expected {
+            return Err(failure(
+                "recursive directory download tree or bytes mismatch",
+            ));
+        }
+
+        eprintln!("{} E2E phase: delete-file", provider.key());
+        // File deletion and recursive directory deletion are verified in their active
+        // parent. The top-level fixture is permanently removed below, recursively
+        // cleaning these already-trashed descendants without selecting unrelated trash.
+        let delete_file = upload(
+            &state,
+            &http,
+            provider,
+            &base.id,
+            &local_root.join("delete-file.txt"),
+        )?;
+        trash_and_confirm_absent(&state, &http, provider, &base.id, &delete_file.id)?;
+
+        eprintln!("{} E2E phase: delete-directory", provider.key());
+        let delete_dir = mutate(&state, &http, provider, |driver| {
+            driver.create_directory(&base.id, "delete-directory")
+        })?;
+        let delete_child = mutate(&state, &http, provider, |driver| {
+            driver.create_directory(&delete_dir.id, "child")
+        })?;
+        upload(
+            &state,
+            &http,
+            provider,
+            &delete_child.id,
+            &local_root.join("delete-file.txt"),
+        )?;
+        trash_and_confirm_absent(&state, &http, provider, &base.id, &delete_dir.id)?;
+
+        eprintln!("{} E2E phase: cleanup-root", provider.key());
+        trash_and_delete(&state, &http, provider, &base.id, &base_name)?;
+        base_needs_cleanup = false;
+        Ok(())
+    })();
+
+    if base_needs_cleanup {
+        // Best-effort cleanup is constrained to the unique test root id.
+        let _ = trash_and_delete(&state, &http, provider, &base.id, &base_name);
+    }
+    let _ = fs::remove_dir_all(&local_root);
+    result
+}
+
+fn cleanup_provider_residuals(provider: CloudProvider) -> LiveResult<()> {
+    require_live_authorization()?;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveHttp::new()?;
+    let descriptor = ProviderRegistry::global().get(provider);
+    let prefix = format!("AllDownloader-E2E-{}-", provider.key());
+    let root = read(&state, &http, provider, |driver| {
+        driver.list_directory(descriptor.root_directory_id)
+    })?;
+    for item in root
+        .items
+        .iter()
+        .filter(|item| item.name.starts_with(&prefix))
+    {
+        mutate(&state, &http, provider, |driver| {
+            driver.trash(&[item.id.clone()])
+        })?;
+    }
+    let recycle_id = descriptor.recycle_bin_directory_id;
+    let recycle = read(&state, &http, provider, |driver| {
+        driver.list_directory(recycle_id)
+    })?;
+    for item in recycle
+        .items
+        .iter()
+        .filter(|item| item.name.starts_with(&prefix))
+    {
+        mutate(&state, &http, provider, |driver| {
+            driver.delete(&[item.id.clone()])
+        })?;
+    }
+    let active_after = read(&state, &http, provider, |driver| {
+        driver.list_directory(descriptor.root_directory_id)
+    })?;
+    let recycle_after = read(&state, &http, provider, |driver| {
+        driver.list_directory(recycle_id)
+    })?;
+    if active_after
+        .items
+        .iter()
+        .chain(&recycle_after.items)
+        .any(|item| item.name.starts_with(&prefix))
+    {
+        return Err(failure(
+            "provider still contains an AllDownloader E2E residual",
+        ));
+    }
+    Ok(())
+}
+
+fn audit_provider_residuals(provider: CloudProvider) -> LiveResult<(usize, usize)> {
+    require_live_authorization()?;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveHttp::new()?;
+    let descriptor = ProviderRegistry::global().get(provider);
+    let prefix = format!("AllDownloader-E2E-{}-", provider.key());
+    let active = read(&state, &http, provider, |driver| {
+        driver.list_directory(descriptor.root_directory_id)
+    })?;
+    let recycle = read(&state, &http, provider, |driver| {
+        driver.list_directory(descriptor.recycle_bin_directory_id)
+    })?;
+    Ok((
+        active
+            .items
+            .iter()
+            .filter(|item| item.name.starts_with(&prefix))
+            .count(),
+        recycle
+            .items
+            .iter()
+            .filter(|item| item.name.starts_with(&prefix))
+            .count(),
+    ))
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's Quark session"]
+fn live_quark_complete_crud() -> LiveResult<()> {
+    run_provider(CloudProvider::Quark)
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's PikPak session"]
+fn live_pikpak_complete_crud() -> LiveResult<()> {
+    run_provider(CloudProvider::Pikpak)
+}
+
+#[test]
+#[ignore = "permanently removes only AllDownloader-E2E-quark-* test roots"]
+fn live_cleanup_quark_e2e_residuals() -> LiveResult<()> {
+    cleanup_provider_residuals(CloudProvider::Quark)
+}
+
+#[test]
+#[ignore = "permanently removes only AllDownloader-E2E-pikpak-* test roots"]
+fn live_cleanup_pikpak_e2e_residuals() -> LiveResult<()> {
+    cleanup_provider_residuals(CloudProvider::Pikpak)
+}
+
+#[test]
+#[ignore = "read-only count of AllDownloader-E2E-pikpak-* test roots"]
+fn live_audit_pikpak_e2e_residuals() -> LiveResult<()> {
+    let (active, recycle) = audit_provider_residuals(CloudProvider::Pikpak)?;
+    eprintln!("PikPak E2E residuals: active={active}, recycle={recycle}");
+    Ok(())
+}

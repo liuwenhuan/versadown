@@ -1,7 +1,17 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
-import { CloudWorkspace } from './CloudWorkspace';
+import { useState } from 'react';
+import { CloudWorkspace as WorkspaceContent, type CloudWorkspacePage, type CloudWorkspaceProps } from './CloudWorkspace';
+import { CloudNavigation } from './CloudNavigation';
+import type { ProviderDescriptor } from '../lib/cloudTypes';
+
+function CloudWorkspace(props: Omit<CloudWorkspaceProps, 'activePage' | 'onPageChange' | 'onProvidersChange'>) {
+  const [page, setPage] = useState<CloudWorkspacePage>('management');
+  const [providers, setProviders] = useState<readonly ProviderDescriptor[]>([]);
+  return <><nav aria-label="主导航"><CloudNavigation providers={providers} activePage={page} onSelect={setPage} icon={null} /></nav>
+    <WorkspaceContent {...props} activePage={page} onPageChange={setPage} onProvidersChange={setProviders} /></>;
+}
 import { cloudCatalog } from '../test/cloudCatalog';
 
 type TestAccount = { id: string; displayName: string; provider: 'quark' | 'pikpak'; authMethod: 'web' | 'password' };
@@ -15,7 +25,7 @@ it('adds the authorized workspace immediately from the completion event', async 
   fireEvent.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await act(async () => {});
   await act(async () => { receive?.({ provider: 'quark', state: 'Ready', account: { id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' } }); });
-  expect(screen.getByRole('tab', { name: '夸克网盘' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '夸克网盘' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '我已完成授权' })).not.toBeInTheDocument();
   expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
   expect(screen.queryByText(/旧会话错误/)).not.toBeInTheDocument();
@@ -51,7 +61,7 @@ function createClient(accounts: Record<string, TestAccount | undefined> = {}) {
     loginCloudWithPassword: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => Promise.resolve({ id: `${provider}-1`, displayName: `${provider}-alice`, provider, authMethod: 'password' as const })),
     getCloudAccount: vi.fn().mockImplementation((provider: 'quark' | 'pikpak') => accounts[provider] ? Promise.resolve(accounts[provider]) : Promise.reject(Object.assign(new Error('未授权'), { code: 'unauthorized' }))),
     listCloudDirectory: vi.fn().mockImplementation((provider: string, parentId = '0') => Promise.resolve({ id: parentId, items: [{ id: `${provider}-file`, parentId, name: `${provider}-文件.txt`, kind: 'file', size: 10, modifiedAt: '刚刚' }] })),
-    createCloudDirectory: vi.fn().mockResolvedValue(undefined), renameCloudFile: vi.fn().mockResolvedValue(undefined), moveCloudFiles: vi.fn().mockResolvedValue(undefined), copyCloudFiles: vi.fn().mockResolvedValue(undefined), trashCloudFiles: vi.fn().mockResolvedValue(undefined), deleteCloudFiles: vi.fn().mockResolvedValue(undefined), downloadCloudFile: vi.fn().mockResolvedValue({}), downloadCloudDirectory: vi.fn().mockResolvedValue({ queuedCount: 0, tasks: [], failures: [] }), logoutCloud: vi.fn().mockResolvedValue(undefined), pickAndUploadFiles: vi.fn().mockResolvedValue(undefined),
+    createCloudDirectory: vi.fn().mockResolvedValue(undefined), renameCloudFile: vi.fn().mockResolvedValue(undefined), moveCloudFiles: vi.fn().mockResolvedValue(undefined), copyCloudFiles: vi.fn().mockResolvedValue(undefined), trashCloudFiles: vi.fn().mockResolvedValue(undefined), deleteCloudFiles: vi.fn().mockResolvedValue(undefined), downloadCloudFile: vi.fn().mockResolvedValue({}), downloadCloudDirectory: vi.fn().mockResolvedValue({ queuedCount: 0, tasks: [], failures: [] }), logoutCloud: vi.fn().mockResolvedValue(undefined), pickAndUploadFiles: vi.fn().mockResolvedValue({ uploaded: [], failures: [] }), pickAndUploadDirectory: vi.fn().mockResolvedValue({ uploaded: [], failures: [] }),
     getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({
       provider,
       web: true,
@@ -65,23 +75,23 @@ function createClient(accounts: Record<string, TestAccount | undefined> = {}) {
   };
 }
 
-it('defaults to the cloud management tab and lists every supported provider there', async () => {
+it('defaults to the cloud management page and lists every supported provider there', async () => {
   const client = createClient();
   render(<CloudWorkspace client={client} />);
 
-  expect(await screen.findByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
   expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
   expect(screen.queryByText('添加网盘')).not.toBeInTheDocument();
   expect(screen.queryByText(/成功连接后会生成独立的文件管理标签/)).not.toBeInTheDocument();
   expect(screen.getByRole('region', { name: '夸克账号授权' })).toBeVisible();
   expect(screen.getByRole('region', { name: 'PikPak账号授权' })).toBeVisible();
-  expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('tab', { name: 'PikPak网盘' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'PikPak网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
-it('keeps one provider workspace tab after logout and login as a different account', async () => {
+it('keeps one provider workspace submenu after logout and login as a different account', async () => {
   const user = userEvent.setup();
   const client = createClient({ quark: { id: 'old', displayName: 'old-alice', provider: 'quark', authMethod: 'web' } });
   client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0]]);
@@ -90,13 +100,13 @@ it('keeps one provider workspace tab after logout and login as a different accou
   await screen.findByText('· old-alice');
   await user.click(screen.getByRole('button', { name: '退出授权' }));
   await user.click(screen.getByRole('button', { name: '确认退出授权' }));
-  await waitFor(() => expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument());
   await user.click(screen.getByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
   expect(await screen.findByText('· new-bob')).toBeVisible();
   expect(screen.queryByText('· old-alice')).not.toBeInTheDocument();
-  expect(screen.getAllByRole('tab', { name: '夸克网盘' })).toHaveLength(1);
-  await user.click(screen.getByRole('tab', { name: '夸克网盘' }));
+  expect(screen.getAllByRole('button', { name: '夸克网盘' })).toHaveLength(1);
+  await user.click(screen.getByRole('button', { name: '夸克网盘' }));
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
   expect(screen.queryByRole('tablist', { name: '夸克账号' })).not.toBeInTheDocument();
 });
@@ -131,7 +141,7 @@ it('opens a recovered UC account at root 0', async () => {
   });
   render(<CloudWorkspace client={client as never} />);
 
-  await user.click(await screen.findByRole('tab', { name: 'UC网盘' }));
+  await user.click(await screen.findByRole('button', { name: 'UC网盘' }));
   expect(await screen.findByRole('tree', { name: 'UC网盘文件' })).toBeVisible();
   expect(client.listCloudDirectory).toHaveBeenLastCalledWith('uc', '0');
 });
@@ -142,8 +152,8 @@ it('ignores a recovered account when the provider does not match the request', a
   render(<CloudWorkspace client={client as never} />);
 
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
-  expect(screen.getAllByRole('tab', { name: 'PikPak网盘' })).toHaveLength(1);
-  expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument();
+  expect(screen.getAllByRole('button', { name: 'PikPak网盘' })).toHaveLength(1);
+  expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
 });
 
 it('shows the management shell and completed recoveries while a provider remains pending', async () => {
@@ -156,21 +166,21 @@ it('shows the management shell and completed recoveries while a provider remains
 
   render(<CloudWorkspace client={client} />);
 
-  expect(screen.getByRole('tab', { name: '网盘管理' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '我的网盘' })).toBeVisible();
   expect(screen.getByRole('status', { name: '正在读取网盘账号状态' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '登录PikPak账号' })).not.toBeInTheDocument();
 
   resolveQuark({ id: 'q-1', displayName: 'q-alice', provider: 'quark', authMethod: 'web' });
-  expect(await screen.findByRole('tab', { name: '夸克网盘' })).toBeVisible();
-  expect(screen.queryByRole('tab', { name: 'PikPak网盘' })).not.toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: '夸克网盘' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'PikPak网盘' })).not.toBeInTheDocument();
   resolvePikpak({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' });
-  await screen.findByRole('tab', { name: 'PikPak网盘' });
-  expect(screen.getByRole('tab', { name: 'PikPak网盘' })).toBeVisible();
+  await screen.findByRole('button', { name: 'PikPak网盘' });
+  expect(screen.getByRole('button', { name: 'PikPak网盘' })).toBeVisible();
   expect(screen.queryByRole('status', { name: '正在读取网盘账号状态' })).not.toBeInTheDocument();
 });
 
-it('adds a provider tab after priority password login and keeps account controls in management', async () => {
+it('adds a provider submenu after priority password login and keeps account controls in management', async () => {
   const user = userEvent.setup();
   const client = createClient();
   render(<CloudWorkspace client={client} />);
@@ -180,19 +190,19 @@ it('adds a provider tab after priority password login and keeps account controls
   await user.type(within(pikpakAuthorization).getByLabelText('密码'), 'secret');
   await user.click(within(pikpakAuthorization).getByRole('button', { name: '登录' }));
 
-  expect(await screen.findByRole('tab', { name: 'PikPak网盘' })).toHaveAttribute('aria-selected', 'false');
-  expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByRole('button', { name: 'PikPak网盘' })).not.toHaveAttribute('aria-current');
+  expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
   expect(screen.getByRole('button', { name: '已经登录' })).toBeDisabled();
   expect(screen.getByRole('button', { name: '退出登录' })).toBeVisible();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole('tab', { name: 'PikPak网盘' }));
+  await user.click(screen.getByRole('button', { name: 'PikPak网盘' }));
   expect(await screen.findByRole('tree', { name: 'PikPak网盘文件' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '已经登录' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '退出登录' })).not.toBeInTheDocument();
 });
 
-it('adds a Quark file tab after web authorization without moving authorization actions into it', async () => {
+it('adds a Quark file submenu after web authorization without moving authorization actions into it', async () => {
   const user = userEvent.setup();
   const client = createClient();
   render(<CloudWorkspace client={client} />);
@@ -200,17 +210,17 @@ it('adds a Quark file tab after web authorization without moving authorization a
   await user.click((await screen.findAllByRole('button', { name: '使用网页授权' }))[0]);
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
 
-  expect(await screen.findByRole('tab', { name: '夸克网盘' })).toHaveAttribute('aria-selected', 'false');
+  expect(await screen.findByRole('button', { name: '夸克网盘' })).not.toHaveAttribute('aria-current');
   expect(screen.getByRole('button', { name: '已经完成授权' })).toBeDisabled();
   expect(screen.getByRole('button', { name: '退出授权' })).toBeVisible();
 
-  await user.click(screen.getByRole('tab', { name: '夸克网盘' }));
+  await user.click(screen.getByRole('button', { name: '夸克网盘' }));
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
   expect(screen.queryByText('已经完成授权')).not.toBeInTheDocument();
   expect(screen.queryByText('退出授权')).not.toBeInTheDocument();
 });
 
-it('automatically adds the Aliyun workspace tab after web authorization completes', async () => {
+it('automatically adds the Aliyun workspace submenu after web authorization completes', async () => {
   const user = userEvent.setup();
   const client = createClient();
   render(<CloudWorkspace client={client as never} />);
@@ -219,45 +229,62 @@ it('automatically adds the Aliyun workspace tab after web authorization complete
   await user.click(within(aliyunAuthorization).getByRole('button', { name: '使用网页授权' }));
   await act(async () => { client.emitAuthorization({ id: 'ali', displayName: 'alice', provider: 'aliyun', authMethod: 'web' }); });
 
-  expect(await screen.findByRole('tab', { name: '阿里网盘' }, { timeout: 1_500 })).toHaveAttribute('aria-selected', 'false');
+  expect(await screen.findByRole('button', { name: '阿里网盘' }, { timeout: 1_500 })).not.toHaveAttribute('aria-current');
   expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
 });
 
-it('recovers accounts into tabs while still opening on cloud management', async () => {
+it('recovers accounts into submenus while still opening on cloud management', async () => {
   const client = createClient({ quark: { id: 'q-1', displayName: 'q-alice', provider: 'quark', authMethod: 'web' } });
   render(<CloudWorkspace client={client} />);
 
-  expect(await screen.findByRole('tab', { name: '夸克网盘' })).toHaveAttribute('aria-selected', 'false');
-  expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
+  expect(await screen.findByRole('button', { name: '夸克网盘' })).not.toHaveAttribute('aria-current');
+  expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
   expect(client.listCloudDirectory).not.toHaveBeenCalled();
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
 });
 
-it('shows only authorized provider tabs and switches their real directory views', async () => {
+it('shows only authorized provider submenus and switches their real directory views', async () => {
   const user = userEvent.setup();
   const client = createClient({ quark: { id: 'q-1', displayName: 'q-alice', provider: 'quark', authMethod: 'web' }, pikpak: { id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' } });
   render(<CloudWorkspace client={client} />);
 
-  await screen.findByRole('tab', { name: '夸克网盘' });
-  expect(screen.getByRole('tab', { name: 'PikPak网盘' })).toBeVisible();
-  await user.click(screen.getByRole('tab', { name: '夸克网盘' }));
+  await screen.findByRole('button', { name: '夸克网盘' });
+  expect(screen.getByRole('button', { name: 'PikPak网盘' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '夸克网盘' }));
   expect(await screen.findByText('quark-文件.txt')).toBeVisible();
-  await user.click(screen.getByRole('tab', { name: 'PikPak网盘' }));
+  await user.click(screen.getByRole('button', { name: 'PikPak网盘' }));
   expect(await screen.findByText('pikpak-文件.txt')).toBeVisible();
 });
 
-it('logs out from management, removes the provider tab, and stays on management', async () => {
+it('logs out from management, removes the provider submenu, and stays on management', async () => {
   const user = userEvent.setup();
   const client = createClient({ quark: { id: 'q-1', displayName: 'q-alice', provider: 'quark', authMethod: 'web' } });
   render(<CloudWorkspace client={client} />);
 
-  await screen.findByRole('tab', { name: '夸克网盘' });
+  await screen.findByRole('button', { name: '夸克网盘' });
   await user.click(screen.getByRole('button', { name: '退出授权' }));
   await user.click(screen.getByRole('button', { name: '确认退出授权' }));
 
-  await waitFor(() => expect(screen.queryByRole('tab', { name: '夸克网盘' })).not.toBeInTheDocument());
-  expect(screen.getByRole('tab', { name: '网盘管理' })).toHaveAttribute('aria-selected', 'true');
+  await waitFor(() => expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument());
+  expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
   expect(screen.getByRole('region', { name: '夸克账号授权' })).toBeVisible();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
+});
+
+it('returns to management if the removed provider is selected while logout is pending', async () => {
+  const user = userEvent.setup();
+  const client = createClient({ quark: { id: 'q-1', displayName: 'q-alice', provider: 'quark', authMethod: 'web' } });
+  let finishLogout!: () => void;
+  client.logoutCloud.mockReturnValue(new Promise<void>(resolve => { finishLogout = resolve; }));
+  render(<CloudWorkspace client={client} />);
+  const submenu = await screen.findByRole('button', { name: '夸克网盘' });
+  await user.click(screen.getByRole('button', { name: '退出授权' }));
+  await user.click(screen.getByRole('button', { name: '确认退出授权' }));
+  await user.click(submenu);
+  expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
+  await act(async () => { finishLogout(); });
+  expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
+  expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
 });

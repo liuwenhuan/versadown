@@ -51,9 +51,13 @@ pub(super) fn password_script(
     if !supports_browser_password(provider) || username.trim().is_empty() || password.is_empty() {
         return Err(QuarkError::InvalidInput("请输入账号和密码".into()));
     }
+    let allowed_hosts = super::ProviderRegistry::global()
+        .get(provider)
+        .password_login_hosts;
     let args = Zeroizing::new(
         serde_json::to_string(&(
             provider.key(),
+            allowed_hosts,
             username,
             password,
             uuid::Uuid::new_v4().to_string(),

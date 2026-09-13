@@ -400,6 +400,27 @@ impl TaskStore {
             .map_err(StoreError::from)
     }
 
+    /// Records cancellation before waiting for an in-flight leaf submission.
+    /// No local task or payload file is removed here.
+    pub fn cancel_cloud_directory_group(&self, group_id: Uuid) -> Result<(), StoreError> {
+        validate_uuid(group_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE cloud_directory_groups SET status = ?1, updated_at = ?2
+             WHERE id = ?3 AND status <> ?4",
+            params![
+                TaskStatus::Cancelled.as_db(),
+                current_timestamp(),
+                group_id.to_string(),
+                TaskStatus::Recycled.as_db()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(group_id));
+        }
+        Ok(())
+    }
+
     pub fn link_cloud_directory_group_item_task(
         &self,
         group_id: Uuid,

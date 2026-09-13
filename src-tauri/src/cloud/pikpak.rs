@@ -6,9 +6,32 @@ use super::{
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+};
 const AUTH: &str = "https://user.mypikpak.com";
 const DRIVE: &str = "https://api-drive.mypikpak.com";
+pub(crate) const PIKPAK_WEB_TOKENS_JS: &str = r#"(() => {
+ if (location.protocol !== 'https:' || !(location.hostname === 'mypikpak.com' || location.hostname.endsWith('.mypikpak.com'))) return null;
+ const out = {}; const seen = new Set();
+ function inspect(v, depth) {
+  if (!v || depth > 6) return;
+  if (typeof v === 'string') { try { inspect(JSON.parse(v),depth+1); } catch (_) {} return; }
+  if (typeof v !== 'object' || seen.has(v)) return; seen.add(v);
+  for (const [k,x] of Object.entries(v)) {
+   if (['expires_at','expiresAt'].includes(k) && Number.isFinite(Number(x))) out.expires_at = Number(x);
+   if (['access_token','accessToken'].includes(k) && typeof x === 'string') out.access_token=x;
+   else if (['refresh_token','refreshToken'].includes(k) && typeof x === 'string') out.refresh_token=x;
+   else if (['device_id','deviceId','deviceid'].includes(k) && typeof x === 'string') out.device_id=x;
+   else if (['captcha_token','captchaToken'].includes(k) && typeof x === 'string') out.captcha_token=x;
+   else if (!/password/i.test(k)) inspect(x,depth+1);
+  }
+ }
+ for (let i=0;i<localStorage.length;i++) {const k=localStorage.key(i); inspect({[k]:localStorage.getItem(k)},0);}
+ for (let i=0;i<localStorage.length;i++) {const k=localStorage.key(i); if(k.startsWith('credentials_')) {try {const v=JSON.parse(localStorage.getItem(k)); if(v.access_token && v.refresh_token) {inspect(v,0);out.client_id=k.slice(12);break;}} catch (_) {}}}
+ return out.access_token && out.refresh_token ? out : null;
+})()"#;
 
 #[cfg(test)]
 mod tests {
@@ -301,6 +324,51 @@ mod tests {
             .iter()
             .any(|request| request.url.contains("batchUntrash")));
     }
+
+    #[test]
+    fn supervised_snapshot_rotates_action_captcha_without_refreshing_access_session() {
+        let durable = MemoryCredentialStore::default();
+        durable
+            .save(
+                "pikpak",
+                &serde_json::to_vec(&PikPakSession {
+                    access_token: "current-access".into(),
+                    refresh_token: "current-refresh".into(),
+                    expires_at: u64::MAX,
+                    device_id: "device".into(),
+                    captcha_token: "stale-captcha".into(),
+                    client_id: Some("YNxT9w7GMdWvEOKa".into()),
+                    user_id: "user".into(),
+                    captcha_expires_at: u64::MAX,
+                    auth_method: CloudAuthMethod::Password,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let snapshot =
+            crate::cloud::auth_supervisor::SessionSnapshot::new(&durable, CloudProvider::Pikpak)
+                .unwrap();
+        let http = Http::new(vec![
+            json!({"error":"riskLimited","error_code":9}),
+            json!({"captcha_token":"rotated-captcha","expires_in":300,"url":""}),
+            json!({}),
+        ]);
+
+        PikPakClient::new(&http, &snapshot)
+            .rename("fixture", "renamed")
+            .unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].url.ends_with("/drive/v1/files/fixture"));
+        assert!(requests[1].url.contains("/v1/shield/captcha/init"));
+        assert!(requests[2].url.ends_with("/drive/v1/files/fixture"));
+        let saved: PikPakSession =
+            serde_json::from_slice(&snapshot.load("pikpak").unwrap().unwrap()).unwrap();
+        assert_eq!(saved.access_token, "current-access");
+        assert_eq!(saved.refresh_token, "current-refresh");
+        assert_eq!(saved.captcha_token, "rotated-captcha");
+    }
 }
 pub(crate) const PIKPAK_RECYCLE_BIN_ID: &str = "__all_downloader_pikpak_recycle_bin__";
 const PIKPAK_RECYCLE_BIN_NAME: &str = "回收站";
@@ -503,10 +571,12 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
         let s = self.stored()?;
-        if !self.store.automatic_session_recovery() {
-            return self.raw(method, url, body, Some(&s));
-        }
-        let mut access_refreshed = s.expires_at <= now() + 60;
+        let automatic_session_recovery = self.store.automatic_session_recovery();
+        // AuthSupervisor snapshots must not rotate access/refresh credentials on
+        // their own. PikPak's per-action captcha, however, is part of an ordinary
+        // drive request: it is scoped to the exact method/path and must be rotated
+        // inside the private snapshot so the supervisor can publish it atomically.
+        let mut access_refreshed = automatic_session_recovery && s.expires_at <= now() + 60;
         let mut s = if access_refreshed {
             self.refresh(s)?
         } else {
@@ -515,7 +585,9 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         let mut captcha_refreshed = false;
         loop {
             match self.raw(method, url.clone(), body.clone(), Some(&s)) {
-                Err(QuarkError::AuthorizationExpired) if !access_refreshed => {
+                Err(QuarkError::AuthorizationExpired)
+                    if automatic_session_recovery && !access_refreshed =>
+                {
                     s = self.refresh(s)?;
                     access_refreshed = true;
                 }
@@ -896,6 +968,15 @@ use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry, ShareInspect,
     ShareInspection, ShareResolution, ShareResolve,
 };
+impl<'a, T: CloudHttpTransport + CloudUploadTransport, S: CredentialStore> PikPakClient<'a, T, S> {
+    pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
+        reject_pikpak_recycle_bin_target(parent)?;
+        super::upload::upload_pikpak_file(self.http, parent, path, |payload| {
+            self.request("POST", format!("{DRIVE}/drive/v1/files"), Some(payload))
+        })
+    }
+}
+
 const SHARE_DRIVE: &str = "https://api-drive.mypikpak.net";
 const SHARE_AUTH: &str = "https://user.mypikpak.net";
 const SHARE_WEB_CLIENT: &str = "YUMx5nI8ZU8Ap8pm";

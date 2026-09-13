@@ -256,13 +256,12 @@ fn require_background_ui_test() -> Result<(), String> {
 }
 
 pub fn launcher_hexagon_region(
-    outer: (u32, u32),
+    client_origin: (i32, i32),
     inner: (u32, u32),
     scale_factor: f64,
 ) -> LauncherRegion {
     let diameter = (LAUNCHER_HEXAGON_SIZE * scale_factor).round() as i32;
-    let client_x = outer.0.saturating_sub(inner.0) as i32 / 2;
-    let client_y = outer.1.saturating_sub(inner.1) as i32 / 2;
+    let (client_x, client_y) = client_origin;
     LauncherRegion {
         x: client_x + inner.0 as i32 - diameter,
         y: client_y + inner.1 as i32 - diameter,
@@ -272,39 +271,31 @@ pub fn launcher_hexagon_region(
 }
 
 pub fn launcher_hexagon_points(region: LauncherRegion) -> [LauncherPoint; 6] {
-    const ICON_SIZE: i32 = 128;
-    let scale_x = |coordinate| region.x + (coordinate * region.width + ICON_SIZE / 2) / ICON_SIZE;
-    let scale_y = |coordinate| region.y + (coordinate * region.height + ICON_SIZE / 2) / ICON_SIZE;
-    [
-        LauncherPoint {
-            x: scale_x(64),
-            y: scale_y(10),
-        },
-        LauncherPoint {
-            x: scale_x(112),
-            y: scale_y(39),
-        },
-        LauncherPoint {
-            x: scale_x(112),
-            y: scale_y(89),
-        },
-        LauncherPoint {
-            x: scale_x(64),
-            y: scale_y(118),
-        },
-        LauncherPoint {
-            x: scale_x(16),
-            y: scale_y(89),
-        },
-        LauncherPoint {
-            x: scale_x(16),
-            y: scale_y(39),
-        },
-    ]
+    static HEXAGON: std::sync::LazyLock<[[i32; 2]; 6]> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../../src/assets/launcher/hexagon.json"))
+            .expect("bundled launcher hexagon must contain six percentage coordinates")
+    });
+    // Use the renderer's outline with a one-physical-pixel inward guard.
+    // CSS keeps fractional dimensions while HWND sizes are integral; the guard
+    // also covers half-pixel apex shifts at odd diameters and antialiased edges.
+    let scale = |coordinate: i32, size: i32| {
+        let value = f64::from(coordinate) * f64::from(size) / 100.0;
+        if coordinate < 50 {
+            value.ceil() as i32 + 1
+        } else if coordinate > 50 {
+            value.floor() as i32 - 1
+        } else {
+            value.round() as i32
+        }
+    };
+    HEXAGON.map(|[x, y]| LauncherPoint {
+        x: region.x + scale(x, region.width),
+        y: region.y + scale(y, region.height),
+    })
 }
 
 pub fn launcher_live_regions(
-    outer: (u32, u32),
+    client_origin: (i32, i32),
     inner: (u32, u32),
     scale_factor: f64,
 ) -> LauncherLiveRegions {
@@ -312,8 +303,7 @@ pub fn launcher_live_regions(
     let speed_left = (LAUNCHER_LIVE_SPEED_LEFT * scale_factor).round() as i32;
     let speed_top = (LAUNCHER_LIVE_SPEED_TOP * scale_factor).round() as i32;
     let speed_height = (LAUNCHER_LIVE_SPEED_HEIGHT * scale_factor).round() as i32;
-    let client_x = outer.0.saturating_sub(inner.0) as i32 / 2;
-    let client_y = outer.1.saturating_sub(inner.1) as i32 / 2;
+    let (client_x, client_y) = client_origin;
     LauncherLiveRegions {
         hexagon: LauncherRegion {
             x: client_x,
@@ -336,7 +326,7 @@ mod tests {
 
     #[test]
     fn uses_a_64px_compact_hexagon_region() {
-        let region = launcher_hexagon_region((64, 64), (64, 64), 1.0);
+        let region = launcher_hexagon_region((0, 0), (64, 64), 1.0);
 
         assert_eq!(
             region,
@@ -458,11 +448,12 @@ fn apply_launcher_shape(
     redraw: bool,
 ) -> Result<Option<LauncherRegion>, String> {
     use windows::Win32::{
-        Foundation::POINT,
+        Foundation::{POINT, RECT},
         Graphics::Gdi::{
-            CombineRgn, CreatePolygonRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn,
-            ALTERNATE, HGDIOBJ, RGN_ERROR, RGN_OR,
+            ClientToScreen, CombineRgn, CreatePolygonRgn, CreateRoundRectRgn, DeleteObject,
+            SetWindowRgn, ALTERNATE, HGDIOBJ, RGN_ERROR, RGN_OR,
         },
+        UI::WindowsAndMessaging::{GetClientRect, GetWindowRect},
     };
 
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
@@ -476,22 +467,27 @@ fn apply_launcher_shape(
         };
     }
 
-    let outer = window.outer_size().map_err(|error| error.to_string())?;
-    let inner = window.inner_size().map_err(|error| error.to_string())?;
-    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let live_regions = launcher_live_regions(
-        (outer.width, outer.height),
-        (inner.width, inner.height),
-        scale_factor,
+    // SetWindowRgn uses window coordinates; the renderer uses client coordinates.
+    // Read the actual offset after frame removal rather than assuming symmetric borders.
+    let mut outer = RECT::default();
+    let mut inner = RECT::default();
+    let mut client_screen = POINT::default();
+    unsafe { GetWindowRect(hwnd, &mut outer) }.map_err(|error| error.to_string())?;
+    unsafe { GetClientRect(hwnd, &mut inner) }.map_err(|error| error.to_string())?;
+    if !unsafe { ClientToScreen(hwnd, &mut client_screen) }.as_bool() {
+        return Err("无法定位悬浮窗客户区".to_string());
+    }
+    let client_origin = (client_screen.x - outer.left, client_screen.y - outer.top);
+    let client_size = (
+        (inner.right - inner.left) as u32,
+        (inner.bottom - inner.top) as u32,
     );
+    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
+    let live_regions = launcher_live_regions(client_origin, client_size, scale_factor);
     let region = if live {
         live_regions.hexagon
     } else {
-        launcher_hexagon_region(
-            (outer.width, outer.height),
-            (inner.width, inner.height),
-            scale_factor,
-        )
+        launcher_hexagon_region(client_origin, client_size, scale_factor)
     };
     let points = launcher_hexagon_points(region).map(|point| POINT {
         x: point.x,

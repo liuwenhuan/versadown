@@ -480,6 +480,10 @@ mod tests {
 }
 
 pub const QUARK_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch";
+const QUARK_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
+    object_host: "pds.quark.cn",
+    object_store_user_agent: "aliyun-sdk-js/6.6.1",
+};
 pub(crate) const QUARK_RECYCLE_BIN_ID: &str = "__all_downloader_quark_recycle_bin__";
 const QUARK_RECYCLE_BIN_NAME: &str = "回收站";
 
@@ -714,6 +718,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
             upload_http,
             parent,
             path,
+            QUARK_UPLOAD_PROFILE,
             |payload| {
                 self.request("POST", "file/upload/pre", Some(payload))
                     .and_then(|response| response_json(&response))

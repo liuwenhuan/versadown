@@ -40,8 +40,14 @@ impl DriveOps for XunleiDriver<'_> {
         let http = &self.http;
         let h = http;
         with_xunlei_client(store, h, |client| {
+            let previous_ids = client
+                .directory(&parent_id)?
+                .items
+                .into_iter()
+                .map(|file| file.id)
+                .collect();
             client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
+            find_created_directory(client.directory(&parent_id)?, &name, &previous_ids)
         })
     }
     fn rename(&mut self, file_id: &str, name: &str) -> Result<(), CloudError> {
@@ -134,7 +140,7 @@ impl ProviderAuth for XunleiDriver<'_> {
     }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
-            token_script: Some(XUNLEI_WEB_TOKENS_JS),
+            token_script: Some(xunlei::XUNLEI_WEB_TOKENS_JS),
             asynchronous_tokens: true,
             ..Default::default()
         }

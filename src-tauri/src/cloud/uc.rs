@@ -5,8 +5,9 @@
 //! the official `drive.uc.cn` web authorization flow.  Signed download URLs
 //! and response cookies are kept in `UcDownload` for immediate use only.
 use super::{
-    types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest,
-    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudUploadTransport, QuarkError,
+    types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudDriveUploadProfile,
+    CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
+    CloudUploadTransport, QuarkError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,6 +16,10 @@ use std::{collections::BTreeMap, fmt, path::Path};
 const API: &str = "https://pc-api.uc.cn/1/clouddrive";
 const WEB: &str = "https://drive.uc.cn";
 pub const UC_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
+const UC_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
+    object_host: "pds.uc.cn",
+    object_store_user_agent: "aliyun-sdk-js/6.6.1",
+};
 pub(crate) const UC_RECYCLE_BIN_ID: &str = "__all_downloader_uc_recycle_bin__";
 const UC_RECYCLE_BIN_NAME: &str = "回收站";
 
@@ -276,14 +281,23 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         Err(QuarkError::InvalidResponse)
     }
 
-    pub fn mkdir(&self, parent: &str, name: &str) -> Result<CloudHttpResponse, QuarkError> {
+    pub fn mkdir(&self, parent: &str, name: &str) -> Result<CloudFile, QuarkError> {
         validate_name(name)?;
-        self.request(
+        let response = self.request(
             "POST",
             "file",
             "",
             Some(json!({"pdir_fid":parent,"file_name":name,"dir_path":"","dir_init_lock":false})),
-        )
+        )?;
+        let value = uc_json(&response)?;
+        Ok(CloudFile {
+            id: required(value.get("data").ok_or(QuarkError::InvalidResponse)?, "fid")?,
+            parent_id: parent.into(),
+            name: name.into(),
+            kind: "folder".into(),
+            size: None,
+            modified_at: None,
+        })
     }
 
     pub fn rename(&self, id: &str, name: &str) -> Result<CloudHttpResponse, QuarkError> {
@@ -357,6 +371,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             upload_http,
             parent,
             path,
+            UC_UPLOAD_PROFILE,
             |payload| self.request_json("POST", "file/upload/pre", "", Some(payload)),
             |payload| self.request_json("POST", "file/update/hash", "", Some(payload)),
             |payload| self.request_json("POST", "file/upload/auth", "", Some(payload)),
@@ -466,13 +481,16 @@ fn uc_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if code == 401 || status == 401 || message.to_ascii_lowercase().contains("login") {
         return Err(QuarkError::AuthorizationExpired);
     }
+    let normalized_message = message.to_ascii_lowercase();
+    if code == 32011 || normalized_message.contains("not real name") || message.contains("未实名")
+    {
+        return Err(QuarkError::Provider(
+            "UC 网盘账号未实名，请先在 UC 官方页面完成实名认证后重试".into(),
+        ));
+    }
     if ["captcha", "verify", "risk", "安全验证"]
         .iter()
-        .any(|needle| {
-            message
-                .to_ascii_lowercase()
-                .contains(&needle.to_ascii_lowercase())
-        })
+        .any(|needle| normalized_message.contains(&needle.to_ascii_lowercase()))
     {
         return Err(QuarkError::WebAuthorizationRequired);
     }

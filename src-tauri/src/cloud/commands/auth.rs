@@ -310,7 +310,7 @@ pub async fn cloud_begin_authorization(
                     .browser_profile_owner
                     && is_baidu_authorization_page(payload.url())
                 {
-                    let _ = window.eval(BAIDU_AUTO_OPEN_LOGIN_JS);
+                    let _ = window.eval(baidu::BAIDU_AUTO_OPEN_LOGIN_JS);
                 }
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {

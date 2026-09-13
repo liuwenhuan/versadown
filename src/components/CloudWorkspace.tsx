@@ -1,14 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react';
 import type { CloudAccount, CloudProvider, ProviderDescriptor } from '../lib/cloudTypes';
 import { CloudManager, CloudManagerClient } from './CloudManager';
 
 export interface CloudWorkspaceProps {
   client: CloudManagerClient;
+  activePage: CloudWorkspacePage;
+  onPageChange: Dispatch<SetStateAction<CloudWorkspacePage>>;
+  onProvidersChange(providers: readonly ProviderDescriptor[]): void;
   onDownloadTask?(task: unknown): void;
   privacyDownloadEnabled?: boolean;
 }
 
-type WorkspaceTab = 'management' | CloudProvider;
+export type CloudWorkspacePage = 'management' | CloudProvider;
 
 
 function isUnauthorized(error: unknown) {
@@ -23,16 +26,18 @@ function errorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
-export function CloudWorkspace({ client, onDownloadTask, privacyDownloadEnabled = false }: CloudWorkspaceProps) {
+export function CloudWorkspace({ client, activePage, onPageChange, onProvidersChange, onDownloadTask, privacyDownloadEnabled = false }: CloudWorkspaceProps) {
   const [accounts, setAccounts] = useState<readonly CloudAccount[]>([]);
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>('management');
   const [catalog, setCatalog] = useState<readonly ProviderDescriptor[]>([]);
   const [pendingProviders, setPendingProviders] = useState<readonly CloudProvider[]>([]);
   const [loadingCatalog, setLoadingCatalog] = useState(true);
   const recoveringAccounts = loadingCatalog || pendingProviders.length > 0;
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [accountErrors, setAccountErrors] = useState<Partial<Record<CloudProvider, string>>>({});
-  const activeAccount = activeTab === 'management' ? null : accounts.find((account) => account.provider === activeTab) ?? null;
+  const activeAccount = activePage === 'management' ? null : accounts.find((account) => account.provider === activePage) ?? null;
+  const authorizedProviders = useMemo(() => catalog.filter(descriptor => accounts.some(account => account.provider === descriptor.provider)), [catalog, accounts]);
+
+  useEffect(() => { onProvidersChange(authorizedProviders); }, [authorizedProviders, onProvidersChange]);
 
   function acceptAccount(account: CloudAccount) {
     setAccountErrors(current => {
@@ -53,7 +58,7 @@ export function CloudWorkspace({ client, onDownloadTask, privacyDownloadEnabled 
     setAccounts([]);
     setCatalog([]);
     setPendingProviders([]);
-    setActiveTab('management');
+    onPageChange('management');
     void client.getCloudProviderCatalog().then((descriptors) => {
       if (!active) return;
       setCatalog(descriptors);
@@ -75,20 +80,15 @@ export function CloudWorkspace({ client, onDownloadTask, privacyDownloadEnabled 
       }
     });
     return () => { active = false; };
-  }, [client]);
+  }, [client, onPageChange]);
 
   function removeAccount(provider: CloudProvider) {
     setAccounts((current) => current.filter((account) => account.provider !== provider));
-    setActiveTab((current) => current === provider ? 'management' : current);
+    onPageChange(current => current === provider ? 'management' : current);
   }
 
   return <section className="cloud-workspace" aria-label="我的网盘工作区">
-    <div className="cloud-workspace-tabs workspace-tab-list" role="tablist" aria-label="我的网盘标签">
-      <button role="tab" aria-selected={activeTab === 'management'} onClick={() => setActiveTab('management')}>网盘管理</button>
-      {catalog.filter(d => accounts.some(a => a.provider === d.provider)).map(d => <button key={d.provider} role="tab" aria-selected={activeTab === d.provider} onClick={() => setActiveTab(d.provider)}>{d.displayName}网盘</button>)}
-    </div>
-
-    {activeTab === 'management' && <section className="cloud-management-panel" aria-label="网盘管理">
+    {activePage === 'management' && <section className="cloud-management-panel" aria-label="网盘管理">
       {recoveringAccounts && <div className="cloud-account-recovery" role="status" aria-label="正在读取网盘账号状态"><i aria-hidden="true" /><span>正在读取网盘账号状态…</span></div>}
       {recoveryError && <p className="cloud-operation-status error" role="alert">恢复账号失败：{recoveryError}</p>}
       {catalog.filter(d => accountErrors[d.provider]).map(d => <p key={d.provider} className="cloud-operation-status error" role="alert">{d.displayName}恢复账号失败：{accountErrors[d.provider]}</p>)}

@@ -12,7 +12,7 @@ use super::{
 };
 use crate::cloud::share::{CloudShareDownloadEntry, CloudShareDownloadSelection};
 use crate::cloud::{
-    baidu::{parse_baidu_web_session, BaiduSession},
+    baidu::{parse_baidu_web_session, BaiduSession, BAIDU_AUTO_OPEN_LOGIN_JS},
     browser_password_login_preferred, save_password_credential, save_password_login_draft,
     set_baidu_browser_profile_username, set_browser_password_login_preferred,
     tianyi::TianyiSession,
@@ -522,12 +522,13 @@ fn baidu_authorization_auto_opens_login_without_breaking_changed_pages() {
         .split("#[cfg(test)]")
         .next()
         .expect("production source precedes its tests");
+    let script = BAIDU_AUTO_OPEN_LOGIN_JS;
     assert!(source.contains("BAIDU_AUTO_OPEN_LOGIN_JS"));
-    assert!(source.contains("\"去登录\""));
-    assert!(source.contains("element.click()"));
-    assert!(source.contains("attempts >= 20"));
+    assert!(script.contains("\"去登录\""));
+    assert!(script.contains("element.click()"));
+    assert!(script.contains("attempts >= 20"));
     assert!(source.contains("is_baidu_authorization_page(payload.url())"));
-    assert!(source.contains("window.eval(BAIDU_AUTO_OPEN_LOGIN_JS)"));
+    assert!(source.contains("window.eval(baidu::BAIDU_AUTO_OPEN_LOGIN_JS)"));
 
     assert!(super::is_baidu_authorization_page(
         &url::Url::parse("https://pan.baidu.com/disk/main").unwrap()
@@ -907,6 +908,18 @@ impl SessionRecoveryTransport {
                 ),
                 ..Default::default()
             },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"errno":0,"list":[]}"#.into(),
+                ..Default::default()
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: format!(
+                    r#"{{"errno":0,"user":{{"uk":"{account_id}","netdisk_name":"fixture"}}}}"#
+                ),
+                ..Default::default()
+            },
         ])))
     }
 
@@ -1205,11 +1218,15 @@ impl CloudHttpTransport for XunleiRootAcceptingTransport {
 struct TianyiRootAcceptingTransport(Mutex<u8>);
 
 impl CloudHttpTransport for TianyiRootAcceptingTransport {
-    fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         *self.0.lock().unwrap() += 1;
         Ok(CloudHttpResponse {
             status: 200,
-            body: r#"{"res_code":0,"fileListAO":{"fileList":[{"id":"root-fixture","name":"fixture","isFolder":false}]}}"#.into(),
+            body: if request.url.contains("getUserInfoForPortal.action") {
+                r#"{"res_code":0,"loginName":"alice@189.cn"}"#.into()
+            } else {
+                r#"{"res_code":0,"fileListAO":{"fileList":[{"id":"root-fixture","name":"fixture","isFolder":false}]}}"#.into()
+            },
             ..Default::default()
         })
     }
@@ -1384,6 +1401,31 @@ fn tianyi_authorization_window_strips_native_identity_and_cookie_headers() {
     assert!(!filtered.contains_key("Origin"));
     assert!(!filtered.contains_key("Referer"));
     assert!(!filtered.values().any(|value| value.contains("secret")));
+}
+
+struct TianyiAppAcceptingWebRejectingTransport;
+
+impl CloudHttpTransport for TianyiAppAcceptingWebRejectingTransport {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        if request.headers.contains_key("SessionKey") {
+            return Ok(CloudHttpResponse {
+                status: 200,
+                body: r#"<listFiles><fileList></fileList></listFiles>"#.into(),
+                ..Default::default()
+            });
+        }
+        Err(QuarkError::AuthorizationExpired)
+    }
+}
+
+#[test]
+fn tianyi_browser_context_capture_observes_fetch_as_well_as_xhr() {
+    let script = include_str!("../tianyi-browser-context.js");
+
+    assert!(script.contains("XMLHttpRequest.prototype"));
+    assert!(script.contains("window.fetch"));
+    assert!(script.contains("headers.get('browser-id')"));
+    assert!(script.contains("window.__alldownloaderTianyiContext"));
 }
 
 #[test]
@@ -1624,6 +1666,90 @@ fn tianyi_web_authorization_persists_a_session_after_root_directory_validates() 
     assert_eq!(account.provider, CloudProvider::Tianyi);
     assert_eq!(*transport.0.lock().unwrap(), 1);
     assert!(credentials.load("tianyi").unwrap().is_some());
+}
+
+#[test]
+fn tianyi_driver_rejects_a_web_snapshot_without_the_native_browser_identity() {
+    let credentials = MemoryCredentialStore::default();
+    let transport = TianyiRootAcceptingTransport(Mutex::new(0));
+    let input = crate::cloud::driver::WebAuthorizationInput {
+        cookies: vec!["SSON=official-browser-session".into()],
+        storage: serde_json::Value::Null,
+        browser_context: Some(serde_json::json!({})),
+    };
+
+    let result = crate::cloud::ProviderRegistry::global()
+        .driver(CloudProvider::Tianyi, &credentials, &transport)
+        .auth()
+        .complete_web(&input);
+
+    assert!(matches!(result, Err(QuarkError::AuthorizationPending)));
+    assert_eq!(*transport.0.lock().unwrap(), 0);
+    assert!(credentials.load("tianyi").unwrap().is_none());
+}
+
+#[test]
+fn tianyi_driver_combines_verified_web_cookie_with_existing_app_credentials() {
+    let credentials = MemoryCredentialStore::default();
+    credentials
+        .save(
+            "tianyi",
+            br#"{"cookie":"","authMethod":"password","app":{"sessionKey":"app-key","sessionSecret":"app-secret","accessToken":"access-token","loginName":"alice@189.cn"}}"#,
+        )
+        .unwrap();
+    let transport = TianyiRootAcceptingTransport(Mutex::new(0));
+    let input = crate::cloud::driver::WebAuthorizationInput {
+        cookies: vec!["SSON=official-browser-session".into()],
+        storage: serde_json::Value::Null,
+        browser_context: Some(serde_json::json!({
+            "browser_id": "1234567890abcdef1234567890abcdef",
+            "user_agent": "OfficialBrowser/140"
+        })),
+    };
+
+    let account = crate::cloud::ProviderRegistry::global()
+        .driver(CloudProvider::Tianyi, &credentials, &transport)
+        .auth()
+        .complete_web(&input)
+        .expect("the browser candidate should retain the independent App transport");
+
+    assert_eq!(account.id, "alice@189.cn");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&credentials.load("tianyi").unwrap().unwrap()).unwrap();
+    assert_eq!(saved["cookie"], "SSON=official-browser-session");
+    assert_eq!(saved["browser_id"], "1234567890abcdef1234567890abcdef");
+    assert_eq!(saved["app"]["sessionKey"], "app-key");
+    assert_eq!(saved["auth_method"], "password");
+}
+
+#[test]
+fn tianyi_driver_does_not_let_a_valid_app_session_mask_an_invalid_web_candidate() {
+    let credentials = MemoryCredentialStore::default();
+    let existing = br#"{"cookie":"","auth_method":"password","app":{"sessionKey":"app-key","sessionSecret":"app-secret","accessToken":"access-token","loginName":"alice@189.cn"}}"#;
+    credentials.save("tianyi", existing).unwrap();
+    let input = crate::cloud::driver::WebAuthorizationInput {
+        cookies: vec!["SSON=rejected-browser-session".into()],
+        storage: serde_json::Value::Null,
+        browser_context: Some(serde_json::json!({
+            "browser_id": "1234567890abcdef1234567890abcdef",
+            "user_agent": "OfficialBrowser/140"
+        })),
+    };
+
+    let result = crate::cloud::ProviderRegistry::global()
+        .driver(
+            CloudProvider::Tianyi,
+            &credentials,
+            &TianyiAppAcceptingWebRejectingTransport,
+        )
+        .auth()
+        .complete_web(&input);
+
+    assert!(matches!(result, Err(QuarkError::AuthorizationPending)));
+    assert_eq!(
+        credentials.load("tianyi").unwrap().as_deref(),
+        Some(existing.as_slice())
+    );
 }
 
 #[test]

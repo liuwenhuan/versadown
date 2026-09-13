@@ -24,4 +24,20 @@ describe('window resize performance mode', () => {
 
     dispose();
   });
+
+  it('does not restore effects while the mouse is held stationary in a native resize', () => {
+    vi.useFakeTimers();
+    let setActive!: (active: boolean) => void;
+    const dispose = installWindowResizePerformanceMode((handler) => {
+      setActive = handler;
+      return () => undefined;
+    });
+    setActive(true);
+    window.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(1500);
+    expect(document.documentElement).toHaveClass('window-resizing');
+    setActive(false);
+    expect(document.documentElement).not.toHaveClass('window-resizing');
+    dispose();
+  });
 });

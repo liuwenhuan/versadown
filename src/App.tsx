@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BatchTaskCommand, displayTaskName, DownloadQueue } from './components/DownloadQueue';
 import { NewDownloadDialog } from './components/NewDownloadDialog';
@@ -8,7 +9,8 @@ import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
 import { RemoveTaskDialog } from './components/RemoveTaskDialog';
 import { TaskDetailsDialog } from './components/TaskDetailsDialog';
 import type { CloudManagerClient } from './components/CloudManager';
-import { CloudWorkspace } from './components/CloudWorkspace';
+import { CloudWorkspace, type CloudWorkspacePage } from './components/CloudWorkspace';
+import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
@@ -20,8 +22,9 @@ import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNaviga
 import darkMintIcon from './assets/launcher/dark_mint_128.png';
 import mintWhiteIcon from './assets/launcher/mint_white_128.png';
 import { getResolvedTheme, subscribeTheme } from './lib/theme';
-import type { CloudAuthorization } from './lib/cloudTypes';
+import type { CloudAuthorization, ProviderDescriptor } from './lib/cloudTypes';
 import { installWindowResizePerformanceMode } from './lib/windowResizePerformance';
+import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
 
 type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
 type TaskSortMode = 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
@@ -95,10 +98,9 @@ const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mo
   ] },
 ];
 
-const privacyTaskFilterOptions: ReadonlyArray<{ value: PrivacyTaskFilter; label: string }> = [
-  { value: 'all', label: '全部任务' },
-  { value: 'private', label: '仅隐私任务' },
-  { value: 'ordinary', label: '仅普通任务' },
+const privacyTaskFilterOptions: ReadonlyArray<{ value: Exclude<PrivacyTaskFilter, 'all'>; label: string }> = [
+  { value: 'private', label: '显示隐私任务' },
+  { value: 'ordinary', label: '显示普通任务' },
 ];
 
 function PrivacyLockIcon({ unlocked }: { unlocked: boolean }) {
@@ -133,7 +135,14 @@ function TaskSortControl({ value, onChange, privacyFilter, onPrivacyFilterChange
     </button>
     {open && <div className="task-sort-menu" role="menu" aria-label="任务排序">
       {taskSortGroups.map((group) => <section key={group.label}><p>{group.label}</p><div>{group.options.map((option) => <button type="button" key={option.mode} role="menuitemradio" aria-checked={value === option.mode} aria-label={option.ariaLabel} className={value === option.mode ? 'selected' : ''} onClick={() => { onChange(option.mode); setOpen(false); }}>{option.label}</button>)}</div></section>)}
-      {showPrivacyFilter && <section><p>显示任务</p><div>{privacyTaskFilterOptions.map((option) => <button type="button" key={option.value} role="menuitemradio" aria-checked={privacyFilter === option.value} className={privacyFilter === option.value ? 'selected' : ''} onClick={() => { onPrivacyFilterChange(option.value); setOpen(false); }}>{option.label}</button>)}</div></section>}
+      {showPrivacyFilter && <section><p>显示任务</p><div>{privacyTaskFilterOptions.map((option) => {
+        const checked = privacyFilter === 'all' || privacyFilter === option.value;
+        const onlySelected = privacyFilter === option.value;
+        return <button type="button" key={option.value} role="menuitemcheckbox" aria-checked={checked} aria-disabled={onlySelected} title={onlySelected ? '至少选择一项' : undefined} className={checked ? 'selected' : ''} onClick={() => {
+          if (onlySelected) return;
+          onPrivacyFilterChange(privacyFilter === 'all' ? (option.value === 'private' ? 'ordinary' : 'private') : 'all');
+        }}>{option.label}</button>;
+      })}</div></section>}
     </div>}
   </div>;
 }
@@ -250,6 +259,8 @@ export function App() {
   const [duplicateQueue, setDuplicateQueue] = useState<DuplicateDownload[]>([]);
   const [resolvingDuplicateId, setResolvingDuplicateId] = useState<string | null>(null);
   const [view, setView] = useState<ManagerView | 'about'>('downloads');
+  const [cloudPage, setCloudPage] = useState<CloudWorkspacePage>('management');
+  const [authorizedCloudProviders, setAuthorizedCloudProviders] = useState<readonly ProviderDescriptor[]>([]);
   const [downloadTab, setDownloadTab] = useState<TaskListTab>('active');
   const [taskSorts, setTaskSorts] = useState<Record<TaskListTab, TaskSortMode>>(initialTaskSorts);
   const [searchInput, setSearchInput] = useState('');
@@ -317,7 +328,25 @@ export function App() {
   tasksRef.current = tasks;
   const duplicate = resolvingDuplicateId ? null : duplicateQueue[0] ?? null;
 
-  useEffect(() => installWindowResizePerformanceMode(), []);
+  const windowInteraction = useRef<ReturnType<typeof createWindowInteraction> | null>(null);
+  const [nativeWindowDrag, setNativeWindowDrag] = useState(false);
+  useEffect(() => {
+    const interaction = createWindowInteraction();
+    windowInteraction.current = interaction;
+    const stopResizeMode = installWindowResizePerformanceMode(interaction.subscribe);
+    const stopNative = isTauriRuntime() ? connectWindowInteraction(
+      interaction,
+      (handler) => listen<boolean>('main-window-interaction', ({ payload }) => handler(payload)),
+      () => invoke<WindowInteractionSnapshot>('main_window_interaction_state'),
+      (enabled) => setNativeWindowDrag(supportsNativeWindowDrag(enabled)),
+    ) : undefined;
+    return () => {
+      stopNative?.();
+      stopResizeMode();
+      interaction.dispose();
+      if (windowInteraction.current === interaction) windowInteraction.current = null;
+    };
+  }, []);
 
   function enqueueDuplicate(next: DuplicateDownload) {
     setDuplicateQueue((current) => [...current, next]);
@@ -548,11 +577,15 @@ export function App() {
         if (disposed) return;
         if (terminalRefreshTimer !== undefined) window.clearTimeout(terminalRefreshTimer);
         terminalRefreshTimer = window.setTimeout(() => {
-          void refreshTaskSnapshot(() => disposed, 'terminal');
+          windowInteraction.current?.schedule('focus-terminal', () => {
+            if (!disposed) void refreshTaskSnapshot(() => disposed, 'terminal');
+          });
         }, 0);
       });
     };
-    getCurrentWindow().onFocusChanged(({ payload }) => { if (payload) refreshTasks(); })
+    getCurrentWindow().onFocusChanged(({ payload }) => {
+      if (payload) windowInteraction.current?.schedule('focus', () => { if (!disposed) refreshTasks(); });
+    })
       .then((stop) => { if (disposed) stop(); else stopFocus = stop; })
       .catch(() => undefined);
     return () => {
@@ -1150,10 +1183,10 @@ export function App() {
 
   return (
     <main className="app-shell" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
-      <header className="app-header">
-        <div className="app-header-drag-space" data-tauri-drag-region aria-hidden="true" />
-        <div className="brand" data-tauri-drag-region="deep">
-          <div className="brand-mark" data-icon-variant={resolvedTheme} aria-hidden="true"><img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" /></div>
+      <header className="app-header" data-native-window-drag={nativeWindowDrag || undefined}>
+        <div className="app-header-drag-space" data-tauri-drag-region={nativeWindowDrag ? undefined : true} aria-hidden="true" />
+        <div className="brand" data-tauri-drag-region={nativeWindowDrag ? undefined : 'deep'}>
+          <div className="brand-mark" data-icon-variant={resolvedTheme} aria-hidden="true"><img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" draggable={false} /></div>
           <h1>万能下载</h1>
         </div>
         <div className="header-input-shell" data-window-no-drag>
@@ -1219,7 +1252,7 @@ export function App() {
       }} />
       <div className={`workspace${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}><nav id="primary-navigation" aria-label="主导航" aria-hidden={sidebarCollapsed}>
         <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="tasks" /></span><span>任务</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
-        <button className={view === 'cloud' ? 'nav-active' : ''} onClick={() => setView('cloud')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="cloud" /></span><span>我的网盘</span></button>
+        <CloudNavigation providers={authorizedCloudProviders} activePage={view === 'cloud' ? cloudPage : null} icon={<NavigationIcon kind="cloud" />} onSelect={page => { setCloudPage(page); setView('cloud'); }} />
         <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="settings" /></span><span>设置</span></button>
         <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{appUpdate ? '有新版本' : '关于'}</span></button>
       </nav>
@@ -1246,7 +1279,7 @@ export function App() {
             <DownloadQueue tasks={visibleTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onFileSelection={selectTaskFile} onFileCancel={cancelTaskFile} onConfirm={reopenTaskConfirmation} />
           </section>
         </section>}
-        <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
+        <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
         {view === 'about' && <section className="view-panel" aria-label="关于"><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
       </div>
@@ -1254,7 +1287,7 @@ export function App() {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
       } : current)} onClose={dismissConfirmation} />}
-      {privacyUnlockOpen && <div className="modal-backdrop" role="presentation"><section className="cloud-trash-confirm" role="dialog" aria-modal="true" aria-label="解锁隐私任务"><h3>解锁隐私任务</h3><form onSubmit={(event) => { event.preventDefault(); void unlockPrivateTasks(); }}><div className="cloud-operation-editor"><label>隐私模式密码<input ref={privacyUnlockPassword} type="password" autoComplete="current-password" aria-label="隐私模式密码" disabled={privacyUnlocking} /></label></div>{privacyUnlockError && <p className="cloud-operation-status error" role="alert">{privacyUnlockError}</p>}<div className="new-download-actions"><button type="button" onClick={() => setPrivacyUnlockOpen(false)} disabled={privacyUnlocking}>取消</button><button className="primary" type="submit" disabled={privacyUnlocking}>{privacyUnlocking ? '正在解锁…' : '解锁'}</button></div></form></section></div>}
+      {privacyUnlockOpen && <div className="modal-backdrop" role="presentation"><section className="cloud-trash-confirm" role="dialog" aria-modal="true" aria-labelledby="privacy-unlock-title"><h3 id="privacy-unlock-title">输入隐私密码解锁</h3><form onSubmit={(event) => { event.preventDefault(); void unlockPrivateTasks(); }}><div className="cloud-operation-editor"><label><input ref={privacyUnlockPassword} type="password" autoComplete="current-password" aria-label="隐私模式密码" disabled={privacyUnlocking} /></label></div>{privacyUnlockError && <p className="cloud-operation-status error" role="alert">{privacyUnlockError}</p>}<div className="new-download-actions"><button type="button" onClick={() => setPrivacyUnlockOpen(false)} disabled={privacyUnlocking}>取消</button><button className="primary" type="submit" disabled={privacyUnlocking}>{privacyUnlocking ? '正在解锁…' : '解锁'}</button></div></form></section></div>}
       {duplicate && <DuplicateDownloadDialog
         task={duplicate.task}
         state={duplicate.state}

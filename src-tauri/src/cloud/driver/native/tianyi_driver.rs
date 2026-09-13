@@ -48,8 +48,14 @@ impl DriveOps for TianyiDriver<'_> {
         {
             let client =
                 tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, store)?, h);
+            let previous_ids = client
+                .directory(&parent_id)?
+                .items
+                .into_iter()
+                .map(|file| file.id)
+                .collect();
             client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
+            find_created_directory(client.directory(&parent_id)?, &name, &previous_ids)
         }
     }
     fn rename(&mut self, file_id: &str, name: &str) -> Result<(), CloudError> {
@@ -161,6 +167,15 @@ impl ProviderAuth for TianyiDriver<'_> {
         {
             let mut session = tianyi::parse_tianyi_web_session(&input.cookies)?;
             session.apply_browser_context(&input.browser_context.clone().unwrap_or_default());
+            if !session.has_browser_context() {
+                return Err(QuarkError::AuthorizationPending);
+            }
+            if let Some(existing) = store
+                .load(CloudProvider::Tianyi.key())?
+                .and_then(|bytes| serde_json::from_slice::<tianyi::TianyiSession>(&bytes).ok())
+            {
+                session.retain_app_transport(&existing);
+            }
             let account = finalize_tianyi_web_authorization(
                 crate::cloud::ProviderRegistry::global().get(CloudProvider::Tianyi),
                 session,
@@ -179,7 +194,13 @@ impl ProviderAuth for TianyiDriver<'_> {
         let store = &self.store;
         let http = &self.http;
         let native_result = tianyi::TianyiClient::login_password(username, password, http);
-        complete_native_password_login(native_result, |session| {
+        complete_native_password_login(native_result, |mut session| {
+            if let Some(existing) = store
+                .load(CloudProvider::Tianyi.key())?
+                .and_then(|bytes| serde_json::from_slice::<tianyi::TianyiSession>(&bytes).ok())
+            {
+                session.retain_web_transport(&existing);
+            }
             let client = tianyi::TianyiClient::new(session.clone(), http);
             let account = client.account()?;
             client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
@@ -191,13 +212,20 @@ impl ProviderAuth for TianyiDriver<'_> {
         &mut self,
         credential: &CloudPasswordCredential,
     ) -> Result<(CloudAccount, Vec<u8>), CloudError> {
+        let store = &self.store;
         let http = &self.http;
         Ok({
-            let session = tianyi::TianyiClient::login_password(
+            let mut session = tianyi::TianyiClient::login_password(
                 credential.username(),
                 credential.password(),
                 http,
             )?;
+            if let Some(existing) = store
+                .load(CloudProvider::Tianyi.key())?
+                .and_then(|bytes| serde_json::from_slice::<tianyi::TianyiSession>(&bytes).ok())
+            {
+                session.retain_web_transport(&existing);
+            }
             let client = tianyi::TianyiClient::new(session.clone(), http);
             let account = client.account()?;
             (
@@ -213,6 +241,7 @@ impl ProviderAuth for TianyiDriver<'_> {
         report_stage: &mut dyn FnMut(&'static str),
     ) -> Result<(CloudAccount, Vec<u8>), CloudError> {
         let provider = CloudProvider::Tianyi;
+        let store = &self.store;
         let http = &self.http;
         Ok({
             let mut session = tianyi::parse_tianyi_web_session(cookies)?;
@@ -224,12 +253,29 @@ impl ProviderAuth for TianyiDriver<'_> {
                 return Err(QuarkError::AuthorizationPending);
             }
             session.auth_method = CloudAuthMethod::Password;
-            let client = tianyi::TianyiClient::new(session.clone(), http);
-            // A generic "tianyi-web" account is not enough for auto-renewal.
+            let web_client = tianyi::TianyiClient::new(session.clone(), http);
             report_stage("账号信息校验");
-            let account = client.account()?;
+            let web_account = web_client.account()?;
             report_stage("目录访问校验");
-            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
+            web_client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
+            if let Some(existing) = store
+                .load(CloudProvider::Tianyi.key())?
+                .and_then(|bytes| serde_json::from_slice::<tianyi::TianyiSession>(&bytes).ok())
+            {
+                session.retain_app_transport(&existing);
+            }
+            let client = tianyi::TianyiClient::new(session.clone(), http);
+            let account = if session.app.is_some() {
+                let stable = client.account()?;
+                if stable.id != web_account.id {
+                    return Err(QuarkError::InvalidInput(
+                        "登录账号与原任务账号不一致，已保留原凭据，请使用原账号登录".into(),
+                    ));
+                }
+                stable
+            } else {
+                web_account
+            };
             (
                 account,
                 serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
@@ -244,6 +290,13 @@ impl ProviderAuth for TianyiDriver<'_> {
         Ok(Some({
             let mut session = tianyi::parse_tianyi_web_session(&cookies)?;
             session.apply_browser_context(&input.browser_context.clone().unwrap_or_default());
+            if let Some(existing) = self
+                .store
+                .load(CloudProvider::Tianyi.key())?
+                .and_then(|bytes| serde_json::from_slice::<tianyi::TianyiSession>(&bytes).ok())
+            {
+                session.retain_app_transport(&existing);
+            }
             serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?
         }))
     }

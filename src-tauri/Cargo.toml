@@ -47,8 +47,14 @@ axum = "0.8"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging"] }
+webview2-com = "0.38.2"
+windows = { version = "0.61", features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 report-debug-tool = []
+
+[patch.crates-io]
+# Tao 0.36 includes a wider API change. Backport only the Windows DPI fix
+# from tauri-apps/tao#1252 while keeping Tauri's 0.35 dependency contract.
+tao = { path = "vendor/tao" }

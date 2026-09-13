@@ -42,8 +42,21 @@ impl DriveOps for UcDriver<'_> {
         let h = http;
         {
             let client = uc::UcClient::new(load_provider_session(CloudProvider::Uc, store)?, h);
-            client.mkdir(&parent_id, &name)?;
-            find_created_directory(client.directory(&parent_id)?, &name)
+            let created = client.mkdir(&parent_id, &name)?;
+            for attempt in 0..20 {
+                if let Some(directory) = client
+                    .directory(&parent_id)?
+                    .items
+                    .into_iter()
+                    .find(|file| file.kind == "folder" && file.id == created.id)
+                {
+                    return Ok(directory);
+                }
+                if attempt < 19 {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+            Err(CloudError::InvalidResponse)
         }
     }
     fn rename(&mut self, file_id: &str, name: &str) -> Result<(), CloudError> {

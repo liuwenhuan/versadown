@@ -2,8 +2,10 @@ import { vi, expect, it } from 'vitest';
 
 const native = { invoke: vi.fn().mockResolvedValue(undefined) };
 const events = vi.hoisted(() => ({ listen: vi.fn() }));
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: events.listen }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: dialog.open }));
 
 it('shares one authorization listener and releases it after the last subscriber', async () => {
   let receive: ((event: { payload: unknown }) => void) | undefined;
@@ -89,4 +91,34 @@ it('marks cloud file and directory submissions as private only when explicitly r
   expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_download_directory', {
     provider: 'quark', directoryId: 'folder-1', directoryName: '归档', privateDownload: true
   });
+});
+
+it('invokes file and directory uploads with the structured outcome contract', async () => {
+  const outcome = { uploaded: [], failures: [{ itemName: 'bad.txt', code: 'network_error', message: 'offline' }] };
+  native.invoke.mockClear();
+  native.invoke.mockResolvedValueOnce(outcome).mockResolvedValueOnce(outcome);
+  const api = await import('./cloudApi');
+
+  expect(await api.uploadCloudFiles('xunlei', 'root', ['C:\\fixture.txt'])).toEqual(outcome);
+  expect(await api.uploadCloudDirectory('xunlei', 'root', 'C:\\fixture')).toEqual(outcome);
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'cloud_upload_files', {
+    provider: 'xunlei', parentId: 'root', paths: ['C:\\fixture.txt']
+  });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_upload_directory', {
+    provider: 'xunlei', parentId: 'root', path: 'C:\\fixture'
+  });
+});
+
+it('selects upload paths before invoking an upload so authorization retries can reuse them', async () => {
+  const api = await import('./cloudApi');
+  dialog.open
+    .mockResolvedValueOnce(['C:\\a.txt', 'C:\\b.txt'])
+    .mockResolvedValueOnce('C:\\folder')
+    .mockResolvedValueOnce(null);
+
+  expect(await api.pickCloudUploadFiles()).toEqual(['C:\\a.txt', 'C:\\b.txt']);
+  expect(await api.pickCloudUploadDirectory()).toBe('C:\\folder');
+  expect(await api.pickCloudUploadFiles()).toEqual([]);
+  expect(dialog.open).toHaveBeenNthCalledWith(1, { directory: false, multiple: true, title: '选择上传文件' });
+  expect(dialog.open).toHaveBeenNthCalledWith(2, { directory: true, multiple: false, title: '选择上传目录' });
 });

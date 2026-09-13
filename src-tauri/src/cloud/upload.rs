@@ -229,18 +229,6 @@ fn xml_escape(v: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-impl<'a, T: CloudHttpTransport + CloudUploadTransport, S: CredentialStore> PikPakClient<'a, T, S> {
-    pub fn upload_file(&self, parent: &str, path: &Path) -> Result<CloudFile, QuarkError> {
-        super::pikpak::reject_pikpak_recycle_bin_target(parent)?;
-        upload_pikpak_file(self.http, parent, path, |payload| {
-            self.request(
-                "POST",
-                "https://api-drive.mypikpak.com/drive/v1/files".into(),
-                Some(payload),
-            )
-        })
-    }
-}
 /// File preparation and OSS transfer require no live account credentials.
 pub fn upload_pikpak_file(
     http: &impl CloudUploadTransport,
@@ -320,8 +308,11 @@ pub fn upload_pikpak_file(
 }
 
 const CLOUD_DRIVE_DEFAULT_PART_SIZE: usize = 4 * 1024 * 1024;
-const CLOUD_DRIVE_OBJECT_HOST: &str = "pds.quark.cn";
-const CLOUD_DRIVE_OSS_USER_AGENT: &str = "aliyun-sdk-js/6.6.1";
+
+pub(crate) struct CloudDriveUploadProfile {
+    pub(crate) object_host: &'static str,
+    pub(crate) object_store_user_agent: &'static str,
+}
 
 /// Runs the CloudDrive browser upload protocol shared by Quark and UC.
 ///
@@ -333,6 +324,7 @@ pub(crate) fn upload_cloud_drive_file(
     http: &impl CloudUploadTransport,
     parent: &str,
     path: &Path,
+    profile: CloudDriveUploadProfile,
     pre_upload: impl FnOnce(Value) -> Result<Value, QuarkError>,
     update_hash: impl FnOnce(Value) -> Result<Value, QuarkError>,
     authorize: impl Fn(Value) -> Result<Value, QuarkError>,
@@ -372,6 +364,7 @@ pub(crate) fn upload_cloud_drive_file(
             &required(pre_data, "bucket")?,
             &required(pre_data, "obj_key")?,
             &required(pre_data, "upload_url")?,
+            profile.object_host,
         )?,
         bucket: required(pre_data, "bucket")?,
         object_key: required(pre_data, "obj_key")?,
@@ -408,6 +401,7 @@ pub(crate) fn upload_cloud_drive_file(
             content_type,
             bytes,
             None,
+            profile.object_store_user_agent,
             &authorize,
         )?;
         let response = checked(http.send_upload(request)?)?;
@@ -436,9 +430,10 @@ pub(crate) fn upload_cloud_drive_file(
         "application/xml",
         manifest.into(),
         contract.callback.as_deref(),
+        profile.object_store_user_agent,
         &authorize,
     )?)?)?;
-    if !completed.body.contains("CompleteMultipartUploadResult") {
+    if !cloud_drive_completion_succeeded(&completed.body) {
         return Err(QuarkError::InvalidResponse);
     }
     snapshot.validate()?;
@@ -454,6 +449,19 @@ pub(crate) fn upload_cloud_drive_file(
         &name,
         size,
     )
+}
+
+fn cloud_drive_completion_succeeded(body: &str) -> bool {
+    body.contains("CompleteMultipartUploadResult")
+        || serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("Status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|status| status.eq_ignore_ascii_case("OK"))
 }
 
 struct CloudDriveUploadContract {
@@ -518,7 +526,12 @@ fn cloud_drive_hashes(path: &Path, expected_size: u64) -> Result<(String, String
     ))
 }
 
-fn cloud_drive_object_url(bucket: &str, key: &str, upload_url: &str) -> Result<String, QuarkError> {
+fn cloud_drive_object_url(
+    bucket: &str,
+    key: &str,
+    upload_url: &str,
+    object_host: &str,
+) -> Result<String, QuarkError> {
     if bucket.is_empty()
         || bucket.len() > 63
         || bucket.starts_with('-')
@@ -533,17 +546,34 @@ fn cloud_drive_object_url(bucket: &str, key: &str, upload_url: &str) -> Result<S
     {
         return Err(QuarkError::InvalidResponse);
     }
-    let transfer_url = https_transfer_url(upload_url)?;
+    let upload_url = upload_url.trim();
+    let upload_url = upload_url
+        .strip_prefix("//")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or_else(|| upload_url.to_owned());
+    let mut url = url::Url::parse(&upload_url).map_err(|_| QuarkError::InvalidResponse)?;
+    let expected_host = format!("{bucket}.{object_host}");
+    let host = url.host_str().ok_or(QuarkError::InvalidResponse)?;
+    // Quark's current pre-upload response still returns this fixed provider
+    // endpoint as http. Upgrade only the already allowlisted object host;
+    // arbitrary insecure endpoints remain rejected by the shared validator.
+    if url.scheme() == "http"
+        && url.port().is_none()
+        && (host == object_host || host == expected_host)
+    {
+        url.set_scheme("https")
+            .map_err(|_| QuarkError::InvalidResponse)?;
+    }
+    let transfer_url = https_transfer_url(url.as_str())?;
     let mut url = url::Url::parse(&transfer_url).map_err(|_| QuarkError::InvalidResponse)?;
     if url.path() != "/" || url.query().is_some() || !matches!(url.port(), None | Some(443)) {
         return Err(QuarkError::InvalidResponse);
     }
     let host = url.host_str().ok_or(QuarkError::InvalidResponse)?;
-    let expected_host = format!("{bucket}.{CLOUD_DRIVE_OBJECT_HOST}");
-    if host != CLOUD_DRIVE_OBJECT_HOST && host != expected_host {
+    if host != object_host && host != expected_host {
         return Err(QuarkError::InvalidResponse);
     }
-    if host == CLOUD_DRIVE_OBJECT_HOST {
+    if host == object_host {
         url.set_host(Some(&expected_host))
             .map_err(|_| QuarkError::InvalidResponse)?;
     }
@@ -576,6 +606,7 @@ fn cloud_drive_authorized_request(
     content_type: &str,
     body: UploadBody,
     callback: Option<&str>,
+    object_store_user_agent: &str,
     authorize: &impl Fn(Value) -> Result<Value, QuarkError>,
 ) -> Result<UploadHttpRequest, QuarkError> {
     let date = httpdate::fmt_http_date(std::time::SystemTime::now());
@@ -593,7 +624,8 @@ fn cloud_drive_authorized_request(
         oss_headers.push_str(&format!("x-oss-callback:{callback}\n"));
     }
     oss_headers.push_str(&format!("x-oss-date:{date}\n"));
-    oss_headers.push_str(&format!("x-oss-user-agent:{CLOUD_DRIVE_OSS_USER_AGENT}\n"));
+    checked_temporary_header(object_store_user_agent)?;
+    oss_headers.push_str(&format!("x-oss-user-agent:{object_store_user_agent}\n"));
     let auth = authorize(json!({
         "task_id":&contract.task_id,
         "auth_info":&contract.auth_info,
@@ -610,7 +642,7 @@ fn cloud_drive_authorized_request(
     let mut headers = BTreeMap::from([
         ("Content-Type".into(), content_type.into()),
         ("x-oss-date".into(), date),
-        ("x-oss-user-agent".into(), CLOUD_DRIVE_OSS_USER_AGENT.into()),
+        ("x-oss-user-agent".into(), object_store_user_agent.into()),
         ("Authorization".into(), auth_key),
     ]);
     if let Some(content_md5) = content_md5 {
