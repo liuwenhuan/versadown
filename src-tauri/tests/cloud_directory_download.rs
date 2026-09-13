@@ -119,6 +119,64 @@ fn interrupted_preparation_after_restart_is_resumable_without_replaying_a_live_s
 }
 
 #[tokio::test]
+async fn interrupted_directory_submission_restarts_paused_and_resumes_only_pending_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("interrupted-directory.db");
+    let store = TaskStore::open_path(&path).unwrap();
+    let group_id = cancellation_group(&store, temp.path());
+    let items = store.cloud_directory_group_items(group_id).unwrap();
+    let mut completed = store
+        .create(NewTask::direct("cloud://quark/first"))
+        .unwrap();
+    completed.status = TaskStatus::Completed;
+    completed.total_length = Some(100);
+    completed.completed_length = 100;
+    completed.progress = 100;
+    store.apply_transfer_snapshot(completed.clone()).unwrap();
+    store
+        .link_cloud_directory_group_item_task(group_id, items[0].id, completed.id)
+        .unwrap();
+    drop(store); // The pending directory submission loop is lost on process exit.
+
+    let store = TaskStore::open_path(&path).unwrap();
+    assert_eq!(store.recover_interrupted_cloud_directories().unwrap(), 1);
+    assert_eq!(store.recover_interrupted_cloud_directories().unwrap(), 0);
+    let root = list_queue_tasks_for_scope(&store, Some("active"))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        root.status,
+        TaskStatus::Paused,
+        "interrupted roots must expose Resume"
+    );
+    assert_eq!(root.completed_length, 100);
+    store.set_cloud_directory_paused(group_id, false).unwrap();
+    let mut submitted = Vec::new();
+    retry_cloud_directory_group_with(&store, group_id, Default::default(), |_, file_id, _, _| {
+        submitted.push(file_id.clone());
+        let task = store
+            .create(NewTask::direct(format!("cloud://quark/{file_id}")))
+            .unwrap();
+        std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+    })
+    .await
+    .unwrap();
+    submitted.sort();
+    assert_eq!(submitted, vec!["second", "third"]);
+    assert_eq!(
+        store.find(completed.id).unwrap().status,
+        TaskStatus::Completed
+    );
+    assert_eq!(store.cloud_directory_groups().unwrap().len(), 1);
+    assert_eq!(store.list().unwrap().len(), 3);
+    assert!(store
+        .cloud_directory_group_items(group_id)
+        .unwrap()
+        .iter()
+        .all(|item| item.task_id.is_some()));
+}
+
+#[tokio::test]
 async fn authorization_recovery_reopens_directory_leaves_and_retries_each_once() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("tasks.db");
@@ -242,6 +300,119 @@ async fn authorization_recovery_reopens_directory_leaves_and_retries_each_once()
         .unwrap()
         .0
         .is_empty());
+}
+
+#[test]
+fn startup_directory_recovery_covers_every_provider_without_changing_terminal_groups() {
+    for provider in [
+        CloudProvider::Quark,
+        CloudProvider::Pikpak,
+        CloudProvider::Baidu,
+        CloudProvider::Tianyi,
+        CloudProvider::Aliyun,
+        CloudProvider::Xunlei,
+        CloudProvider::Uc,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let interrupted = cancellation_group_for_provider(&store, temp.path(), provider);
+        let cancelled = cancellation_group_for_provider(&store, temp.path(), provider);
+        store.cancel_cloud_directory_group(cancelled).unwrap();
+        let recycled = cancellation_group_for_provider(&store, temp.path(), provider);
+        store.recycle_cloud_directory_group(recycled).unwrap();
+        let failed = cancellation_group_for_provider(&store, temp.path(), provider);
+        for item in store.cloud_directory_group_items(failed).unwrap() {
+            store
+                .fail_cloud_directory_group_item(failed, item.id, "network_error", "offline")
+                .unwrap();
+        }
+        let completed = cancellation_group_for_provider(&store, temp.path(), provider);
+        for item in store.cloud_directory_group_items(completed).unwrap() {
+            let mut task = store
+                .create(NewTask::direct(format!(
+                    "cloud://{}/{}",
+                    provider.key(),
+                    item.id
+                )))
+                .unwrap();
+            task.status = TaskStatus::Completed;
+            store.apply_transfer_snapshot(task.clone()).unwrap();
+            store
+                .link_cloud_directory_group_item_task(completed, item.id, task.id)
+                .unwrap();
+        }
+        assert_eq!(
+            store.recover_interrupted_cloud_directories().unwrap(),
+            1,
+            "{provider:?}"
+        );
+        let roots = list_queue_tasks_for_scope(&store, None).unwrap();
+        for (id, expected) in [
+            (interrupted, TaskStatus::Paused),
+            (cancelled, TaskStatus::Cancelled),
+            (recycled, TaskStatus::Recycled),
+            (failed, TaskStatus::Failed),
+            (completed, TaskStatus::Completed),
+        ] {
+            assert_eq!(
+                roots
+                    .iter()
+                    .find(|root| root.id == id.to_string())
+                    .unwrap()
+                    .status,
+                expected,
+                "{provider:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn startup_directory_recovery_handles_linked_preparations_but_leaves_engine_owned_tasks_alone() {
+    for status in [TaskStatus::Parsing, TaskStatus::Paused] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let interrupted = cancellation_group(&store, temp.path());
+        let engine_owned = cancellation_group(&store, temp.path());
+        for (group_id, has_gid) in [(interrupted, false), (engine_owned, true)] {
+            for item in store.cloud_directory_group_items(group_id).unwrap() {
+                let mut task = store
+                    .create(NewTask::direct(format!("cloud://quark/{}", item.id)))
+                    .unwrap();
+                task.status = status;
+                if has_gid {
+                    task.aria_gid = Some(item.id.simple().to_string()[..16].to_string());
+                }
+                store.apply_transfer_snapshot(task.clone()).unwrap();
+                store
+                    .link_cloud_directory_group_item_task(group_id, item.id, task.id)
+                    .unwrap();
+            }
+        }
+        assert_eq!(store.recover_interrupted_cloud_directories().unwrap(), 1);
+        assert_eq!(
+            store
+                .cloud_directory_group(interrupted)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Paused
+        );
+        assert_eq!(
+            store
+                .cloud_directory_group(engine_owned)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Queued
+        );
+        for task in store.list().unwrap() {
+            assert_eq!(
+                task.status, status,
+                "engine reconciliation and member resume own leaf state"
+            );
+        }
+    }
 }
 
 fn file(id: &str, parent_id: &str, name: &str) -> CloudFile {
@@ -413,6 +584,14 @@ async fn review_late_duplicate_retry_never_erases_the_successful_leaf_link() {
 }
 
 fn cancellation_group(store: &TaskStore, output: &std::path::Path) -> uuid::Uuid {
+    cancellation_group_for_provider(store, output, CloudProvider::Quark)
+}
+
+fn cancellation_group_for_provider(
+    store: &TaskStore,
+    output: &std::path::Path,
+    provider: CloudProvider,
+) -> uuid::Uuid {
     use alldownloader_lib::cloud::commands::{
         create_cloud_directory_group_for_download, CloudDirectoryDownloadPlan, PlannedCloudFile,
     };
@@ -438,16 +617,9 @@ fn cancellation_group(store: &TaskStore, output: &std::path::Path) -> uuid::Uuid
             },
         ],
     };
-    create_cloud_directory_group_for_download(
-        store,
-        CloudProvider::Quark,
-        "cancel-root",
-        &plan,
-        output,
-        false,
-    )
-    .unwrap()
-    .id
+    create_cloud_directory_group_for_download(store, provider, "cancel-root", &plan, output, false)
+        .unwrap()
+        .id
 }
 
 #[tokio::test]

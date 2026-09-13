@@ -165,6 +165,7 @@ pub fn run() {
             };
             std::fs::create_dir_all(&data_dir)?;
             let store = std::sync::Arc::new(TaskStore::open_path(&data_dir.join("tasks.sqlite"))?);
+            store.recover_interrupted_cloud_directories()?;
             let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
                 data_dir.join("cloud-sessions"),
             )?);

@@ -50,6 +50,25 @@ pub struct TaskStore {
 }
 
 impl TaskStore {
+    /// Run once at application startup, before any directory submission workers.
+    /// Engine recovery only sees linked tasks: unsubmitted directory leaves have
+    /// no GID and their submission loop does not survive a process exit.
+    pub fn recover_interrupted_cloud_directories(&self) -> Result<usize, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.execute(
+            "UPDATE cloud_directory_groups SET status = 'paused', updated_at = ?1
+             WHERE status IN ('queued', 'parsing', 'downloading') AND EXISTS (
+                 SELECT 1 FROM cloud_directory_group_items i
+                 LEFT JOIN tasks t ON t.id = i.task_id
+                 WHERE i.group_id = cloud_directory_groups.id AND (
+                     (i.task_id IS NULL AND i.failure_code IS NULL AND i.failure_message IS NULL)
+                     OR (t.aria_gid IS NULL AND t.status IN ('parsing', 'paused'))
+                 )
+             )",
+            [current_timestamp()],
+        )?)
+    }
+
     pub fn claim_cloud_directory_leaf_task(
         &self,
         group: Uuid,
