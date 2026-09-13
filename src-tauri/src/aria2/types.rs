@@ -96,11 +96,25 @@ pub struct Aria2Status {
     #[serde(default)]
     pub files: Vec<Aria2File>,
     #[serde(default)]
+    pub bittorrent: Option<Aria2BitTorrent>,
+    #[serde(default)]
     pub followed_by: Vec<String>,
     #[serde(default)]
     pub error_code: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Aria2BitTorrent {
+    #[serde(default)]
+    pub info: Option<Aria2TorrentInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Aria2TorrentInfo {
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -348,6 +348,7 @@ impl crate::aria2::Aria2Api for SagaAria2 {
             upload_speed: "0".into(),
             connections: "0".into(),
             files: vec![],
+            bittorrent: None,
             followed_by: vec![],
             error_code: None,
             error_message: None,

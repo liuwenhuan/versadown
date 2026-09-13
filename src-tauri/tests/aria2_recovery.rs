@@ -74,6 +74,44 @@ async fn native_recovery_reconciles_only_owned_job() {
 }
 
 #[tokio::test]
+async fn reconcile_repairs_a_recovery_placeholder_from_the_reported_file_name() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellStatus" => {
+            let mut status = fixture::status("late-name", "active", 30);
+            status["files"] = json!([{
+                "index": "1",
+                "path": "C:\\Downloads\\稍后取得的名称.pdf",
+                "length": "100",
+                "completedLength": "30",
+                "selected": "true"
+            }]);
+            status
+        }
+        other => panic!("{other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask {
+            source: "aria2:late-name".into(),
+            name: "恢复的下载任务".into(),
+            kind: "file".into(),
+            is_private: false,
+        })
+        .unwrap();
+    store.bind_gid(task.id, "late-name").unwrap();
+
+    let updated = DownloadService::new(Arc::new(client), Arc::clone(&store))
+        .reconcile_task(task.id)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.name, "稍后取得的名称.pdf");
+    assert_eq!(store.find(task.id).unwrap().name, "稍后取得的名称.pdf");
+    server.abort();
+}
+
+#[tokio::test]
 async fn native_recovery_removes_unowned_engine_job_and_confined_payload() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("orphan.bin");

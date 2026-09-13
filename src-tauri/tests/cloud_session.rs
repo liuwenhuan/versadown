@@ -208,6 +208,7 @@ impl alldownloader_lib::aria2::Aria2Api for AuthorizationRetryEngine {
             upload_speed: "0".into(),
             connections: "1".into(),
             files: vec![],
+            bittorrent: None,
             followed_by: vec![],
             error_code: None,
             error_message: None,

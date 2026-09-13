@@ -47,6 +47,7 @@ impl RecordingAria2 {
             upload_speed: "0".to_string(),
             connections: "2".to_string(),
             files: vec![],
+            bittorrent: None,
             followed_by: vec![],
             error_code: None,
             error_message: None,

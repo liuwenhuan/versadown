@@ -773,7 +773,7 @@ impl DownloadService {
 
     pub(super) async fn apply_status(
         &self,
-        current: DownloadTask,
+        mut current: DownloadTask,
         mut status: Aria2Status,
         confirmed: bool,
     ) -> Result<DownloadTask, DownloadServiceError> {
@@ -788,6 +788,17 @@ impl DownloadService {
                 return Err(Aria2Error::MalformedResponse.into());
             }
             let Some(next) = status.followed_by.first().cloned() else {
+                if super::recovery::needs_recovery_name(&current) {
+                    let name = super::recovery::recovery_name(&status).or_else(|| {
+                        let files = self.store.files(current.id).ok()?;
+                        super::recovery::recovery_file_name(
+                            files.iter().map(|file| file.path.as_str()),
+                        )
+                    });
+                    if let Some(name) = name {
+                        current.name = name;
+                    }
+                }
                 let mut snapshot = TransferSnapshot::try_from(status)?;
                 if !confirmed
                     && !self.store.selection_confirmed(current.id)?
