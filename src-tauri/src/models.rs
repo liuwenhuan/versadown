@@ -302,6 +302,8 @@ pub struct DownloadTask {
     #[serde(default)]
     pub connections: u32,
     #[serde(default)]
+    pub discovered_nodes: u32,
+    #[serde(default)]
     pub eta_seconds: Option<u64>,
     #[serde(default)]
     pub aria_error_code: Option<String>,
@@ -382,6 +384,7 @@ pub struct QueueTaskPayload {
     pub download_speed: u64,
     pub upload_speed: u64,
     pub connections: u32,
+    pub discovered_nodes: u32,
     pub eta_seconds: Option<u64>,
     pub aria_error_code: Option<String>,
     pub created_at: i64,

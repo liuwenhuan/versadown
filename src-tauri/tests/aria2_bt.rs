@@ -6,6 +6,40 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
+async fn reconcile_tracks_unique_peers_for_an_active_torrent() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "system.multicall" => json!([[fixture::status("torrent-gid", "active", 0)]]),
+        "aria2.getPeers" => json!([
+            {"ip":"203.0.113.10","port":"51413"},
+            {"ip":"203.0.113.10","port":"51413"},
+            {"ip":"2001:db8::7","port":"51414"}
+        ]),
+        "aria2.getGlobalStat" => json!({
+            "downloadSpeed":"10", "uploadSpeed":"0", "numActive":"1",
+            "numWaiting":"0", "numStopped":"0", "numStoppedTotal":"0"
+        }),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:test".into(),
+            name: "test".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
+        .unwrap();
+    store.bind_gid(task.id, "torrent-gid").unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    service.reconcile_now().await.unwrap();
+
+    assert_eq!(store.find(task.id).unwrap().discovered_nodes, 2);
+    server.abort();
+}
+
+#[tokio::test]
 async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_start() {
     let calls = Arc::new(Mutex::new(vec![]));
     let wire = calls.clone();

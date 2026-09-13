@@ -63,6 +63,17 @@ fn legacy_database_is_preserved_and_accepts_a_gid() {
 }
 
 #[test]
+fn legacy_database_defaults_discovered_nodes_to_zero() {
+    let (path, id) = legacy_database_with_one_task();
+    let store = TaskStore::open_path(&path).expect("migrate legacy database");
+
+    assert_eq!(store.find(id).unwrap().discovered_nodes, 0);
+
+    drop(store);
+    std::fs::remove_file(path).expect("remove test database");
+}
+
+#[test]
 fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
     let path = temporary_database_path();
     let id = Uuid::new_v4();
@@ -108,7 +119,7 @@ fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        9
+        10
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -192,7 +203,7 @@ fn version_three_database_backfills_creation_time_from_the_existing_timestamp() 
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        9
+        10
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -250,6 +261,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             download_speed: 50,
             upload_speed: 2,
             connections: 3,
+            discovered_nodes: 0,
             eta_seconds: Some(15),
             aria_error_code: None,
             created_at: task.created_at,
