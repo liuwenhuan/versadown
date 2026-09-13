@@ -51,8 +51,9 @@ pub use models::{
     TaskStatus,
 };
 pub use parser::{
-    classify_input, extract_candidates, extract_cloud_share_candidate, Candidate, CandidateKind,
-    CloudShareCandidate,
+    classify_input, extract_candidates, extract_cloud_share_candidate, scan_download_inputs,
+    validate_download_input, validate_task_source, Candidate, CandidateKind, CloudShareCandidate,
+    InputValidationError, ScannedInput, ValidatedCandidate,
 };
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};

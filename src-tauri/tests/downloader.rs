@@ -206,6 +206,54 @@ async fn cloud_share_submission_keeps_signed_url_and_headers_out_of_task_store()
 }
 
 #[tokio::test]
+async fn legacy_invalid_magnet_never_reaches_aria2() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    let task = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:short".into(),
+            name: "legacy magnet".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
+        .unwrap();
+
+    let error = service
+        .prepare_magnet_with_options(task.id, task.source.clone(), UriSubmissionOptions::default())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "磁链格式无效");
+    assert!(api.calls().is_empty());
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Parsing);
+}
+
+#[tokio::test]
+async fn legacy_invalid_direct_source_never_reaches_aria2() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    let task = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:short".into(),
+            name: "legacy direct".into(),
+            kind: "file".into(),
+            is_private: false,
+        })
+        .unwrap();
+
+    let error = service
+        .submit_uri_with_options(task.id, vec![task.source.clone()], UriSubmissionOptions::default())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "磁链格式无效");
+    assert!(api.calls().is_empty());
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Parsing);
+}
+
+#[tokio::test]
 async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2() {
     use alldownloader_lib::cloud::{
         commands::ResolvedCloudDownload,

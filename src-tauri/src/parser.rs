@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -30,26 +31,21 @@ pub enum ShareInputError {
     MultipleLinks,
     #[error("访问码格式无效")]
     InvalidAccessCode,
+    #[error("网盘分享链接格式无效")]
+    InvalidShare,
 }
 
 impl CloudShareCandidate {
     fn from_candidate(candidate: Candidate) -> Option<Self> {
-        let mut url = Url::parse(&candidate.uri).ok()?;
+        let url = Url::parse(&candidate.uri).ok()?;
         let provider = cloud_provider_for_url(&url)?;
+        valid_share_id(&url, provider)?;
         let access_code = access_code_from_query(&url);
-        let remaining_query = url
-            .query_pairs()
-            .filter(|(name, _)| !is_access_code_parameter(name))
-            .map(|(name, value)| (name.into_owned(), value.into_owned()))
-            .collect::<Vec<_>>();
-        {
-            let mut query = url.query_pairs_mut();
-            query.clear();
-            query.extend_pairs(remaining_query.iter().map(|(name, value)| (name, value)));
-        }
         Some(Self {
             provider,
-            url: url.into(),
+            // Parsing a URL is needed for structural checks only. Serializing
+            // it would rewrite a query signature or access code.
+            url: candidate.uri,
             access_code,
         })
     }
@@ -64,11 +60,22 @@ pub fn extract_cloud_share_candidate(
     input: &str,
     entered_access_code: Option<&str>,
 ) -> Result<Option<CloudShareCandidate>, ShareInputError> {
-    let values = extract_candidates(input)
+    let candidates = extract_candidates(input);
+    let has_invalid_share = candidates.iter().any(|candidate| {
+        let Ok(url) = Url::parse(&candidate.uri) else {
+            return false;
+        };
+        registered_share_provider(&url).is_some_and(|provider| {
+            cloud_provider_for_url(&url) != Some(provider)
+                || valid_share_id(&url, provider).is_none()
+        })
+    });
+    let values = candidates
         .into_iter()
         .filter_map(CloudShareCandidate::from_candidate)
         .collect::<Vec<_>>();
     match values.as_slice() {
+        [] if has_invalid_share => Err(ShareInputError::InvalidShare),
         [] => Ok(None),
         [value] => {
             let inferred_access_code = value
@@ -89,10 +96,46 @@ fn cloud_provider_for_url(url: &Url) -> Option<CloudProvider> {
         .map(|descriptor| descriptor.provider)
 }
 
+fn registered_share_provider(url: &Url) -> Option<CloudProvider> {
+    crate::cloud::ProviderRegistry::global()
+        .all()
+        .iter()
+        .find(|descriptor| {
+            matches!(url.scheme(), "http" | "https")
+                && url
+                    .host_str()
+                    .is_some_and(|host| descriptor.share_hosts.contains(&host))
+        })
+        .map(|descriptor| descriptor.provider)
+}
+
+fn valid_share_id(url: &Url, provider: CloudProvider) -> Option<&str> {
+    let descriptor = crate::cloud::ProviderRegistry::global().get(provider);
+    if !descriptor.accepts_share_url(url)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return None;
+    }
+    descriptor
+        .share_patterns
+        .iter()
+        .find_map(|prefix| url.path().strip_prefix(prefix))
+        .filter(|id| {
+            !id.is_empty()
+                && !id.contains('/')
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        })
+}
+
 fn access_code_from_query(url: &Url) -> Option<String> {
-    url.query_pairs()
-        .find(|(name, _)| is_access_code_parameter(name))
-        .map(|(_, value)| value.into_owned())
+    url.query()?.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        is_access_code_parameter(name).then(|| value.to_string())
+    })
 }
 
 fn is_access_code_parameter(name: &str) -> bool {
@@ -143,44 +186,192 @@ pub struct Candidate {
     pub auto_start: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedCandidate {
+    pub kind: CandidateKind,
+    pub source: String,
+    pub auto_start: bool,
+}
+
+impl ValidatedCandidate {
+    pub fn as_candidate(&self) -> Candidate {
+        Candidate {
+            kind: self.kind.clone(),
+            uri: self.source.clone(),
+            auto_start: self.auto_start,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum InputValidationError {
+    #[error("未发现受支持的有效下载链接")]
+    Unsupported,
+    #[error("下载链接格式无效")]
+    InvalidUrl,
+    #[error("磁链格式无效")]
+    InvalidMagnet,
+    #[error("ED2K 链接格式无效")]
+    InvalidEd2k,
+    #[error("FTP 链接格式无效")]
+    InvalidFtp,
+    #[error("迅雷链接格式无效")]
+    InvalidThunder,
+    #[error("网盘分享链接格式无效")]
+    InvalidCloudShare,
+    #[error("种子文件路径格式无效")]
+    InvalidTorrent,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScannedInput {
+    pub input: String,
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<CandidateKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl ScannedInput {
+    fn valid(candidate: ValidatedCandidate) -> Self {
+        Self {
+            input: candidate.source,
+            valid: true,
+            kind: Some(candidate.kind),
+            message: None,
+        }
+    }
+
+    fn invalid(input: String, error: InputValidationError) -> Self {
+        Self {
+            input,
+            valid: false,
+            kind: None,
+            message: Some(error.to_string()),
+        }
+    }
+}
+
 pub fn classify_input(input: &str) -> Candidate {
     let uri = input.trim().to_string();
-    let lower = uri.to_lowercase();
-    let path_without_query = lower.split(['?', '#']).next().unwrap_or(&lower);
-    let share_provider = Url::parse(&uri)
-        .ok()
-        .as_ref()
-        .and_then(|url| crate::cloud::ProviderRegistry::global().for_candidate_url(url))
-        .map(|d| d.provider);
-    let kind = if valid_ed2k_file_link(&uri) {
-        CandidateKind::Ed2k
-    } else if lower.starts_with("ed2k:") {
-        CandidateKind::Text
-    } else if lower.starts_with("magnet:") {
-        CandidateKind::Magnet
-    } else if lower.starts_with("thunder://") {
-        CandidateKind::Thunder
-    } else if lower.starts_with("ftp://") {
-        CandidateKind::Ftp
-    } else if share_provider == Some(CloudProvider::Quark) {
-        CandidateKind::QuarkShare
-    } else if share_provider == Some(CloudProvider::Pikpak) {
-        CandidateKind::PikPakShare
-    } else if path_without_query.ends_with(".torrent") {
-        CandidateKind::Torrent
-    } else if (lower.starts_with("http://") || lower.starts_with("https://"))
-        && path_without_query.ends_with(".m3u8")
-    {
-        CandidateKind::Hls
-    } else if (lower.starts_with("http://") || lower.starts_with("https://"))
-        && path_without_query.ends_with(".mpd")
-    {
-        CandidateKind::Dash
-    } else if lower.starts_with("http://") || lower.starts_with("https://") {
-        CandidateKind::Direct
-    } else {
-        CandidateKind::Text
+    validate_download_input(&uri)
+        .map(|candidate| candidate.as_candidate())
+        .unwrap_or(Candidate {
+            kind: CandidateKind::Text,
+            uri,
+            auto_start: false,
+        })
+}
+
+pub fn extract_candidates(text: &str) -> Vec<Candidate> {
+    extract_raw_candidates(text)
+        .into_iter()
+        .map(|value| classify_input(&value))
+        .collect()
+}
+
+pub fn scan_download_inputs(text: &str) -> Vec<ScannedInput> {
+    let values = extract_raw_candidates(text);
+    if values.is_empty() {
+        return vec![ScannedInput::invalid(
+            text.trim().to_string(),
+            InputValidationError::Unsupported,
+        )];
+    }
+    values
+        .into_iter()
+        .map(|input| match validate_download_input(&input) {
+            Ok(candidate) => ScannedInput::valid(candidate),
+            Err(error) => ScannedInput::invalid(input, error),
+        })
+        .collect()
+}
+
+pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputValidationError> {
+    let source = input.trim();
+    if source.is_empty() {
+        return Err(InputValidationError::Unsupported);
+    }
+    let lower = source.to_ascii_lowercase();
+    if lower.starts_with("magnet:") {
+        validate_magnet(source)?;
+        return Ok(validated(CandidateKind::Magnet, source.to_string()));
+    }
+    if lower.starts_with("ed2k:") {
+        if !valid_ed2k_file_link(source) {
+            return Err(InputValidationError::InvalidEd2k);
+        }
+        return Ok(validated(CandidateKind::Ed2k, source.to_string()));
+    }
+    if lower.starts_with("thunder://") {
+        let target = decode_thunder_target(source)?;
+        let target_kind = validate_download_input(&target)?.kind;
+        if matches!(target_kind, CandidateKind::Torrent | CandidateKind::Thunder) {
+            return Err(InputValidationError::InvalidThunder);
+        }
+        return Ok(validated(CandidateKind::Thunder, source.to_string()));
+    }
+    if lower.starts_with("ftp:") {
+        return validate_network_url(source, "ftp").map(|source| validated(CandidateKind::Ftp, source));
+    }
+    if lower.starts_with("http:") || lower.starts_with("https:") {
+        let url = Url::parse(source).map_err(|_| InputValidationError::InvalidUrl)?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(InputValidationError::InvalidUrl);
+        }
+        if registered_share_provider(&url).is_some() {
+            let provider = cloud_provider_for_url(&url).ok_or(InputValidationError::InvalidCloudShare)?;
+            valid_share_id(&url, provider).ok_or(InputValidationError::InvalidCloudShare)?;
+            let kind = match provider {
+                CloudProvider::Quark => CandidateKind::QuarkShare,
+                CloudProvider::Pikpak => CandidateKind::PikPakShare,
+                _ => CandidateKind::Direct,
+            };
+            return Ok(validated(kind, source.to_string()));
+        }
+        let normalized = normalize_queryless_unicode_path(source, &url);
+        let path = url.path().to_ascii_lowercase();
+        let kind = if path.ends_with(".torrent") {
+            CandidateKind::Torrent
+        } else if path.ends_with(".m3u8") {
+            CandidateKind::Hls
+        } else if path.ends_with(".mpd") {
+            CandidateKind::Dash
+        } else {
+            CandidateKind::Direct
+        };
+        return Ok(validated(kind, normalized));
+    }
+    if lower.ends_with(".torrent") {
+        validate_local_torrent(source)?;
+        return Ok(validated(CandidateKind::Torrent, source.to_string()));
+    }
+    Err(InputValidationError::Unsupported)
+}
+
+pub fn validate_task_source(kind: &str, source: &str) -> Result<(), InputValidationError> {
+    if kind == "cloud" {
+        // Signed cloud URLs are never persisted as task sources. Cloud
+        // connectors validate their stable `cloud://` identities separately.
+        return Ok(());
+    }
+    let candidate = validate_download_input(source)?;
+    let valid_kind = match kind {
+        "file" => candidate.kind == CandidateKind::Direct,
+        "ed2k" => candidate.kind == CandidateKind::Ed2k,
+        "ftp" => candidate.kind == CandidateKind::Ftp,
+        "hls" => candidate.kind == CandidateKind::Hls,
+        "dash" => candidate.kind == CandidateKind::Dash,
+        "magnet" => candidate.kind == CandidateKind::Magnet,
+        "torrent" => candidate.kind == CandidateKind::Torrent,
+        _ => false,
     };
+    valid_kind.then_some(()).ok_or(InputValidationError::Unsupported)
+}
+
+fn validated(kind: CandidateKind, source: String) -> ValidatedCandidate {
     let auto_start = matches!(
         kind,
         CandidateKind::Direct
@@ -190,28 +381,107 @@ pub fn classify_input(input: &str) -> Candidate {
             | CandidateKind::Dash
             | CandidateKind::Thunder
     );
-    Candidate {
+    ValidatedCandidate {
         kind,
-        uri,
+        source,
         auto_start,
     }
 }
 
-pub fn extract_candidates(text: &str) -> Vec<Candidate> {
+fn extract_raw_candidates(text: &str) -> Vec<String> {
     let pattern = Regex::new(
-        r"(?i)(ed2k://\|file\|[^\r\n<>]*?\|/|magnet:\?[^\s<>]+|thunder://[^\s<>]+|ftp://[^\s<>]+|https?://[^\s<>]+)",
+        r"(?i)(ed2k:[^\s<>]+|magnet:[^\s<>]*|thunder://[^\s<>]*|ftp:[^\s<>]+|https?://[^\s<>]+)",
     )
     .expect("static candidate pattern");
     pattern
         .find_iter(text)
         .map(|match_| {
-            classify_input(
-                match_
-                    .as_str()
-                    .trim_end_matches(|character: char| ".,;；，。)】]}".contains(character)),
-            )
+            match_
+                .as_str()
+                .trim_end_matches(|character: char| ".,;；，。)】]}".contains(character))
+                .to_string()
         })
         .collect()
+}
+
+fn validate_magnet(source: &str) -> Result<(), InputValidationError> {
+    let query = source
+        .get(..8)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("magnet:?"))
+        .and_then(|_| source.get(8..))
+        .ok_or(InputValidationError::InvalidMagnet)?;
+    let valid = query.split('&').any(|part| {
+        let Some((name, value)) = part.split_once('=') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case("xt")
+            && value
+                .get(..9)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("urn:btih:"))
+            && value.get(9..).is_some_and(|hash| {
+                (hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    || (hash.len() == 32
+                        && hash.bytes().all(|byte| {
+                            byte.is_ascii_alphabetic() || (b'2'..=b'7').contains(&byte)
+                        }))
+            })
+    });
+    valid.then_some(()).ok_or(InputValidationError::InvalidMagnet)
+}
+
+pub(crate) fn decode_thunder_target(source: &str) -> Result<String, InputValidationError> {
+    let encoded = source
+        .get("thunder://".len()..)
+        .ok_or(InputValidationError::InvalidThunder)?;
+    let decoded = STANDARD
+        .decode(encoded)
+        .map_err(|_| InputValidationError::InvalidThunder)?;
+    let decoded = String::from_utf8(decoded).map_err(|_| InputValidationError::InvalidThunder)?;
+    decoded
+        .strip_prefix("AA")
+        .and_then(|value| value.strip_suffix("ZZ"))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(InputValidationError::InvalidThunder)
+}
+
+fn validate_network_url(source: &str, scheme: &str) -> Result<String, InputValidationError> {
+    let url = Url::parse(source).map_err(|_| InputValidationError::InvalidFtp)?;
+    if url.scheme() != scheme || url.host_str().is_none() {
+        return Err(InputValidationError::InvalidFtp);
+    }
+    Ok(normalize_queryless_unicode_path(source, &url))
+}
+
+fn normalize_queryless_unicode_path(source: &str, url: &Url) -> String {
+    if url.query().is_some() || url.fragment().is_some() {
+        return source.to_string();
+    }
+    let Some(authority_start) = source.find("://").map(|index| index + 3) else {
+        return source.to_string();
+    };
+    let authority_end = source[authority_start..]
+        .find('/')
+        .map(|index| authority_start + index)
+        .unwrap_or(source.len());
+    if !source[..authority_end].is_ascii() || source[authority_end..].is_ascii() {
+        return source.to_string();
+    }
+    url.to_string()
+}
+
+fn validate_local_torrent(source: &str) -> Result<(), InputValidationError> {
+    let path = if source.to_ascii_lowercase().starts_with("file:") {
+        Url::parse(source)
+            .ok()
+            .and_then(|url| url.to_file_path().ok())
+    } else {
+        Some(std::path::PathBuf::from(source))
+    }
+    .ok_or(InputValidationError::InvalidTorrent)?;
+    path.is_absolute()
+        .then_some(())
+        .ok_or(InputValidationError::InvalidTorrent)
 }
 
 fn valid_ed2k_file_link(value: &str) -> bool {
@@ -251,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_all_provider_hosts_and_strips_pwd_from_canonical_url() {
+    fn recognizes_all_provider_hosts_without_rewriting_the_access_code_query() {
         for (input, provider) in [
             ("https://pan.quark.cn/s/a?pwd=1234", CloudProvider::Quark),
             (
@@ -270,7 +540,7 @@ mod tests {
             let value = extract_cloud_share_candidate(input, None).unwrap().unwrap();
             assert_eq!(value.provider, provider);
             assert_eq!(value.access_code.as_deref(), Some("1234"));
-            assert!(!value.url.contains("pwd="));
+            assert_eq!(value.url, input.split_whitespace().next().unwrap());
         }
     }
 
@@ -284,4 +554,50 @@ mod tests {
             Err(ShareInputError::MultipleLinks)
         ));
     }
+
+    #[test]
+    fn classifies_a_short_btih_as_text_instead_of_a_magnet() {
+        assert_eq!(
+            classify_input("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef0123").kind,
+            CandidateKind::Text
+        );
+    }
+
+    #[test]
+    fn rejects_a_registered_share_host_without_a_share_id() {
+        assert!(matches!(
+            extract_cloud_share_candidate("https://pan.baidu.com/s/", None),
+            Err(ShareInputError::InvalidShare)
+        ));
+    }
+
+    #[test]
+    fn scan_keeps_invalid_candidates_in_order_without_creating_a_fallback_link() {
+        let values = scan_download_inputs(
+            "magnet:?xt=urn:btih:short https://example.test/release.iso",
+        );
+
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].message.as_deref(), Some("磁链格式无效"));
+        assert!(!values[0].valid);
+        assert!(values[1].valid);
+        assert_eq!(values[1].kind, Some(CandidateKind::Direct));
+    }
+
+    #[test]
+    fn only_normalizes_a_queryless_unicode_url_path() {
+        assert_eq!(
+            validate_download_input("https://example.test/目录/file.iso")
+                .unwrap()
+                .source,
+            "https://example.test/%E7%9B%AE%E5%BD%95/file.iso"
+        );
+        assert_eq!(
+            validate_download_input("https://example.test/目录/file.iso?signature=未改写")
+                .unwrap()
+                .source,
+            "https://example.test/目录/file.iso?signature=未改写"
+        );
+    }
+
 }
