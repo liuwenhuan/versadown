@@ -21,6 +21,12 @@ it('uses concise quick-add controls without explanatory labels', () => {
   expect(screen.queryByText('标准链接直接规则解析；复杂内容才会请求 AI 辅助。')).not.toBeInTheDocument();
 });
 
+it.each(['modal', 'header'] as const)('omits parser implementation guidance in %s placement', (placement) => {
+  render(<NewDownloadDialog open placement={placement} onParse={vi.fn()} onClose={vi.fn()} />);
+  expect(screen.queryByText('标准链接直接规则解析；复杂内容才会请求 AI 辅助。')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '开始解析下载' })).toBeVisible();
+});
+
 it('uses a compact launcher card without a fixed blank lower area', () => {
   const stylesheet = document.createElement('style');
   stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
@@ -111,6 +117,14 @@ it.each([
   '网盘请求失败：阿里云盘分享已删除',
   '网盘请求失败：迅雷分享已删除',
   '网盘请求失败：UC 分享已失效或已停止分享',
+  '网盘请求失败：百度分享无效或请求被拒绝',
+  '网盘请求失败：夸克分享无效或已过期',
+  '网盘请求失败：PikPak 分享已失效或无权访问',
+  '网盘请求失败：迅雷分享已失效或无权访问',
+  '网盘请求失败：天翼云盘分享不可用，请检查访问码、有效期及权限',
+  '网盘请求失败：阿里云盘分享不可用，请检查分享有效期及访问权限',
+  '网盘请求失败：UC 分享链接无权访问',
+  '网盘请求失败：分享内容被封禁',
 ])('closes instead of reparsing unavailable shares across providers: %s', async (message) => {
   const user = userEvent.setup();
   const onParse = vi.fn().mockRejectedValue(message);
@@ -135,13 +149,14 @@ it.each([
   '阿里云盘分享请求频繁，请稍后重试',
   '百度网盘授权已过期，请重新授权',
   '分享访问码错误或缺失',
-  '天翼云盘分享不可用，请检查访问码、有效期及权限',
-  '百度分享无效或请求被拒绝',
   '分享令牌已过期，请重新获取',
-  '迅雷分享已失效或无权访问',
-  'PikPak 分享已失效或无权访问',
-  '夸克分享无效或已过期',
-])('keeps retry available for recoverable or ambiguous failures: %s', async (message) => {
+  '百度分享提取码校验失败，请检查提取码后重试',
+  '百度分享验证已通过，但文件列表访问失败，请重试或重新网页授权',
+  '分享不可用：网络请求超时，请重试',
+  '分享不可用：请求频繁，请稍后重试',
+  '分享链接无效：提取码错误',
+  '分享不可用：请先登录后重试',
+])('keeps retry available for recoverable failures: %s', async (message) => {
   const user = userEvent.setup();
   render(<NewDownloadDialog open initialInput="https://example.test/share" onParse={() => Promise.reject(new Error(message))} onClose={vi.fn()} />);
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
@@ -149,10 +164,10 @@ it.each([
   expect(screen.getByRole('button', { name: '开始解析下载' })).toBeEnabled();
 });
 
-it('clears an unavailable-share failure when the user changes the link', async () => {
+it.each(['launcher', 'modal', 'header'] as const)('clears an unavailable-share failure when the user changes the link in %s', async (placement) => {
   const user = userEvent.setup();
-  const onParse = vi.fn().mockRejectedValueOnce(new Error('PikPak 分享已删除')).mockResolvedValueOnce(undefined);
-  render(<NewDownloadDialog open initialInput="https://example.test/old" onParse={onParse} onClose={vi.fn()} />);
+  const onParse = vi.fn().mockRejectedValueOnce(new Error('网盘请求失败：百度分享无效或请求被拒绝')).mockResolvedValueOnce(undefined);
+  render(<NewDownloadDialog open placement={placement} initialInput="https://example.test/old" onParse={onParse} onClose={vi.fn()} />);
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
   expect(await screen.findByRole('button', { name: '关闭', exact: true })).toBeEnabled();
   await user.clear(screen.getByLabelText('下载内容'));

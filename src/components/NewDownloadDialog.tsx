@@ -12,13 +12,13 @@ export interface NewDownloadDialogProps {
   initialInput?: string;
 }
 
-// Parse errors currently cross IPC as text. Match explicit share failures,
-// not provider names or generic request/auth failures, which may be retried.
+// Parse errors currently cross IPC as text. All providers use the same action
+// policy: unavailable shares close; explicit transient/auth/code errors retry.
 function isUnavailableShare(message: string | null): boolean {
   if (!message) return false;
-  // These messages are provider catch-alls, not confirmed terminal statuses.
-  if (/分享已失效或无权访问|分享无效或已过期/.test(message)) return false;
-  return /分享(?:链接|地址|文件|内容|的文件)?(?:已(?:被)?(?:取消|删除|失效|过期|屏蔽|封禁)|不存在)/.test(message)
+  // A generic suggestion to check a code is not a confirmed code error.
+  if (/超时|请求(?:过于)?频繁|限流|(?:请|需要)(?:先|重新)?(?:登录|授权)|(?:登录|授权|令牌)(?:已)?(?:过期|失效|无效)|(?:提取码|访问码|分享码|密码)(?:(?:校验|验证)?(?:错误|失败|无效)|不正确|缺失)/.test(message)) return false;
+  return /分享(?:链接|地址|文件|内容|的文件)?(?:已(?:经)?(?:被)?|被)?(?:取消|删除|失效|过期|屏蔽|封禁|不存在|无效|不可用|无权访问|禁止访问|拒绝访问)/.test(message)
     || /(?:已|已经)(?:被)?(?:取消|停止)(?:了)?分享/.test(message)
     || /分享[^。；\n]*封禁[^。；\n]*(?:无法访问|受限)/.test(message);
 }
@@ -135,7 +135,6 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
           if (value.trim() !== input.trim()) { setError(null); setAccessCode(''); setAccessCodePrompt(null); }
           setInput(value);
         }} placeholder="粘贴链接、分享地址、文本或网页地址" />
-        {placement !== 'launcher' && <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>}
         <div className={`new-download-actions${accessCodePrompt ? ' cloud-toolbar' : ''}`}>
           {placement === 'launcher' && <button type="button" onClick={openTaskList} disabled={isSubmitting}>打开任务列表</button>}
           {error && <span role="alert" className="parse-failure">{error}</span>}
