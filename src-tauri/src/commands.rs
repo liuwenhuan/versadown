@@ -334,6 +334,11 @@ fn fail_engine_submission_text(store: &TaskStore, task: &DownloadTask, error: St
 }
 
 #[tauri::command]
+pub fn scan_download_inputs(input: String) -> Vec<crate::ScannedInput> {
+    crate::scan_download_inputs(&input)
+}
+
+#[tauri::command]
 pub async fn parse_download(
     app: AppHandle,
     input: String,

@@ -201,7 +201,7 @@ git commit -m "feat: scan download inputs before task creation"
 
 **Interfaces:**
 - Dialog consumes `onScan(input)` and processes scan entries serially.
-- Valid batch entries call `onParse(entry.input, ..., true)` only after the user confirms; invalid entries expose `skip` and cannot call `onParse`.
+- Valid batch entries call `onParse(entry.input, ...)` only after the user confirms the candidate; invalid entries expose `skip` and cannot call `onParse`. Existing magnet/torrent/share resource confirmations continue through the app-level confirmation flow after that candidate confirmation.
 
 - [ ] **Step 1: Write failing dialog tests**
 

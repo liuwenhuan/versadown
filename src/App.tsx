@@ -14,7 +14,7 @@ import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
@@ -1252,7 +1252,7 @@ export function App() {
               ...current,
               resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
             } : current)} onClose={() => { dismissHeaderConfirmation(); setHeaderPanel(null); }} />
-              : headerPanel === 'download' ? <NewDownloadDialog open placement="header" initialInput={searchInput} onParse={async (input, accessCode) => {
+              : headerPanel === 'download' ? <NewDownloadDialog open placement="header" initialInput={searchInput} onScan={scanDownloadInputs} onParse={async (input, accessCode) => {
                 const result = await parse(input, accessCode, 'header');
                 setView('downloads');
                 setDownloadTab('active');
@@ -1324,7 +1324,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" onParse={async (input, accessCode) => {
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" onScan={scanDownloadInputs} onParse={async (input, accessCode) => {
         const result = await parse(input, accessCode);
         setView('downloads');
         setDownloadTab('active');

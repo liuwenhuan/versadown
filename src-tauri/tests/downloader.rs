@@ -254,6 +254,29 @@ async fn legacy_invalid_direct_source_never_reaches_aria2() {
 }
 
 #[tokio::test]
+async fn legacy_cloud_share_page_never_reaches_aria2_as_a_direct_file() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    let task = store
+        .create(NewTask {
+            source: "https://pan.baidu.com/s/share_123".into(),
+            name: "legacy cloud page".into(),
+            kind: "file".into(),
+            is_private: false,
+        })
+        .unwrap();
+
+    let error = service
+        .submit_uri_with_options(task.id, vec![task.source.clone()], UriSubmissionOptions::default())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), "未发现受支持的有效下载链接");
+    assert!(api.calls().is_empty());
+}
+
+#[tokio::test]
 async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2() {
     use alldownloader_lib::cloud::{
         commands::ResolvedCloudDownload,

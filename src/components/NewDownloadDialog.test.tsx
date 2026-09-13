@@ -55,6 +55,30 @@ it('enables parsing only after the quick-add input contains content', async () =
   expect(submit).toBeEnabled();
 });
 
+it('confirms scanned candidates in order and skips invalid input without submitting it', async () => {
+  const user = userEvent.setup();
+  const onParse = vi.fn().mockResolvedValue(undefined);
+  const onClose = vi.fn();
+  render(<NewDownloadDialog open placement="modal" onParse={onParse} onClose={onClose} onScan={async () => [
+    { input: 'https://example.test/first.iso', valid: true, kind: 'direct' },
+    { input: 'magnet:?xt=urn:btih:short', valid: false, message: '磁链格式无效' }
+  ]} />);
+
+  await user.type(screen.getByLabelText('下载内容'), '混合下载文本');
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  expect(screen.getByRole('status')).toHaveTextContent('正在处理 1/2');
+  expect(screen.getByText('已识别有效下载链接，确认后才会创建任务。')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '确认并继续' }));
+  await waitFor(() => expect(onParse).toHaveBeenCalledWith('https://example.test/first.iso', undefined));
+
+  expect(screen.getByRole('status')).toHaveTextContent('正在处理 2/2');
+  expect(screen.getByRole('alert')).toHaveTextContent('磁链格式无效');
+  await user.click(screen.getByRole('button', { name: '跳过并完成' }));
+  expect(onParse).toHaveBeenCalledTimes(1);
+  expect(onClose).toHaveBeenCalledOnce();
+});
+
 it('closes the modal through Escape, its backdrop, and its modal close button', async () => {
   const user = userEvent.setup();
   const onClose = vi.fn();

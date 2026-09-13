@@ -174,6 +174,7 @@ pub enum CandidateKind {
     Magnet,
     Torrent,
     Thunder,
+    CloudShare,
     QuarkShare,
     PikPakShare,
     Text,
@@ -308,7 +309,10 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
     if lower.starts_with("thunder://") {
         let target = decode_thunder_target(source)?;
         let target_kind = validate_download_input(&target)?.kind;
-        if matches!(target_kind, CandidateKind::Torrent | CandidateKind::Thunder) {
+        if matches!(
+            target_kind,
+            CandidateKind::Torrent | CandidateKind::Thunder | CandidateKind::CloudShare | CandidateKind::QuarkShare | CandidateKind::PikPakShare
+        ) {
             return Err(InputValidationError::InvalidThunder);
         }
         return Ok(validated(CandidateKind::Thunder, source.to_string()));
@@ -327,7 +331,7 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
             let kind = match provider {
                 CloudProvider::Quark => CandidateKind::QuarkShare,
                 CloudProvider::Pikpak => CandidateKind::PikPakShare,
-                _ => CandidateKind::Direct,
+                _ => CandidateKind::CloudShare,
             };
             return Ok(validated(kind, source.to_string()));
         }
@@ -353,9 +357,12 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
 
 pub fn validate_task_source(kind: &str, source: &str) -> Result<(), InputValidationError> {
     if kind == "cloud" {
-        // Signed cloud URLs are never persisted as task sources. Cloud
-        // connectors validate their stable `cloud://` identities separately.
-        return Ok(());
+        let valid = if source.starts_with("cloud-share://") {
+            crate::cloud::share::parse_stable_cloud_share_source(source).is_ok()
+        } else {
+            crate::cloud::parse_stable_cloud_source(source).is_ok()
+        };
+        return valid.then_some(()).ok_or(InputValidationError::InvalidCloudShare);
     }
     let candidate = validate_download_input(source)?;
     let valid_kind = match kind {
@@ -568,6 +575,20 @@ mod tests {
         assert!(matches!(
             extract_cloud_share_candidate("https://pan.baidu.com/s/", None),
             Err(ShareInputError::InvalidShare)
+        ));
+    }
+
+    #[test]
+    fn never_treats_a_registered_cloud_share_as_a_direct_file_url() {
+        let source = "https://pan.baidu.com/s/share_123?pwd=preserved";
+
+        assert_eq!(
+            validate_download_input(source).unwrap().kind,
+            CandidateKind::CloudShare
+        );
+        assert!(matches!(
+            validate_task_source("file", source),
+            Err(InputValidationError::Unsupported)
         ));
     }
 

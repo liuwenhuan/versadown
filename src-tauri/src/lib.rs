@@ -279,6 +279,7 @@ pub fn run() {
             check_for_app_update,
             local_upload_picker::local_upload_entries,
             main_window_interaction_state,
+            commands::scan_download_inputs,
             commands::parse_download,
             commands::confirm_cloud_share_download,
             commands::confirm_download_command,
