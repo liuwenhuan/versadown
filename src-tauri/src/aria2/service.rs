@@ -278,6 +278,7 @@ impl DownloadService {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
+        self.clear_observed_peers(task_id);
         self.finish_directory_uri(task_id, &gid, directory).await
     }
 
@@ -301,6 +302,7 @@ impl DownloadService {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
+        self.clear_observed_peers(task_id);
         self.finish_directory_uri(task_id, &gid, directory).await
     }
 
@@ -335,6 +337,7 @@ impl DownloadService {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
+        self.clear_observed_peers(expected.id);
         self.finish_directory_uri(expected.id, &gid, directory)
             .await
             .map(Some)
@@ -489,6 +492,9 @@ impl DownloadService {
                             .await)
                     }
                 };
+                if rebind_existing_task {
+                    self.clear_observed_peers(task_id);
+                }
                 snapshot.status = TaskStatus::AwaitingUser;
                 self.persist_snapshot(current, snapshot)
             }
@@ -515,6 +521,9 @@ impl DownloadService {
                             .await)
                     }
                 };
+                if rebind_existing_task {
+                    self.clear_observed_peers(task_id);
+                }
                 self.persist_snapshot(current, snapshot)?;
                 Err(DownloadServiceError::TorrentNotSelectable(aria_status))
             }
@@ -1092,6 +1101,7 @@ impl DownloadService {
         &self,
         mut task: DownloadTask,
     ) -> Result<DownloadTask, DownloadServiceError> {
+        self.clear_observed_peers(task.id);
         task.status = TaskStatus::Cancelled;
         task.download_speed = 0;
         task.upload_speed = 0;
@@ -1175,10 +1185,7 @@ impl DownloadService {
         if !matches!(updated.status, TaskStatus::Downloading)
             || !matches!(updated.kind.as_str(), "magnet" | "torrent")
         {
-            self.observed_peers
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(&updated.id);
+            self.clear_observed_peers(updated.id);
             return Ok(());
         }
         let Some(gid) = updated.aria_gid.as_deref() else {
@@ -1204,6 +1211,13 @@ impl DownloadService {
             }
         }
         Ok(())
+    }
+
+    fn clear_observed_peers(&self, task_id: Uuid) {
+        self.observed_peers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&task_id);
     }
 
     pub(super) fn publish_task(&self, task: &DownloadTask) -> Result<(), DownloadServiceError> {

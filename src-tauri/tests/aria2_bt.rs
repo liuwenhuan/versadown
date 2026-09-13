@@ -40,6 +40,78 @@ async fn reconcile_tracks_unique_peers_for_an_active_torrent() {
 }
 
 #[tokio::test]
+async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
+    let retried = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let retry_state = retried.clone();
+    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+        "system.multicall" => json!([[
+            fixture::status(
+                if retry_state.load(std::sync::atomic::Ordering::SeqCst) {
+                    "new-gid"
+                } else {
+                    "old-gid"
+                },
+                "active",
+                0,
+            )
+        ]]),
+        "aria2.getPeers" => {
+            if retry_state.load(std::sync::atomic::Ordering::SeqCst) {
+                json!([{"ip":"2001:db8::7","port":"51414"}])
+            } else {
+                json!([
+                    {"ip":"203.0.113.10","port":"51413"},
+                    {"ip":"203.0.113.11","port":"51413"}
+                ])
+            }
+        }
+        "aria2.remove" => json!("old-gid"),
+        "aria2.addUri" => {
+            retry_state.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!("new-gid")
+        }
+        "aria2.tellStatus" => fixture::status("new-gid", "active", 0),
+        "aria2.getGlobalStat" => json!({
+            "downloadSpeed":"10", "uploadSpeed":"0", "numActive":"1",
+            "numWaiting":"0", "numStopped":"0", "numStoppedTotal":"0"
+        }),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:test".into(),
+            name: "test".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
+        .unwrap();
+    store.bind_gid(task.id, "old-gid").unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    service.reconcile_now().await.unwrap();
+    assert_eq!(store.find(task.id).unwrap().discovered_nodes, 2);
+    service
+        .control(task.id, alldownloader_lib::DownloadAction::Cancel)
+        .await
+        .unwrap();
+    service
+        .resubmit_uri_with_options(
+            task.id,
+            vec!["magnet:?xt=urn:btih:test".into()],
+            UriSubmissionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    service.reconcile_now().await.unwrap();
+
+    assert_eq!(store.find(task.id).unwrap().discovered_nodes, 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_start() {
     let calls = Arc::new(Mutex::new(vec![]));
     let wire = calls.clone();
