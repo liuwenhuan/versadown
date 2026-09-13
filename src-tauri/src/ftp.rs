@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt,
     path::{Path, PathBuf},
     sync::{
@@ -157,11 +157,53 @@ enum WorkerCommand {
     Shutdown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FtpDownloadLimits {
+    max_active_tasks: usize,
+    max_connections_per_task: usize,
+}
+
+impl FtpDownloadLimits {
+    pub fn new(max_active_tasks: u16, max_connections_per_task: u8) -> Self {
+        Self {
+            max_active_tasks: usize::from(max_active_tasks.max(1)),
+            max_connections_per_task: usize::from(max_connections_per_task.max(1)),
+        }
+    }
+
+    pub fn max_active_tasks(self) -> usize {
+        self.max_active_tasks
+    }
+
+    pub fn max_connections_per_task(self) -> usize {
+        self.max_connections_per_task
+    }
+}
+
+impl Default for FtpDownloadLimits {
+    fn default() -> Self {
+        Self::new(5, 8)
+    }
+}
+
+struct QueuedWorker {
+    task_id: Uuid,
+    source: String,
+    output: PathBuf,
+}
+
+#[derive(Default)]
+struct WorkerScheduler {
+    active: HashMap<Uuid, watch::Sender<WorkerCommand>>,
+    queued: VecDeque<QueuedWorker>,
+}
+
 pub struct FtpDownloadEngine {
     default_directory: RwLock<PathBuf>,
     store: Arc<TaskStore>,
     events: Arc<dyn EventSink>,
-    workers: Mutex<HashMap<Uuid, watch::Sender<WorkerCommand>>>,
+    scheduler: Mutex<WorkerScheduler>,
+    limits: RwLock<FtpDownloadLimits>,
     accepting: AtomicBool,
 }
 
@@ -175,9 +217,26 @@ impl FtpDownloadEngine {
             default_directory: RwLock::new(default_directory.as_ref().to_path_buf()),
             store,
             events,
-            workers: Mutex::new(HashMap::new()),
+            scheduler: Mutex::new(WorkerScheduler::default()),
+            limits: RwLock::new(FtpDownloadLimits::default()),
             accepting: AtomicBool::new(true),
         }
+    }
+
+    pub fn set_limits(self: &Arc<Self>, max_active_tasks: u16, max_connections_per_task: u8) {
+        *self
+            .limits
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) =
+            FtpDownloadLimits::new(max_active_tasks, max_connections_per_task);
+        self.schedule_pump();
+    }
+
+    pub fn limits(&self) -> FtpDownloadLimits {
+        *self
+            .limits
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     pub async fn submit_uri(
@@ -375,8 +434,8 @@ impl FtpDownloadEngine {
 
     pub async fn shutdown(&self) {
         self.accepting.store(false, Ordering::Release);
-        let workers = self.workers.lock().await;
-        for sender in workers.values() {
+        let scheduler = self.scheduler.lock().await;
+        for sender in scheduler.active.values() {
             let _ = sender.send(WorkerCommand::Shutdown);
         }
     }
@@ -387,28 +446,63 @@ impl FtpDownloadEngine {
         source: String,
         output: PathBuf,
     ) -> Result<(), FtpDownloadError> {
-        let mut workers = self.workers.lock().await;
-        if workers.contains_key(&task_id) {
-            return Ok(());
+        {
+            let mut scheduler = self.scheduler.lock().await;
+            if scheduler.active.contains_key(&task_id)
+                || scheduler.queued.iter().any(|work| work.task_id == task_id)
+            {
+                return Ok(());
+            }
+            scheduler.queued.push_back(QueuedWorker {
+                task_id,
+                source,
+                output,
+            });
         }
-        let (sender, receiver) = watch::channel(WorkerCommand::Running);
-        workers.insert(task_id, sender);
-        drop(workers);
-        let engine = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
-            let result = engine.run_worker(task_id, &source, &output, receiver).await;
-            engine.workers.lock().await.remove(&task_id);
-            if let Err(error) = result {
-                if let Ok(current) = engine.store.find(task_id) {
-                    if !matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled) {
-                        if let Ok(failed) = engine.store.fail(task_id, error.to_string()) {
-                            engine.events.task_updated(&failed);
+        self.pump_queue().await;
+        Ok(())
+    }
+
+    async fn pump_queue(self: &Arc<Self>) {
+        let limits = self.limits();
+        let mut starts = Vec::new();
+        {
+            let mut scheduler = self.scheduler.lock().await;
+            while scheduler.active.len() < limits.max_active_tasks() {
+                let Some(work) = scheduler.queued.pop_front() else {
+                    break;
+                };
+                let (sender, receiver) = watch::channel(WorkerCommand::Running);
+                scheduler.active.insert(work.task_id, sender);
+                starts.push((work, receiver));
+            }
+        }
+        for (work, receiver) in starts {
+            let engine = Arc::clone(self);
+            tauri::async_runtime::spawn(async move {
+                let result = engine
+                    .run_worker(work.task_id, &work.source, &work.output, receiver)
+                    .await;
+                engine.scheduler.lock().await.active.remove(&work.task_id);
+                if let Err(error) = result {
+                    if let Ok(current) = engine.store.find(work.task_id) {
+                        if !matches!(current.status, TaskStatus::Paused | TaskStatus::Cancelled) {
+                            if let Ok(failed) = engine.store.fail(work.task_id, error.to_string()) {
+                                engine.events.task_updated(&failed);
+                            }
                         }
                     }
                 }
-            }
+                engine.schedule_pump();
+            });
+        }
+    }
+
+    fn schedule_pump(self: &Arc<Self>) {
+        let engine = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            engine.pump_queue().await;
         });
-        Ok(())
     }
 
     async fn run_worker(
@@ -631,11 +725,15 @@ impl FtpDownloadEngine {
     }
 
     async fn signal_and_wait(&self, task_id: Uuid, command: WorkerCommand) {
-        let sender = self.workers.lock().await.get(&task_id).cloned();
+        let sender = {
+            let mut scheduler = self.scheduler.lock().await;
+            scheduler.queued.retain(|work| work.task_id != task_id);
+            scheduler.active.get(&task_id).cloned()
+        };
         if let Some(sender) = sender {
             let _ = sender.send(command);
             for _ in 0..100 {
-                if !self.workers.lock().await.contains_key(&task_id) {
+                if !self.scheduler.lock().await.active.contains_key(&task_id) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

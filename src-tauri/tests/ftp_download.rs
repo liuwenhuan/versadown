@@ -99,6 +99,91 @@ fn ftp_segments_are_ordered_updated_and_deleted() {
     assert!(store.ftp_segments(task.id).unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn ftp_scheduler_keeps_later_task_queued_until_an_active_slot_is_available() {
+    let payload = vec![0x5a; 3 * 1024 * 1024];
+    let (source, _) = spawn_ftp_server(payload, Duration::from_millis(10)).await;
+    let directory = tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let first = store
+        .create(NewTask {
+            source: source.clone(),
+            name: "first.bin".into(),
+            kind: "ftp".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let second = store
+        .create(NewTask {
+            source: source.clone(),
+            name: "second.bin".into(),
+            kind: "ftp".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let engine = Arc::new(FtpDownloadEngine::new(
+        directory.path(),
+        Arc::clone(&store),
+        Arc::new(NoEvents),
+    ));
+    engine.set_limits(1, 4);
+
+    engine
+        .submit_uri(
+            first.id,
+            &source,
+            UriSubmissionOptions {
+                output_name: Some("first.bin".into()),
+                ..UriSubmissionOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    engine
+        .submit_uri(
+            second.id,
+            &source,
+            UriSubmissionOptions {
+                output_name: Some("second.bin".into()),
+                ..UriSubmissionOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if store.find(first.id).unwrap().status == TaskStatus::Downloading {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first FTP task becomes active");
+    assert_eq!(store.find(second.id).unwrap().status, TaskStatus::Queued);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                store.find(second.id).unwrap().status,
+                TaskStatus::Downloading | TaskStatus::Completed
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "queued FTP task did not become active after its predecessor completed; first={:?}, second={:?}",
+            store.find(first.id),
+            store.find(second.id)
+        )
+    });
+}
+
 struct NoEvents;
 
 impl EventSink for NoEvents {

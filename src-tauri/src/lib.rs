@@ -37,7 +37,7 @@ pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
-pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpTarget};
+pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpDownloadLimits, FtpTarget};
 pub use launcher::{
     launcher_hexagon_points, launcher_hexagon_region, launcher_live_regions, launcher_menu_entries,
     launcher_native_chrome_policy, launcher_window_style_without_frame,
