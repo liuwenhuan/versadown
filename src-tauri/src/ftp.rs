@@ -9,11 +9,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use percent_encoding::percent_decode_str;
 use suppaftp::{tokio::AsyncFtpStream, types::FileType};
 use thiserror::Error;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::{watch, Mutex},
 };
 use url::Url;
@@ -25,6 +26,7 @@ use crate::{
 };
 
 const ANONYMOUS_PASSWORD: &str = "anonymous@alldownloader.local";
+const MIN_SEGMENT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct FtpTarget {
@@ -198,6 +200,12 @@ struct WorkerScheduler {
     queued: VecDeque<QueuedWorker>,
 }
 
+struct SegmentPublishState {
+    sample_started: Instant,
+    sample_completed: u64,
+    last_published: Instant,
+}
+
 pub struct FtpDownloadEngine {
     default_directory: RwLock<PathBuf>,
     store: Arc<TaskStore>,
@@ -274,8 +282,11 @@ impl FtpDownloadEngine {
             return Err(FtpDownloadError::InvalidOption("输出文件名无效"));
         }
         let output = directory.join(output_name);
-        if options.allow_overwrite && tokio::fs::try_exists(&output).await? {
-            tokio::fs::remove_file(&output).await?;
+        if options.allow_overwrite {
+            if tokio::fs::try_exists(&output).await? {
+                tokio::fs::remove_file(&output).await?;
+            }
+            self.store.clear_ftp_segments(task_id)?;
         }
 
         let mut task = self.store.find(task_id)?;
@@ -292,10 +303,18 @@ impl FtpDownloadEngine {
         task.upload_speed = 0;
         task.connections = 0;
         task.eta_seconds = None;
-        let existing = tokio::fs::metadata(&output)
-            .await
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let saved_segments = self.store.ftp_segments(task_id)?;
+        let existing = if saved_segments.is_empty() {
+            tokio::fs::metadata(&output)
+                .await
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        } else {
+            saved_segments
+                .iter()
+                .map(|segment| segment.completed_length)
+                .sum()
+        };
         task.completed_length = existing;
         task.progress = 0;
         task = self.persist(task, &output, 0, existing)?;
@@ -329,7 +348,10 @@ impl FtpDownloadEngine {
                 if latest.status == TaskStatus::Completed {
                     return Ok(latest);
                 }
-                self.set_terminal_transfer_state(latest, TaskStatus::Cancelled, None)
+                let cancelled =
+                    self.set_terminal_transfer_state(latest, TaskStatus::Cancelled, None)?;
+                self.store.clear_ftp_segments(task_id)?;
+                Ok(cancelled)
             }
             DownloadAction::Resume => {
                 if current.status != TaskStatus::Paused {
@@ -515,10 +537,19 @@ impl FtpDownloadEngine {
         if *command.borrow_and_update() != WorkerCommand::Running {
             return Ok(());
         }
-        let completed_before_connect = tokio::fs::metadata(output)
+        let saved_segments = self.store.ftp_segments(task_id)?;
+        let file_length = tokio::fs::metadata(output)
             .await
             .map(|metadata| metadata.len())
             .unwrap_or(0);
+        let completed_before_connect = if saved_segments.is_empty() {
+            file_length
+        } else {
+            saved_segments
+                .iter()
+                .map(|segment| segment.completed_length)
+                .sum()
+        };
         let mut connecting = self.store.find(task_id)?;
         connecting.status = TaskStatus::Downloading;
         connecting.completed_length = completed_before_connect;
@@ -530,28 +561,54 @@ impl FtpDownloadEngine {
         self.events.task_updated(&connecting);
 
         let target = parse_ftp_url(source)?;
-        let address = format!("{}:{}", target.host(), target.port());
-        let mut ftp =
-            tokio::time::timeout(Duration::from_secs(20), AsyncFtpStream::connect(address))
-                .await
-                .map_err(|_| FtpDownloadError::Protocol("连接超时".into()))?
-                .map_err(protocol_error)?;
-        ftp.login(target.username(), target.password())
+        let mut ftp = connect_ftp(&target).await?;
+        let total = ftp
+            .size(target.remote_path())
             .await
-            .map_err(protocol_error)?;
-        ftp.transfer_type(FileType::Binary)
-            .await
-            .map_err(protocol_error)?;
-        let total = u64::try_from(
-            ftp.size(target.remote_path())
-                .await
-                .map_err(protocol_error)?,
-        )
-        .map_err(|_| FtpDownloadError::Protocol("远程文件过大".into()))?;
-        let mut completed = tokio::fs::metadata(output)
-            .await
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+            .ok()
+            .and_then(|size| u64::try_from(size).ok());
+        let total = match total {
+            Some(total) => total,
+            None if saved_segments.is_empty() => {
+                return self
+                    .run_single_transfer(task_id, &target, output, None, file_length, ftp, command)
+                    .await;
+            }
+            None => {
+                let total = saved_segments
+                    .last()
+                    .map(|segment| segment.end_offset)
+                    .ok_or_else(|| FtpDownloadError::Protocol("缺少 FTP 分片范围".into()))?;
+                if !segments_match_total(&saved_segments, total) {
+                    return Err(FtpDownloadError::Protocol("FTP 分片范围无效".into()));
+                }
+                total
+            }
+        };
+
+        if !saved_segments.is_empty() {
+            if !segments_match_total(&saved_segments, total) {
+                return Err(FtpDownloadError::Protocol(
+                    "远程文件大小已变化，无法安全续传".into(),
+                ));
+            }
+            let completed: u64 = saved_segments
+                .iter()
+                .map(|segment| segment.completed_length)
+                .sum();
+            if completed == total {
+                let task = self.completed_snapshot(task_id, output, total)?;
+                self.events.task_updated(&task);
+                let _ = ftp.quit().await;
+                return Ok(());
+            }
+            let _ = ftp.quit().await;
+            return self
+                .run_segmented_transfer(task_id, &target, output, total, saved_segments, command)
+                .await;
+        }
+
+        let mut completed = file_length;
         if completed > total {
             tokio::fs::File::create(output).await?;
             completed = 0;
@@ -562,6 +619,46 @@ impl FtpDownloadEngine {
             let _ = ftp.quit().await;
             return Ok(());
         }
+
+        let segments = plan_segments(total, self.limits().max_connections_per_task());
+        if completed == 0 && segments.len() > 1 && self.supports_parallel_ranges(&target).await {
+            let _ = ftp.quit().await;
+            return self
+                .run_segmented_transfer(task_id, &target, output, total, segments, command)
+                .await;
+        }
+
+        self.run_single_transfer(
+            task_id,
+            &target,
+            output,
+            Some(total),
+            completed,
+            ftp,
+            command,
+        )
+        .await
+    }
+
+    async fn supports_parallel_ranges(&self, target: &FtpTarget) -> bool {
+        let Ok(mut ftp) = connect_ftp(target).await else {
+            return false;
+        };
+        let supports_rest = ftp.resume_transfer(1).await.is_ok();
+        let _ = ftp.quit().await;
+        supports_rest
+    }
+
+    async fn run_single_transfer(
+        &self,
+        task_id: Uuid,
+        target: &FtpTarget,
+        output: &Path,
+        total: Option<u64>,
+        mut completed: u64,
+        mut ftp: AsyncFtpStream,
+        mut command: watch::Receiver<WorkerCommand>,
+    ) -> Result<(), FtpDownloadError> {
         if completed > 0 {
             ftp.resume_transfer(
                 usize::try_from(completed)
@@ -588,12 +685,12 @@ impl FtpDownloadEngine {
             .map_err(protocol_error)?;
         let mut task = self.store.find(task_id)?;
         task.status = TaskStatus::Downloading;
-        task.total_length = Some(total);
+        task.total_length = total;
         task.completed_length = completed;
         task.connections = 1;
         task.error = None;
-        task.progress = progress(completed, total);
-        task = self.persist(task, output, total, completed)?;
+        task.progress = total.map(|total| progress(completed, total)).unwrap_or(0);
+        task = self.persist(task, output, total.unwrap_or(0), completed)?;
         self.events.task_updated(&task);
 
         let mut buffer = vec![0u8; 64 * 1024];
@@ -618,20 +715,24 @@ impl FtpDownloadEngine {
             }
             file.write_all(&buffer[..read]).await?;
             completed = completed.saturating_add(read as u64);
-            if last_published.elapsed() >= Duration::from_millis(200) || completed >= total {
+            if last_published.elapsed() >= Duration::from_millis(200)
+                || total.is_some_and(|total| completed >= total)
+            {
                 let elapsed = sample_started.elapsed().as_secs_f64().max(0.001);
                 let speed = ((completed.saturating_sub(sample_completed)) as f64 / elapsed) as u64;
                 let mut task = self.store.find(task_id)?;
                 if task.status != TaskStatus::Downloading {
                     return Ok(());
                 }
-                task.total_length = Some(total);
+                task.total_length = total;
                 task.completed_length = completed;
                 task.download_speed = speed;
                 task.connections = 1;
-                task.progress = progress(completed, total);
-                task.eta_seconds = (speed > 0).then(|| total.saturating_sub(completed) / speed);
-                let task = self.persist(task, output, total, completed)?;
+                task.progress = total.map(|total| progress(completed, total)).unwrap_or(0);
+                task.eta_seconds = total
+                    .filter(|_| speed > 0)
+                    .map(|total| total.saturating_sub(completed) / speed);
+                let task = self.persist(task, output, total.unwrap_or(0), completed)?;
                 self.events.task_updated(&task);
                 sample_started = Instant::now();
                 sample_completed = completed;
@@ -643,14 +744,218 @@ impl FtpDownloadEngine {
             .await
             .map_err(protocol_error)?;
         let _ = ftp.quit().await;
+        if let Some(total) = total {
+            if completed != total {
+                return Err(FtpDownloadError::Protocol(format!(
+                    "传输提前结束：已接收 {completed} / {total} 字节"
+                )));
+            }
+        }
+        let task = self.completed_snapshot(task_id, output, total.unwrap_or(completed))?;
+        self.events.task_updated(&task);
+        Ok(())
+    }
+
+    async fn run_segmented_transfer(
+        &self,
+        task_id: Uuid,
+        target: &FtpTarget,
+        output: &Path,
+        total: u64,
+        mut segments: Vec<crate::FtpSegment>,
+        command: watch::Receiver<WorkerCommand>,
+    ) -> Result<(), FtpDownloadError> {
+        let persisted = self.store.ftp_segments(task_id)?;
+        if persisted.is_empty() {
+            self.store.replace_ftp_segments(task_id, &segments)?;
+        } else {
+            segments = persisted;
+        }
+
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(output)
+            .await?;
+        file.set_len(total).await?;
+        drop(file);
+
+        let completed: u64 = segments
+            .iter()
+            .map(|segment| segment.completed_length)
+            .sum();
+        let connections = segments
+            .iter()
+            .filter(|segment| segment.completed_length < segment.end_offset - segment.start_offset)
+            .count() as u32;
+        self.publish_segment_snapshot(task_id, output, total, completed, 0, connections)?;
+
+        let publish_state = Arc::new(Mutex::new(SegmentPublishState {
+            sample_started: Instant::now(),
+            sample_completed: completed,
+            last_published: Instant::now(),
+        }));
+        let mut workers = FuturesUnordered::new();
+        for segment in segments {
+            if segment.completed_length < segment.end_offset - segment.start_offset {
+                workers.push(self.run_segment(
+                    task_id,
+                    target.clone(),
+                    output.to_path_buf(),
+                    total,
+                    segment,
+                    command.clone(),
+                    Arc::clone(&publish_state),
+                    connections,
+                ));
+            }
+        }
+
+        let mut stopped = false;
+        while let Some(result) = workers.next().await {
+            stopped |= result?;
+        }
+        if stopped {
+            return Ok(());
+        }
+        let completed: u64 = self
+            .store
+            .ftp_segments(task_id)?
+            .iter()
+            .map(|segment| segment.completed_length)
+            .sum();
         if completed != total {
             return Err(FtpDownloadError::Protocol(format!(
-                "传输提前结束：已接收 {completed} / {total} 字节"
+                "分片传输提前结束：已接收 {completed} / {total} 字节"
             )));
         }
         let task = self.completed_snapshot(task_id, output, total)?;
         self.events.task_updated(&task);
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_segment(
+        &self,
+        task_id: Uuid,
+        target: FtpTarget,
+        output: PathBuf,
+        total: u64,
+        mut segment: crate::FtpSegment,
+        mut command: watch::Receiver<WorkerCommand>,
+        publish_state: Arc<Mutex<SegmentPublishState>>,
+        connections: u32,
+    ) -> Result<bool, FtpDownloadError> {
+        let mut ftp = connect_ftp(&target).await?;
+        let start = segment
+            .start_offset
+            .checked_add(segment.completed_length)
+            .ok_or_else(|| FtpDownloadError::Protocol("分片续传偏移量溢出".into()))?;
+        ftp.resume_transfer(
+            usize::try_from(start)
+                .map_err(|_| FtpDownloadError::Protocol("分片续传偏移量过大".into()))?,
+        )
+        .await
+        .map_err(protocol_error)?;
+        let mut data = ftp
+            .retr_as_stream(target.remote_path())
+            .await
+            .map_err(protocol_error)?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&output)
+            .await?;
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let remaining = segment
+                .end_offset
+                .saturating_sub(segment.start_offset + segment.completed_length);
+            if remaining == 0 {
+                break;
+            }
+            let limit = remaining.min(buffer.len() as u64) as usize;
+            let read = tokio::select! {
+                result = data.read(&mut buffer[..limit]) => result?,
+                changed = command.changed() => {
+                    if changed.is_err() {
+                        return Ok(true);
+                    }
+                    match *command.borrow_and_update() {
+                        WorkerCommand::Running => continue,
+                        WorkerCommand::Pause | WorkerCommand::Cancel | WorkerCommand::Shutdown => return Ok(true),
+                    }
+                }
+            };
+            if read == 0 {
+                return Err(FtpDownloadError::Protocol(format!(
+                    "分片 {} 提前结束",
+                    segment.index
+                )));
+            }
+            file.write_all(&buffer[..read]).await?;
+            segment.completed_length = segment.completed_length.saturating_add(read as u64);
+            self.store
+                .update_ftp_segment(task_id, segment.index, segment.completed_length)?;
+
+            let mut state = publish_state.lock().await;
+            let completed: u64 = self
+                .store
+                .ftp_segments(task_id)?
+                .iter()
+                .map(|segment| segment.completed_length)
+                .sum();
+            if state.last_published.elapsed() >= Duration::from_millis(200) || completed == total {
+                let elapsed = state.sample_started.elapsed().as_secs_f64().max(0.001);
+                let speed =
+                    ((completed.saturating_sub(state.sample_completed)) as f64 / elapsed) as u64;
+                self.publish_segment_snapshot(
+                    task_id,
+                    &output,
+                    total,
+                    completed,
+                    speed,
+                    connections,
+                )?;
+                state.sample_started = Instant::now();
+                state.sample_completed = completed;
+                state.last_published = Instant::now();
+            }
+        }
+        file.flush().await?;
+        if segment.end_offset == total {
+            ftp.finalize_retr_stream(data)
+                .await
+                .map_err(protocol_error)?;
+        } else {
+            drop(data);
+            let _ = ftp.quit().await;
+        }
+        Ok(false)
+    }
+
+    fn publish_segment_snapshot(
+        &self,
+        task_id: Uuid,
+        output: &Path,
+        total: u64,
+        completed: u64,
+        speed: u64,
+        connections: u32,
+    ) -> Result<DownloadTask, FtpDownloadError> {
+        let mut task = self.store.find(task_id)?;
+        if task.status != TaskStatus::Downloading {
+            return Ok(task);
+        }
+        task.total_length = Some(total);
+        task.completed_length = completed;
+        task.download_speed = speed;
+        task.connections = connections;
+        task.progress = progress(completed, total);
+        task.eta_seconds = (speed > 0).then(|| total.saturating_sub(completed) / speed);
+        let task = self.persist(task, output, total, completed)?;
+        self.events.task_updated(&task);
+        Ok(task)
     }
 
     fn completed_snapshot(
@@ -669,6 +974,7 @@ impl FtpDownloadEngine {
         task.upload_speed = 0;
         task.connections = 0;
         task.eta_seconds = Some(0);
+        self.store.clear_ftp_segments(task_id)?;
         self.persist(task, output, total, total)
     }
 
@@ -695,9 +1001,17 @@ impl FtpDownloadEngine {
                     .join(&task.name)
             });
         let total = task.total_length.unwrap_or(0);
-        let completed = std::fs::metadata(&output)
-            .map(|metadata| metadata.len())
-            .unwrap_or(task.completed_length);
+        let segments = self.store.ftp_segments(task.id)?;
+        let completed = if segments.is_empty() {
+            std::fs::metadata(&output)
+                .map(|metadata| metadata.len())
+                .unwrap_or(task.completed_length)
+        } else {
+            segments
+                .iter()
+                .map(|segment| segment.completed_length)
+                .sum()
+        };
         task.completed_length = completed;
         task.progress = progress(completed, total);
         let task = self.persist(task, &output, total, completed)?;
@@ -740,6 +1054,50 @@ impl FtpDownloadEngine {
             }
         }
     }
+}
+
+async fn connect_ftp(target: &FtpTarget) -> Result<AsyncFtpStream, FtpDownloadError> {
+    let address = format!("{}:{}", target.host(), target.port());
+    let mut ftp = tokio::time::timeout(Duration::from_secs(20), AsyncFtpStream::connect(address))
+        .await
+        .map_err(|_| FtpDownloadError::Protocol("连接超时".into()))?
+        .map_err(protocol_error)?;
+    ftp.login(target.username(), target.password())
+        .await
+        .map_err(protocol_error)?;
+    ftp.transfer_type(FileType::Binary)
+        .await
+        .map_err(protocol_error)?;
+    Ok(ftp)
+}
+
+fn plan_segments(total: u64, connection_limit: usize) -> Vec<crate::FtpSegment> {
+    let count = connection_limit
+        .max(1)
+        .min(total.saturating_add(MIN_SEGMENT_BYTES - 1) as usize / MIN_SEGMENT_BYTES as usize)
+        .max(1);
+    (0..count)
+        .map(|index| crate::FtpSegment {
+            index: index as u32,
+            start_offset: total * index as u64 / count as u64,
+            end_offset: total * (index as u64 + 1) / count as u64,
+            completed_length: 0,
+        })
+        .collect()
+}
+
+fn segments_match_total(segments: &[crate::FtpSegment], total: u64) -> bool {
+    segments
+        .iter()
+        .enumerate()
+        .try_fold(0u64, |expected_start, (index, segment)| {
+            (segment.index == index as u32
+                && segment.start_offset == expected_start
+                && segment.end_offset > segment.start_offset
+                && segment.completed_length <= segment.end_offset - segment.start_offset)
+                .then_some(segment.end_offset)
+        })
+        == Some(total)
 }
 
 fn protocol_error(error: suppaftp::FtpError) -> FtpDownloadError {
