@@ -304,9 +304,172 @@ fn sqlite_migration_failure_keeps_legacy_until_commit_and_can_retry() {
     );
     assert!(!directory.path().join("cloud-share-plans-v1.bin").exists());
 }
-use crate::cloud::MemoryCredentialStore;
+use crate::cloud::{
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, MemoryCredentialStore,
+};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+struct TimeoutThenSuccessfulReadTransport {
+    attempts: AtomicU64,
+}
+
+impl CloudHttpTransport for TimeoutThenSuccessfulReadTransport {
+    fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt < 2 {
+            return Err(QuarkError::Transport("连接超时".into()));
+        }
+        Ok(CloudHttpResponse {
+            status: 200,
+            body: "share-page".into(),
+            ..Default::default()
+        })
+    }
+}
+
+#[test]
+fn share_read_retries_transient_transport_timeouts_without_replaying_a_plan() {
+    let inner = TimeoutThenSuccessfulReadTransport {
+        attempts: AtomicU64::new(0),
+    };
+    let retrying = RetryingShareReadTransport::new(&inner);
+
+    let response = retrying
+        .send(CloudHttpRequest {
+            method: "GET",
+            url: "https://example.test/share-page".into(),
+            headers: BTreeMap::new(),
+            body: None,
+        })
+        .expect("the final transient-read retry must return the provider response");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, "share-page");
+    assert_eq!(inner.attempts.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn aliyun_forbidden_direct_url_transfers_once_and_reuses_the_personal_copy() {
+    use crate::cloud::aliyun::AliyunShareAdapter;
+    use std::collections::VecDeque;
+
+    struct StatusHttp {
+        replies: Mutex<VecDeque<CloudHttpResponse>>,
+        requests: Mutex<Vec<CloudHttpRequest>>,
+    }
+    impl CloudHttpTransport for StatusHttp {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.requests.lock().unwrap().push(request);
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(QuarkError::InvalidResponse)
+        }
+    }
+
+    let (store, credentials, _) = memory_store();
+    credentials
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"personal","drive_id":"drive-7"}"#,
+        )
+        .unwrap();
+    let plan = CloudSharePlan::new(
+        CloudProvider::Aliyun,
+        "share-7".into(),
+        None,
+        vec![CloudShareEntry::new(
+            "share-7",
+            "shared-file".into(),
+            "sample.bin".into(),
+            vec![],
+            Some(7),
+        )],
+        serde_json::json!({"share_token":"share-token"}),
+    );
+    let source = plan.source_for("shared-file");
+    store.upsert(&plan).unwrap();
+    let http = StatusHttp {
+        replies: Mutex::new(
+            vec![
+                CloudHttpResponse {
+                    status: 403,
+                    body: serde_json::json!({"code":"Forbidden"}).to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({"drive_id":"drive-7","file_id":"personal-file"})
+                        .to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({"url":"https://cdn.example/personal-file"})
+                        .to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({"url":"https://cdn.example/personal-file-refreshed"})
+                        .to_string(),
+                    set_cookies: vec![],
+                },
+            ]
+            .into(),
+        ),
+        requests: Mutex::new(vec![]),
+    };
+    let adapter = AliyunShareAdapter {
+        credentials: credentials.as_ref(),
+        http: &http,
+    };
+
+    let download = resolve_current_share_download(&store, &adapter, &source).unwrap();
+
+    assert_eq!(download.url, "https://cdn.example/personal-file");
+    assert_eq!(download.name, "sample.bin");
+    assert!(download.headers.is_empty());
+    let records = store.resolve_entry(&source).unwrap().plan.transfers;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].created_file_id, "personal-file");
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].url.ends_with("/v2/file/get_download_url"));
+    assert!(requests[1].url.ends_with("/v2/file/copy"));
+    assert!(requests[2].url.ends_with("/v2/file/get_download_url"));
+    assert_eq!(
+        requests[1].headers.get("Authorization").map(String::as_str),
+        Some("Bearer personal")
+    );
+    assert_eq!(
+        requests[1].headers.get("x-share-token").map(String::as_str),
+        Some("share-token")
+    );
+    let copy: serde_json::Value = serde_json::from_str(requests[1].body.as_ref().unwrap()).unwrap();
+    assert_eq!(copy["share_id"], "share-7");
+    assert_eq!(copy["file_id"], "shared-file");
+    assert_eq!(copy["to_drive_id"], "drive-7");
+    assert_eq!(copy["to_parent_file_id"], "root");
+    assert_eq!(copy["auto_rename"], true);
+    assert!(copy.get("drive_id").is_none());
+    drop(requests);
+
+    let refreshed = resolve_current_share_download(&store, &adapter, &source).unwrap();
+
+    assert_eq!(refreshed.url, "https://cdn.example/personal-file-refreshed");
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.ends_with("/v2/file/copy"))
+            .count(),
+        1
+    );
+}
 
 #[derive(Default)]
 struct SagaAria2 {
@@ -2044,7 +2207,7 @@ async fn unavailable_engine_prevents_task_creation_and_provider_resolution() {
 }
 
 #[tokio::test]
-async fn unavailable_engine_keeps_a_share_directory_leaf_linked_to_its_failed_root() {
+async fn share_directory_leaf_failure_does_not_project_the_complete_directory_tree() {
     let (plans, _, _) = memory_store();
     let plan = fixture("directory-engine-unavailable");
     let source = plan.source_for("f1");
@@ -2103,13 +2266,9 @@ async fn unavailable_engine_keeps_a_share_directory_leaf_linked_to_its_failed_ro
     .unwrap();
 
     assert_eq!(outcome.payload.task.status, crate::TaskStatus::Failed);
-    assert_eq!(
-        outcome.queue_task.as_ref().map(|task| task.id.clone()),
-        Some(group.id.to_string())
-    );
-    assert_eq!(
-        outcome.queue_task.as_ref().map(|task| task.status),
-        Some(crate::TaskStatus::Failed)
+    assert!(
+        outcome.queue_task.is_none(),
+        "directory scheduling only needs the leaf task; rebuilding the whole tree for every failed leaf is quadratic"
     );
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
     assert_eq!(

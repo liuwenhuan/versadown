@@ -14,7 +14,9 @@ pub async fn inspect_cloud_share(
     // Only genuine authentication expiry uses the shared recovery order. Share
     // access codes, CAPTCHA and risk checks retain their direct user flows.
     run_share_session_read_work(app, candidate.provider, move |state, http| {
-        let adapter = share::provider_share_adapter(candidate.provider, &state.store, http)?;
+        let retrying_http = share::RetryingShareReadTransport::new(http);
+        let adapter =
+            share::provider_share_adapter(candidate.provider, &state.store, &retrying_http)?;
         share::inspect_share_with_adapter(&state.share_plans, adapter.as_ref(), &candidate)
     })
     .await
@@ -31,11 +33,12 @@ pub async fn resolve_stable_cloud_share_download(
     ));
     let _cancel_on_drop = CancelShareOnDrop(Arc::clone(&control));
     let completion_control = Arc::clone(&control);
-    // Resolution can create personal files. Recovery may renew authorization,
-    // but it must never replay this combined operation after a transfer starts.
     run_session_work_checked(
         app,
         provider,
+        // Any provider, including Aliyun, can fall back to a personal-drive
+        // transfer when the share service denies a direct URL. Never replay a
+        // mutation after session recovery; the caller can safely retry.
         SessionWorkKind::Mutation,
         move |state, http| {
             share::resolve_current_share_download_cancellable(
@@ -366,9 +369,24 @@ pub(crate) fn is_retryable_cloud_share_prepare(task: &DownloadTask) -> bool {
 }
 
 pub(crate) fn cloud_share_task_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskActionOutcome {
+    // Directory submission consumes only the leaf ID. Projecting its root here
+    // expands every group item, which turns a large share into a quadratic
+    // amount of SQLite work before later leaves can be scheduled.
+    if tasks
+        .cloud_directory_group_for_task(task.id)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return cloud_share_leaf_outcome(tasks, task);
+    }
     if let Ok(outcome) = task_action_outcome(tasks, task.clone(), None) {
         return outcome;
     }
+    cloud_share_leaf_outcome(tasks, task)
+}
+
+fn cloud_share_leaf_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskActionOutcome {
     let files = tasks.files(task.id).unwrap_or_default();
     let reauthorization_required =
         requires_cloud_reauthorization_failure(task.failure_code.as_deref());
@@ -392,6 +410,19 @@ pub(crate) fn schedule_cloud_share_cleanup(app: AppHandle, task: &DownloadTask) 
     tauri::async_runtime::spawn(async move {
         let _ = cleanup_cloud_share_task(app, id, false).await;
     });
+}
+
+/// Direct-share downloads never create a personal cloud file. Only a transfer
+/// journal entry for this exact leaf may require a personal identity or a
+/// provider delete call after the local task completes.
+pub(super) fn share_entry_needs_cleanup(entry: &share::CloudShareResolvedEntry) -> bool {
+    entry.plan.transfers.iter().any(|transfer| {
+        transfer.entry_fingerprint == entry.entry.entry_fingerprint
+            && !matches!(
+                transfer.cleanup_state,
+                share::CloudShareCleanupState::Succeeded
+            )
+    })
 }
 
 /// Explicit retry uses the same exact-object journal, and never resolves a URL
@@ -478,6 +509,9 @@ pub(crate) async fn cleanup_cloud_share_task_inner(
                 .map_err(|_| QuarkError::Storage)?
                 .delete_transferred_share_files_after_download;
             let entry = cloud.share_plans.resolve_entry(&task.source)?;
+            if !share_entry_needs_cleanup(&entry) {
+                return Ok(None);
+            }
             let adapter = share::provider_share_adapter(provider, &cloud.store, http)?;
             let owner = adapter.transfer_owner_fingerprint(&entry)?;
             crate::engine_runtime::cleanup_completed_share_for_owner(

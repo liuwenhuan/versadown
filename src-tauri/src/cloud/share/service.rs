@@ -73,6 +73,60 @@ impl crate::cloud::CloudHttpTransport for ControlledShareTransport<'_> {
         self.http.cookies_for_url(url)
     }
 }
+
+/// Retries only transient reads while a public share is being inspected. This
+/// sits below provider pagination, so a timeout retries the one failed page
+/// instead of replaying a successfully inspected directory or a mutation.
+pub(crate) struct RetryingShareReadTransport<'a> {
+    inner: &'a dyn crate::cloud::CloudHttpTransport,
+}
+
+impl<'a> RetryingShareReadTransport<'a> {
+    const ATTEMPTS: usize = 3;
+
+    pub(crate) fn new(inner: &'a dyn crate::cloud::CloudHttpTransport) -> Self {
+        Self { inner }
+    }
+}
+
+impl crate::cloud::CloudHttpTransport for RetryingShareReadTransport<'_> {
+    fn send(
+        &self,
+        request: crate::cloud::CloudHttpRequest,
+    ) -> Result<crate::cloud::CloudHttpResponse, QuarkError> {
+        for attempt in 0..Self::ATTEMPTS {
+            match self.inner.send(request.clone()) {
+                Ok(response) => return Ok(response),
+                Err(QuarkError::Transport(_)) if attempt + 1 < Self::ATTEMPTS => {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        250 * (attempt as u64 + 1),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("a bounded retry loop always returns")
+    }
+
+    fn check_transfer(&self) -> Result<(), QuarkError> {
+        self.inner.check_transfer()
+    }
+
+    fn isolated_session(
+        &self,
+    ) -> Result<Option<Box<dyn crate::cloud::CloudHttpTransport>>, QuarkError> {
+        self.inner.isolated_session()
+    }
+
+    fn manages_cookie_session(&self) -> bool {
+        self.inner.manages_cookie_session()
+    }
+
+    fn cookies_for_url(&self, url: &str) -> Result<Vec<String>, QuarkError> {
+        self.inner.cookies_for_url(url)
+    }
+}
+
 /// The only cloud-share plan projection permitted across the IPC boundary.
 /// Its source is an opaque, validated `cloud-share://` reference; credentials,
 /// provider session context, and canonical share identifiers remain DPAPI-only.

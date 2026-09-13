@@ -24,6 +24,46 @@ use crate::cloud::{
 };
 use crate::TaskStore;
 
+#[test]
+fn share_cleanup_only_requires_personal_identity_for_a_recorded_transfer() {
+    let mut plan = crate::cloud::share::CloudSharePlan::new(
+        CloudProvider::Aliyun,
+        "share-cleanup".into(),
+        None,
+        vec![crate::cloud::share::CloudShareEntry::new(
+            "share-cleanup",
+            "shared-file".into(),
+            "file.bin".into(),
+            vec![],
+            Some(7),
+        )],
+        serde_json::json!({}),
+    );
+    let entry = crate::cloud::share::CloudShareResolvedEntry {
+        provider: CloudProvider::Aliyun,
+        entry: plan.entries[0].clone(),
+        plan: plan.clone(),
+    };
+
+    assert!(!super::share_commands::share_entry_needs_cleanup(&entry));
+
+    plan.transfers
+        .push(crate::cloud::share::CloudShareTransfer {
+            entry_fingerprint: plan.entries[0].entry_fingerprint.clone(),
+            created_file_id: "personal-file".into(),
+            owner_fingerprint: "a".repeat(64),
+            owner_scheme: crate::cloud::share::CloudShareTransferOwnerScheme::AccountV2,
+            cleanup_state: crate::cloud::share::CloudShareCleanupState::Pending,
+        });
+    let entry = crate::cloud::share::CloudShareResolvedEntry {
+        provider: CloudProvider::Aliyun,
+        entry: plan.entries[0].clone(),
+        plan,
+    };
+
+    assert!(super::share_commands::share_entry_needs_cleanup(&entry));
+}
+
 #[path = "password_login_tests.rs"]
 mod password_login_tests;
 

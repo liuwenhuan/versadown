@@ -121,7 +121,9 @@ impl ProviderRegistry {
             CloudProvider::Xunlei => {
                 transferable!(super::xunlei::XunleiShareAdapter { credentials, http })
             }
-            CloudProvider::Aliyun => read_only!(super::aliyun::AliyunShareAdapter { http }),
+            CloudProvider::Aliyun => {
+                transferable!(super::aliyun::AliyunShareAdapter { credentials, http })
+            }
             CloudProvider::Pikpak => {
                 read_only!(super::pikpak::PikPakShareAdapter { credentials, http })
             }
