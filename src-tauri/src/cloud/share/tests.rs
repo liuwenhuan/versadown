@@ -2088,6 +2088,7 @@ async fn unavailable_engine_keeps_a_share_directory_leaf_linked_to_its_failed_ro
         }),
         false,
         false,
+        None,
         || async {
             Err::<Arc<crate::DownloadService>, _>(QuarkError::Transport(
                 "engine unavailable".into(),
@@ -2117,6 +2118,53 @@ async fn unavailable_engine_keeps_a_share_directory_leaf_linked_to_its_failed_ro
             .unwrap()
             .map(|linked| linked.id),
         Some(group.id)
+    );
+}
+
+#[tokio::test]
+async fn named_share_task_is_acknowledged_before_provider_resolution() {
+    let (plans, _, _) = memory_store();
+    let plan = fixture("early-ack");
+    let source = plan.source_for("f1");
+    plans.upsert(&plan).unwrap();
+    let tasks = Arc::new(crate::TaskStore::open_in_memory().unwrap());
+    let service = Arc::new(crate::DownloadService::new(
+        Arc::new(SagaAria2::default()),
+        tasks.clone(),
+    ));
+    let acknowledged = Arc::new(Mutex::new(None));
+    let received = acknowledged.clone();
+    let expected_name = "file.txt";
+    let result = crate::cloud::commands::submit_new_cloud_share_file_scoped_with(
+        tasks.clone(),
+        &plans,
+        source,
+        Default::default(),
+        None,
+        true,
+        false,
+        Some(Arc::new(move |task: &crate::DownloadTask| {
+            *received.lock().unwrap() = Some((task.id, task.name.clone()));
+        })),
+        || async { Ok(service) },
+        || async {
+            let (id, name) = acknowledged
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("task creation must precede provider requests");
+            assert_eq!(name, expected_name);
+            assert_eq!(tasks.find(id).unwrap().status, crate::TaskStatus::Parsing);
+            Err(QuarkError::NotAuthorized)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.payload.task.status, crate::TaskStatus::Failed);
+    assert_eq!(
+        tasks.list().unwrap().len(),
+        1,
+        "failure retains a retryable task"
     );
 }
 

@@ -297,10 +297,10 @@ fn risk_limited_retry_is_bounded_and_interactive_challenge_stops_retry() {
 #[test]
 fn pikpak_delete_uses_the_permanent_batch_delete_endpoint() {
     let store = MemoryCredentialStore::default();
-    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap","captcha_expires_at":9999999999,"captcha_action":"GET:/drive/v1/files"}"#).unwrap();
     let http = Sequence::new(&[
-        r#"{"id":"trashed-file-1","trashed":true}"#,
-        r#"{"id":"trashed-file-2","trashed":true}"#,
+        r#"{"files":[{"id":"trashed-file-1","name":"one","kind":"drive#file"},{"id":"trashed-file-2","name":"two","kind":"drive#file"}],"next_page_token":""}"#,
+        r#"{"captcha_token":"delete-cap","expires_in":300}"#,
         r#"{}"#,
     ]);
 
@@ -311,9 +311,9 @@ fn pikpak_delete_uses_the_permanent_batch_delete_endpoint() {
     let requests = &http.0.lock().unwrap().1;
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "GET");
-    assert!(requests[0].url.ends_with("/drive/v1/files/trashed-file-1"));
-    assert_eq!(requests[1].method, "GET");
-    assert!(requests[1].url.ends_with("/drive/v1/files/trashed-file-2"));
+    assert!(requests[0].url.contains("/drive/v1/files?"));
+    assert!(requests[0].url.contains("%22trashed%22%3A%7B%22eq%22%3Atrue%7D"));
+    assert!(requests[1].url.contains("/v1/shield/captcha/init"));
     let request = &requests[2];
     assert!(request.url.ends_with("/drive/v1/files:batchDelete"));
     assert_eq!(request.method, "POST");
@@ -324,12 +324,61 @@ fn pikpak_delete_uses_the_permanent_batch_delete_endpoint() {
 }
 
 #[test]
+fn pikpak_delete_refreshes_the_mutation_captcha_after_recycle_listing() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"old-cap","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"error_code":9}"#,
+        r#"{"captcha_token":"read-cap","expires_in":300}"#,
+        r#"{"files":[{"id":"trashed-folder","name":"old","kind":"drive#folder"}],"next_page_token":""}"#,
+        r#"{"captcha_token":"delete-cap","expires_in":300}"#,
+        r#"{}"#,
+    ]);
+
+    PikPakClient::new(&http, &store)
+        .delete(&["trashed-folder".to_owned()])
+        .unwrap();
+
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 5);
+    assert!(requests[3].url.contains("/v1/shield/captcha/init"));
+    let captcha: serde_json::Value =
+        serde_json::from_str(requests[3].body.as_deref().unwrap()).unwrap();
+    assert_eq!(captcha["action"], "POST:/drive/v1/files:batchDelete");
+    assert!(requests[4].url.ends_with("/drive/v1/files:batchDelete"));
+    assert_eq!(requests[4].headers["X-Captcha-Token"], "delete-cap");
+}
+
+#[test]
+fn pikpak_delete_does_not_reuse_an_unscoped_login_captcha_for_the_mutation() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"login-cap","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"files":[{"id":"trashed-folder","name":"old","kind":"drive#folder"}],"next_page_token":""}"#,
+        r#"{"captcha_token":"delete-cap","expires_in":300}"#,
+        r#"{}"#,
+    ]);
+
+    PikPakClient::new(&http, &store)
+        .delete(&["trashed-folder".to_owned()])
+        .unwrap();
+
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].url.contains("/v1/shield/captcha/init"));
+    let captcha: serde_json::Value =
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(captcha["action"], "POST:/drive/v1/files:batchDelete");
+    assert!(requests[2].url.ends_with("/drive/v1/files:batchDelete"));
+    assert_eq!(requests[2].headers["X-Captcha-Token"], "delete-cap");
+}
+
+#[test]
 fn pikpak_delete_rejects_items_outside_the_recycle_bin_without_batch_delete() {
     let store = MemoryCredentialStore::default();
     store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
     let http = Sequence::new(&[
-        r#"{"id":"trashed-file","trashed":true}"#,
-        r#"{"id":"live-file","trashed":false}"#,
+        r#"{"files":[{"id":"trashed-file","name":"old","kind":"drive#file"}],"next_page_token":""}"#,
     ]);
 
     let error = PikPakClient::new(&http, &store)
@@ -338,9 +387,8 @@ fn pikpak_delete_rejects_items_outside_the_recycle_bin_without_batch_delete() {
 
     assert!(matches!(error, QuarkError::InvalidInput(_)));
     let requests = &http.0.lock().unwrap().1;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[1].method, "GET");
     assert!(requests
         .iter()
         .all(|request| !request.url.contains("batchDelete")));
@@ -561,38 +609,43 @@ fn pikpak_cache_risk_for_browser_session_never_falls_back_to_fetch() {
 #[test]
 fn pikpak_web_delete_renews_each_action_without_relogging_or_changing_client() {
     let store = MemoryCredentialStore::default();
-    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"web-device","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
     let http = Sequence::new(&[
         r#"{"error_code":9}"#,
         r#"{"captcha_token":"read-cap","expires_in":300}"#,
-        r#"{"trashed":true}"#,
-        r#"{"error_code":9}"#,
+        r#"{"files":[{"id":"deleted-file","name":"old","kind":"drive#file"}],"next_page_token":""}"#,
         r#"{"captcha_token":"delete-cap","expires_in":300}"#,
         r#"{}"#,
     ]);
     PikPakClient::new(&http, &store).delete(&["deleted-file".into()]).unwrap();
     let requests = &http.0.lock().unwrap().1;
-    assert_eq!(requests.len(), 6);
-    for (index, action) in [(1, "GET:/drive/v1/files/"), (4, "POST:/drive/v1/files:batchDelete")] {
+    assert_eq!(requests.len(), 5);
+    for (index, action) in [(1, "GET:/drive/v1/files"), (3, "POST:/drive/v1/files:batchDelete")] {
         let body: serde_json::Value = serde_json::from_str(requests[index].body.as_deref().unwrap()).unwrap();
         assert_eq!(body["client_id"], "YUMx5nI8ZU8Ap8pm");
         assert_eq!(body["action"], action);
-        assert_eq!(body["meta"]["package_name"], "mypikpak.com");
-        assert_eq!(body["meta"]["client_version"], "2.0.0");
+        assert_eq!(body["device_id"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(body["meta"]["package_name"], "drive.mypikpak.com");
+        assert_eq!(body["meta"]["client_version"], "undefined");
+        assert_eq!(body["meta"]["timestamp"], "1789110095225");
+        assert_eq!(
+            body["meta"]["captcha_sign"],
+            "1.a7fcbb4b535e3c24e3e1b3020ec33bcf"
+        );
         assert_eq!(body["meta"]["user_id"], "owner");
     }
-    assert_eq!(requests[5].headers["X-Captcha-Token"], "delete-cap");
-    assert_eq!(requests[5].headers["X-Client-Id"], "YUMx5nI8ZU8Ap8pm");
-    assert_eq!(requests[5].headers["Authorization"], "Bearer access");
-    assert!(requests[5].headers["User-Agent"].contains("Mozilla/"));
-    assert_eq!(requests[5].headers["Origin"], "https://mypikpak.com");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(requests[5].body.as_deref().unwrap()).unwrap()["ids"], serde_json::json!(["deleted-file"]));
+    assert_eq!(requests[4].headers["X-Captcha-Token"], "delete-cap");
+    assert_eq!(requests[4].headers["X-Client-Id"], "YUMx5nI8ZU8Ap8pm");
+    assert_eq!(requests[4].headers["Authorization"], "Bearer access");
+    assert!(requests[4].headers["User-Agent"].contains("Mozilla/"));
+    assert_eq!(requests[4].headers["Origin"], "https://mypikpak.com");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(requests[4].body.as_deref().unwrap()).unwrap()["ids"], serde_json::json!(["deleted-file"]));
 }
 
 #[test]
 fn pikpak_web_delete_challenge_stops_before_deletion_and_preserves_verification_context() {
     let store = MemoryCredentialStore::default();
-    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"web-device","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
     let http = Sequence::new(&[
         r#"{"error_code":9}"#,
         r#"{"captcha_token":"pending-cap","expires_in":300,"url":"https://user.mypikpak.com/verify?token=private-challenge"}"#,
@@ -600,7 +653,7 @@ fn pikpak_web_delete_challenge_stops_before_deletion_and_preserves_verification_
     let error = PikPakClient::new(&http, &store).delete(&["deleted-file".into()]).unwrap_err();
     let public = serde_json::to_value(&error).unwrap();
     assert_eq!(public["code"], "pikpak_operation_verification_required");
-    assert!(public["message"].as_str().unwrap().contains("读取文件信息"));
+    assert!(public["message"].as_str().unwrap().contains("读取文件列表"));
     assert!(!public.to_string().contains("private-challenge"));
     assert!(!format!("{error:?}").contains("private-challenge"));
     assert_eq!(http.0.lock().unwrap().1.len(), 2);
@@ -617,7 +670,7 @@ fn pikpak_operation_verification_rejects_other_accounts_and_unsafe_destinations(
         assert!(!allows_pikpak_operation_verification_url(url), "{url}");
     }
     let store = MemoryCredentialStore::default();
-    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap","captcha_expires_at":9999999999,"verification_url":"https://user.mypikpak.com/check","client_id":"YUMx5nI8ZU8Ap8pm","auth_method":"web"}"#).unwrap();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"cap","captcha_expires_at":9999999999,"verification_url":"https://user.mypikpak.com/check","client_id":"YUMx5nI8ZU8Ap8pm","auth_method":"web"}"#).unwrap();
     let http = Sequence::new(&[r#"{"sub":"other-owner","name":"other"}"#]);
     assert!(matches!(PikPakClient::new(&http, &store).operation_verification_url("original-owner"), Err(QuarkError::InvalidInput(_))));
     assert_eq!(http.0.lock().unwrap().1.len(), 1);
@@ -644,33 +697,37 @@ fn pikpak_operation_verification_uses_only_current_unexpired_official_challenge(
 #[test]
 fn pikpak_verified_token_is_used_on_explicit_retry_without_creating_another_challenge() {
     let store = MemoryCredentialStore::default();
-    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"verified-cap","client_id":"YUMx5nI8ZU8Ap8pm","auth_method":"web"}"#).unwrap();
-    let http = Sequence::new(&[r#"{"trashed":true}"#, r#"{}"#]);
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"verified-cap","captcha_expires_at":9999999999,"captcha_action":"POST:/drive/v1/files:batchDelete","operation_verifications":{"POST:/drive/v1/files:batchDelete":{"token":"verified-cap","expires_at":9999999999,"url":null}},"client_id":"YUMx5nI8ZU8Ap8pm","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"captcha_token":"read-cap","expires_in":300}"#,
+        r#"{"files":[{"id":"original-file","name":"old","kind":"drive#file"}],"next_page_token":""}"#,
+        r#"{}"#,
+    ]);
     PikPakClient::new(&http, &store).delete(&["original-file".into()]).unwrap();
     let requests = &http.0.lock().unwrap().1;
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1].url.ends_with("/drive/v1/files:batchDelete"));
-    assert_eq!(requests[1].headers["X-Captcha-Token"], "verified-cap");
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].url.ends_with("/drive/v1/files:batchDelete"));
+    assert_eq!(requests[2].headers["X-Captcha-Token"], "verified-cap");
 }
 
 #[test]
 fn pikpak_delete_challenge_survives_metadata_captcha_rotation_on_explicit_retry() {
     let store = MemoryCredentialStore::default();
-    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
     let http = Sequence::new(&[
-        r#"{"trashed":true}"#, r#"{"error_code":9}"#,
+        r#"{"files":[{"id":"file","name":"old","kind":"drive#file"}],"next_page_token":""}"#,
         r#"{"captcha_token":"verify-delete","expires_in":300,"url":"https://user.mypikpak.com/check"}"#,
-        // The next explicit retry checks the file first, with a different action.
-        r#"{"error_code":9}"#, r#"{"captcha_token":"read-only-cap","expires_in":300}"#,
-        r#"{"trashed":true}"#, r#"{}"#,
+        // The next explicit retry refreshes the recycle listing action first.
+        r#"{"captcha_token":"read-only-cap","expires_in":300}"#,
+        r#"{"files":[{"id":"file","name":"old","kind":"drive#file"}],"next_page_token":""}"#, r#"{}"#,
     ]);
     let client = PikPakClient::new(&http, &store);
     assert_eq!(serde_json::to_value(client.delete(&["file".into()]).unwrap_err()).unwrap()["code"], "pikpak_operation_verification_required");
     client.delete(&["file".into()]).unwrap();
     let requests = &http.0.lock().unwrap().1;
-    assert_eq!(requests.len(), 7);
-    assert_eq!(requests[5].headers["X-Captcha-Token"], "read-only-cap");
-    assert_eq!(requests[6].headers["X-Captcha-Token"], "verify-delete");
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[3].headers["X-Captcha-Token"], "read-only-cap");
+    assert_eq!(requests[4].headers["X-Captcha-Token"], "verify-delete");
 }
 
 #[test]

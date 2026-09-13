@@ -421,6 +421,33 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Durable user intent, independent of currently linked/running children.
+    pub fn set_cloud_directory_paused(
+        &self,
+        group_id: Uuid,
+        paused: bool,
+    ) -> Result<(), StoreError> {
+        validate_uuid(group_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE cloud_directory_groups SET status = ?1, updated_at = ?2
+             WHERE id = ?3 AND status NOT IN ('cancelled', 'recycled', 'completed')",
+            params![
+                if paused {
+                    TaskStatus::Paused.as_db()
+                } else {
+                    TaskStatus::Queued.as_db()
+                },
+                current_timestamp(),
+                group_id.to_string()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(group_id));
+        }
+        Ok(())
+    }
+
     pub fn link_cloud_directory_group_item_task(
         &self,
         group_id: Uuid,

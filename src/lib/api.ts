@@ -1,5 +1,5 @@
 import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './types';
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 
 function fileNameFrom(value: string) {
@@ -141,9 +141,11 @@ export async function openTaskFile(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_file', { taskId });
 }
 
-export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false): Promise<CloudShareBatchResult> {
+export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false, onCreated?: (task: QueueTask) => void): Promise<CloudShareBatchResult> {
   if (!isTauriRuntime()) return { outcomes: [], failures: [] };
-  const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}) });
+  const onCreatedChannel = new Channel<QueueTask>();
+  onCreatedChannel.onmessage = (task) => onCreated?.(task);
+  const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), onCreated: onCreatedChannel });
   return { outcomes: result.outcomes.map(duplicateResult), failures: result.failures };
 }
 

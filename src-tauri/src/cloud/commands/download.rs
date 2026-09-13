@@ -621,9 +621,10 @@ pub(crate) fn directory_download_failure_fields(
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => {
             ("web_auth_required", "网盘需要网页验证")
         }
-        QuarkError::PikpakOperationVerificationRequired(_) => {
-            ("pikpak_operation_verification_required", "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试")
-        }
+        QuarkError::PikpakOperationVerificationRequired(_) => (
+            "pikpak_operation_verification_required",
+            "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试",
+        ),
         QuarkError::Transport(_) => ("network_error", "网络或下载引擎错误"),
         QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
         QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),
@@ -658,7 +659,12 @@ fn directory_submission_stopped(
     Ok(store
         .cloud_directory_group(group_id)
         .map_err(|_| QuarkError::Storage)?
-        .is_none_or(|group| matches!(group.status, TaskStatus::Cancelled | TaskStatus::Recycled)))
+        .is_none_or(|group| {
+            matches!(
+                group.status,
+                TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Recycled
+            )
+        }))
 }
 
 /// Shared by user retries and background URL/authorization refreshes.
@@ -675,10 +681,28 @@ pub async fn lock_directory_member_submission(
     let guard = lock_directory_submission(group.id).await?;
     if directory_submission_stopped(store, group.id)? {
         return Err(QuarkError::InvalidInput(
-            "目录下载任务已取消或移入回收站".into(),
+            "目录下载任务已暂停、取消或移入回收站".into(),
         ));
     }
     Ok(Some(guard))
+}
+
+/// Called only with the directory/source submission gates held. A live
+/// resolver must finish first; after restart there is no resolver to wait for.
+pub fn recover_interrupted_directory_preparation(
+    store: &TaskStore,
+    task_id: uuid::Uuid,
+) -> Result<DownloadTask, QuarkError> {
+    let mut task = store.find(task_id).map_err(|_| QuarkError::Storage)?;
+    if task.aria_gid.is_none() && task.status == TaskStatus::Parsing {
+        task.status = TaskStatus::Paused;
+        task.download_speed = 0;
+        task.upload_speed = 0;
+        task = store
+            .apply_transfer_snapshot(task)
+            .map_err(|_| QuarkError::Storage)?;
+    }
+    Ok(task)
 }
 
 pub async fn cancel_cloud_directory_group_with<F, Fut>(
@@ -848,6 +872,15 @@ where
         let _submission = lock_directory_submission(group.id).await?;
         if directory_submission_stopped(store, group.id)? {
             break;
+        }
+        // A resume may have submitted this item while the original loop waited.
+        if store
+            .cloud_directory_group_items(group.id)
+            .map_err(|_| QuarkError::Storage)?
+            .iter()
+            .any(|current| current.id == item.id && current.task_id.is_some())
+        {
+            continue;
         }
         let relative_path = planned_relative_path(&file);
         let output_directory =

@@ -58,6 +58,7 @@ pub async fn submit_cloud_share_file(
     source: String,
     configured: UriSubmissionOptions,
     private_download: bool,
+    on_created: Option<tauri::ipc::Channel<QueueTaskPayload>>,
 ) -> Result<TaskActionOutcome, QuarkError> {
     let submission = submit_cloud_share_file_internal(
         app.clone(),
@@ -67,6 +68,7 @@ pub async fn submit_cloud_share_file(
         None,
         true,
         private_download,
+        on_created,
     )
     .await?;
     let outcome = match submission {
@@ -90,6 +92,7 @@ pub(crate) async fn submit_cloud_share_file_internal(
     directory_context: Option<DirectoryLeafContext>,
     append_entry_directory: bool,
     private_download: bool,
+    on_created: Option<tauri::ipc::Channel<QueueTaskPayload>>,
 ) -> Result<CloudShareFileSubmission, QuarkError> {
     share::parse_stable_cloud_share_source(&source)?;
     let _source_submission = state.cloud_download_sources.acquire(&source).await?;
@@ -121,6 +124,16 @@ pub(crate) async fn submit_cloud_share_file_internal(
         directory_context,
         append_entry_directory,
         private_download,
+        on_created.map(|channel| {
+            let store = state.store.clone();
+            Arc::new(move |task: &DownloadTask| {
+                if let Ok(root) =
+                    crate::commands::queue_task_payload_from_task(&store, task.clone())
+                {
+                    let _ = channel.send(root);
+                }
+            }) as Arc<dyn Fn(&DownloadTask) + Send + Sync>
+        }),
         || async {
             state
                 .runtime
@@ -150,6 +163,7 @@ pub async fn submit_cloud_share_directory_leaf(
         Some(context),
         false,
         private_download,
+        None,
     )
     .await?
     {
@@ -176,7 +190,7 @@ where
     RFut: std::future::Future<Output = Result<ResolvedCloudDownload, QuarkError>>,
 {
     submit_new_cloud_share_file_scoped_with(
-        tasks, plans, source, configured, None, true, false, service, resolve,
+        tasks, plans, source, configured, None, true, false, None, service, resolve,
     )
     .await
 }
@@ -189,6 +203,7 @@ pub(crate) async fn submit_new_cloud_share_file_scoped_with<S, SFut, R, RFut>(
     directory_context: Option<DirectoryLeafContext>,
     append_entry_directory: bool,
     private_download: bool,
+    on_created: Option<Arc<dyn Fn(&DownloadTask) + Send + Sync>>,
     service: S,
     resolve: R,
 ) -> Result<TaskActionOutcome, QuarkError>
@@ -281,6 +296,9 @@ where
             .map_err(|_| QuarkError::Storage)?;
     }
 
+    if let Some(on_created) = on_created {
+        on_created(&prepared);
+    }
     let service = match eager_service {
         Some(service) => service,
         None => match service_factory

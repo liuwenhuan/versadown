@@ -314,7 +314,7 @@ pub async fn parse_download(
                 }
                 let configured = download_submission_options(&state)?;
                 let action = crate::cloud::commands::submit_cloud_share_file(
-                    app, &state, source, configured, false,
+                    app, &state, source, configured, false, None,
                 )
                 .await
                 .map_err(|error| error.to_string())?;
@@ -444,6 +444,7 @@ pub async fn confirm_cloud_share_download(
     selected_ids: Vec<String>,
     destination_directory: Option<String>,
     private_download: Option<bool>,
+    on_created: tauri::ipc::Channel<QueueTaskPayload>,
     state: State<'_, AppState>,
 ) -> Result<CloudShareBatchOutcome, crate::cloud::QuarkError> {
     let cloud = app
@@ -479,6 +480,7 @@ pub async fn confirm_cloud_share_download(
             configured,
             private_download,
             move |root| {
+                let _ = on_created.send(root.clone());
                 if emit_root {
                     use tauri::Emitter;
                     let _ = root_event_app.emit("download-task-updated", root);
@@ -520,15 +522,23 @@ pub async fn confirm_cloud_share_download(
     let mut result = submit_cloud_share_batch_with(selections, |source| {
         let app = app.clone();
         let configured = configured.clone();
+        let on_created = on_created.clone();
         async move {
-            crate::cloud::commands::submit_cloud_share_file(
+            let outcome = crate::cloud::commands::submit_cloud_share_file(
                 app,
                 state,
                 source,
                 configured,
                 private_download,
+                Some(on_created.clone()),
             )
-            .await
+            .await?;
+            if let Ok(task) =
+                queue_task_payload_from_task(&state.store, outcome.payload.task.clone())
+            {
+                let _ = on_created.send(task);
+            }
+            Ok(outcome)
         }
     })
     .await;
@@ -608,7 +618,9 @@ fn cloud_share_failure_code(error: &crate::cloud::QuarkError) -> &'static str {
         QuarkError::NotAuthorized => "not_authorized",
         QuarkError::AuthorizationExpired => "credentials_expired",
         QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
-        QuarkError::PikpakOperationVerificationRequired(_) => "pikpak_operation_verification_required",
+        QuarkError::PikpakOperationVerificationRequired(_) => {
+            "pikpak_operation_verification_required"
+        }
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
@@ -879,7 +891,10 @@ fn virtual_cloud_directory_item_payload(
     error: Option<String>,
     failure_code: Option<String>,
 ) -> QueueTaskPayload {
-    let status = if matches!(group.status, TaskStatus::Cancelled | TaskStatus::Recycled) {
+    let status = if matches!(
+        group.status,
+        TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Recycled
+    ) {
         group.status
     } else if error.is_some() {
         TaskStatus::Failed
@@ -1116,6 +1131,8 @@ fn aggregate_cloud_directory_folder(
             .all(|item| item.status == TaskStatus::Completed);
     let status = if group.status == TaskStatus::Recycled || all_linked_recycled {
         TaskStatus::Recycled
+    } else if group.status == TaskStatus::Paused && !all_completed {
+        TaskStatus::Paused
     } else if has_active {
         leaves
             .iter()
@@ -1422,6 +1439,115 @@ async fn run_cloud_directory_group_action(
     if !matches!(action, "pause" | "resume" | "cancel" | "retry") {
         return Err("当前任务不能执行此操作".to_string());
     }
+    if matches!(action, "pause" | "resume") {
+        state
+            .store
+            .set_cloud_directory_paused(group.id, action == "pause")
+            .map_err(|error| error.to_string())?;
+        use tauri::Emitter;
+        let root = cloud_directory_group_queue_task(&state.store, group.id)?;
+        if !group.is_private
+            || privacy_task_visibility(state)
+                .map(|v| v.unlocked)
+                .unwrap_or(false)
+        {
+            let _ = app.emit("download-task-updated", root);
+        }
+        let items = state
+            .store
+            .cloud_directory_group_items(group.id)
+            .map_err(|e| e.to_string())?;
+        let targets = items
+            .iter()
+            .filter_map(|item| item.task_id)
+            .map(|id| state.store.find(id))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|task| task.aria_gid.is_some() && task_is_active(task.status));
+        // Dispatch every interrupt before waiting for any child's reconciliation.
+        let targets = targets.collect::<Vec<_>>();
+        let mut results = Vec::new();
+        if !targets.is_empty() {
+            let service = state.runtime.service().await.map_err(|e| e.to_string())?;
+            let control = if action == "pause" {
+                DownloadAction::Pause
+            } else {
+                DownloadAction::Resume
+            };
+            results = futures_util::future::join_all(
+                targets
+                    .iter()
+                    .map(|task| service.control_directory_member(task.id, control)),
+            )
+            .await;
+        }
+        if action == "resume" {
+            let app = app.clone();
+            let group_id = group.id;
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                // Linked preparations can survive an application exit without
+                // ever receiving a GID. resubmit_task waits for any live resolver
+                // and rechecks the record before doing provider work.
+                for id in items.iter().filter_map(|item| item.task_id) {
+                    if let Ok(task) = state.store.find(id) {
+                        if task.aria_gid.is_none()
+                            && matches!(task.status, TaskStatus::Parsing | TaskStatus::Paused)
+                        {
+                            if let Err(error) =
+                                resubmit_task(app.clone(), &state, task, Default::default()).await
+                            {
+                                if let Ok(current) = state.store.find(id) {
+                                    let still_running = state
+                                        .store
+                                        .cloud_directory_group(group_id)
+                                        .ok()
+                                        .flatten()
+                                        .is_some_and(|group| {
+                                            !matches!(
+                                                group.status,
+                                                TaskStatus::Paused
+                                                    | TaskStatus::Cancelled
+                                                    | TaskStatus::Recycled
+                                            )
+                                        });
+                                    if still_running
+                                        && current.aria_gid.is_none()
+                                        && matches!(
+                                            current.status,
+                                            TaskStatus::Parsing | TaskStatus::Paused
+                                        )
+                                    {
+                                        let _ = state.store.fail(id, &error);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if items.iter().any(|item| item.task_id.is_none()) {
+                    let _ =
+                        crate::cloud::commands::retry_cloud_directory_group(app.clone(), group_id)
+                            .await;
+                }
+                if let Ok(root) = cloud_directory_group_queue_task(&state.store, group_id) {
+                    if !root.is_private
+                        || privacy_task_visibility(&state)
+                            .map(|v| v.unlocked)
+                            .unwrap_or(false)
+                    {
+                        let _ = app.emit("download-task-updated", root);
+                    }
+                }
+            });
+        }
+        if let Some(error) = results.into_iter().find_map(Result::err) {
+            return Err(format!("部分目录文件操作失败，请重试：{error}"));
+        }
+        return crate::cloud::commands::cloud_directory_group_task_outcome(&state.store, group)
+            .map_err(|error| error.to_string());
+    }
     let items = state
         .store
         .cloud_directory_group_items(group.id)
@@ -1582,7 +1708,7 @@ pub async fn resolve_duplicate_download(
 pub(crate) async fn resubmit_task(
     app: AppHandle,
     state: &AppState,
-    task: DownloadTask,
+    mut task: DownloadTask,
     mut options: UriSubmissionOptions,
 ) -> Result<DownloadTask, String> {
     // Match the cleanup worker's source gate for both retry and overwrite.
@@ -1601,6 +1727,19 @@ pub(crate) async fn resubmit_task(
     } else {
         None
     };
+    if _directory_submission.is_some()
+        && task.aria_gid.is_none()
+        && matches!(task.status, TaskStatus::Parsing | TaskStatus::Paused)
+    {
+        task = crate::cloud::commands::recover_interrupted_directory_preparation(
+            &state.store,
+            task.id,
+        )
+        .map_err(|error| error.to_string())?;
+        if task.aria_gid.is_some() || task.status != TaskStatus::Paused {
+            return Ok(task);
+        }
+    }
     if task.source.starts_with("cloud-share://") {
         let cloud = app
             .try_state::<Arc<crate::cloud::commands::CloudState>>()
@@ -3042,6 +3181,59 @@ mod tests {
                 season.completed_at.is_some(),
                 status == TaskStatus::Completed
             );
+        }
+    }
+
+    #[test]
+    fn cloud_directory_queue_serializes_transfer_metrics_with_download_task_field_names() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Pikpak,
+                    "cloud-share://pikpak/share/root",
+                    "分享目录",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "cloud-share://pikpak/share/file",
+                    &["分享目录"],
+                    "视频.mp4",
+                    Some(1_000),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+        let task = store
+            .create(NewTask::direct("cloud-share://pikpak/share/file"))
+            .unwrap();
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Downloading,
+                progress: 25,
+                total_length: Some(1_000),
+                completed_length: 250,
+                download_speed: 64,
+                eta_seconds: Some(12),
+                ..task.clone()
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+
+        let json = serde_json::to_value(cloud_directory_group_queue_task(&store, group.id).unwrap())
+            .unwrap();
+
+        for node in [&json, &json["children"][0]] {
+            assert_eq!(node["total_length"], 1_000);
+            assert_eq!(node["completed_length"], 250);
+            assert_eq!(node["download_speed"], 64);
+            assert_eq!(node["eta_seconds"], 12);
+            assert!(node.get("totalLength").is_none());
+            assert!(node.get("completedLength").is_none());
+            assert!(node.get("downloadSpeed").is_none());
+            assert!(node.get("etaSeconds").is_none());
         }
     }
 

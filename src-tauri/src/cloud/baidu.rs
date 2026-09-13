@@ -56,7 +56,8 @@ mod tests {
         crate::parser::CloudShareCandidate {
             provider: CloudProvider::Baidu,
             url: "https://pan.baidu.com/s/1share123".into(),
-            access_code: Some("a123".into()),
+            // Existing listing fixtures represent public/already accessible shares.
+            access_code: None,
         }
     }
 
@@ -161,6 +162,200 @@ mod tests {
             )
             .unwrap();
         credentials
+    }
+    struct ShareHttp {
+        replies: Mutex<std::collections::VecDeque<CloudHttpResponse>>,
+        requests: Mutex<Vec<CloudHttpRequest>>,
+    }
+    impl CloudHttpTransport for ShareHttp {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.requests.lock().unwrap().push(request);
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(QuarkError::InvalidResponse)
+        }
+    }
+    fn share_response(body: &str, cookies: &[&str]) -> CloudHttpResponse {
+        CloudHttpResponse {
+            status: 200,
+            body: body.into(),
+            set_cookies: cookies.iter().map(|cookie| (*cookie).into()).collect(),
+        }
+    }
+    #[test]
+    fn protected_share_verifies_code_and_keeps_session_for_children_and_download() {
+        for cookie in [vec![], vec!["BDCLND=verified%2Bkey%2F%3D; Path=/; Secure"]] {
+            let credentials = credentials();
+            credentials
+                .save(
+                    "baidu",
+                    &serde_json::to_vec(&BaiduSession::cookie("BDUSS=current; BDCLND=old-share"))
+                        .unwrap(),
+                )
+                .unwrap();
+            let saved = credentials.load("baidu").unwrap();
+            let http = ShareHttp {
+                replies: Mutex::new(vec![
+                    share_response("<html>share</html>", &["csrfToken=page-token; Path=/"]),
+                    share_response(r#"{"errno":0,"randsk":"verified%2Bkey%2F%3D"}"#, &cookie),
+                    share_response(r#"{"errno":0,"shareid":22,"uk":33,"list":[{"fs_id":12,"server_filename":"folder","path":"/folder","isdir":1}]}"#, &[]),
+                    share_response(r#"{"errno":0,"list":[{"fs_id":11,"server_filename":"file.txt","path":"/folder/file.txt","isdir":0,"size":123}]}"#, &[]),
+                    share_response(r#"{"errno":0,"data":{"sign":"sign","timestamp":1234}}"#, &[]),
+                    share_response(r#"{"errno":0,"list":[{"fs_id":11,"dlink":"https://d.pcs.baidu.com/file"}]}"#, &[]),
+                ].into()),
+                requests: Mutex::new(vec![]),
+            };
+            let adapter =
+                provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+            let input = crate::parser::CloudShareCandidate {
+                provider: CloudProvider::Baidu,
+                url: "https://pan.baidu.com/s/1_49elQi_54BPJASvAxAB6w".into(),
+                access_code: Some("88in".into()),
+            };
+            let result = adapter.inspect(&input);
+            assert!(
+                matches!(result, Ok(ShareInspection::Plan(_))),
+                "correct code must unlock the file list: {:?}",
+                result.as_ref().err()
+            );
+            let ShareInspection::Plan(plan) = result.unwrap() else {
+                unreachable!()
+            };
+            assert_eq!(plan.entries[0].relative_directory, vec!["folder"]);
+            assert_eq!(plan.provider_context["bdclnd"], "verified%2Bkey%2F%3D");
+            assert_eq!(plan.provider_context["seckey"], "verified+key/=");
+            let entry = CloudShareResolvedEntry {
+                provider: plan.provider,
+                entry: plan.entries[0].clone(),
+                plan,
+            };
+            assert!(matches!(
+                adapter.resolve(&entry).unwrap(),
+                ShareResolution::Direct(_)
+            ));
+            assert_eq!(
+                credentials.load("baidu").unwrap(),
+                saved,
+                "share cookies must not replace account credentials"
+            );
+            let requests = http.requests.lock().unwrap();
+            assert_eq!(requests.len(), 6);
+            assert_eq!(requests[0].url, input.url);
+            assert_eq!(requests[1].method, "POST");
+            let verify_url = url::Url::parse(&requests[1].url).unwrap();
+            assert_eq!(verify_url.path(), "/share/verify");
+            assert!(verify_url
+                .query_pairs()
+                .any(|(k, v)| k == "surl" && v == "_49elQi_54BPJASvAxAB6w"));
+            let body: BTreeMap<_, _> =
+                url::form_urlencoded::parse(requests[1].body.as_ref().unwrap().as_bytes())
+                    .into_owned()
+                    .collect();
+            assert_eq!(body["pwd"], "88in");
+            assert!(requests[1].headers["Cookie"].contains("csrfToken=page-token"));
+            for request in &requests[2..] {
+                assert!(request.headers["Cookie"].contains("BDCLND=verified%2Bkey%2F%3D"));
+                assert_eq!(request.headers["Cookie"].matches("BDCLND=").count(), 1);
+                assert!(
+                    !request.url.contains("pwd="),
+                    "password belongs only in verification POST body"
+                );
+            }
+            let body: BTreeMap<_, _> =
+                url::form_urlencoded::parse(requests[5].body.as_ref().unwrap().as_bytes())
+                    .into_owned()
+                    .collect();
+            assert_eq!(body["extra"], r#"{"sekey":"verified+key/="}"#);
+        }
+    }
+    #[test]
+    fn protected_share_verification_errors_never_list_or_transfer() {
+        for (response, expected) in [
+            (json!({"errno":-9}), "code"),
+            (json!({"errno":-12}), "code"),
+            (json!({"errno":-6}), "auth"),
+            (json!({"errno":-20}), "web"),
+            (json!({"errno":-9,"vcode_str":"challenge"}), "web"),
+            (json!({"errno":9019}), "captcha"),
+            (json!({"errno":0}), "invalid"),
+        ] {
+            let credentials = credentials();
+            let http = ShareHttp {
+                replies: Mutex::new(
+                    vec![
+                        share_response("<html/>", &[]),
+                        share_response(&response.to_string(), &[]),
+                    ]
+                    .into(),
+                ),
+                requests: Mutex::new(vec![]),
+            };
+            let adapter =
+                provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+            let mut input = candidate();
+            input.access_code = Some("a123".into());
+            let result = adapter.inspect(&input);
+            assert!(
+                match expected {
+                    "code" => matches!(result, Err(QuarkError::InvalidInput(_))),
+                    "auth" => matches!(result, Err(QuarkError::AuthorizationExpired)),
+                    "web" => matches!(result, Err(QuarkError::WebAuthorizationRequired)),
+                    "captcha" => matches!(result, Err(QuarkError::CaptchaRequired)),
+                    _ => matches!(result, Err(QuarkError::InvalidResponse)),
+                },
+                "unexpected verification outcome: {:?}",
+                result.as_ref().err()
+            );
+            let requests = http.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].url.contains("/share/verify?"));
+        }
+    }
+    #[test]
+    fn protected_share_list_rejection_is_not_reported_as_wrong_code() {
+        let credentials = credentials();
+        let http = ShareHttp {
+            replies: Mutex::new(
+                vec![
+                    share_response("<html/>", &[]),
+                    share_response(r#"{"errno":0,"randsk":"verified"}"#, &[]),
+                    share_response(r#"{"errno":-9}"#, &[]),
+                ]
+                .into(),
+            ),
+            requests: Mutex::new(vec![]),
+        };
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+        let mut input = candidate();
+        input.access_code = Some("a123".into());
+        assert!(matches!(
+            adapter.inspect(&input),
+            Err(QuarkError::Provider(_))
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    #[ignore = "read-only: requires BAIDU_SHARE_PROBE_URL and BAIDU_SHARE_PROBE_CODE; no account credentials or downloads"]
+    fn live_protected_share_verification() {
+        let input = std::env::var("BAIDU_SHARE_PROBE_URL").expect("explicit share URL required");
+        let code = std::env::var("BAIDU_SHARE_PROBE_CODE").expect("explicit access code required");
+        let candidate = crate::parser::extract_cloud_share_candidate(&input, Some(&code))
+            .unwrap()
+            .unwrap();
+        let id = super::super::share::share_id(&candidate, CloudProvider::Baidu).unwrap();
+        let short = id.strip_prefix('1').unwrap();
+        let http = crate::cloud::ReqwestTransport::new().unwrap();
+        let mut client = BaiduClient::new(BaiduSession::cookie(""), &http);
+        let (bdclnd, _) = client.verify_share_access(short, &code).unwrap();
+        let response = client.share_http("GET", &format!("/share/list?channel=chunlei&clienttype=0&app_id=250528&web=1&shorturl={}&root=1&dir=%2F&num=1&page=1", encoded(short)), None, &bdclnd).unwrap();
+        let value = share_json(&response).unwrap();
+        assert!(
+            value["list"].is_array(),
+            "verification must unlock the root listing"
+        );
     }
     #[test]
     fn baidu_share_uses_the_current_share_list_endpoint() {
@@ -267,7 +462,6 @@ mod tests {
         let credentials = credentials();
         let http = Http::new(vec![
             json!({"errno":-9}),
-            json!({"errno":-9}),
             json!({"errno":-6}),
             json!({"errno":-20}),
             json!({"errno":9019}),
@@ -281,10 +475,6 @@ mod tests {
         ));
         assert!(matches!(
             adapter.inspect(&candidate()),
-            Err(QuarkError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            adapter.inspect(&candidate()),
             Err(QuarkError::AuthorizationExpired)
         ));
         assert!(matches!(
@@ -295,7 +485,7 @@ mod tests {
             adapter.inspect(&candidate()),
             Err(QuarkError::CaptchaRequired)
         ));
-        assert_eq!(http.requests.lock().unwrap().len(), 5);
+        assert_eq!(http.requests.lock().unwrap().len(), 4);
     }
     #[test]
     fn baidu_share_pages_nested_paths_and_empty_folder_stays_empty() {
@@ -1971,6 +2161,95 @@ impl BaiduShareAdapter<'_> {
     }
 }
 impl<T: CloudHttpTransport + ?Sized> BaiduClient<'_, T> {
+    /// Verification is a web session handshake, not a `pwd` option on share/list.
+    /// Keep these cookies local to this inspection; they are not account credentials.
+    fn verify_share_access(
+        &mut self,
+        short: &str,
+        code: &str,
+    ) -> Result<(String, String), QuarkError> {
+        let mut cookies = BaiduLoginCookies::default();
+        cookies.absorb_cookie_header(&self.session.cookie);
+        cookies.0.remove("BDCLND");
+        self.session.cookie = cookies.header();
+        let page_url = format!("{PAN}/s/1{}", encoded(short));
+        let page = self.http.send(CloudHttpRequest {
+            method: "GET",
+            url: page_url.clone(),
+            headers: self.web_headers(),
+            body: None,
+        })?;
+        if page.status == 401 {
+            return Err(QuarkError::AuthorizationExpired);
+        }
+        if !(200..300).contains(&page.status) {
+            return Err(QuarkError::Provider(
+                "百度分享验证页面暂时无法访问，请稍后重试".into(),
+            ));
+        }
+        cookies.absorb_set_cookies(&page.set_cookies);
+        self.session.cookie = cookies.header();
+        let mut headers = self.web_headers();
+        headers.insert("Referer".into(), page_url);
+        headers.insert("X-Requested-With".into(), "XMLHttpRequest".into());
+        headers.insert(
+            "Content-Type".into(),
+            "application/x-www-form-urlencoded".into(),
+        );
+        let response = self.http.send(CloudHttpRequest {
+            method: "POST",
+            url: format!(
+                "{PAN}/share/verify?channel=chunlei&clienttype=0&web=1&app_id=250528&surl={}",
+                encoded(short)
+            ),
+            headers,
+            body: Some(form(&[
+                ("pwd", code.into()),
+                ("vcode", "".into()),
+                ("vcode_str", "".into()),
+            ])),
+        })?;
+        let value = share_json(&response).map_err(|error| {
+            // Do not turn login expiry or a captcha challenge into a password error.
+            let errno = serde_json::from_str::<Value>(&response.body)
+                .ok()
+                .and_then(|value| value["errno"].as_i64());
+            match error {
+                QuarkError::Provider(_)
+                    if response.status == 200 && matches!(errno, Some(-9 | -12)) =>
+                {
+                    QuarkError::InvalidInput("百度分享提取码校验失败，请检查提取码后重试".into())
+                }
+                error => error,
+            }
+        })?;
+        // Only accept a token issued by this verification, never a stale account cookie.
+        let mut verified = BaiduLoginCookies::default();
+        verified.absorb_set_cookies(&response.set_cookies);
+        let bdclnd = verified
+            .0
+            .get("BDCLND")
+            .cloned()
+            .or_else(|| {
+                value["randsk"]
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+            })
+            .ok_or(QuarkError::InvalidResponse)?;
+        if bdclnd.chars().any(|c| c.is_control() || c == ';') {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let seckey = percent_encoding::percent_decode_str(&bdclnd)
+            .decode_utf8()
+            .map_err(|_| QuarkError::InvalidResponse)?
+            .into_owned();
+        cookies.absorb_set_cookies(&response.set_cookies);
+        cookies.insert("BDCLND", &bdclnd);
+        self.session.cookie = cookies.header();
+        Ok((bdclnd, seckey))
+    }
+
     fn share_http(
         &self,
         method: &'static str,
@@ -1980,10 +2259,10 @@ impl<T: CloudHttpTransport + ?Sized> BaiduClient<'_, T> {
     ) -> Result<CloudHttpResponse, QuarkError> {
         let mut headers = self.pan_headers();
         if !bdclnd.is_empty() {
-            headers.insert(
-                "Cookie".into(),
-                format!("{}; BDCLND={bdclnd}", self.session.cookie),
-            );
+            let mut cookies = BaiduLoginCookies::default();
+            cookies.absorb_cookie_header(&self.session.cookie);
+            cookies.insert("BDCLND", bdclnd);
+            headers.insert("Cookie".into(), cookies.header());
         }
         if body.is_some() {
             headers.insert(
@@ -2044,11 +2323,21 @@ impl ShareInspect for BaiduShareAdapter<'_> {
         &self,
         candidate: &crate::parser::CloudShareCandidate,
     ) -> Result<ShareInspection, QuarkError> {
-        let client = self.client()?;
+        let mut client = self.client()?;
         let id = super::share::share_id(candidate, CloudProvider::Baidu)?;
         let short = id.strip_prefix('1').ok_or(QuarkError::InvalidResponse)?;
         let mut entries = vec![];
         let mut context = json!({"shorturl":short,"bdclnd":"","paths":{}});
+        if let Some(code) = candidate
+            .access_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            let (bdclnd, seckey) = client.verify_share_access(short, code)?;
+            context["bdclnd"] = json!(bdclnd);
+            context["seckey"] = json!(seckey);
+        }
         let mut queue =
             std::collections::VecDeque::from([("/".to_owned(), Vec::<String>::new(), true)]);
         let mut visited = std::collections::BTreeSet::new();
@@ -2059,7 +2348,6 @@ impl ShareInspect for BaiduShareAdapter<'_> {
             for page in 1..=10000 {
                 let query = form(&[
                     ("shorturl", short.into()),
-                    ("pwd", candidate.access_code.clone().unwrap_or_default()),
                     ("root", if root { "1" } else { "0" }.into()),
                     ("dir", parent.clone()),
                     ("num", "100".into()),
@@ -2077,10 +2365,12 @@ impl ShareInspect for BaiduShareAdapter<'_> {
                 let raw: Value = serde_json::from_str(&response.body)
                     .map_err(|_| QuarkError::InvalidResponse)?;
                 if response.status == 200 && raw["errno"].as_i64() == Some(-9) {
-                    return if candidate.access_code.is_none() {
+                    return if context["bdclnd"].as_str().unwrap_or("").is_empty() {
                         Ok(ShareInspection::AccessCodeRequired)
                     } else {
-                        Err(QuarkError::InvalidInput("百度分享访问码错误".into()))
+                        Err(QuarkError::Provider(
+                            "百度分享验证已通过，但文件列表访问失败，请重试或重新网页授权".into(),
+                        ))
                     };
                 }
                 let value = share_json(&response)?;
@@ -2097,7 +2387,9 @@ impl ShareInspect for BaiduShareAdapter<'_> {
                     context["shareid"] = json!(numeric_field(data, "shareid")
                         .or_else(|_| numeric_field(data, "share_id"))?);
                     context["uk"] = json!(numeric_field(data, "uk")?);
-                    context["seckey"] = json!(data["seckey"].as_str().unwrap_or(""));
+                    if context["seckey"].as_str().unwrap_or("").is_empty() {
+                        context["seckey"] = json!(data["seckey"].as_str().unwrap_or(""));
+                    }
                 }
                 for cookie in &response.set_cookies {
                     if let Some(value) = cookie
@@ -2355,7 +2647,10 @@ pub fn resolve_baidu_share(
     let cookie = if bdclnd.is_empty() {
         client.session.cookie.clone()
     } else {
-        format!("{}; BDCLND={bdclnd}", client.session.cookie)
+        let mut cookies = BaiduLoginCookies::default();
+        cookies.absorb_cookie_header(&client.session.cookie);
+        cookies.insert("BDCLND", bdclnd);
+        cookies.header()
     };
     Ok(ShareResolution::Direct(
         super::commands::ResolvedCloudDownload {

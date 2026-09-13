@@ -101,6 +101,7 @@ mod tests {
                     client_id: Some("YUMx5nI8ZU8Ap8pm".into()),
                     user_id: "u1".into(),
                     captcha_expires_at: u64::MAX,
+                    captcha_action: None,
                     verification_url: None,
                     operation_verifications: BTreeMap::new(),
                     auth_method: CloudAuthMethod::Web,
@@ -412,20 +413,28 @@ mod tests {
                 br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device"}"#,
             )
             .unwrap();
-        let http = Http::new(vec![json!({"id":"trashed-id","trashed":true}), json!({})]);
+        let http = Http::new(vec![
+            json!({"files":[{"id":"trashed-id","name":"old.txt","kind":"drive#file"}],"next_page_token":""}),
+            json!({"captcha_token":"restore-cap","expires_in":300}),
+            json!({}),
+        ]);
 
         PikPakClient::new(&http, &store)
             .restore_recycle_entries(&["trashed-id".into()])
             .unwrap();
 
         let requests = http.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].method, "GET");
-        assert!(requests[0].url.ends_with("/drive/v1/files/trashed-id"));
-        assert_eq!(requests[1].method, "POST");
-        assert!(requests[1].url.ends_with("/drive/v1/files:batchUntrash"));
+        assert!(requests[0].url.contains("/drive/v1/files?"));
+        assert!(requests[0]
+            .url
+            .contains("%22trashed%22%3A%7B%22eq%22%3Atrue%7D"));
+        assert!(requests[1].url.contains("/v1/shield/captcha/init"));
+        assert_eq!(requests[2].method, "POST");
+        assert!(requests[2].url.ends_with("/drive/v1/files:batchUntrash"));
         assert_eq!(
-            serde_json::from_str::<Value>(requests[1].body.as_deref().unwrap()).unwrap()["ids"],
+            serde_json::from_str::<Value>(requests[2].body.as_deref().unwrap()).unwrap()["ids"],
             json!(["trashed-id"])
         );
     }
@@ -439,7 +448,7 @@ mod tests {
                 br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device"}"#,
             )
             .unwrap();
-        let http = Http::new(vec![json!({"id":"live-id","trashed":false})]);
+        let http = Http::new(vec![json!({"files":[],"next_page_token":""})]);
 
         let error = PikPakClient::new(&http, &store)
             .restore_recycle_entries(&["live-id".into()])
@@ -469,6 +478,7 @@ mod tests {
                     client_id: Some("YNxT9w7GMdWvEOKa".into()),
                     user_id: "user".into(),
                     captcha_expires_at: u64::MAX,
+                    captcha_action: None,
                     verification_url: None,
                     operation_verifications: BTreeMap::new(),
                     auth_method: CloudAuthMethod::Password,
@@ -544,6 +554,10 @@ pub struct PikPakSession {
     pub user_id: String,
     #[serde(default)]
     pub captcha_expires_at: u64,
+    /// Drive action for which `captcha_token` was issued. Legacy login tokens
+    /// remain unscoped until PikPak rotates them for a concrete operation.
+    #[serde(default)]
+    pub captcha_action: Option<String>,
     /// Kept only in the encrypted provider session, never returned in an error/event.
     #[serde(default)]
     pub verification_url: Option<String>,
@@ -646,6 +660,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
             client_id: Some(self.client_id.clone()),
             user_id: String::new(),
             captcha_expires_at: 0,
+            captcha_action: None,
             verification_url: None,
             operation_verifications: BTreeMap::new(),
             auth_method: CloudAuthMethod::Password,
@@ -665,6 +680,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
             client_id: Some(self.client_id.clone()),
             user_id: v["sub"].as_str().unwrap_or("").into(),
             captcha_expires_at: now().saturating_add(cap["expires_in"].as_u64().unwrap_or(0)),
+            captcha_action: None,
             verification_url: None,
             operation_verifications: BTreeMap::new(),
             auth_method: CloudAuthMethod::Password,
@@ -736,12 +752,31 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         };
         let mut captcha_refreshed = false;
         let action = pikpak_captcha_action(method, &url)?;
+        let mut has_action_token = false;
         if let Some(verification) = s
             .operation_verifications
             .get(&action)
             .filter(|v| v.expires_at > now())
         {
             s.captcha_token = verification.token.clone();
+            s.captcha_expires_at = verification.expires_at;
+            s.captcha_action = Some(action.clone());
+            has_action_token = true;
+        }
+        // After PikPak rotates the generic login captcha into an
+        // action-scoped ticket, that ticket must never be reused for another
+        // endpoint. Recycle operations validate each item with GET and then
+        // mutate it with POST; reusing the GET ticket for batchDelete is
+        // rejected as `code 3 / invalid_argument` instead of captcha_required.
+        has_action_token |= s.captcha_action.as_deref() == Some(action.as_str())
+            && s.captcha_expires_at > now();
+        let requires_explicit_action_token = matches!(
+            action.as_str(),
+            "POST:/drive/v1/files:batchDelete" | "POST:/drive/v1/files:batchUntrash"
+        );
+        if (requires_explicit_action_token || s.captcha_action.is_some()) && !has_action_token {
+            s = self.refresh_action_captcha(method, &url, s)?;
+            captcha_refreshed = true;
         }
         loop {
             match self.raw(method, url.clone(), body.clone(), Some(&s)) {
@@ -796,10 +831,20 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
             .unwrap_or_default()
             .as_millis()
             .to_string();
-        let mut meta = if web {
-            json!({"client_version":"2.0.0","package_name":"mypikpak.com","timestamp":timestamp,"captcha_sign":pikpak_share_captcha_sign(&s.device_id,&timestamp)})
+        let captcha_device_id = if web {
+            pikpak_web_origin_device_id(&s.device_id)?
         } else {
-            json!({"client_version":"1.53.2","package_name":"com.pikcloud.pikpak","timestamp":timestamp,"captcha_sign":pikpak_captcha_sign(&client_id,&s.device_id,&timestamp)})
+            s.device_id.clone()
+        };
+        let mut meta = if web {
+            json!({
+                "client_version": SHARE_WEB_VERSION,
+                "package_name": SHARE_WEB_PACKAGE,
+                "timestamp": SHARE_WEB_SIGNATURE_TIMESTAMP,
+                "captcha_sign": pikpak_current_share_captcha_sign(&captcha_device_id),
+            })
+        } else {
+            json!({"client_version":"1.53.2","package_name":"com.pikcloud.pikpak","timestamp":timestamp,"captcha_sign":pikpak_captcha_sign(&client_id,&captcha_device_id,&timestamp)})
         };
         if s.user_id.is_empty() {
             // This claim is only metadata for the provider, never used as a local authorization decision.
@@ -829,7 +874,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         } else {
             "xlaccsdk01://xbase.cloud/callback?state=harbor"
         };
-        let payload = json!({"action":action,"captcha_token":s.captcha_token,"client_id":client_id,"device_id":s.device_id,"meta":meta,"redirect_uri":redirect});
+        let payload = json!({"action":action,"captcha_token":s.captcha_token,"client_id":client_id,"device_id":captcha_device_id,"meta":meta,"redirect_uri":redirect});
         let v = self
             .raw(
                 "POST",
@@ -854,6 +899,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         s.captcha_token = required(&v, "captcha_token")
             .map_err(|_| pikpak_operation_verification_error(method, url))?;
         s.captcha_expires_at = now().saturating_add(v["expires_in"].as_u64().unwrap_or(300));
+        s.captcha_action = Some(action.clone());
         if let Some(challenge) = challenge {
             s.verification_url =
                 allows_pikpak_operation_verification_url(challenge).then(|| challenge.to_owned());
@@ -1015,20 +1061,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
     /// Permanently deletes items already present in PikPak's recycle bin.
     pub fn delete(&self, ids: &[String]) -> Result<(), QuarkError> {
         reject_pikpak_recycle_bin_sources(ids)?;
-        for id in ids {
-            // PikPak documents no conditional batch-delete request. Validate the
-            // current state immediately before sending the permanent-delete call.
-            let file = self.request(
-                "GET",
-                format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
-                None,
-            )?;
-            if file["trashed"].as_bool() != Some(true) {
-                return Err(QuarkError::InvalidInput(
-                    "只能永久删除 PikPak 回收站中的项目".into(),
-                ));
-            }
-        }
+        self.validate_recycle_entries(ids, "只能永久删除 PikPak 回收站中的项目")?;
         self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files:batchDelete"),
@@ -1039,24 +1072,30 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
     /// Restores items only after the provider confirms that they remain trashed.
     pub fn restore_recycle_entries(&self, ids: &[String]) -> Result<(), QuarkError> {
         reject_pikpak_recycle_bin_sources(ids)?;
-        for id in ids {
-            let file = self.request(
-                "GET",
-                format!("{DRIVE}/drive/v1/files/{}", encoded(id)),
-                None,
-            )?;
-            if file["trashed"].as_bool() != Some(true) {
-                return Err(QuarkError::InvalidInput(
-                    "只能恢复 PikPak 回收站中的项目".into(),
-                ));
-            }
-        }
+        self.validate_recycle_entries(ids, "只能恢复 PikPak 回收站中的项目")?;
         self.request(
             "POST",
             format!("{DRIVE}/drive/v1/files:batchUntrash"),
             Some(json!({"ids":ids})),
         )?;
         Ok(())
+    }
+    fn validate_recycle_entries(
+        &self,
+        ids: &[String],
+        message: &'static str,
+    ) -> Result<(), QuarkError> {
+        let recycle = self.list(PIKPAK_RECYCLE_BIN_ID)?;
+        let current = recycle
+            .items
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        if ids.iter().all(|id| current.contains(id)) {
+            Ok(())
+        } else {
+            Err(QuarkError::InvalidInput(message.into()))
+        }
     }
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
         reject_pikpak_recycle_bin_source(id)?;
@@ -1256,29 +1295,6 @@ impl PikPakShareAdapter<'_> {
             ]),
         })
     }
-}
-fn pikpak_share_captcha_sign(device: &str, timestamp: &str) -> String {
-    let mut value = format!("{SHARE_WEB_CLIENT}2.0.0mypikpak.com{device}{timestamp}");
-    for salt in [
-        "C9qPpZLN8ucRTaTiUMWYS9cQvWOE",
-        "+r6CQVxjzJV6LCV",
-        "F",
-        "pFJRC",
-        "9WXYIDGrwTCz2OiVlgZa90qpECPD6olt",
-        "/750aCr4lm/Sly/c",
-        "RB+DT/gZCrbV",
-        "",
-        "CyLsf7hdkIRxRm215hl",
-        "7xHvLi2tOYP0Y92b",
-        "ZGTXXxu8E/MIWaEDB+Sm/",
-        "1UI3",
-        "E7fP5Pfijd+7K+t6Tg/NhuLq0eEUVChpJSkrKxpO",
-        "ihtqpG6FMt65+Xk+tWUH2",
-        "NhXXU9rg4XXdzo7u5o",
-    ] {
-        value = format!("{:x}", md5::compute(format!("{value}{salt}")));
-    }
-    format!("1.{value}")
 }
 fn pikpak_current_share_captcha_sign(device: &str) -> String {
     let mut value = format!(

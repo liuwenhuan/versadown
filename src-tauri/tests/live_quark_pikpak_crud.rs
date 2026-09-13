@@ -78,6 +78,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::WebAuthorizationRequired => "web-authorization-required",
         CloudError::CaptchaRequired => "captcha-required",
         CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
+        CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
         CloudError::AuthorizationPending => "authorization-pending",
         CloudError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         CloudError::InvalidResponse => "invalid-response",
@@ -131,7 +132,7 @@ fn mutate<T>(
 ) -> LiveResult<T> {
     supervised(state, http, provider, SessionWorkKind::Mutation, operation).map_err(|error| {
         failure(format!(
-            "{} mutation: {}",
+            "{} mutation: {} ({error})",
             provider.key(),
             error_kind(&error)
         ))

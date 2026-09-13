@@ -25,6 +25,100 @@ fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
 }
 
 #[tokio::test]
+async fn paused_directory_stops_pending_submission_and_can_resume_after_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("paused.db");
+    let store = TaskStore::open_path(&path).unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Pikpak, "root", "原始目录", |id| {
+        Ok(directory(
+            id,
+            vec![file("one", id, "one.mp4"), file("two", id, "two.mp4")],
+        ))
+    })
+    .unwrap();
+    let result = submit_cloud_directory_plan_with_group_event(
+        &store,
+        CloudProvider::Pikpak,
+        "root",
+        plan,
+        UriSubmissionOptions {
+            directory: Some(temp.path().to_owned()),
+            ..Default::default()
+        },
+        false,
+        |root| {
+            store
+                .set_cloud_directory_paused(uuid::Uuid::parse_str(&root.id).unwrap(), true)
+                .unwrap();
+            Ok(())
+        },
+        |_, _, _, _| async { panic!("paused directory must not start another file") },
+    )
+    .await
+    .unwrap();
+    let id = result.task.payload.task.id;
+    assert_eq!(result.task.queue_task.unwrap().status, TaskStatus::Paused);
+    drop(store);
+    let store = TaskStore::open_path(&path).unwrap();
+    assert_eq!(
+        list_queue_tasks_for_scope(&store, Some("active")).unwrap()[0].status,
+        TaskStatus::Paused
+    );
+    store.set_cloud_directory_paused(id, false).unwrap();
+    let result = retry_cloud_directory_group_with(
+        &store,
+        id,
+        UriSubmissionOptions {
+            directory: Some(temp.path().to_owned()),
+            ..Default::default()
+        },
+        |_, file_id, _, _| {
+            let task = store
+                .create(NewTask::direct(format!("https://example.test/{file_id}")))
+                .unwrap();
+            std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+        },
+    )
+    .await
+    .unwrap();
+    assert_ne!(result.queue_task.unwrap().status, TaskStatus::Paused);
+    assert!(store
+        .cloud_directory_group_items(id)
+        .unwrap()
+        .iter()
+        .all(|item| item.task_id.is_some()));
+}
+
+#[test]
+fn interrupted_preparation_after_restart_is_resumable_without_replaying_a_live_submission() {
+    use alldownloader_lib::cloud::commands::recover_interrupted_directory_preparation;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("interrupted.db");
+    let store = TaskStore::open_path(&path).unwrap();
+    let task = store
+        .create(NewTask::direct("https://example.test/unfinished"))
+        .unwrap();
+    let group_id = cancellation_group(&store, temp.path());
+    store
+        .link_cloud_directory_group_item_task(
+            group_id,
+            store.cloud_directory_group_items(group_id).unwrap()[0].id,
+            task.id,
+        )
+        .unwrap();
+    drop(store);
+    let store = TaskStore::open_path(&path).unwrap();
+    let recovered = recover_interrupted_directory_preparation(&store, task.id).unwrap();
+    assert_eq!(recovered.status, TaskStatus::Paused);
+    assert_eq!(recovered.id, task.id);
+    store.bind_gid(task.id, "already-accepted").unwrap();
+    let accepted = store.find(task.id).unwrap();
+    let unchanged = recover_interrupted_directory_preparation(&store, task.id).unwrap();
+    assert_eq!(unchanged.aria_gid.as_deref(), Some("already-accepted"));
+    assert_eq!(unchanged.status, accepted.status);
+}
+
+#[tokio::test]
 async fn authorization_recovery_reopens_directory_leaves_and_retries_each_once() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("tasks.db");

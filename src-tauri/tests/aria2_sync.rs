@@ -80,6 +80,262 @@ async fn changed_snapshots_persist_before_events_and_unchanged_emit_once() {
 }
 
 #[tokio::test]
+async fn late_directory_uri_is_admitted_paused_without_starting_connections() {
+    use alldownloader_lib::cloud::{
+        commands::{create_cloud_directory_group_for_download, plan_cloud_directory_download},
+        CloudProvider,
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let plan = plan_cloud_directory_download(CloudProvider::Pikpak, "root", "Series", |id| {
+        Ok(alldownloader_lib::cloud::CloudDirectory {
+            id: id.into(),
+            items: vec![alldownloader_lib::cloud::CloudFile {
+                id: "file".into(),
+                name: "video.mp4".into(),
+                kind: "file".into(),
+                size: Some(100),
+                parent_id: id.into(),
+                modified_at: None,
+            }],
+        })
+    })
+    .unwrap();
+    let group = create_cloud_directory_group_for_download(
+        &store,
+        CloudProvider::Pikpak,
+        "root",
+        &plan,
+        temp.path(),
+        false,
+    )
+    .unwrap();
+    let task = store
+        .create(NewTask::direct("https://example.test/file"))
+        .unwrap();
+    store
+        .link_cloud_directory_group_item_task(
+            group.id,
+            store.cloud_directory_group_items(group.id).unwrap()[0].id,
+            task.id,
+        )
+        .unwrap();
+    store.set_cloud_directory_paused(group.id, true).unwrap();
+    let options = Arc::new(Mutex::new(Value::Null));
+    let observed = options.clone();
+    let engine_paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let wire_paused = engine_paused.clone();
+    let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.addUri" => {
+            *observed.lock().unwrap() = request["params"][2].clone();
+            json!("late-gid")
+        }
+        "aria2.tellStatus" => status(
+            "late-gid",
+            if wire_paused.load(std::sync::atomic::Ordering::SeqCst) {
+                "paused"
+            } else {
+                "active"
+            },
+            0,
+        ),
+        "aria2.forcePause" => {
+            wire_paused.store(true, std::sync::atomic::Ordering::SeqCst);
+            json!("late-gid")
+        }
+        "aria2.unpause" => {
+            wire_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            json!("late-gid")
+        }
+        other => panic!("unexpected method: {other}"),
+    })
+    .await;
+    let service = DownloadService::new(Arc::new(client), store);
+    let result = service
+        .submit_uri(
+            task.id,
+            vec!["https://example.test/file".into()],
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(options.lock().unwrap()["pause"], "true");
+    assert!(engine_paused.load(std::sync::atomic::Ordering::SeqCst));
+    service
+        .store()
+        .set_cloud_directory_paused(group.id, false)
+        .unwrap();
+    // An older pause completing after a newer resume must obey the new intent.
+    let resumed = service
+        .control_directory_member(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, alldownloader_lib::TaskStatus::Downloading);
+    // Explicit leaf pause still works while the rest of the directory runs.
+    let paused = service
+        .control(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+        .await
+        .unwrap();
+    assert_eq!(paused.status, alldownloader_lib::TaskStatus::Paused);
+    server.abort();
+}
+
+#[tokio::test]
+async fn pause_wins_when_an_inflight_resume_finishes_after_the_fast_interrupt() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let entering_resume = Arc::new(tokio::sync::Notify::new());
+    let release_resume = Arc::new(tokio::sync::Notify::new());
+    let interrupted = Arc::new(tokio::sync::Notify::new());
+    let paused = Arc::new(AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/jsonrpc", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/jsonrpc",
+        axum::routing::post({
+            let entering_resume = entering_resume.clone();
+            let release_resume = release_resume.clone();
+            let interrupted = interrupted.clone();
+            let paused = paused.clone();
+            move |axum::Json(request): axum::Json<Value>| {
+                let entering_resume = entering_resume.clone();
+                let release_resume = release_resume.clone();
+                let interrupted = interrupted.clone();
+                let paused = paused.clone();
+                async move {
+                    let result = match request["method"].as_str().unwrap() {
+                        "aria2.unpause" => {
+                            entering_resume.notify_one();
+                            release_resume.notified().await;
+                            paused.store(false, Ordering::SeqCst);
+                            json!("gid")
+                        }
+                        "aria2.forcePause" => {
+                            paused.store(true, Ordering::SeqCst);
+                            interrupted.notify_one();
+                            json!("gid")
+                        }
+                        "aria2.tellStatus" => status(
+                            "gid",
+                            if paused.load(Ordering::SeqCst) {
+                                "paused"
+                            } else {
+                                "active"
+                            },
+                            10,
+                        ),
+                        other => panic!("unexpected method {other}"),
+                    };
+                    axum::Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":result}))
+                }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/resume-race"))
+        .unwrap();
+    store.bind_gid(task.id, "gid").unwrap();
+    let service = Arc::new(DownloadService::new(
+        Arc::new(Aria2RpcClient::new(endpoint, RpcSecret::from_bytes([1; 32])).unwrap()),
+        store,
+    ));
+    let resume = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .control(task.id, alldownloader_lib::aria2::DownloadAction::Resume)
+                .await
+        }
+    });
+    entering_resume.notified().await;
+    let pause = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .control(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+                .await
+        }
+    });
+    interrupted.notified().await;
+    release_resume.notify_one();
+    resume.await.unwrap().unwrap();
+    let result = pause.await.unwrap().unwrap();
+    server.abort();
+    assert_eq!(result.status, alldownloader_lib::TaskStatus::Paused);
+    assert!(paused.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn pause_interrupt_reaches_engine_while_snapshot_rpc_is_still_blocked() {
+    let polling = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let paused = Arc::new(tokio::sync::Notify::new());
+    let pause_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/jsonrpc", listener.local_addr().unwrap());
+    let app = axum::Router::new().route("/jsonrpc", axum::routing::post({
+        let polling = polling.clone(); let release = release.clone(); let paused = paused.clone(); let pause_requested = pause_requested.clone();
+        move |axum::Json(request): axum::Json<Value>| {
+            let polling = polling.clone(); let release = release.clone(); let paused = paused.clone(); let pause_requested = pause_requested.clone();
+            async move {
+                if request["method"] == "aria2.forcePause" && pause_requested.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return axum::Json(json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":1,"message":"cannot be paused now"}}));
+                }
+                let result = match request["method"].as_str().unwrap() {
+                    "system.multicall" => { polling.notify_one(); release.notified().await; json!([[status("gid", "active", 20)]]) },
+                    "aria2.forcePause" => { paused.notify_one(); json!("gid") },
+                    "aria2.pause" => json!("gid"),
+                    "aria2.tellStatus" => status("gid", "paused", 20),
+                    "aria2.getGlobalStat" => global(),
+                    other => panic!("unexpected method {other}"),
+                };
+                axum::Json(json!({"jsonrpc":"2.0", "id":request["id"], "result":result}))
+            }
+        }
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = Aria2RpcClient::new(endpoint, RpcSecret::from_bytes([1; 32])).unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/video"))
+        .unwrap();
+    store.bind_gid(task.id, "gid").unwrap();
+    let service = Arc::new(DownloadService::new(Arc::new(client), store));
+    let poll = tokio::spawn({
+        let service = service.clone();
+        async move { service.reconcile_now().await }
+    });
+    polling.notified().await;
+    let control = tokio::spawn({
+        let service = service.clone();
+        async move {
+            service
+                .control(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+                .await
+        }
+    });
+    let interrupted =
+        tokio::time::timeout(std::time::Duration::from_millis(500), paused.notified()).await;
+    release.notify_one();
+    poll.await.unwrap().unwrap();
+    assert_eq!(
+        control.await.unwrap().unwrap().status,
+        alldownloader_lib::TaskStatus::Paused
+    );
+    server.abort();
+    assert!(
+        interrupted.is_ok(),
+        "pause must not queue behind the stalled poll"
+    );
+}
+
+#[tokio::test]
 async fn paused_task_keeps_persisted_progress_when_aria2_restores_without_lengths() {
     let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
         "system.multicall" => {

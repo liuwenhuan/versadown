@@ -48,6 +48,9 @@ pub trait Aria2Api: Send + Sync {
         calls: Vec<RpcCall>,
     ) -> Result<Vec<Result<Value, RpcFault>>, Aria2Error>;
     async fn pause(&self, gid: &str) -> Result<String, Aria2Error>;
+    async fn force_pause(&self, gid: &str) -> Result<String, Aria2Error> {
+        self.pause(gid).await
+    }
     async fn unpause(&self, gid: &str) -> Result<String, Aria2Error>;
     async fn remove(&self, gid: &str) -> Result<String, Aria2Error>;
     async fn force_remove(&self, gid: &str) -> Result<String, Aria2Error>;
@@ -232,6 +235,9 @@ impl Aria2Api for Aria2RpcClient {
     }
     async fn pause(&self, gid: &str) -> Result<String, Aria2Error> {
         self.call("aria2.pause", vec![json!(gid)]).await
+    }
+    async fn force_pause(&self, gid: &str) -> Result<String, Aria2Error> {
+        self.call("aria2.forcePause", vec![json!(gid)]).await
     }
     async fn unpause(&self, gid: &str) -> Result<String, Aria2Error> {
         self.call("aria2.unpause", vec![json!(gid)]).await

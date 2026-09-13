@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => ({ invoke: vi.fn() }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke, Channel: class { onmessage = (_message: unknown) => {}; } }));
 
 beforeEach(() => {
   Object.defineProperty(window, '__TAURI_INTERNALS__', {
@@ -83,8 +83,22 @@ it('sends opaque share plans to the cloud-share confirmation command', async () 
 
   expect(native.invoke).toHaveBeenCalledWith('confirm_cloud_share_download', {
     planSource: `cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}`,
-    selectedIds: ['f1']
+    selectedIds: ['f1'], onCreated: expect.any(Object)
   });
+});
+
+it('delivers the durable named task before the batch command resolves', async () => {
+  let finish!: (value: unknown) => void;
+  const created: unknown[] = [];
+  native.invoke.mockImplementationOnce((_command, args) => {
+    args.onCreated.onmessage({ id: 'root', name: '原始目录', kind: 'folder', status: 'queued', progress: 0 });
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const { confirmCloudShareDownload } = await import('./api');
+  const pending = confirmCloudShareDownload('cloud-share://pikpak/plan', ['file'], undefined, false, task => created.push(task));
+  expect(created).toEqual([{ id: 'root', name: '原始目录', kind: 'folder', status: 'queued', progress: 0 }]);
+  finish({ outcomes: [], failures: [] });
+  await pending;
 });
 
 it('preserves every native share task outcome and maps duplicate metadata in order', async () => {
@@ -144,6 +158,6 @@ it('sends the privacy confirmation and private selection flags only when request
     taskId: 'awaiting', selectedIds: [], privateDownload: true
   });
   expect(native.invoke).toHaveBeenNthCalledWith(3, 'confirm_cloud_share_download', {
-    planSource: 'cloud-share://quark/plan', selectedIds: ['f1'], privateDownload: true
+    planSource: 'cloud-share://quark/plan', selectedIds: ['f1'], privateDownload: true, onCreated: expect.any(Object)
   });
 });

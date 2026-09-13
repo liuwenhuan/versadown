@@ -887,6 +887,27 @@ it('queues normal share results and presents duplicate results in FIFO order', a
   await waitFor(() => expect(screen.getByRole('dialog', { name: '检测到重复下载' })).toHaveTextContent('second-existing.bin'));
 });
 
+it('closes and selects the named share root as soon as creation is acknowledged, before the batch completes', async () => {
+  const submission = deferred<{ outcomes: never[]; failures: never[] }>();
+  state.parse.mockResolvedValueOnce({ confirmation: {
+    taskId: 'cloud-share://pikpak/early-plan', title: '原始分享目录', requiresConfirmation: true,
+    resources: [{ id: 'f1', name: 'first.mp4', size: '1 MB', selected: true }], processing: [],
+  } });
+  state.confirmCloud.mockReturnValueOnce(submission.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  fireEvent.click(screen.getByRole('tab', { name: /已完成/ }));
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://mypikpak.com/s/early-plan' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
+  const created = state.confirmCloud.mock.calls[0][4] as ((task: QueueTask) => void) | undefined;
+  await act(async () => { created?.({ id: 'early-root', name: '原始分享目录', kind: 'folder', status: 'queued', progress: 0 }); });
+  expect(screen.queryByRole('dialog', { name: '确认下载内容' })).not.toBeInTheDocument();
+  const row = within(screen.getByRole('region', { name: '下载队列' })).getByTitle('原始分享目录').closest('article');
+  expect(row).toHaveAttribute('aria-selected', 'true');
+  await act(async () => { submission.resolve({ outcomes: [], failures: [] }); });
+});
+
 it('uses the single directory root returned for a confirmed share folder', async () => {
   state.parse.mockResolvedValueOnce({
     confirmation: {
@@ -920,6 +941,27 @@ it('uses the single directory root returned for a confirmed share folder', async
   const queue = screen.getByRole('region', { name: '下载队列' });
   expect(within(queue).getByTitle('夸克分享目录')).toBeVisible();
   expect(queue.querySelectorAll('article.task-row')).toHaveLength(1);
+});
+
+it('restores only failed selections for retry after early task creation closed the dialog', async () => {
+  const submission = deferred<{ outcomes: never[]; failures: { selectedId: string; code: string; message: string }[] }>();
+  state.parse.mockResolvedValueOnce({ confirmation: {
+    taskId: 'cloud-share://pikpak/partial-created', title: '资料', requiresConfirmation: true,
+    resources: [{ id: 'ok', name: 'ok.mp4', size: '1 B', selected: true }, { id: 'bad', name: 'bad.mp4', size: '2 B', selected: true }], processing: [],
+  } });
+  state.confirmCloud.mockReturnValueOnce(submission.promise);
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://mypikpak.com/s/partial-created' }); });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 2/ }));
+  await act(async () => { state.confirmCloud.mock.calls[0][4]({ id: 'ok-task', name: 'ok.mp4', kind: 'cloud', status: 'parsing', progress: 0 }); });
+  expect(screen.queryByRole('dialog', { name: '确认下载内容' })).not.toBeInTheDocument();
+  await act(async () => { submission.resolve({ outcomes: [], failures: [{ selectedId: 'bad', code: 'network_error', message: '网络暂时不可用' }] }); });
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
+  expect(screen.getByRole('checkbox', { name: '选择 ok.mp4' })).not.toBeChecked();
+  expect(screen.getByRole('checkbox', { name: '选择 bad.mp4' })).toBeChecked();
+  expect(screen.getByRole('button', { name: /立即下载 1/ })).toBeEnabled();
+  expect(screen.getByRole('status')).toHaveTextContent('网络暂时不可用');
 });
 
 it('keeps only failed share entries selected while preserving earlier successful outcomes', async () => {
@@ -1097,7 +1139,7 @@ it('does not let an old response clear a reparsed confirmation for the same shar
   fireEvent.click(secondSubmit);
   fireEvent.click(secondSubmit);
   expect(state.confirmCloud).toHaveBeenCalledTimes(2);
-  expect(state.confirmCloud).toHaveBeenLastCalledWith('cloud-share://uc/same-plan', ['f2'], undefined, false);
+  expect(state.confirmCloud).toHaveBeenLastCalledWith('cloud-share://uc/same-plan', ['f2'], undefined, false, expect.any(Function));
 
   await act(async () => { firstSubmission.resolve({ outcomes: [], failures: [] }); });
 

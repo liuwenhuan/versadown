@@ -359,7 +359,6 @@ pub struct CloudDirectoryGroup {
 /// A task as rendered in the queue. Cloud-directory roots and intermediate
 /// folders are synthetic entries; ordinary downloads remain flat entries.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct QueueTaskPayload {
     pub id: String,
     pub source: String,

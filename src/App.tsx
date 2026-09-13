@@ -830,20 +830,42 @@ export function App() {
       const requestGeneration = activeGeneration.current;
       if (shareConfirmationsInFlight.current.has(planKey)) return;
       shareConfirmationsInFlight.current.add(planKey);
+      let createdTaskId: string | undefined;
+      const onCreated = (task: QueueTask) => {
+        recordTaskEvent(task);
+        setTasks((current) => upsertTask(current, task));
+        if (createdTaskId || activeGeneration.current !== requestGeneration) return;
+        createdTaskId = task.id;
+        setActiveConfirmation(null);
+        setHeaderPanel(null);
+        setSearchInput('');
+        setView('downloads');
+        setDownloadTab('active');
+        setSelectedTaskId(task.id);
+        window.setTimeout(() => {
+          Array.from(document.querySelectorAll<HTMLElement>('[data-task-id]'))
+            .find((element) => element.dataset.taskId === task.id)
+            ?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+        }, 0);
+      };
       try {
-        const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory, privateDownload);
+        const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory, privateDownload, onCreated);
         const outcomes = result.outcomes;
         const cloudTasks = outcomes.flatMap((outcome) => outcome.queueTask ? [outcome.queueTask] : outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
         const duplicates = outcomes.flatMap((outcome) => outcome.duplicate ? [outcome.duplicate] : []);
         cloudTasks.forEach((cloudTask) => recordTaskEvent(cloudTask));
         setTasks((current) => cloudTasks.reduce((next, cloudTask) => upsertTask(next, cloudTask), current));
-        setSelectedTaskId(cloudTasks.at(-1)?.id ?? null);
+        if (!createdTaskId && result.failures.length === 0 && cloudTasks.length) onCreated(cloudTasks[0]);
         setDuplicateQueue((current) => [...current, ...duplicates]);
+        const failedTask = cloudTasks.find((task) => task.status === 'failed');
+        if (failedTask && activeGeneration.current === requestGeneration) {
+          setNotice({ kind: 'error', message: `${failedTask.name}：${failedTask.error || '提交失败'}，可在“失败”中重试` });
+        }
         if (result.failures.length > 0) {
           const failedIds = new Set(result.failures.map((failure) => failure.selectedId));
-          setActiveConfirmation((current) => current?.taskId === planSource && activeGeneration.current === requestGeneration ? {
-            ...current,
-            resources: current.resources.map((resource) => ({ ...resource, selected: failedIds.has(resource.id) })),
+          setActiveConfirmation((current) => activeGeneration.current === requestGeneration && (current?.taskId === planSource || (!current && createdTaskId)) ? {
+            ...activeConfirmation,
+            resources: activeConfirmation.resources.map((resource) => ({ ...resource, selected: failedIds.has(resource.id) })),
           } : current);
           if (activeGeneration.current === requestGeneration) {
             const first = result.failures[0];
@@ -855,6 +877,7 @@ export function App() {
         }
       } catch (error) {
         if (activeGeneration.current === requestGeneration) {
+          if (createdTaskId) setActiveConfirmation((current) => current ?? activeConfirmation);
           setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
         }
       } finally {

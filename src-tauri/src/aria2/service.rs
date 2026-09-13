@@ -130,6 +130,7 @@ pub struct DownloadService {
     events: Arc<dyn EventSink>,
     published: std::sync::Mutex<BTreeMap<Uuid, serde_json::Value>>,
     global: std::sync::Mutex<Option<Aria2GlobalStat>>,
+    resume_versions: std::sync::Mutex<BTreeMap<String, u64>>,
     pub(super) operation: tokio::sync::Mutex<()>,
     restart_budget: super::recovery::RestartBudget,
 }
@@ -144,6 +145,7 @@ impl DownloadService {
             events: Arc::new(NoEvents),
             published: Default::default(),
             global: Default::default(),
+            resume_versions: Default::default(),
             operation: Default::default(),
             restart_budget: Default::default(),
         }
@@ -175,17 +177,57 @@ impl DownloadService {
         &self,
         task_id: Uuid,
         uris: Vec<String>,
-        options: BTreeMap<String, String>,
+        mut options: BTreeMap<String, String>,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         if self.store.find(task_id)?.aria_gid.is_some() {
             return Err(DownloadServiceError::AlreadySubmitted);
         }
+        let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.bind_gid(task_id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
+        }
+        self.finish_directory_uri(task_id, &gid, directory).await
+    }
+
+    fn prepare_directory_uri(
+        &self,
+        task_id: Uuid,
+        options: &mut Aria2Options,
+    ) -> Result<Option<Uuid>, DownloadServiceError> {
+        let group = self.store.cloud_directory_group_for_task(task_id)?;
+        if group.is_some() {
+            // Admit directory members without opening connections. Recheck the
+            // durable user intent after the RPC, including pauses during addUri.
+            options.insert("pause".into(), "true".into());
+        }
+        Ok(group.map(|group| group.id))
+    }
+
+    async fn finish_directory_uri(
+        &self,
+        task_id: Uuid,
+        gid: &str,
+        directory: Option<Uuid>,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        if let Some(id) = directory {
+            match self
+                .store
+                .cloud_directory_group(id)?
+                .map(|group| group.status)
+            {
+                Some(TaskStatus::Paused) => {}
+                None | Some(TaskStatus::Cancelled | TaskStatus::Recycled) => {
+                    self.api().force_remove(gid).await?;
+                    return self.persist_removed(self.store.find(task_id)?);
+                }
+                _ => {
+                    self.unpause_gid(gid).await?;
+                }
+            }
         }
         self.reconcile_task_unlocked(task_id).await
     }
@@ -225,15 +267,16 @@ impl DownloadService {
         uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
-        let options = options.into_aria2_options()?;
+        let mut options = options.into_aria2_options()?;
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
+        let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
-        self.reconcile_task_unlocked(task_id).await
+        self.finish_directory_uri(task_id, &gid, directory).await
     }
 
     pub async fn resubmit_native_media_with_options(
@@ -250,12 +293,13 @@ impl DownloadService {
         options.insert("media".into(), media.into());
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
+        let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
-        self.reconcile_task_unlocked(task_id).await
+        self.finish_directory_uri(task_id, &gid, directory).await
     }
 
     /// Compare the caller's pre-resolution snapshot while holding the same
@@ -267,7 +311,7 @@ impl DownloadService {
         uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<Option<DownloadTask>, DownloadServiceError> {
-        let options = options.into_aria2_options()?;
+        let mut options = options.into_aria2_options()?;
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         let current = self.store.find(expected.id)?;
@@ -283,12 +327,15 @@ impl DownloadService {
         {
             return Ok(None);
         }
+        let directory = self.prepare_directory_uri(expected.id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(expected.id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
-        self.reconcile_task_unlocked(expected.id).await.map(Some)
+        self.finish_directory_uri(expected.id, &gid, directory)
+            .await
+            .map(Some)
     }
 
     pub async fn submit_torrent(
@@ -515,19 +562,109 @@ impl DownloadService {
         task_id: Uuid,
         action: DownloadAction,
     ) -> Result<DownloadTask, DownloadServiceError> {
+        self.control_with_directory_intent(task_id, action, false)
+            .await
+    }
+
+    fn resume_version(&self, gid: &str) -> u64 {
+        *self
+            .resume_versions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(gid)
+            .unwrap_or(&0)
+    }
+
+    async fn unpause_gid(&self, gid: &str) -> Result<String, Aria2Error> {
+        let result = self.api().unpause(gid).await;
+        // Even an uncertain RPC completion may have accepted the resume.
+        let mut versions = self
+            .resume_versions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let version = versions.entry(gid.to_owned()).or_default();
+        *version = version.wrapping_add(1);
+        result
+    }
+
+    pub async fn control_directory_member(
+        &self,
+        task_id: Uuid,
+        action: DownloadAction,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        self.control_with_directory_intent(task_id, action, true)
+            .await
+    }
+
+    async fn control_with_directory_intent(
+        &self,
+        task_id: Uuid,
+        action: DownloadAction,
+        directory_intent: bool,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        // Interrupt network activity before waiting for a possibly slow status
+        // poll. Revalidate the GID under the operation lock before persisting.
+        let mut interrupted_gid = None;
+        if action == DownloadAction::Pause {
+            self.ensure_accepting()?;
+            if let Some(gid) = self.store.find(task_id)?.aria_gid.as_deref() {
+                let version = self.resume_version(gid);
+                if self.api().force_pause(gid).await.is_ok() {
+                    interrupted_gid = Some((gid.to_owned(), version));
+                }
+            }
+        }
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
+        if directory_intent {
+            self.reconcile_task_unlocked(task_id).await?;
+        }
         let task = self.store.find(task_id)?;
+        let action = if directory_intent
+            && matches!(action, DownloadAction::Pause | DownloadAction::Resume)
+        {
+            match self.store.cloud_directory_group_for_task(task_id)? {
+                Some(group) if group.status == TaskStatus::Paused => DownloadAction::Pause,
+                Some(group)
+                    if matches!(group.status, TaskStatus::Cancelled | TaskStatus::Recycled) =>
+                {
+                    DownloadAction::Cancel
+                }
+                Some(_) => DownloadAction::Resume,
+                None => action,
+            }
+        } else {
+            action
+        };
         let gid = task
             .aria_gid
             .as_deref()
             .ok_or(DownloadServiceError::MissingGid(task_id))?;
         match action {
             DownloadAction::Pause => {
-                self.api().pause(gid).await?;
+                // forcePause is not idempotent: a second call can reject an
+                // already accepted pause request. Reissue only for a new GID
+                // or a resume that finished after the fast interrupt started.
+                let still_interrupted =
+                    interrupted_gid
+                        .as_ref()
+                        .is_some_and(|(interrupted, version)| {
+                            interrupted == gid && *version == self.resume_version(gid)
+                        });
+                if !still_interrupted && task.status != TaskStatus::Paused {
+                    if let Err(error) = self.api().force_pause(gid).await {
+                        let latest = self.reconcile_task_unlocked(task_id).await?;
+                        if matches!(latest.status, TaskStatus::Paused | TaskStatus::Completed) {
+                            return Ok(latest);
+                        }
+                        return Err(error.into());
+                    }
+                }
             }
             DownloadAction::Resume => {
-                self.api().unpause(gid).await?;
+                if !directory_intent || task.status == TaskStatus::Paused {
+                    self.unpause_gid(gid).await?;
+                }
             }
             DownloadAction::Cancel => {
                 if self.api().remove(gid).await.is_err() {
@@ -711,7 +848,7 @@ impl DownloadService {
         aria2_options.insert("select-file".into(), selection);
         self.api().change_option(gid, aria2_options).await?;
         if task.status == TaskStatus::AwaitingUser && !self.store.selection_confirmed(task_id)? {
-            self.api().unpause(gid).await?;
+            self.unpause_gid(gid).await?;
         }
         self.store.confirm_selection(task_id)?;
         self.apply_status(task.clone(), self.api().tell_status(gid).await?, true)
