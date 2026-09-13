@@ -34,10 +34,20 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
   const recoveringAccounts = loadingCatalog || pendingProviders.length > 0;
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [accountErrors, setAccountErrors] = useState<Partial<Record<CloudProvider, string>>>({});
+  const [visitedAccounts, setVisitedAccounts] = useState<ReadonlySet<string>>(() => new Set());
   const activeAccount = activePage === 'management' ? null : accounts.find((account) => account.provider === activePage) ?? null;
+  const accountKey = (account: CloudAccount) => `${account.provider}:${account.id}`;
+  const activeKey = activeAccount ? accountKey(activeAccount) : null;
   const authorizedProviders = useMemo(() => catalog.filter(descriptor => accounts.some(account => account.provider === descriptor.provider)), [catalog, accounts]);
 
   useEffect(() => { onProvidersChange(authorizedProviders); }, [authorizedProviders, onProvidersChange]);
+
+  useEffect(() => {
+    setVisitedAccounts(current => {
+      const next = new Set(accounts.map(accountKey).filter(key => current.has(key) || key === activeKey));
+      return next.size === current.size && [...next].every(key => current.has(key)) ? current : next;
+    });
+  }, [accounts, activeKey]);
 
   function acceptAccount(account: CloudAccount) {
     setAccountErrors(current => {
@@ -111,18 +121,22 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
       })}</div>
     </section>}
 
-    {activeAccount && <CloudManager
-      key={`files:${activeAccount.provider}:${activeAccount.id}`}
-      descriptor={catalog.find(d => d.provider === activeAccount.provider)!}
-      provider={activeAccount.provider}
+    {/* Keep visited account workspaces alive during navigation, including their
+        in-flight upload callbacks and results. Removing/replacing an account
+        unmounts its workspace, so state never leaks into another login. */}
+    {accounts.filter(account => visitedAccounts.has(accountKey(account)) || accountKey(account) === activeKey).map(account => <div key={`files:${accountKey(account)}`} hidden={accountKey(account) !== activeKey}>
+      <CloudManager
+      descriptor={catalog.find(d => d.provider === account.provider)!}
+      provider={account.provider}
       client={client}
-      initialAccount={activeAccount}
+      initialAccount={account}
+      workspaceVisible={accountKey(account) === activeKey}
       privacyDownloadEnabled={privacyDownloadEnabled}
       restoreOnMount={false}
       showSessionActions={false}
       onDownloadTask={onDownloadTask}
       onAccountAuthorized={acceptAccount}
       onAccountLoggedOut={removeAccount}
-    />}
+    /></div>)}
   </section>;
 }

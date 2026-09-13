@@ -3,7 +3,7 @@ import { vi, expect, it } from 'vitest';
 const native = { invoke: vi.fn().mockResolvedValue(undefined) };
 const events = vi.hoisted(() => ({ listen: vi.fn() }));
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke, Channel: class { onmessage = (_event: unknown) => {}; } }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: events.listen }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: dialog.open }));
 
@@ -116,11 +116,44 @@ it('invokes file and directory uploads with the structured outcome contract', as
   expect(await api.uploadCloudFiles('xunlei', 'root', ['C:\\fixture.txt'])).toEqual(outcome);
   expect(await api.uploadCloudDirectory('xunlei', 'root', 'C:\\fixture')).toEqual(outcome);
   expect(native.invoke).toHaveBeenNthCalledWith(1, 'cloud_upload_files', {
-    provider: 'xunlei', parentId: 'root', paths: ['C:\\fixture.txt']
+    provider: 'xunlei', parentId: 'root', paths: ['C:\\fixture.txt'], uploadId: expect.any(String), onProgress: expect.any(Object)
   });
   expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_upload_directory', {
-    provider: 'xunlei', parentId: 'root', path: 'C:\\fixture'
+    provider: 'xunlei', parentId: 'root', path: 'C:\\fixture', uploadId: expect.any(String), onProgress: expect.any(Object)
   });
+  expect(native.invoke.mock.calls[0][1].uploadId).not.toBe(native.invoke.mock.calls[1][1].uploadId);
+});
+
+it('streams upload progress per invocation before its outcome and ignores late events', async () => {
+  const api = await import('./cloudApi');
+  let finish!: (value: any) => void;
+  native.invoke.mockClear();
+  native.invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const receive = vi.fn();
+  const pending = api.uploadCloudFiles('quark', '0', ['C:/a.txt'], receive);
+  const channel = native.invoke.mock.calls[0][1].onProgress;
+  expect(channel).toBeDefined();
+  const progress = { uploadId: native.invoke.mock.calls[0][1].uploadId, provider: 'quark', phase: 'uploading', uploadedBytes: 5, totalBytes: 10, speedBytesPerSecond: 5, completedFiles: 0, totalFiles: 1, failedItems: 0, currentFiles: ['a.txt'], progress: 50 };
+  channel.onmessage({ ...progress, uploadId: 'different-upload' });
+  channel.onmessage({ ...progress, provider: 'pikpak' });
+  expect(receive).not.toHaveBeenCalled();
+  channel.onmessage(progress);
+  expect(receive).toHaveBeenCalledWith(progress);
+  const outcome = { uploaded: [], failures: [] };
+  finish(outcome);
+  expect(await pending).toEqual(outcome);
+  channel.onmessage(progress);
+  expect(receive).toHaveBeenCalledTimes(1);
+});
+
+it('targets upload controls by invocation identity and propagates rejected controls', async () => {
+  const api = await import('./cloudApi');
+  native.invoke.mockClear();
+  native.invoke.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce({ code: 'invalid_input', message: '上传已结束' });
+  await api.controlCloudUpload('quark', 'upload-1', 'pause');
+  await api.controlCloudUpload('quark', 'upload-1', 'resume');
+  await expect(api.controlCloudUpload('quark', 'upload-1', 'cancel')).rejects.toEqual({ code: 'invalid_input', message: '上传已结束' });
+  expect(native.invoke.mock.calls).toEqual(['pause', 'resume', 'cancel'].map(action => ['cloud_control_upload', { provider: 'quark', uploadId: 'upload-1', action }]));
 });
 
 it('selects upload paths before invoking an upload so authorization retries can reuse them', async () => {

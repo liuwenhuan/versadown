@@ -14,7 +14,95 @@ function CloudWorkspace(props: Omit<CloudWorkspaceProps, 'activePage' | 'onPageC
 }
 import { cloudCatalog } from '../test/cloudCatalog';
 
+it.each(['success', 'failure'] as const)('retains upload state and its %s result across providers and hidden application views', async (outcome) => {
+  const user = userEvent.setup();
+  let finish!: (value: any) => void;
+  const client = {
+    ...createClient({
+      quark: { id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' },
+      pikpak: { id: 'p', displayName: 'bob', provider: 'pikpak', authMethod: 'web' },
+    }),
+    listLocalUploadEntries: vi.fn().mockResolvedValue({ path: 'C:/Uploads', parentPath: 'C:/', roots: [], entries: [{ path: 'C:/Uploads/a.txt', name: 'a.txt', kind: 'file', size: 1024 }] }),
+    uploadCloudFiles: vi.fn(() => new Promise<any>(resolve => { finish = resolve; })),
+  };
+  const view = render(<div><CloudWorkspace client={client} /></div>);
+  await user.click(await screen.findByRole('button', { name: '夸克网盘' }));
+  await screen.findByRole('tree', { name: '夸克网盘文件' });
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await user.click(await screen.findByRole('checkbox', { name: '选择 a.txt' }));
+  await user.click(screen.getByRole('button', { name: '确认上传' }));
+  expect(await screen.findByText('正在准备上传…')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'PikPak网盘' }));
+  await screen.findByRole('tree', { name: 'PikPak网盘文件' });
+  const inactiveUpload = screen.queryByText('正在准备上传…');
+  if (inactiveUpload) expect(inactiveUpload).not.toBeVisible();
+  await user.click(screen.getByRole('button', { name: '夸克网盘' }));
+  expect(await screen.findByText('正在准备上传…')).toBeVisible();
+  expect(screen.getByRole('button', { name: '上传', exact: true })).toBeDisabled();
+  view.rerender(<div hidden><CloudWorkspace client={client} /></div>);
+  await act(async () => { finish(outcome === 'success'
+    ? { uploaded: [{ id: 'new-file', name: 'a.txt', kind: 'file', parentId: '0' }], failures: [] }
+    : { uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code: 'network_error', message: '网络中断' }] }); });
+  view.rerender(<div><CloudWorkspace client={client} /></div>);
+  const message = outcome === 'success' ? '已上传 1 项' : '上传完成：成功 0 项，失败 1 项：a.txt：网络中断';
+  expect(await screen.findByText(message)).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'PikPak网盘' }));
+  await user.click(screen.getByRole('button', { name: '夸克网盘' }));
+  expect(screen.getByText(message)).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '刷新' }));
+  expect(screen.getByText(message)).toBeVisible();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole('button', { name: '我的网盘' }));
+  const card = screen.getByRole('region', { name: '夸克账号授权' });
+  await user.click(within(card).getByRole('button', { name: '退出授权' }));
+  await user.click(screen.getByRole('button', { name: '确认退出授权' }));
+  await waitFor(() => expect(screen.queryByText(message)).not.toBeInTheDocument());
+  const authorization = screen.getByRole('region', { name: '夸克账号授权' });
+  await user.click(within(authorization).getByRole('button', { name: '使用网页授权' }));
+  await act(async () => { client.emitAuthorization({ id: 'different-account', displayName: 'other', provider: 'quark', authMethod: 'web' }); });
+  await user.click(screen.getByRole('button', { name: '夸克网盘' }));
+  await screen.findByRole('tree', { name: '夸克网盘文件' });
+  expect(screen.queryByText(message)).not.toBeInTheDocument();
+});
+
 type TestAccount = { id: string; displayName: string; provider: 'quark' | 'pikpak'; authMethod: 'web' | 'password' };
+
+it('keeps paused upload controls scoped to the original provider after navigation', async () => {
+  const user = userEvent.setup();
+  let receive!: (value: any) => void;
+  const client = {
+    ...createClient({ quark: { id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }, pikpak: { id: 'p', displayName: 'bob', provider: 'pikpak', authMethod: 'web' } }),
+    listLocalUploadEntries: vi.fn().mockResolvedValue({ path: 'C:/', parentPath: null, roots: [], entries: [{ path: 'C:/a.txt', name: 'a.txt', kind: 'file', size: 100 }] }),
+    uploadCloudFiles: vi.fn((_p, _d, _paths, callback) => { receive = callback; return new Promise<any>(() => {}); }),
+    controlCloudUpload: vi.fn().mockResolvedValue(undefined),
+  };
+  render(<CloudWorkspace client={client} />);
+  await user.click(await screen.findByRole('button', { name: '夸克网盘' }));
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await user.click(await screen.findByRole('checkbox', { name: '选择 a.txt' }));
+  await user.click(screen.getByRole('button', { name: '确认上传' }));
+  await act(async () => { receive({ uploadId: 'quark-upload', provider: 'quark', phase: 'uploading', totalBytes: 100, uploadedBytes: 40, speedBytesPerSecond: 10, totalFiles: 1, completedFiles: 0, failedItems: 0, currentFiles: ['a.txt'], progress: 40 }); });
+  await user.click(screen.getByRole('button', { name: '暂停上传' }));
+  await user.click(screen.getByRole('button', { name: 'PikPak网盘' }));
+  expect(screen.queryByRole('button', { name: '继续上传' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '取消上传' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '夸克网盘' }));
+  expect(screen.getByText('上传已暂停：a.txt')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '继续上传' }));
+  expect(client.controlCloudUpload.mock.calls).toEqual([['quark', 'quark-upload', 'pause'], ['quark', 'quark-upload', 'resume']]);
+});
+
+it('closes portal menus when leaving a cached provider workspace', async () => {
+  const user = userEvent.setup();
+  const client = createClient({ quark: { id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' } });
+  render(<CloudWorkspace client={client} />);
+  await user.click(await screen.findByRole('button', { name: '夸克网盘' }));
+  fireEvent.contextMenu(await screen.findByText('quark-文件.txt'), { clientX: 100, clientY: 100 });
+  expect(screen.getByRole('menu')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: '我的网盘' }));
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
 
 it('adds the authorized workspace immediately from the completion event', async () => {
   let receive: ((event: any) => void) | undefined;

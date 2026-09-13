@@ -237,6 +237,8 @@ body *{font-weight:400!important}
 .brand h1{font-weight:700!important}
 .cloud-provider-auths .cloud-manager{font-size:13px}.cloud-provider-auths .cloud-heading h2{font-size:18px}.cloud-provider-auths .cloud-manager button,.cloud-provider-auths .cloud-manager input{font-size:13px}.cloud-provider-auths .cloud-authorization-feedback,.cloud-provider-auths .cloud-operation-status{font-size:11px}.cloud-provider-auths .cloud-connected-account .cloud-account-name{font-size:13px}
 .cloud-operation-status{display:flex;align-items:center;justify-content:space-between;gap:12px}.cloud-authorization-continuation{flex:0 0 auto}
+.cloud-upload-status-content{display:grid;gap:6px;min-width:0;flex:1;overflow-wrap:anywhere}.cloud-upload-status-content p{margin:0}
+.cloud-upload-stats{display:flex;justify-content:space-between;gap:8px 20px;flex-wrap:wrap}.cloud-upload-stats>span:last-child{margin-left:auto;text-align:right}.cloud-upload-track-row{display:flex;align-items:center;gap:8px}.cloud-upload-track-row>.progress-track{flex:1;min-width:0}.cloud-upload-track-row>button{flex:0 0 auto;white-space:nowrap}
 
 /* Shared file-manager typography and density for every cloud provider. */
 .cloud-row,.cloud-toolbar button,.cloud-breadcrumbs button,

@@ -1,4 +1,157 @@
 use super::*;
+use crate::cloud::upload::{report_upload_progress, UploadProgressTracker};
+use tauri::ipc::Channel;
+
+async fn run_upload_session<F, Fut>(
+    provider: CloudProvider,
+    upload_id: String,
+    on_progress: Channel<CloudUploadProgress>,
+    operation: F,
+) -> Result<CloudUploadOutcome, QuarkError>
+where
+    F: FnOnce(UploadProgressTracker, UploadControl) -> Fut,
+    Fut: std::future::Future<Output = Result<CloudUploadOutcome, QuarkError>>,
+{
+    let control = UploadControl::default();
+    let _registration =
+        crate::cloud::upload_registry().register(provider, &upload_id, control.clone())?;
+    let tracker = UploadProgressTracker::new(provider);
+    tracker.bind_session(upload_id, control.clone());
+    report_upload_progress(
+        tracker.clone(),
+        move |event| {
+            let _ = on_progress.send(event);
+        },
+        async {
+            let result = operation(tracker.clone(), control.clone()).await;
+            let result = match result {
+                Ok(mut outcome) => {
+                    outcome.cancelled |= control.is_cancelled();
+                    Ok(outcome)
+                }
+                Err(error) if crate::cloud::is_upload_cancelled(&error) => Ok(CloudUploadOutcome {
+                    uploaded: Vec::new(),
+                    failures: Vec::new(),
+                    cancelled: true,
+                }),
+                Err(error) => Err(error),
+            };
+            let failed_items = match &result {
+                Ok(outcome) => outcome
+                    .failures
+                    .iter()
+                    .filter(|failure| failure.code != "upload_cancelled")
+                    .count(),
+                Err(_) => 1,
+            };
+            if result.as_ref().is_ok_and(|outcome| outcome.cancelled) {
+                tracker.finish_cancelled(failed_items);
+            } else {
+                tracker.finish(failed_items);
+            }
+            result
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn cloud_control_upload(
+    provider: CloudProvider,
+    upload_id: String,
+    action: String,
+) -> Result<(), QuarkError> {
+    crate::cloud::upload_registry().apply(provider, &upload_id, &action)
+}
+
+enum PreparedUpload {
+    File(PathBuf),
+    Directory(DirectoryUploadPlan),
+}
+
+fn prepare_upload_input(
+    provider: CloudProvider,
+    path: &Path,
+    control: &crate::cloud::UploadControl,
+    tracker: &UploadProgressTracker,
+    input: usize,
+) -> Result<PreparedUpload, QuarkError> {
+    control.check()?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| QuarkError::InvalidInput("无法读取选中的上传项目".into()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(QuarkError::InvalidInput(
+            "不能上传符号链接或目录联接".into(),
+        ));
+    }
+    if metadata.is_file() {
+        validate_upload_file(provider, path, &metadata)?;
+        tracker.add_file(input, path, metadata.len());
+        Ok(PreparedUpload::File(path.into()))
+    } else if metadata.is_dir() {
+        let plan = build_directory_upload_plan_with_limits(
+            provider,
+            path,
+            control,
+            DIRECTORY_UPLOAD_LIMITS,
+        )?;
+        for entry in &plan.entries {
+            if let DirectoryUploadEntry::File { source, size, .. } = entry {
+                tracker.add_file(input, source, *size);
+            }
+        }
+        Ok(PreparedUpload::Directory(plan))
+    } else {
+        Err(QuarkError::InvalidInput("只能上传普通文件或目录".into()))
+    }
+}
+
+fn upload_file_with_progress(
+    control: &crate::cloud::UploadControl,
+    path: &Path,
+    upload: impl FnOnce() -> Result<CloudFile, QuarkError>,
+) -> Result<CloudFile, QuarkError> {
+    control.wait_ready_blocking()?;
+    control.start_file(path);
+    let file = upload().map_err(|error| {
+        if control.is_cancelled() {
+            crate::cloud::upload_cancelled()
+        } else {
+            error
+        }
+    })?;
+    control.complete_file(path);
+    Ok(file)
+}
+
+#[cfg(test)]
+async fn run_with_upload_channel<F, Fut>(
+    provider: CloudProvider,
+    on_progress: Channel<CloudUploadProgress>,
+    operation: F,
+) -> Result<CloudUploadOutcome, QuarkError>
+where
+    F: FnOnce(UploadProgressTracker) -> Fut,
+    Fut: std::future::Future<Output = Result<CloudUploadOutcome, QuarkError>>,
+{
+    let tracker = UploadProgressTracker::new(provider);
+    report_upload_progress(
+        tracker.clone(),
+        move |event| {
+            // Closing the view or losing the callback never cancels the upload.
+            let _ = on_progress.send(event);
+        },
+        async {
+            let result = operation(tracker.clone()).await;
+            tracker.finish(match &result {
+                Ok(outcome) => outcome.failures.len(),
+                Err(_) => 1,
+            });
+            result
+        },
+    )
+    .await
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DirectoryUploadEntry {
@@ -8,6 +161,7 @@ enum DirectoryUploadEntry {
     File {
         relative_path: PathBuf,
         source: PathBuf,
+        size: u64,
     },
 }
 
@@ -43,6 +197,12 @@ pub struct CloudUploadFailure {
 pub struct CloudUploadOutcome {
     pub uploaded: Vec<CloudFile>,
     pub failures: Vec<CloudUploadFailure>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub cancelled: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl DirectoryUploadEntry {
@@ -103,6 +263,7 @@ fn build_directory_upload_plan_with_limits(
             entries.push(DirectoryUploadEntry::File {
                 relative_path,
                 source: path,
+                size: metadata.len(),
             });
             continue;
         }
@@ -205,12 +366,10 @@ fn upload_directory_tree(
     http: &(impl CloudHttpTransport + CloudUploadTransport),
     provider: CloudProvider,
     parent_id: &str,
-    root: &Path,
+    plan: DirectoryUploadPlan,
     control: &crate::cloud::UploadControl,
 ) -> Result<Vec<CloudFile>, QuarkError> {
-    let plan =
-        build_directory_upload_plan_with_limits(provider, root, control, DIRECTORY_UPLOAD_LIMITS)?;
-    control.check()?;
+    control.wait_ready_blocking()?;
     let destination = state.with_upload_session(provider, http, |store| {
         ProviderRegistry::global()
             .driver(provider, store, http)
@@ -218,23 +377,34 @@ fn upload_directory_tree(
     })?;
     ensure_upload_root_available(&destination, &plan.root_name)?;
     let create_directory = |parent_id: &str, name: &str| {
-        state.with_upload_session(provider, http, |store| {
-            ProviderRegistry::global()
-                .driver(provider, store, http)
-                .create_directory(parent_id, name)
-        })
+        state
+            .with_upload_session(provider, http, |store| {
+                ProviderRegistry::global()
+                    .driver(provider, store, http)
+                    .create_directory(parent_id, name)
+            })
+            .map_err(|error| {
+                if control.is_cancelled() {
+                    crate::cloud::upload_cancelled()
+                } else {
+                    error
+                }
+            })
     };
     execute_directory_upload_plan(
         parent_id,
         plan,
-        || control.check(),
+        || control.wait_ready_blocking(),
         create_directory,
         |remote_parent, source| {
-            ProviderRegistry::global()
-                .driver(provider, &state.store, http)
-                .upload(state, http, remote_parent, source)
+            upload_file_with_progress(control, source, || {
+                ProviderRegistry::global()
+                    .driver(provider, &state.store, http)
+                    .upload(state, http, remote_parent, source)
+            })
         },
         |root_id| {
+            control.check()?;
             let ids = vec![root_id.to_owned()];
             state.with_upload_session(provider, http, |store| {
                 ProviderRegistry::global()
@@ -284,12 +454,14 @@ fn execute_directory_upload_plan(
                 }
             }
         }
-        Ok(results)
+        Ok(())
     })();
     match operation {
-        Ok(results) => Ok(results),
+        Ok(()) => Ok(results),
+        Err(error) if crate::cloud::is_upload_cancelled(&error) => Ok(results),
         Err(error) => match trash_root(&root_id) {
             Ok(()) => Err(error),
+            Err(error) if crate::cloud::is_upload_cancelled(&error) => Ok(results),
             Err(_) => Err(QuarkError::Provider(
                 "目录上传失败，且无法自动回收本次新建的远端目录；请刷新后手动处理".into(),
             )),
@@ -301,41 +473,38 @@ fn upload_selected_path(
     state: &CloudState,
     provider: CloudProvider,
     parent_id: &str,
-    path: &Path,
+    prepared: PreparedUpload,
     control: crate::cloud::UploadControl,
 ) -> Result<Vec<CloudFile>, QuarkError> {
-    control.check()?;
+    control.wait_ready_blocking()?;
     let transport = ReqwestTransport::new()?;
     let http = crate::cloud::http::ControlledUploadHttp {
         inner: &transport,
         control: control.clone(),
     };
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| QuarkError::InvalidInput("无法读取选中的上传项目".into()))?;
-    if metadata.file_type().is_symlink() {
-        return Err(QuarkError::InvalidInput(
-            "不能上传符号链接或目录联接".into(),
-        ));
-    }
-    if metadata.is_dir() {
-        upload_directory_tree(state, &http, provider, parent_id, path, &control)
-    } else if metadata.is_file() {
-        validate_upload_file(provider, path, &metadata)?;
-        control.check()?;
-        Ok(vec![ProviderRegistry::global()
-            .driver(provider, &state.store, &http)
-            .upload(state, &http, parent_id, path)?])
-    } else {
-        Err(QuarkError::InvalidInput("只能上传普通文件或目录".into()))
+    match prepared {
+        PreparedUpload::Directory(plan) => {
+            upload_directory_tree(state, &http, provider, parent_id, plan, &control)
+        }
+        PreparedUpload::File(path) => Ok(vec![upload_file_with_progress(&control, &path, || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .upload(state, &http, parent_id, &path)
+        })?]),
     }
 }
 
 fn upload_error_code(error: &QuarkError) -> &'static str {
+    if crate::cloud::is_upload_cancelled(error) {
+        return "upload_cancelled";
+    }
     match error {
         QuarkError::NotAuthorized => "not_authorized",
         QuarkError::AuthorizationExpired => "credentials_expired",
         QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
-        QuarkError::PikpakOperationVerificationRequired(_) => "pikpak_operation_verification_required",
+        QuarkError::PikpakOperationVerificationRequired(_) => {
+            "pikpak_operation_verification_required"
+        }
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
@@ -354,16 +523,20 @@ fn summarize_upload_batches(
     let mut outcome = CloudUploadOutcome {
         uploaded: Vec::new(),
         failures: Vec::new(),
+        cancelled: false,
     };
     for (input_index, item_name, batch) in batches {
         match batch {
             Ok(files) => outcome.uploaded.extend(files),
-            Err(error) => outcome.failures.push(CloudUploadFailure {
-                input_index,
-                item_name,
-                code: upload_error_code(&error),
-                message: error.to_string(),
-            }),
+            Err(error) => {
+                outcome.cancelled |= crate::cloud::is_upload_cancelled(&error);
+                outcome.failures.push(CloudUploadFailure {
+                    input_index,
+                    item_name,
+                    code: upload_error_code(&error),
+                    message: error.to_string(),
+                });
+            }
         }
     }
     outcome
@@ -375,26 +548,60 @@ async fn upload_selected_paths(
     provider: CloudProvider,
     parent_id: String,
     paths: Vec<PathBuf>,
+    tracker: UploadProgressTracker,
+    control: UploadControl,
 ) -> Result<CloudUploadOutcome, QuarkError> {
-    let inputs = paths
-        .into_iter()
-        .map(|path| {
-            let item_name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "上传项目".into());
-            (item_name, path)
-        })
-        .collect();
+    let scan_control = control.clone();
+    let scan_tracker = tracker.clone();
+    // Build each bounded directory plan once, before any remote mutation. The
+    // same plan provides totals and later drives uploads; failures stay indexed.
+    let inputs = tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .enumerate()
+            .map(|(input_index, path)| {
+                let item_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "上传项目".into());
+                let prepared = prepare_upload_input(
+                    provider,
+                    &path,
+                    &scan_control,
+                    &scan_tracker,
+                    input_index,
+                );
+                (input_index, item_name, prepared)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|_| QuarkError::InvalidInput("上传预扫描中断".into()))?;
+    tracker.start_uploading();
     let batches = crate::cloud::schedule_uploads(
         inputs,
         descriptor.max_upload_concurrency,
-        crate::cloud::UploadControl::default(),
-        move |(item_name, path), control| {
-            Ok((
-                item_name,
-                upload_selected_path(&state, provider, &parent_id, &path, control),
-            ))
+        control,
+        move |(input_index, item_name, prepared), control| {
+            let control = control.with_progress(tracker.clone(), input_index);
+            let result = prepared
+                .and_then(|prepared| {
+                    upload_selected_path(&state, provider, &parent_id, prepared, control.clone())
+                })
+                .map_err(|error| {
+                    if control.is_cancelled() {
+                        crate::cloud::upload_cancelled()
+                    } else {
+                        error
+                    }
+                });
+            if result
+                .as_ref()
+                .is_err_and(|error| !crate::cloud::is_upload_cancelled(error))
+            {
+                tracker.fail_input(input_index);
+            }
+            Ok((item_name, result))
         },
     )
     .await;
@@ -415,40 +622,53 @@ pub async fn cloud_upload_files(
     provider: CloudProvider,
     parent_id: String,
     paths: Option<Vec<String>>,
+    on_progress: Channel<CloudUploadProgress>,
+    upload_id: String,
 ) -> Result<CloudUploadOutcome, QuarkError> {
-    let picker = app.clone();
-    let descriptor = ProviderRegistry::global().get(provider);
-    // The native picker may stay open indefinitely; it must hold no session lock.
-    let paths = tauri::async_runtime::spawn_blocking(move || {
-        select_cloud_upload_paths(descriptor, paths, |title| {
-            picker
-                .dialog()
-                .file()
-                .set_title(title)
-                .blocking_pick_files()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|path| {
-                    path.into_path()
-                        .map_err(|_| QuarkError::InvalidInput("无法访问选中的文件".into()))
-                })
-                .collect()
-        })
-    })
-    .await
-    .map_err(|_| QuarkError::InvalidInput("文件选择中断".into()))??;
-    if paths.is_empty() {
-        return Ok(CloudUploadOutcome {
-            uploaded: Vec::new(),
-            failures: Vec::new(),
-        });
-    }
-    upload_selected_paths(
-        app.state::<Arc<CloudState>>().inner().clone(),
-        descriptor,
+    run_upload_session(
         provider,
-        parent_id,
-        paths,
+        upload_id,
+        on_progress,
+        |tracker, control| async move {
+            let picker = app.clone();
+            let descriptor = ProviderRegistry::global().get(provider);
+            // The native picker may stay open indefinitely; it must hold no session lock.
+            let paths = tauri::async_runtime::spawn_blocking(move || {
+                select_cloud_upload_paths(descriptor, paths, |title| {
+                    picker
+                        .dialog()
+                        .file()
+                        .set_title(title)
+                        .blocking_pick_files()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|path| {
+                            path.into_path()
+                                .map_err(|_| QuarkError::InvalidInput("无法访问选中的文件".into()))
+                        })
+                        .collect()
+                })
+            })
+            .await
+            .map_err(|_| QuarkError::InvalidInput("文件选择中断".into()))??;
+            if paths.is_empty() {
+                return Ok(CloudUploadOutcome {
+                    uploaded: Vec::new(),
+                    failures: Vec::new(),
+                    cancelled: false,
+                });
+            }
+            upload_selected_paths(
+                app.state::<Arc<CloudState>>().inner().clone(),
+                descriptor,
+                provider,
+                parent_id,
+                paths,
+                tracker,
+                control,
+            )
+            .await
+        },
     )
     .await
 }
@@ -459,41 +679,55 @@ pub async fn cloud_upload_directory(
     provider: CloudProvider,
     parent_id: String,
     path: Option<String>,
+    on_progress: Channel<CloudUploadProgress>,
+    upload_id: String,
 ) -> Result<CloudUploadOutcome, QuarkError> {
-    let descriptor = ProviderRegistry::global().get(provider);
-    let selected = match path {
-        Some(path) => Some(PathBuf::from(path)),
-        None => {
-            let picker = app.clone();
-            let title = format!("选择上传到 {} 的目录", descriptor.upload_display_name);
-            tauri::async_runtime::spawn_blocking(move || {
-                picker
-                    .dialog()
-                    .file()
-                    .set_title(title)
-                    .blocking_pick_folder()
-                    .map(|path| {
-                        path.into_path()
-                            .map_err(|_| QuarkError::InvalidInput("无法访问选中的目录".into()))
-                    })
-                    .transpose()
-            })
-            .await
-            .map_err(|_| QuarkError::InvalidInput("目录选择中断".into()))??
-        }
-    };
-    let Some(path) = selected else {
-        return Ok(CloudUploadOutcome {
-            uploaded: Vec::new(),
-            failures: Vec::new(),
-        });
-    };
-    upload_selected_paths(
-        app.state::<Arc<CloudState>>().inner().clone(),
-        descriptor,
+    run_upload_session(
         provider,
-        parent_id,
-        vec![path],
+        upload_id,
+        on_progress,
+        |tracker, control| async move {
+            let descriptor = ProviderRegistry::global().get(provider);
+            let selected = match path {
+                Some(path) => Some(PathBuf::from(path)),
+                None => {
+                    let picker = app.clone();
+                    let title = format!("选择上传到 {} 的目录", descriptor.upload_display_name);
+                    tauri::async_runtime::spawn_blocking(move || {
+                        picker
+                            .dialog()
+                            .file()
+                            .set_title(title)
+                            .blocking_pick_folder()
+                            .map(|path| {
+                                path.into_path().map_err(|_| {
+                                    QuarkError::InvalidInput("无法访问选中的目录".into())
+                                })
+                            })
+                            .transpose()
+                    })
+                    .await
+                    .map_err(|_| QuarkError::InvalidInput("目录选择中断".into()))??
+                }
+            };
+            let Some(path) = selected else {
+                return Ok(CloudUploadOutcome {
+                    uploaded: Vec::new(),
+                    failures: Vec::new(),
+                    cancelled: false,
+                });
+            };
+            upload_selected_paths(
+                app.state::<Arc<CloudState>>().inner().clone(),
+                descriptor,
+                provider,
+                parent_id,
+                vec![path],
+                tracker,
+                control,
+            )
+            .await
+        },
     )
     .await
 }
@@ -539,6 +773,224 @@ impl CloudState {
 #[cfg(test)]
 mod directory_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn upload_control_native_channel_returns_cancelled_with_successes_and_releases_id() {
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        let event_id = upload_id.clone();
+        let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let received = events.clone();
+        let control_result = Arc::new(Mutex::new(None));
+        let applied = control_result.clone();
+        let channel = Channel::new(move |body| {
+            let event = body.deserialize::<serde_json::Value>()?;
+            if event["phase"] == "preparing" {
+                *applied.lock().unwrap() = Some(crate::cloud::upload_registry().apply(
+                    CloudProvider::Xunlei,
+                    &event_id,
+                    "cancel",
+                ));
+            }
+            received.lock().unwrap().push(event);
+            Ok(())
+        });
+        let outcome = run_upload_session(
+            CloudProvider::Xunlei,
+            upload_id.clone(),
+            channel,
+            |_, _| async {
+                Ok(summarize_upload_batches(vec![(
+                    0,
+                    "finished.txt".into(),
+                    Ok(vec![file(
+                        "finished",
+                        "parent",
+                        "finished.txt",
+                        CloudFileKind::File,
+                    )]),
+                )]))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(control_result.lock().unwrap().as_ref().unwrap().is_ok());
+        assert_eq!(outcome.uploaded[0].id, "finished");
+        assert_eq!(serde_json::to_value(outcome).unwrap()["cancelled"], true);
+        let events = events.lock().unwrap();
+        assert_eq!(events.last().unwrap()["uploadId"], upload_id);
+        assert_eq!(events.last().unwrap()["phase"], "cancelled");
+        assert_eq!(events.last().unwrap()["failedItems"], 0);
+        assert!(crate::cloud::upload_registry()
+            .apply(CloudProvider::Xunlei, &upload_id, "pause")
+            .is_err());
+    }
+
+    #[test]
+    fn upload_control_cancelled_directory_preserves_confirmed_children_without_trash() {
+        let plan = DirectoryUploadPlan {
+            root_name: "fixture".into(),
+            entries: vec![
+                DirectoryUploadEntry::File {
+                    relative_path: "first.txt".into(),
+                    source: "first.txt".into(),
+                    size: 4,
+                },
+                DirectoryUploadEntry::File {
+                    relative_path: "second.txt".into(),
+                    source: "second.txt".into(),
+                    size: 6,
+                },
+            ],
+        };
+        let control = UploadControl::default();
+        let mut trashed = Vec::new();
+        let result = execute_directory_upload_plan(
+            "parent",
+            plan,
+            || control.check(),
+            |parent, name| Ok(file("new-root", parent, name, CloudFileKind::Folder)),
+            |parent, path| {
+                assert_eq!(path, Path::new("first.txt"));
+                control.cancel();
+                Ok(file("first", parent, "first.txt", CloudFileKind::File))
+            },
+            |id| {
+                trashed.push(id.to_owned());
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(trashed.is_empty());
+    }
+
+    #[test]
+    fn upload_progress_preflight_counts_files_and_reuses_the_directory_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("empty")).unwrap();
+        std::fs::create_dir(temp.path().join("nested")).unwrap();
+        std::fs::write(temp.path().join("top.txt"), b"top").unwrap();
+        std::fs::write(temp.path().join("nested/leaf.txt"), b"12345").unwrap();
+        let tracker = UploadProgressTracker::new(CloudProvider::Xunlei);
+        let prepared = prepare_upload_input(
+            CloudProvider::Xunlei,
+            temp.path(),
+            &UploadControl::default(),
+            &tracker,
+            0,
+        )
+        .unwrap();
+        let event = tracker.sample(std::time::Duration::ZERO);
+        assert_eq!(event.total_files, 2);
+        assert_eq!(event.total_bytes, 8);
+        assert_eq!(event.uploaded_bytes, 0);
+        std::fs::write(temp.path().join("late.txt"), b"not in the plan").unwrap();
+        let PreparedUpload::Directory(plan) = prepared else {
+            panic!("expected directory");
+        };
+        let mut uploaded_names = Vec::new();
+        execute_directory_upload_plan(
+            "parent",
+            plan,
+            || Ok(()),
+            |parent, name| Ok(file(name, parent, name, CloudFileKind::Folder)),
+            |parent, path| {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                uploaded_names.push(name.to_owned());
+                Ok(file(name, parent, name, CloudFileKind::File))
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(uploaded_names, ["leaf.txt", "top.txt"]);
+    }
+
+    #[test]
+    fn upload_progress_only_confirms_successful_provider_results_and_keeps_input_index() {
+        let tracker = UploadProgressTracker::new(CloudProvider::Xunlei);
+        let first = Path::new("first.txt");
+        let second = Path::new("second.txt");
+        tracker.add_file(0, first, 3);
+        tracker.add_file(1, second, 4);
+        let control = UploadControl::default().with_progress(tracker.clone(), 0);
+        let success = upload_file_with_progress(&control, first, || {
+            let pending = tracker.sample(std::time::Duration::ZERO);
+            assert_eq!(pending.completed_files, 0);
+            assert_eq!(pending.current_files, ["first.txt"]);
+            Ok(file("first", "parent", "first.txt", CloudFileKind::File))
+        });
+        let failure =
+            upload_file_with_progress(&control.with_progress(tracker.clone(), 1), second, || {
+                Err(QuarkError::Transport("offline".into()))
+            });
+        tracker.fail_input(1);
+        let outcome = summarize_upload_batches(vec![
+            (0, "first.txt".into(), success.map(|file| vec![file])),
+            (1, "second.txt".into(), failure.map(|file| vec![file])),
+        ]);
+        assert_eq!(outcome.failures[0].input_index, 1);
+        assert_eq!(outcome.uploaded[0].id, "first");
+        let event = tracker.sample(std::time::Duration::ZERO);
+        assert_eq!(event.completed_files, 1);
+        assert_eq!(event.uploaded_bytes, 3);
+        assert_eq!(event.failed_items, 1);
+    }
+
+    #[tokio::test]
+    async fn upload_progress_channel_emits_camel_case_terminal_failure_before_returning_outcome() {
+        let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let received = events.clone();
+        let channel = Channel::new(move |body| {
+            received
+                .lock()
+                .unwrap()
+                .push(body.deserialize::<serde_json::Value>()?);
+            Ok(())
+        });
+        let outcome = run_with_upload_channel(CloudProvider::Xunlei, channel, |_| async {
+            Ok(summarize_upload_batches(vec![(
+                2,
+                "bad.txt".into(),
+                Err(QuarkError::Transport("offline".into())),
+            )]))
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome.failures[0].input_index, 2);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["phase"], "preparing");
+        assert_eq!(
+            events[1],
+            serde_json::json!({
+                "provider": "xunlei", "phase": "failed", "totalBytes": 0,
+                "uploadId": "",
+                "uploadedBytes": 0, "speedBytesPerSecond": 0.0, "totalFiles": 0,
+                "completedFiles": 0, "failedItems": 1, "currentFiles": [], "progress": 0.0,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_progress_channel_send_failure_does_not_abort_the_operation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let sent = attempts.clone();
+        let channel = Channel::new(move |_| {
+            sent.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("closed progress channel").into())
+        });
+        let outcome = run_with_upload_channel(CloudProvider::Xunlei, channel, |_| async {
+            Ok(summarize_upload_batches(vec![(
+                0,
+                "ok.txt".into(),
+                Ok(vec![file("ok", "parent", "ok.txt", CloudFileKind::File)]),
+            )]))
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome.uploaded[0].id, "ok");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
 
     fn file(id: &str, parent_id: &str, name: &str, kind: CloudFileKind) -> CloudFile {
         CloudFile {
@@ -639,6 +1091,7 @@ mod directory_tests {
             entries: vec![DirectoryUploadEntry::File {
                 relative_path: "leaf.txt".into(),
                 source,
+                size: 4,
             }],
         };
         let mut trashed = Vec::new();
@@ -660,7 +1113,7 @@ mod directory_tests {
     }
 
     #[test]
-    fn directory_upload_cancellation_stops_before_the_next_mutation_and_rolls_back() {
+    fn directory_upload_cancellation_stops_before_the_next_mutation_and_retains_root() {
         let plan = DirectoryUploadPlan {
             root_name: "fixture".into(),
             entries: vec![DirectoryUploadEntry::Directory {
@@ -693,12 +1146,9 @@ mod directory_tests {
             },
         );
 
-        assert!(matches!(
-            result,
-            Err(QuarkError::InvalidInput(message)) if message == "上传已取消"
-        ));
+        assert_eq!(result.unwrap()[0].id, "new-root");
         assert_eq!(creates, [("parent".into(), "fixture".into())]);
-        assert_eq!(trashed, ["new-root"]);
+        assert!(trashed.is_empty());
     }
 
     #[test]

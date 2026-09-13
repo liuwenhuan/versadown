@@ -2,6 +2,7 @@ import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMous
 import { createPortal } from 'react-dom';
 import { LocalUploadPicker } from './LocalUploadPicker';
 import type { LocalUploadListing } from '../lib/localUpload';
+import type { CloudUploadAction, CloudUploadProgress } from '../lib/cloudTypes';
 import type { CloudAuthorizationStateEvent } from '../lib/cloudTypes';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudUploadOutcome } from '../lib/cloudTypes';
 
@@ -33,8 +34,9 @@ export interface CloudManagerClient {
   pickAndUploadDirectory(provider: CloudProvider, parentId: string): Promise<CloudUploadOutcome>;
   pickCloudUploadFiles?(): Promise<string[]>;
   pickCloudUploadDirectory?(): Promise<string | null>;
-  uploadCloudFiles?(provider: CloudProvider, parentId: string, paths: string[]): Promise<CloudUploadOutcome>;
-  uploadCloudDirectory?(provider: CloudProvider, parentId: string, path: string): Promise<CloudUploadOutcome>;
+  uploadCloudFiles?(provider: CloudProvider, parentId: string, paths: string[], onProgress?: (progress: CloudUploadProgress) => void): Promise<CloudUploadOutcome>;
+  uploadCloudDirectory?(provider: CloudProvider, parentId: string, path: string, onProgress?: (progress: CloudUploadProgress) => void): Promise<CloudUploadOutcome>;
+  controlCloudUpload?(provider: CloudProvider, uploadId: string, action: CloudUploadAction): Promise<void>;
   listLocalUploadEntries?(path?: string): Promise<LocalUploadListing>;
 }
 
@@ -47,6 +49,7 @@ export interface CloudManagerProps {
   authorizationOnly?: boolean;
   restoreOnMount?: boolean;
   showSessionActions?: boolean;
+  workspaceVisible?: boolean;
   privacyDownloadEnabled?: boolean;
   onAccountAuthorized?(account: CloudAccount): void;
   onAccountLoggedOut?(provider: CloudProvider): void;
@@ -55,7 +58,7 @@ export interface CloudManagerProps {
 type DirectoryState = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'expired';
 type Editor = 'create' | 'rename' | null;
 type DestinationAction = 'move' | 'copy';
-type OperationState = { kind: 'working' | 'success' | 'error'; message: string; operationVerification?: boolean } | null;
+type OperationState = { kind: 'working' | 'success' | 'error' | 'cancelled'; message: string; operationVerification?: boolean; uploadProgress?: CloudUploadProgress } | null;
 type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'details' | 'delete' | 'create' | 'upload' | 'refresh';
@@ -438,7 +441,7 @@ function CloudDestinationPicker({ action, provider, descriptor, client, excluded
   </div>, document.body);
 }
 
-export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, privacyDownloadEnabled = false, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const label = descriptor.displayName;
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
@@ -469,6 +472,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const [uploadPickerOpen, setUploadPickerOpen] = useState(false);
   const [pendingLogout, setPendingLogout] = useState(false);
   const [operation, setOperation] = useState<OperationState>(null);
+  const [operationRunning, setOperationRunning] = useState(false);
+  const [uploadResult, setUploadResult] = useState<OperationState>(null);
+  const [uploadControlBusy, setUploadControlBusy] = useState(false);
+  const [uploadControlError, setUploadControlError] = useState<string | null>(null);
+  const uploadControlInFlight = useRef(false);
+  const latestUploadProgress = useRef<CloudUploadProgress | null>(null);
   const [contextMenu, setContextMenu] = useState<CloudContextMenuState | null>(null);
   const [selectionMenuAnchor, setSelectionMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const [detailsFile, setDetailsFile] = useState<CloudFile | null>(null);
@@ -493,7 +502,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const isVirtualRecycleBinItem = (item: CloudFile | undefined) => item?.id === recycleBinId;
   const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
   const selectableItems = sortedItems.filter((item) => !isVirtualRecycleBinItem(item));
-  const operationBusy = operation?.kind === 'working';
+  const operationBusy = operationRunning || operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
   const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
   const logoutLabel = passwordSession ? '退出登录' : '退出授权';
@@ -542,6 +551,31 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   useEffect(() => {
     setSelectionMenuAnchor(null);
   }, [selectedIds]);
+
+  useEffect(() => {
+    if (workspaceVisible) return;
+    setContextMenu(null);
+    setSelectionMenuAnchor(null);
+    setDetailsFile(null);
+    setDestinationAction(null);
+    setUploadPickerOpen(false);
+    setPendingDownload(null);
+    setPendingTrash(false);
+    setEditor(null);
+  }, [workspaceVisible]);
+
+  const previousInitialAccount = useRef(initialAccount);
+  useEffect(() => {
+    if (initialAccount === previousInitialAccount.current || operationInFlight.current) return;
+    previousInitialAccount.current = initialAccount;
+    if (!initialAccount || initialAccount === activeAccount || initialAccount.provider !== provider || initialAccount.id !== activeAccount?.id) return;
+    // A renewed session can arrive from the management card while this file
+    // workspace is cached. Consume its pending action through the same guarded
+    // path as authorization completed in this workspace.
+    void acceptAccount(initialAccount).catch(error => {
+      setOperation({ kind: 'error', message: errorMessage(error, '恢复网盘操作失败，请重试。') });
+    });
+  }, [initialAccount, operationBusy]);
 
   useEffect(() => {
     if (!supportsDirectPasswordLogin) {
@@ -793,15 +827,27 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   async function runOperation(name: string, action: () => Promise<unknown>, refresh = true, retryUploadFailures?: (failures: CloudUploadOutcome['failures']) => () => Promise<void>) {
     if (!activeAccount || operationInFlight.current) return;
     operationInFlight.current = true;
+    setOperationRunning(true);
     setOperation({ kind: 'working', message: `${name}进行中…` });
     try {
       const result = await action();
       if (name.startsWith('上传') && isCloudUploadOutcome(result)) {
-        if (result.uploaded.length === 0 && result.failures.length === 0) {
+        if (!result.cancelled && result.uploaded.length === 0 && result.failures.length === 0) {
           setOperation(null);
           return;
         }
+        const listedFailures = result.failures.slice(0, 3).map(failure => `${failure.itemName}：${failure.message}`).join('；');
+        const remainingFailures = result.failures.length > 3 ? `；另 ${result.failures.length - 3} 项` : '';
+        const report: NonNullable<OperationState> = result.cancelled
+          ? { kind: 'cancelled', message: `上传已取消，已保留 ${result.uploaded.length} 项上传结果${result.failures.some(failure => failure.code !== 'upload_cancelled') ? `；${result.failures.filter(failure => failure.code !== 'upload_cancelled').map(failure => `${failure.itemName}：${failure.message}`).slice(0, 3).join('；')}` : ''}` }
+          : result.failures.length
+          ? { kind: 'error', message: `${name}完成：成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项：${listedFailures}${remainingFailures}` }
+          : { kind: 'success', message: `已上传 ${result.uploaded.length} 项` };
+        // The upload result is authoritative even when the follow-up listing fails.
+        setUploadResult(report);
+        setOperation(report);
         if (refresh && !await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs)) return;
+        if (result.cancelled) return;
         if (result.failures.length > 0) {
           const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
           if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
@@ -819,15 +865,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
             setOperation({ kind: 'error', message: `已自动恢复登录；成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项，请重试失败项目` });
             return;
           }
-          const listedFailures = result.failures.slice(0, 3).map(failure => `${failure.itemName}：${failure.message}`).join('；');
-          const remainingFailures = result.failures.length > 3 ? `；另 ${result.failures.length - 3} 项` : '';
-          setOperation({
-            kind: 'error',
-            message: `${name}完成：成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项：${listedFailures}${remainingFailures}`
-          });
+          setOperation(report);
           return;
         }
-        setOperation({ kind: 'success', message: `已上传 ${result.uploaded.length} 项` });
+        setOperation(report);
         setEditor(null);
         setEditorValue('');
         return;
@@ -858,6 +899,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       }
     } finally {
       operationInFlight.current = false;
+      setOperationRunning(false);
       setOperation(current => current?.kind === 'working'
         ? { kind: 'error', message: `${name}已执行，但列表刷新失败；请刷新列表确认结果。` }
         : current);
@@ -954,7 +996,23 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   async function uploadSelectedFiles(paths: string[]) {
-    await runOperation('上传', () => client.uploadCloudFiles!(provider, currentDirectoryId, paths), true, (failures) => {
+    await runOperation('上传', async () => {
+      setUploadResult(null);
+      setUploadControlError(null);
+      latestUploadProgress.current = null;
+      let acceptingProgress = true;
+      try {
+        return await client.uploadCloudFiles!(provider, currentDirectoryId, paths, progress => {
+          if (!acceptingProgress || progress.provider !== provider) return;
+          latestUploadProgress.current = progress;
+          if (['completed', 'failed', 'cancelled', 'cancelling'].includes(progress.phase)) setUploadControlError(null);
+          setOperation(current => current?.kind === 'working' ? { ...current, uploadProgress: progress } : current);
+        });
+      } finally {
+        acceptingProgress = false;
+        latestUploadProgress.current = null;
+      }
+    }, true, (failures) => {
       const indexed = failures
         .map((failure) => failure.inputIndex)
         .filter((index): index is number => typeof index === 'number' && Number.isInteger(index) && index >= 0 && index < paths.length);
@@ -1086,13 +1144,63 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       <header className="cloud-heading"><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2></header>
       {sessionActions()}
       {logoutConfirmation()}
-      {operation && <div className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}><span>{operation.message}</span>{operation.kind === 'error' && authorizationContinuationButton()}</div>}
+      {operationStatus()}
     </section>;
+  }
+
+  async function controlUpload(action: CloudUploadAction) {
+    const progress = latestUploadProgress.current;
+    if (!progress?.uploadId || !client.controlCloudUpload || uploadControlInFlight.current
+      || ['completed', 'failed', 'cancelled', 'cancelling'].includes(progress.phase)) return;
+    uploadControlInFlight.current = true;
+    setUploadControlBusy(true);
+    setUploadControlError(null);
+    try {
+      await client.controlCloudUpload(provider, progress.uploadId, action);
+      const latest = latestUploadProgress.current;
+      if (!latest || latest.uploadId !== progress.uploadId || ['completed', 'failed', 'cancelled', 'cancelling'].includes(latest.phase)) return;
+      const next: CloudUploadProgress = { ...latest, phase: action === 'pause' ? 'paused' : action === 'cancel' ? 'cancelling' : 'uploading', speedBytesPerSecond: 0 };
+      latestUploadProgress.current = next;
+      setOperation(current => current?.uploadProgress?.uploadId === progress.uploadId ? { ...current, uploadProgress: next } : current);
+    } catch (error) {
+      const latest = latestUploadProgress.current;
+      if (latest?.uploadId === progress.uploadId && !['completed', 'failed', 'cancelled', 'cancelling'].includes(latest.phase)) setUploadControlError(errorMessage(error, '上传控制失败，请重试。'));
+    } finally {
+      uploadControlInFlight.current = false;
+      setUploadControlBusy(false);
+    }
+  }
+
+  function operationStatus() {
+    const notice = operation ?? uploadResult;
+    if (!notice) return null;
+    const progress = operation?.uploadProgress;
+    const phaseLabels = { preparing: '正在准备文件', uploading: '正在上传', finalizing: '等待网盘确认', paused: '上传已暂停', cancelling: '正在取消上传', cancelled: '上传已取消', completed: '上传已完成', failed: '上传已结束' };
+    const controllable = progress && !['completed', 'failed', 'cancelled'].includes(progress.phase) && client.controlCloudUpload && progress.uploadId;
+    return <div className={`cloud-operation-status ${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>
+      <div className="cloud-upload-status-content">
+        {!progress && <span>{notice.message === '上传进行中…' ? '正在准备上传…' : notice.message}</span>}
+        {uploadResult && uploadResult.message !== notice.message && <p>{uploadResult.message}</p>}
+        {progress && <>
+          <div>{phaseLabels[progress.phase]}{progress.currentFiles.length > 0 && `：${progress.currentFiles.join('、')}`}</div>
+          <div className="cloud-upload-stats"><span>{progress.progress.toFixed(1).replace(/\.0$/, '')}% · {readableSize(progress.uploadedBytes)} / {readableSize(progress.totalBytes)} · {readableSize(Math.round(progress.speedBytesPerSecond))}/s</span><span>已完成 {progress.completedFiles} / {progress.totalFiles} 个文件，失败 {progress.failedItems} 项</span></div>
+          <div className="cloud-upload-track-row">
+            <div className="progress-track" role="progressbar" aria-label="上传总进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}><i style={{ width: `${progress.progress}%` }} /></div>
+            {controllable && <>
+              <button type="button" className="secondary" disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload(progress.phase === 'paused' ? 'resume' : 'pause')}>{progress.phase === 'paused' ? '继续上传' : '暂停上传'}</button>
+              <button type="button" className="secondary" disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload('cancel')}>{progress.phase === 'cancelling' ? '正在取消…' : '取消上传'}</button>
+            </>}
+          </div>
+          {uploadControlError && <p className="cloud-error" role="alert">{uploadControlError}</p>}
+        </>}
+      </div>
+      {notice.kind === 'error' && authorizationContinuationButton()}
+    </div>;
   }
 
   if (authorizationOnly && activeAccount) return accountManagementView();
   if (authorizationOnly || !activeAccount) return authorizationView();
-  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={`${label}文件管理器`}><header className="cloud-heading"><h2>{label}网盘</h2></header><div className="cloud-state cloud-error" role="alert"><span>登录凭据已过期。</span>{authorizationContinuationButton()}</div></section>;
+  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={`${label}文件管理器`}><header className="cloud-heading"><h2>{label}网盘</h2></header>{operationStatus()}<div className="cloud-state cloud-error" role="alert"><span>登录凭据已过期。</span>{authorizationContinuationButton()}</div></section>;
   if (directoryState === 'expired') return authorizationView(true);
 
   const parent = breadcrumbs.at(-2);
@@ -1117,7 +1225,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={isRecycleBin ? '确认永久删除' : '确认移入回收站'}><h3>{isRecycleBin ? '确认永久删除' : '确认移入回收站'}</h3><p>{isRecycleBin ? `所选 ${selected.length} 个项目将被永久删除，不可恢复。` : `所选 ${selected.length} 个项目将移入回收站，不会永久删除。`}</p><button className="secondary" onClick={() => setPendingTrash(false)}>取消</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation(isRecycleBin ? '永久删除' : '删除', () => isRecycleBin ? client.deleteCloudFiles(provider, selectedIds.slice()) : client.trashCloudFiles(provider, selectedIds.slice())); }}>{isRecycleBin ? '永久删除' : '移入回收站'}</button></section></div>}
     {pendingDownload && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label="确认下载"><h3>确认下载</h3><p>所选 {pendingDownload.length} 个项目可作为普通任务或隐私任务加入下载队列。</p><button className="secondary" onClick={() => setPendingDownload(null)}>取消</button><button className="primary" onClick={() => confirmPendingDownload(false)}>立即下载</button><button className="secondary" onClick={() => confirmPendingDownload(true)}>隐私下载</button></section></div>}
     {showSessionActions && logoutConfirmation()}
-    {operation && <div className={`cloud-operation-status ${operation.kind}`} role={operation.kind === 'error' ? 'alert' : 'status'}><span>{operation.message}</span>{operation.kind === 'error' && authorizationContinuationButton()}</div>}
+    {operationStatus()}
     {!showSessionActions && reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}
     {directoryState === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>正在加载文件…</span></div>}
     {directoryState === 'error' && <div className="cloud-state cloud-error" role="alert"><b>加载失败</b><span>{authorizationStatus}</span>{authorizationContinuationButton()}<button className="secondary" onClick={refreshDirectory}>重试</button></div>}

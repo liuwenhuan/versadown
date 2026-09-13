@@ -1,7 +1,7 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { LocalUploadListing } from './localUpload';
-import type { CloudAuthorizationStateEvent } from './cloudTypes';
+import type { CloudAuthorizationStateEvent, CloudUploadAction, CloudUploadProgress } from './cloudTypes';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudUploadOutcome } from './cloudTypes';
 
@@ -86,10 +86,22 @@ export const downloadCloudDirectory = (provider: CloudProvider, directoryId: str
 })
   .then((result) => ({ ...result, task: cloudDownloadResult(result.task) }));
 export const logoutCloud = (provider: CloudProvider) => invoke<void>('cloud_logout', { provider });
-export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[]) => invoke<CloudUploadOutcome>('cloud_upload_files', { provider, parentId, paths: paths ?? null });
+async function invokeCloudUpload(command: string, args: Record<string, unknown>, receive?: (progress: CloudUploadProgress) => void): Promise<CloudUploadOutcome> {
+  const uploadId = crypto.randomUUID();
+  const onProgress = new Channel<CloudUploadProgress>();
+  let active = true;
+  onProgress.onmessage = progress => { if (active && progress.uploadId === uploadId && progress.provider === args.provider) receive?.(progress); };
+  try {
+    return await invoke<CloudUploadOutcome>(command, { ...args, uploadId, onProgress });
+  } finally {
+    active = false;
+  }
+}
+export const controlCloudUpload = (provider: CloudProvider, uploadId: string, action: CloudUploadAction) => invoke<void>('cloud_control_upload', { provider, uploadId, action });
+export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[], onProgress?: (progress: CloudUploadProgress) => void) => invokeCloudUpload('cloud_upload_files', { provider, parentId, paths: paths ?? null }, onProgress);
 export const listLocalUploadEntries = (path?: string) => invoke<LocalUploadListing>('local_upload_entries', { path: path ?? null });
 export const pickAndUploadFiles = (provider: CloudProvider, parentId: string) => uploadCloudFiles(provider, parentId);
-export const uploadCloudDirectory = (provider: CloudProvider, parentId: string, path?: string) => invoke<CloudUploadOutcome>('cloud_upload_directory', { provider, parentId, path: path ?? null });
+export const uploadCloudDirectory = (provider: CloudProvider, parentId: string, path?: string, onProgress?: (progress: CloudUploadProgress) => void) => invokeCloudUpload('cloud_upload_directory', { provider, parentId, path: path ?? null }, onProgress);
 export const pickAndUploadDirectory = (provider: CloudProvider, parentId: string) => uploadCloudDirectory(provider, parentId);
 
 export async function pickCloudUploadFiles(): Promise<string[]> {

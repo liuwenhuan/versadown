@@ -4,29 +4,138 @@ use std::{
     io::{self, Cursor, Seek, SeekFrom},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicU64, Ordering},
+        Arc, Condvar, Mutex,
     },
     time::SystemTime,
 };
 
 #[derive(Clone, Default)]
 pub struct UploadControl {
-    cancelled: Arc<AtomicBool>,
+    signal: Arc<UploadSignal>,
     bytes: Arc<AtomicU64>,
+    progress: Option<(UploadProgressTracker, usize)>,
+}
+#[derive(Default)]
+struct UploadSignal {
+    state: Mutex<UploadSignalState>,
+    changed: Condvar,
+    async_changed: tokio::sync::Notify,
+}
+#[derive(Default, Clone, Copy)]
+struct UploadSignalState {
+    paused: bool,
+    cancelled: bool,
 }
 impl UploadControl {
+    pub fn pause(&self) -> Result<(), QuarkError> {
+        self.set_paused(true)
+    }
+    pub fn resume(&self) -> Result<(), QuarkError> {
+        self.set_paused(false)
+    }
+    fn set_paused(&self, paused: bool) -> Result<(), QuarkError> {
+        let mut state = self
+            .signal
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.cancelled {
+            return Err(upload_cancelled());
+        }
+        state.paused = paused;
+        drop(state);
+        self.signal.changed.notify_all();
+        self.signal.async_changed.notify_waiters();
+        Ok(())
+    }
+    pub fn is_paused(&self) -> bool {
+        self.signal
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .paused
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.signal
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cancelled
+    }
+    pub(crate) fn with_progress(mut self, tracker: UploadProgressTracker, input: usize) -> Self {
+        self.progress = Some((tracker, input));
+        self
+    }
+    pub(crate) fn start_file(&self, path: &Path) {
+        if let Some((tracker, input)) = &self.progress {
+            tracker.start_file(*input, path);
+        }
+    }
+    pub(crate) fn complete_file(&self, path: &Path) {
+        if let Some((tracker, input)) = &self.progress {
+            tracker.complete_file(*input, path);
+        }
+    }
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        let mut state = self
+            .signal
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.cancelled = true;
+        state.paused = false;
+        drop(state);
+        self.signal.changed.notify_all();
+        self.signal.async_changed.notify_waiters();
     }
     pub fn bytes_read(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
     }
     pub fn check(&self) -> Result<(), QuarkError> {
-        if self.cancelled.load(Ordering::SeqCst) {
-            Err(QuarkError::InvalidInput("上传已取消".into()))
+        // Session checks can run while auth locks are held: never pause here.
+        if self.is_cancelled() {
+            Err(upload_cancelled())
         } else {
             Ok(())
+        }
+    }
+    pub(crate) fn wait_ready_blocking(&self) -> Result<(), QuarkError> {
+        let mut state = self
+            .signal
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while state.paused && !state.cancelled {
+            state = self
+                .signal
+                .changed
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        if state.cancelled {
+            Err(upload_cancelled())
+        } else {
+            Ok(())
+        }
+    }
+    async fn wait_ready(&self) -> Result<(), QuarkError> {
+        loop {
+            let changed = self.signal.async_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let state = *self
+                .signal
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if state.cancelled {
+                return Err(upload_cancelled());
+            }
+            if !state.paused {
+                return Ok(());
+            }
+            changed.await;
         }
     }
 }
@@ -154,6 +263,13 @@ impl UploadBody {
         }
     }
     pub fn reader(&self, control: UploadControl) -> Result<Box<dyn Read + Send>, QuarkError> {
+        self.reader_for(control, true)
+    }
+    fn reader_for(
+        &self,
+        control: UploadControl,
+        transfer: bool,
+    ) -> Result<Box<dyn Read + Send>, QuarkError> {
         control.check()?;
         match self {
             Self::Bytes(bytes) => Ok(Box::new(Cursor::new(bytes.clone()))),
@@ -171,6 +287,7 @@ impl UploadBody {
                     file: file.take(*length),
                     snapshot: snapshot.clone(),
                     remaining: *length,
+                    position: *offset,
                     control,
                     digest: digest.clone(),
                 }))
@@ -181,16 +298,29 @@ impl UploadBody {
                 suffix,
             } => Ok(Box::new(
                 Cursor::new(prefix.clone())
-                    .chain(file.reader(control)?)
+                    .chain(file.reader_for(control, transfer)?)
                     .chain(Cursor::new(suffix.clone())),
             )),
-            Self::Controlled { body, control } => body.reader(control.clone()),
+            Self::Controlled {
+                body,
+                control: attached,
+            } => body.reader_for(
+                if transfer {
+                    attached.clone()
+                } else {
+                    UploadControl {
+                        signal: attached.signal.clone(),
+                        ..UploadControl::default()
+                    }
+                },
+                transfer,
+            ),
         }
     }
     /// AWS requires a payload digest before sending; hash in a bounded buffer.
     pub(crate) fn sha256(&self) -> Result<String, QuarkError> {
         use sha2::Sha256;
-        let mut reader = self.reader(UploadControl::default())?;
+        let mut reader = self.reader_for(UploadControl::default(), false)?;
         let mut hash = Sha256::new();
         let mut buffer = [0; 64 * 1024];
         loop {
@@ -207,13 +337,14 @@ struct SliceReader {
     file: io::Take<File>,
     snapshot: UploadFileSnapshot,
     remaining: u64,
+    position: u64,
     control: UploadControl,
     digest: Option<UploadDigest>,
 }
 impl Read for SliceReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.control
-            .check()
+            .wait_ready_blocking()
             .map_err(|_| io::Error::other("upload cancelled"))?;
         self.snapshot.validate_file(self.file.get_ref())?;
         if buffer.is_empty() || self.remaining == 0 {
@@ -234,6 +365,10 @@ impl Read for SliceReader {
         self.control
             .bytes
             .fetch_add(count as u64, Ordering::Relaxed);
+        if let Some((tracker, input)) = &self.control.progress {
+            tracker.record_bytes(*input, &self.snapshot.path, self.position, count as u64);
+        }
+        self.position += count as u64;
         Ok(count)
     }
 }
@@ -262,10 +397,12 @@ impl UploadDigest {
         Ok(())
     }
 }
-struct CancelOnDrop(UploadControl);
+struct CancelOnDrop(Option<UploadControl>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        self.0.cancel();
+        if let Some(control) = &self.0 {
+            control.cancel();
+        }
     }
 }
 /// One semaphore permit per file protocol; collect errors after unrelated files settle.
@@ -275,18 +412,22 @@ pub async fn schedule_uploads<I: Send + 'static, O: Send + 'static>(
     control: UploadControl,
     work: impl Fn(I, UploadControl) -> Result<O, QuarkError> + Send + Sync + 'static,
 ) -> Vec<Result<O, QuarkError>> {
-    let _cancel_on_drop = CancelOnDrop(control.clone());
+    let mut cancel_on_drop = CancelOnDrop(Some(control.clone()));
     let permits = Arc::new(tokio::sync::Semaphore::new(limit.max(1)));
     let work = Arc::new(work);
     let mut workers = Vec::with_capacity(inputs.len());
     for input in inputs {
+        if let Err(error) = control.wait_ready().await {
+            workers.push(Err(error));
+            continue;
+        }
         // Acquire in input order so pending files are a predictable FIFO queue.
         let permit = permits
             .clone()
             .acquire_owned()
             .await
             .expect("upload semaphore remains open");
-        if let Err(error) = control.check() {
+        if let Err(error) = control.wait_ready().await {
             workers.push(Err(error));
             continue;
         }
@@ -294,7 +435,7 @@ pub async fn schedule_uploads<I: Send + 'static, O: Send + 'static>(
         let control = control.clone();
         workers.push(Ok(tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            control.check()?;
+            control.wait_ready_blocking()?;
             work(input, control)
         })));
     }
@@ -307,5 +448,178 @@ pub async fn schedule_uploads<I: Send + 'static, O: Send + 'static>(
             Err(error) => Err(error),
         });
     }
+    cancel_on_drop.0 = None;
     results
+}
+
+#[cfg(test)]
+mod upload_progress_body_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn upload_progress_counts_only_streamed_file_ranges_not_multipart_framing_or_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.bin");
+        std::fs::write(&path, b"PAYLOAD").unwrap();
+        let tracker = UploadProgressTracker::new(CloudProvider::Xunlei);
+        tracker.add_file(0, &path, 7);
+        let control = UploadControl::default().with_progress(tracker.clone(), 0);
+        let body = UploadBody::Controlled {
+            body: Box::new(UploadBody::Multipart {
+                prefix: b"header".to_vec(),
+                file: Box::new(
+                    UploadFileSnapshot::capture(&path)
+                        .unwrap()
+                        .slice(0, 7)
+                        .unwrap(),
+                ),
+                suffix: b"footer".to_vec(),
+            }),
+            control: control.clone(),
+        };
+        for _ in 0..2 {
+            let mut actual = Vec::new();
+            body.reader(UploadControl::default())
+                .unwrap()
+                .read_to_end(&mut actual)
+                .unwrap();
+            assert_eq!(actual, b"headerPAYLOADfooter");
+        }
+        let event = tracker.sample(Duration::from_secs(1));
+        assert_eq!(event.uploaded_bytes, 7);
+        assert_eq!(event.speed_bytes_per_second, 14.0);
+        assert_eq!(control.bytes_read(), 14);
+    }
+
+    #[test]
+    fn upload_progress_hashing_a_controlled_body_does_not_count_transfer_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.bin");
+        std::fs::write(&path, b"PAYLOAD").unwrap();
+        let tracker = UploadProgressTracker::new(CloudProvider::Xunlei);
+        tracker.add_file(0, &path, 7);
+        let control = UploadControl::default().with_progress(tracker.clone(), 0);
+        let body = UploadBody::Controlled {
+            body: Box::new(
+                UploadFileSnapshot::capture(&path)
+                    .unwrap()
+                    .slice(0, 7)
+                    .unwrap(),
+            ),
+            control: control.clone(),
+        };
+        assert_eq!(body.sha256().unwrap().len(), 64);
+        assert_eq!(control.bytes_read(), 0);
+        let event = tracker.sample(Duration::from_secs(1));
+        assert_eq!(event.uploaded_bytes, 0);
+        assert_eq!(event.speed_bytes_per_second, 0.0);
+    }
+
+    #[test]
+    fn upload_progress_hashing_keeps_the_attached_cancellation_signal() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.bin");
+        std::fs::write(&path, b"PAYLOAD").unwrap();
+        let control = UploadControl::default();
+        let body = UploadBody::Controlled {
+            body: Box::new(
+                UploadFileSnapshot::capture(&path)
+                    .unwrap()
+                    .slice(0, 7)
+                    .unwrap(),
+            ),
+            control: control.clone(),
+        };
+        control.cancel();
+        assert!(body.sha256().is_err());
+        assert_eq!(control.bytes_read(), 0);
+    }
+}
+
+#[cfg(test)]
+mod upload_control_body_tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn upload_control_pause_stops_real_reader_until_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.bin");
+        std::fs::write(&path, b"PAYLOAD").unwrap();
+        let control = UploadControl::default();
+        let mut reader = UploadFileSnapshot::capture(&path)
+            .unwrap()
+            .slice(0, 7)
+            .unwrap()
+            .reader(control.clone())
+            .unwrap();
+        control.pause().unwrap();
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = reader.read_to_end(&mut bytes);
+            sent.send((result, bytes)).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(75)).is_err());
+        assert_eq!(control.bytes_read(), 0);
+        control.resume().unwrap();
+        let (result, bytes) = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(result.is_ok());
+        assert_eq!(bytes, b"PAYLOAD");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn upload_control_cancel_wakes_a_paused_reader_without_consuming_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.bin");
+        std::fs::write(&path, b"PAYLOAD").unwrap();
+        let control = UploadControl::default();
+        let mut reader = UploadFileSnapshot::capture(&path)
+            .unwrap()
+            .slice(0, 7)
+            .unwrap()
+            .reader(control.clone())
+            .unwrap();
+        control.pause().unwrap();
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || sent.send(reader.read(&mut [0; 7])).unwrap());
+        assert!(received.recv_timeout(Duration::from_millis(75)).is_err());
+        control.cancel();
+        assert!(received
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_err());
+        assert_eq!(control.bytes_read(), 0);
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_control_paused_scheduler_remains_async_and_cancel_stops_every_queued_file() {
+        let control = UploadControl::default();
+        control.pause().unwrap();
+        let work_control = control.clone();
+        let workers = tokio::spawn(async move {
+            schedule_uploads(vec![1, 2], 1, work_control, |input, _| Ok(input)).await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!workers.is_finished());
+        control.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), workers)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result
+            .iter()
+            .all(|item| item.as_ref().is_err_and(|error| is_upload_cancelled(error))));
+    }
+
+    #[tokio::test]
+    async fn upload_control_normal_scheduler_completion_is_not_cancellation() {
+        let control = UploadControl::default();
+        let result = schedule_uploads(vec![1], 1, control.clone(), |input, _| Ok(input)).await;
+        assert_eq!(result[0].as_ref().unwrap(), &1);
+        assert!(!control.is_cancelled());
+    }
 }

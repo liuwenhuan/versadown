@@ -16,6 +16,163 @@ async function confirmAllLocalUploads(user: ReturnType<typeof userEvent.setup>) 
   await user.click(within(picker).getByRole('button', { name: '确认上传' }));
 }
 
+it('refreshes a cached directory when its account is renewed externally', async () => {
+  const client = createCloudFake();
+  client.listCloudDirectory.mockRejectedValueOnce({ code: 'network_error', message: '会话连接已断开' });
+  const account = { id: 'q', provider: 'quark' as const, displayName: 'alice', authMethod: 'web' as const };
+  const view = render(<CloudManager provider="quark" client={client} initialAccount={account} restoreOnMount={false} showSessionActions={false} />);
+  await screen.findByText('会话连接已断开');
+  view.rerender(<CloudManager provider="quark" client={client} initialAccount={{ ...account }} restoreOnMount={false} showSessionActions={false} />);
+  expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
+});
+
+it('shows live upload bytes, speed and confirmation phase in the existing operation notice', async () => {
+  const user = userEvent.setup();
+  let receive: ((value: any) => void) | undefined;
+  let finish!: (value: any) => void;
+  const client = createCloudFake({ uploadCloudFiles: vi.fn((_p, _d, _paths, progress) => {
+    receive = progress;
+    return new Promise(resolve => { finish = resolve; });
+  }) });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  const progress = { provider: 'quark', phase: 'uploading', totalBytes: 1048576, uploadedBytes: 524288, speedBytesPerSecond: 262144, totalFiles: 2, completedFiles: 1, failedItems: 0, currentFiles: ['b.txt'], progress: 50 };
+  await act(async () => { receive?.(progress); });
+  const bar = screen.getByRole('progressbar', { name: '上传总进度' });
+  expect(bar).toHaveAttribute('aria-valuenow', '50');
+  const notice = bar.closest('.cloud-operation-status')!;
+  expect(notice).toHaveTextContent('512.0 KB / 1.0 MB');
+  expect(notice).toHaveTextContent('256.0 KB/s');
+  expect(notice).toHaveTextContent('b.txt');
+  expect(within(notice).queryByText('上传进行中…')).not.toBeInTheDocument();
+  const stats = within(notice).getByText(/50% ·/).parentElement!;
+  expect(within(stats).getByText('已完成 1 / 2 个文件，失败 0 项')).toBeVisible();
+  await act(async () => { receive?.({ ...progress, phase: 'finalizing', uploadedBytes: 1048576, speedBytesPerSecond: 0, progress: 99 }); });
+  expect(notice).toHaveTextContent('等待网盘确认');
+  expect(bar).toHaveAttribute('aria-valuenow', '99');
+  await act(async () => { finish({ uploaded: [{ id: 'new', name: 'a.txt', parentId: '0', kind: 'file' }], failures: [] }); });
+  expect(await screen.findByText('已上传 1 项')).toBeVisible();
+  await act(async () => { receive?.(progress); });
+  expect(screen.getByText('已上传 1 项')).toBeVisible();
+  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+});
+
+it('controls the current upload with pause resume and cancel and preserves completed items', async () => {
+  const user = userEvent.setup();
+  let receive!: (value: any) => void;
+  let finish!: (value: any) => void;
+  let acknowledge!: () => void;
+  const controlCloudUpload = vi.fn().mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; })).mockResolvedValue(undefined);
+  const client = createCloudFake({ controlCloudUpload, uploadCloudFiles: vi.fn((_p, _d, _paths, callback) => { receive = callback; return new Promise(resolve => { finish = resolve; }); }) });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  const progress = { uploadId: 'upload-1', provider: 'quark', phase: 'uploading', totalBytes: 100, uploadedBytes: 40, speedBytesPerSecond: 10, totalFiles: 2, completedFiles: 1, failedItems: 0, currentFiles: ['b.txt'], progress: 40 };
+  await act(async () => { receive(progress); });
+  const trackRow = screen.getByRole('progressbar').parentElement!;
+  expect(within(trackRow).getByRole('button', { name: '取消上传' })).toBeVisible();
+  await user.click(within(trackRow).getByRole('button', { name: '暂停上传' }));
+  expect(screen.getByRole('button', { name: '暂停上传' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: '继续上传' })).not.toBeInTheDocument();
+  await act(async () => { acknowledge(); });
+  await user.click(await screen.findByRole('button', { name: '继续上传' }));
+  await user.click(await screen.findByRole('button', { name: '取消上传' }));
+  expect(controlCloudUpload.mock.calls).toEqual(['pause', 'resume', 'cancel'].map(action => ['quark', 'upload-1', action]));
+  expect(await screen.findByRole('button', { name: '正在取消…' })).toBeDisabled();
+  await act(async () => { receive({ ...progress, phase: 'cancelled', speedBytesPerSecond: 0 }); finish({ uploaded: [{ id: 'done', name: 'a.txt', kind: 'file', parentId: '0' }], failures: [{ inputIndex: 1, itemName: 'b.txt', code: 'upload_cancelled', message: '上传已取消' }], cancelled: true }); });
+  expect(await screen.findByText('上传已取消，已保留 1 项上传结果')).toBeVisible();
+  expect(screen.queryByRole('button', { name: '暂停上传' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/失败 1 项/)).not.toBeInTheDocument();
+});
+
+it('keeps real upload progress and offers control retry when pause fails', async () => {
+  const user = userEvent.setup();
+  let receive!: (value: any) => void;
+  const client = createCloudFake({ controlCloudUpload: vi.fn().mockRejectedValue(new Error('控制请求失败')), uploadCloudFiles: vi.fn((_p, _d, _paths, callback) => { receive = callback; return new Promise(() => {}); }) });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  await act(async () => { receive({ uploadId: 'upload-1', provider: 'quark', phase: 'uploading', totalBytes: 100, uploadedBytes: 40, speedBytesPerSecond: 10, totalFiles: 2, completedFiles: 1, failedItems: 0, currentFiles: ['b.txt'], progress: 40 }); });
+  await user.click(screen.getByRole('button', { name: '暂停上传' }));
+  expect(await screen.findByText('控制请求失败')).toBeVisible();
+  expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '40');
+  expect(screen.getByRole('button', { name: '暂停上传' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: '继续上传' })).not.toBeInTheDocument();
+});
+
+it('ignores a late control failure after the upload terminal event arrives', async () => {
+  const user = userEvent.setup();
+  let receive!: (value: any) => void;
+  let rejectControl!: (error: Error) => void;
+  const client = createCloudFake({ controlCloudUpload: vi.fn(() => new Promise((_resolve, reject) => { rejectControl = reject; })), uploadCloudFiles: vi.fn((_p, _d, _paths, callback) => { receive = callback; return new Promise(() => {}); }) });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  const progress = { uploadId: 'upload-1', provider: 'quark', phase: 'uploading', totalBytes: 100, uploadedBytes: 40, speedBytesPerSecond: 10, totalFiles: 1, completedFiles: 0, failedItems: 0, currentFiles: ['a.txt'], progress: 40 };
+  await act(async () => { receive(progress); });
+  await user.click(screen.getByRole('button', { name: '暂停上传' }));
+  await act(async () => { receive({ ...progress, phase: 'completed', uploadedBytes: 100, completedFiles: 1, progress: 100, currentFiles: [], speedBytesPerSecond: 0 }); });
+  await act(async () => { rejectControl(new Error('上传任务已结束或不存在')); });
+  expect(screen.getByText('上传已完成')).toBeVisible();
+  expect(screen.queryByText('上传任务已结束或不存在')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '暂停上传' })).not.toBeInTheDocument();
+});
+
+it('resumes only failed upload inputs after the cached account is renewed externally', async () => {
+  const user = userEvent.setup();
+  const uploadCloudFiles = vi.fn().mockResolvedValueOnce({ uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code: 'web_auth_required', message: '需要验证' }] })
+    .mockResolvedValue({ uploaded: [{ id: 'new', name: 'a.txt', kind: 'file' }], failures: [] });
+  const client = createCloudFake({ uploadCloudFiles });
+  const account = { id: 'q', provider: 'quark' as const, displayName: 'alice', authMethod: 'web' as const };
+  const view = render(<CloudManager provider="quark" client={client} initialAccount={account} restoreOnMount={false} showSessionActions={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  await screen.findByRole('button', { name: /授权并继续上传/ });
+  view.rerender(<CloudManager provider="quark" client={client} initialAccount={{ ...account }} restoreOnMount={false} showSessionActions={false} />);
+  await waitFor(() => expect(uploadCloudFiles).toHaveBeenCalledTimes(2));
+  expect(uploadCloudFiles).toHaveBeenLastCalledWith('quark', '0', ['C:/a.txt'], expect.any(Function));
+  expect(await screen.findByText('已上传 1 项')).toBeVisible();
+  expect(screen.queryByRole('button', { name: /授权并继续上传|重新网页授权/ })).not.toBeInTheDocument();
+});
+
+it('retains the upload outcome even if refreshing the remote directory fails', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded: [{ id: 'new', name: 'a.txt', kind: 'file', parentId: '0' }], failures: [] }) });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  client.listCloudDirectory.mockRejectedValue(new Error('列表请求超时'));
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  expect(await screen.findByText('已上传 1 项')).toBeVisible();
+  expect(screen.getByText('列表请求超时')).toBeVisible();
+});
+
+it('consumes external authorization received during upload after a delayed directory refresh settles', async () => {
+  const user = userEvent.setup();
+  let finishUpload!: (value: any) => void;
+  let finishRefresh!: (value: any) => void;
+  const uploadCloudFiles = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finishUpload = resolve; }))
+    .mockResolvedValue({ uploaded: [{ id: 'new', name: 'a.txt', kind: 'file' }], failures: [] });
+  const client = createCloudFake({ uploadCloudFiles });
+  const account = { id: 'q', provider: 'quark' as const, displayName: 'alice', authMethod: 'web' as const };
+  const view = render(<CloudManager provider="quark" client={client} initialAccount={account} restoreOnMount={false} showSessionActions={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  view.rerender(<CloudManager provider="quark" client={client} initialAccount={{ ...account }} restoreOnMount={false} showSessionActions={false} />);
+  client.listCloudDirectory.mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }));
+  await act(async () => { finishUpload({ uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code: 'web_auth_required', message: '需要验证' }] }); });
+  await act(async () => { finishRefresh({ id: '0', items: [] }); });
+  await waitFor(() => expect(uploadCloudFiles).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText('已上传 1 项')).toBeVisible();
+});
+
 it('opens one neutral upload action and submits mixed local paths to the current directory', async () => {
   const user = userEvent.setup();
   const client = createCloudFake({
@@ -38,7 +195,7 @@ it('opens one neutral upload action and submits mixed local paths to the current
   await user.click(await screen.findByRole('checkbox', { name: '选择 a.txt' }));
   await user.click(screen.getByRole('checkbox', { name: '选择 Photos' }));
   await user.click(screen.getByRole('button', { name: '确认上传' }));
-  await waitFor(() => expect(client.uploadCloudFiles).toHaveBeenCalledWith('quark', 'folder-1', ['C:/Uploads/a.txt', 'C:/Uploads/Photos']));
+  await waitFor(() => expect(client.uploadCloudFiles).toHaveBeenCalledWith('quark', 'folder-1', ['C:/Uploads/a.txt', 'C:/Uploads/Photos'], expect.any(Function)));
   expect(screen.queryByRole('dialog', { name: '选择上传内容' })).not.toBeInTheDocument();
   expect(client.pickAndUploadFiles).not.toHaveBeenCalled();
   expect(client.pickAndUploadDirectory).not.toHaveBeenCalled();
@@ -1720,8 +1877,8 @@ it('keeps selected upload paths and retries only authorization-failed files afte
   await act(async () => { client.emitAuthorization({ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }); });
 
   await waitFor(() => expect(uploadCloudFiles).toHaveBeenCalledTimes(2));
-  expect(uploadCloudFiles).toHaveBeenNthCalledWith(1, 'pikpak', '0', ['C:/a.txt', 'C:/b.txt']);
-  expect(uploadCloudFiles).toHaveBeenNthCalledWith(2, 'pikpak', '0', ['C:/b.txt']);
+  expect(uploadCloudFiles).toHaveBeenNthCalledWith(1, 'pikpak', '0', ['C:/a.txt', 'C:/b.txt'], expect.any(Function));
+  expect(uploadCloudFiles).toHaveBeenNthCalledWith(2, 'pikpak', '0', ['C:/b.txt'], expect.any(Function));
   expect(client.listLocalUploadEntries).toHaveBeenCalledTimes(1);
 });
 
@@ -1785,7 +1942,7 @@ it('opens the same mixed picker from the file-area upload context command', asyn
 
   expect(await screen.findByRole('dialog', { name: '选择上传内容' })).toBeVisible();
   await confirmAllLocalUploads(user);
-  expect(client.uploadCloudFiles).toHaveBeenCalledWith('quark', '0', ['C:/a.txt', 'C:/b.txt']);
+  expect(client.uploadCloudFiles).toHaveBeenCalledWith('quark', '0', ['C:/a.txt', 'C:/b.txt'], expect.any(Function));
 });
 
 it('automatically completes a renewed web authorization after credentials expire', async () => {

@@ -11,6 +11,11 @@ use sha1::{Digest, Sha1};
 use std::{collections::BTreeMap, io::Read, path::Path};
 mod body;
 pub use body::*;
+mod control;
+pub(crate) use control::{is_upload_cancelled, upload_cancelled, upload_registry};
+mod progress;
+pub use progress::CloudUploadProgress;
+pub(crate) use progress::{report_upload_progress, UploadProgressTracker};
 
 /// Validates a server-provided transfer endpoint before file bytes are sent.
 /// Scheme-relative endpoints are normalised to HTTPS; credentials and fragments

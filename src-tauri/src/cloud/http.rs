@@ -75,7 +75,7 @@ impl<T: super::CloudUploadTransport> super::CloudUploadTransport for ControlledU
         &self,
         mut request: super::UploadHttpRequest,
     ) -> Result<super::UploadHttpResponse, QuarkError> {
-        self.control.check()?;
+        self.control.wait_ready_blocking()?;
         request.body = super::UploadBody::Controlled {
             body: Box::new(request.body),
             control: self.control.clone(),
@@ -306,11 +306,76 @@ pub(crate) fn response_json(r: &CloudHttpResponse) -> Result<Value, QuarkError> 
 
 #[cfg(test)]
 mod upload_tests {
+    #[test]
+    fn upload_control_paused_session_check_does_not_wait_for_resume() {
+        let control = crate::cloud::UploadControl::default();
+        control.pause().unwrap();
+        let worker_control = control.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let transport = super::ReqwestTransport::new().unwrap();
+            let http = super::ControlledUploadHttp {
+                inner: &transport,
+                control: worker_control,
+            };
+            tx.send(super::CloudHttpTransport::check_transfer(&http))
+                .unwrap();
+        });
+        let checked = rx.recv_timeout(std::time::Duration::from_millis(250));
+        control.resume().unwrap();
+        worker.join().unwrap();
+        assert!(
+            checked.is_ok(),
+            "session checks must not hold auth locks while paused"
+        );
+        checked.unwrap().unwrap();
+    }
     use super::*;
     use crate::cloud::{
         CloudUploadTransport, UploadBody, UploadControl, UploadFileSnapshot, UploadHttpRequest,
     };
     use std::io::{Read, Write};
+
+    #[test]
+    fn upload_control_paused_payload_request_waits_until_resume() {
+        struct Observed(std::sync::mpsc::Sender<()>);
+        impl CloudHttpTransport for Observed {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                unreachable!()
+            }
+        }
+        impl CloudUploadTransport for Observed {
+            fn send_upload(
+                &self,
+                _: UploadHttpRequest,
+            ) -> Result<crate::cloud::UploadHttpResponse, QuarkError> {
+                self.0.send(()).unwrap();
+                Err(QuarkError::Transport("fixture response".into()))
+            }
+        }
+        let control = UploadControl::default();
+        control.pause().unwrap();
+        let worker_control = control.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ControlledUploadHttp {
+                inner: &Observed(tx),
+                control: worker_control,
+            }
+            .send_upload(UploadHttpRequest {
+                method: "PUT",
+                url: "https://example.invalid/upload".into(),
+                headers: BTreeMap::new(),
+                body: UploadBody::Bytes(vec![]),
+            })
+        });
+        let during_pause = rx.recv_timeout(std::time::Duration::from_millis(75));
+        control.resume().unwrap();
+        let after_resume = rx.recv_timeout(std::time::Duration::from_secs(2));
+        assert!(worker.join().unwrap().is_err());
+        assert!(during_pause.is_err());
+        assert!(after_resume.is_ok());
+    }
 
     #[test]
     fn reqwest_streams_exact_content_length_and_file_slice() {

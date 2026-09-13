@@ -33,6 +33,21 @@ export interface CloudUploadFailure { inputIndex?: number; itemName: string; cod
 export interface CloudUploadOutcome {
   uploaded: readonly CloudFile[];
   failures: readonly CloudUploadFailure[];
+  cancelled?: boolean;
+}
+export type CloudUploadAction = 'pause' | 'resume' | 'cancel';
+export interface CloudUploadProgress {
+  uploadId: string;
+  provider: CloudProvider;
+  phase: 'preparing' | 'uploading' | 'finalizing' | 'paused' | 'cancelling' | 'cancelled' | 'completed' | 'failed';
+  totalBytes: number;
+  uploadedBytes: number;
+  speedBytesPerSecond: number;
+  totalFiles: number;
+  completedFiles: number;
+  failedItems: number;
+  currentFiles: string[];
+  progress: number;
 }
 export interface CloudAuthorization { provider: CloudProvider; windowLabel: string; instructions: string; completed?: boolean; }
 export type CloudPasswordLoginMode = 'none' | 'rustDirect' | 'officialWebView';
