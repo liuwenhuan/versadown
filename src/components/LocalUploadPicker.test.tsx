@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { LocalUploadPicker } from './LocalUploadPicker';
 import type { LocalUploadListing } from '../lib/localUpload';
 
@@ -10,6 +11,21 @@ const home: LocalUploadListing = {
 };
 const photos: LocalUploadListing = { path: '/home/Photos', parentPath: '/home', roots: home.roots, entries: [{ path: '/home/Photos/p.jpg', name: 'p.jpg', kind: 'file' }] };
 const listing = () => vi.fn(async (path?: string) => path === '/home/Photos' ? photos : home);
+
+it('keeps upload names and metadata readable in compact rows', async () => {
+  const style = document.createElement('style');
+  style.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(style);
+  try {
+    render(<LocalUploadPicker listEntries={listing()} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+    const name = await screen.findByRole('button', { name: 'a.txt' });
+    const row = name.closest('.local-upload-entry')!;
+    expect(getComputedStyle(name).fontSize).toBe('14px');
+    expect(getComputedStyle(row.querySelector('small')!).fontSize).toBe('14px');
+    expect(getComputedStyle(row).minHeight).toBe('36px');
+    expect(getComputedStyle(screen.getByRole('button', { name: '确认上传' })).fontSize).toBe('14px');
+  } finally { style.remove(); }
+});
 
 it('confirms multiple files and multiple directories together without a type selector', async () => {
   const user = userEvent.setup();

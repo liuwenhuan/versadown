@@ -79,6 +79,19 @@ impl CloudHttpTransport for RedactedTransport {
         if !header_names.is_empty() {
             fields.insert(format!("request-headers:{header_names}"));
         }
+        if let Some(device) = request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-device-id"))
+            .map(|(_, value)| value)
+        {
+            fields.insert(format!(
+                "device-shape:len{}-hex{}-dot{}",
+                device.len(),
+                device.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                device.contains('.')
+            ));
+        }
         let response = self.inner.send(request)?;
         let value: serde_json::Value = serde_json::from_str(&response.body).unwrap_or_default();
         fields.insert(format!("response-http:{}", response.status));
@@ -91,6 +104,19 @@ impl CloudHttpTransport for RedactedTransport {
             .and_then(serde_json::Value::as_i64)
         {
             fields.insert(format!("code:{code}"));
+        }
+        let normalized_body = response.body.to_ascii_lowercase();
+        for marker in [
+            "captcha_sign",
+            "device_id",
+            "client_id",
+            "timestamp",
+            "action",
+            "user_id",
+        ] {
+            if normalized_body.contains(marker) {
+                fields.insert(format!("response-marker:{marker}"));
+            }
         }
         if let Some(status) = value
             .get("share_status")
@@ -203,6 +229,7 @@ fn safe_error(error: &QuarkError) -> &'static str {
         QuarkError::WebAuthorizationRequired => "web-authorization-required",
         QuarkError::CaptchaRequired => "captcha-required",
         QuarkError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
+        QuarkError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
         QuarkError::AuthorizationPending => "authorization-pending",
         QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         QuarkError::InvalidResponse => "invalid-response",
@@ -582,6 +609,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
             alldownloader_lib::extract_cloud_share_candidate(url, access_code.as_deref())?
                 .ok_or("sample URL was not recognized")?;
         let adapter = provider_share_adapter(provider, &sessions, &transport)?;
+        let inspect_before = transport.observation_count();
         let source = match inspect_share_with_adapter(&plans, adapter.as_ref(), &candidate) {
             Ok(ShareConfirmationOutcome::AutoSubmit { source, .. }) => source,
             Ok(ShareConfirmationOutcome::Confirmation(confirmation)) => {
@@ -606,10 +634,12 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
             }
             Err(error) => {
                 let failure = safe_error(&error);
+                let remote = transport.observations_since(inspect_before);
                 println!(
-                    "LIVE_SUBMIT provider={} sample={} state=inspect-{failure}",
+                    "LIVE_SUBMIT provider={} sample={} state=inspect-{failure} remote={}",
                     provider.key(),
-                    sample
+                    sample,
+                    if remote.is_empty() { "none" } else { &remote },
                 );
                 preparation_failures.push(format!("{}:inspect-{failure}", provider.key()));
                 continue;

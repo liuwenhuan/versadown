@@ -111,6 +111,11 @@ pub(crate) fn password_login_with_browser(
         Ok(NativeLoginOutcome::NeedBrowserFallback(error))
             if browser_login::supports_browser_password(provider) =>
         {
+            // Cookies may change before validation finishes. Keep this marker
+            // through failure/restart until the matching password is committed.
+            if let Some(key) = password_profile_reset_key(provider) {
+                store.save(key, b"1")?;
+            }
             if ProviderRegistry::global()
                 .get(provider)
                 .browser_profile_owner
@@ -251,16 +256,9 @@ pub fn logout_provider(
     store: &impl CredentialStore,
 ) -> Result<(), QuarkError> {
     require_connected_provider(provider)?;
-    let session_result = store.remove(provider.key());
-    let password_result = if cloud_session_policy(provider).supports_password_fallback {
-        remove_password_credential(store, provider)
-    } else {
-        Ok(())
-    };
-    match (session_result, password_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
+    // Explicit logout clears authorization, not the encrypted login remembered
+    // for the next deliberate sign-in. AuthSupervisor persists Disconnected.
+    store.remove(provider.key())
 }
 
 #[tauri::command]
@@ -387,6 +385,9 @@ pub async fn cloud_reauthorize_failed_task(
     if browser_login::supports_browser_password(requested_provider) {
         let browser_app = app.clone();
         let recovered = run(app.clone(), requested_provider, move |state, http| {
+            if auth_supervisor::is_manually_disconnected(&state.store, requested_provider)? {
+                return Err(QuarkError::NotAuthorized);
+            }
             let Some(credential) = load_password_credential(&state.store, requested_provider)?
             else {
                 return Ok(false);
@@ -679,6 +680,49 @@ pub async fn cloud_complete_authorization(
     Ok(account)
 }
 
+/// Opens only the server challenge stored with the current encrypted session.
+/// Unlike login authorization, this window deliberately has no account-ready
+/// callback and cannot submit/replay the user's file operation.
+#[tauri::command]
+pub async fn cloud_open_operation_verification(
+    app: AppHandle,
+    provider: CloudProvider,
+    expected_account_id: String,
+) -> Result<(), QuarkError> {
+    if provider != CloudProvider::Pikpak {
+        return Err(QuarkError::InvalidInput("此网盘没有待处理的操作验证".into()));
+    }
+    let window_app = app.clone();
+    run(app, provider, move |state, http| {
+        if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
+            return Err(QuarkError::NotAuthorized);
+        }
+        let url = PikPakClient::new(http, &state.store)
+            .operation_verification_url(&expected_account_id)?;
+        let label = "cloud-operation-pikpak";
+        if let Some(window) = window_app.get_webview_window(label) {
+            // Never leave a previous account's/challenge's page in this window.
+            window.navigate(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
+                .map_err(|_| QuarkError::Storage)?;
+            window.show().map_err(|_| QuarkError::Storage)?;
+            let _ = window.set_focus();
+            return Ok(());
+        }
+        WebviewWindowBuilder::new(
+            &window_app, label,
+            WebviewUrl::External(url.parse().map_err(|_| QuarkError::InvalidResponse)?),
+        )
+        .title("PikPak 操作验证：完成后请返回应用重试")
+        .inner_size(1024.0, 760.0)
+        .data_directory(authorization_profile_directory(&window_app, provider)?)
+        .on_navigation(|url| allows_pikpak_operation_verification_url(url.as_str()))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .build()
+        .map_err(|_| QuarkError::Storage)?;
+        Ok(())
+    }).await
+}
+
 #[tauri::command]
 pub async fn cloud_login_password(
     app: AppHandle,
@@ -720,9 +764,7 @@ pub async fn cloud_login_password(
             }
             set_browser_password_login_preferred(&state.store, provider, false)?;
         }
-        // Remember the latest submitted input before contacting the provider,
-        // so a rejected or interrupted attempt does not force re-entry.
-        save_password_login_draft(&state.store, provider, &username, &password)?;
+        // Do not persist submitted input until the provider validates it.
         let account = password_login_with_browser(
             provider,
             &state.store,
@@ -753,6 +795,9 @@ pub async fn cloud_login_password(
                 password.as_str(),
             ),
         )?;
+        if let Some(key) = password_profile_reset_key(provider) {
+            state.store.remove(key)?;
+        }
         state.auth_supervisor.ready_locked(
             &state.store,
             provider,
@@ -796,6 +841,9 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
         s.auth_supervisor.disconnect_locked(&s.store, provider)?;
         s.clear_authorization_completion(provider)?;
         if let Some(w) = copy.get_webview_window(&format!("cloud-auth-{}", provider.key())) {
+            let _ = w.close();
+        }
+        if let Some(w) = copy.get_webview_window(&format!("cloud-operation-{}", provider.key())) {
             let _ = w.close();
         }
         Ok(())

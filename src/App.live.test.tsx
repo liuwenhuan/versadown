@@ -998,16 +998,19 @@ it('binds in-flight share confirmation to its plan without blocking or clearing 
   fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
   fireEvent.click(screen.getByRole('button', { name: '关闭确认窗口' }));
   await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'https://drive.uc.cn/s/plan-b' }); });
-  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
+  expect(screen.getByRole('checkbox', { name: '选择 second.jpg' })).toBeChecked();
+  expect(screen.queryByRole('checkbox', { name: '选择 first.jpg' })).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
   expect(state.confirmCloud).toHaveBeenCalledTimes(2);
 
   await act(async () => { firstSubmission.resolve({ outcomes: [], failures: [] }); });
-  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
+  expect(screen.getByRole('checkbox', { name: '选择 second.jpg' })).toBeChecked();
+  expect(screen.queryByRole('checkbox', { name: '选择 first.jpg' })).not.toBeInTheDocument();
 
   await act(async () => { secondSubmission.reject(new Error('B 下载失败')); });
-  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
+  expect(screen.getByRole('checkbox', { name: '选择 second.jpg' })).toBeChecked();
+  expect(screen.queryByRole('checkbox', { name: '选择 first.jpg' })).not.toBeInTheDocument();
 });
 
 it('does not show a rejected response from a closed share generation over a newer confirmation', async () => {
@@ -1036,7 +1039,8 @@ it('does not show a rejected response from a closed share generation over a newe
 
   await act(async () => { firstSubmission.reject(new Error('A 已过期错误')); });
 
-  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('分享 B');
+  expect(screen.getByRole('checkbox', { name: '选择 second.jpg' })).toBeChecked();
+  expect(screen.queryByRole('checkbox', { name: '选择 first.jpg' })).not.toBeInTheDocument();
   expect(screen.queryByText('A 已过期错误')).not.toBeInTheDocument();
 });
 
@@ -1097,7 +1101,7 @@ it('does not let an old response clear a reparsed confirmation for the same shar
 
   await act(async () => { firstSubmission.resolve({ outcomes: [], failures: [] }); });
 
-  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('同一分享');
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
   expect(screen.getByRole('checkbox', { name: '选择 first.jpg' })).not.toBeChecked();
   expect(screen.getByRole('checkbox', { name: '选择 second.jpg' })).toBeChecked();
   await act(async () => { secondSubmission.resolve({ outcomes: [], failures: [] }); });

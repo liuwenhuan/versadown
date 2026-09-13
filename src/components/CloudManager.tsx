@@ -11,6 +11,7 @@ export interface CloudManagerClient {
   getCloudProviderCatalog(): Promise<readonly ProviderDescriptor[]>;
   getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
+  openCloudOperationVerification?(provider: CloudProvider, expectedAccountId: string): Promise<void>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
   getCompletedCloudAuthorization?(provider: CloudProvider): Promise<CloudAccount | null>;
   subscribeCloudAuthorization?(provider: CloudProvider, receive: (event: CloudAuthorizationStateEvent) => void): Promise<() => void>;
@@ -54,7 +55,7 @@ export interface CloudManagerProps {
 type DirectoryState = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'expired';
 type Editor = 'create' | 'rename' | null;
 type DestinationAction = 'move' | 'copy';
-type OperationState = { kind: 'working' | 'success' | 'error'; message: string } | null;
+type OperationState = { kind: 'working' | 'success' | 'error'; message: string; operationVerification?: boolean } | null;
 type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'details' | 'delete' | 'create' | 'upload' | 'refresh';
@@ -101,9 +102,15 @@ function isAuthorizationPending(error: unknown) {
 function requiresOfficialWebAuthorization(error: unknown) {
   if (typeof error !== 'object' || error === null) return false;
   const code = 'code' in error ? String((error as { code?: unknown }).code).toLowerCase() : '';
+  if (code === 'pikpak_operation_verification_required') return false;
   const message = errorMessage(error, '').toLowerCase();
   return ['web_auth_required', 'captcha_required', 'captcha_invalid', 'verification_required', 'web_verification_required', 'risk_verification_required'].includes(code)
     || /captcha|verification required|网页验证|安全验证|风险验证/.test(message);
+}
+
+function requiresPikpakOperationVerification(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && error.code === 'pikpak_operation_verification_required';
 }
 
 function isSessionRenewedRetryOperation(error: unknown) {
@@ -452,6 +459,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
   const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
+  const [openingOperationVerification, setOpeningOperationVerification] = useState(false);
   const [pendingAuthorizationName, setPendingAuthorizationName] = useState<string | null>(null);
   const [webAuthorization, setWebAuthorization] = useState<CloudAuthorization | null>(null);
   const [editor, setEditor] = useState<Editor>(null);
@@ -505,6 +513,28 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       || (isCredentialExpired(error) && effectiveAuthorizationCapabilities.web);
   }
 
+  function showOperationVerification(error: unknown) {
+    // This is not a failed login. Never queue an automatic replay of a mutation
+    // when the provider is waiting for a separate interactive challenge.
+    pendingAuthorizationAction.current = null;
+    setPendingAuthorizationName(null);
+    setReauthorizationRequired(false);
+    setOperation({ kind: 'error', message: errorMessage(error, '请完成 PikPak 官方操作验证后重试。'), operationVerification: true });
+  }
+
+  async function openOperationVerification() {
+    if (!activeAccount || !client.openCloudOperationVerification || openingOperationVerification) return;
+    setOpeningOperationVerification(true);
+    try {
+      await client.openCloudOperationVerification(provider, activeAccount.id);
+      setOperation({ kind: 'error', operationVerification: true, message: '请在官方页面完成操作验证；返回后重新执行原操作。不会自动永久删除文件。' });
+    } catch (error) {
+      setOperation({ kind: 'error', operationVerification: true, message: errorMessage(error, '无法打开官方操作验证页面，请稍后重试。') });
+    } finally {
+      setOpeningOperationVerification(false);
+    }
+  }
+
   useEffect(() => {
     if (selectAllCheckbox.current) selectAllCheckbox.current.indeterminate = selected.length > 0 && !allSelected;
   }, [allSelected, selected.length]);
@@ -526,7 +556,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setSavedUsername(credentials.hasSavedPassword ? credentials.username : null);
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [client, provider, supportsDirectPasswordLogin]);
+  }, [client, provider, supportsDirectPasswordLogin, activeAccount?.id]);
 
   async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
     setDirectoryState('loading');
@@ -542,17 +572,23 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setDirectory({ ...next, items });
       setBreadcrumbs(nextBreadcrumbs);
       setDirectoryState(items.length ? 'ready' : 'empty');
+      return true;
     } catch (error) {
-      if (needsInPlaceWebAuthorization(error)) {
+      if (requiresPikpakOperationVerification(error)) {
+        showOperationVerification(error);
+        setDirectoryState('error');
+        setAuthorizationStatus(errorMessage(error, '请完成官方操作验证后重试。'));
+      } else if (needsInPlaceWebAuthorization(error)) {
         const detail = errorMessage(error, '');
         const message = `读取目录需要网页验证。${detail ? ` ${detail}` : ''}`;
-        queueAuthorizationContinuation('加载目录', () => loadDirectory(account, parentId, nextBreadcrumbs), message, Boolean(directory), account.id);
+        queueAuthorizationContinuation('加载目录', async () => { await loadDirectory(account, parentId, nextBreadcrumbs); }, message, Boolean(directory), account.id);
         setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
-        return;
+        return false;
       }
       setDirectory(null);
       setDirectoryState(isCredentialExpired(error) ? 'expired' : 'error');
       setAuthorizationStatus(errorMessage(error, '无法读取此目录'));
+      return false;
     }
   }
 
@@ -765,7 +801,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           setOperation(null);
           return;
         }
-        if (refresh) await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs);
+        if (refresh && !await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs)) return;
         if (result.failures.length > 0) {
           const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
           if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
@@ -796,13 +832,15 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         setEditorValue('');
         return;
       }
-      if (refresh) await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs);
+      if (refresh && !await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs)) return;
       const message = name === '上传' && Array.isArray(result) ? `已上传 ${result.length} 个文件` : `${name}成功`;
       setOperation({ kind: 'success', message });
       setEditor(null);
       setEditorValue('');
     } catch (error) {
-      if (needsInPlaceWebAuthorization(error)) {
+      if (requiresPikpakOperationVerification(error)) {
+        showOperationVerification(error);
+      } else if (needsInPlaceWebAuthorization(error)) {
         // Keep the existing account and directory alive while the official
         // browser proves the requested action. `cloud_begin_authorization`
         // only opens the WebView; the saved session is replaced later, after
@@ -820,6 +858,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       }
     } finally {
       operationInFlight.current = false;
+      setOperation(current => current?.kind === 'working'
+        ? { kind: 'error', message: `${name}已执行，但列表刷新失败；请刷新列表确认结果。` }
+        : current);
     }
   }
 
@@ -1002,7 +1043,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsDirectPasswordLogin && <>
           <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
-          <input aria-label="密码" placeholder={useSavedPassword ? "****" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
+          <input aria-label="密码" placeholder={useSavedPassword ? "***" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
           <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? '正在自动登录…' : '登录'}</button>
         </>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
@@ -1013,6 +1054,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function authorizationContinuationButton() {
+    if (operation?.operationVerification && client.openCloudOperationVerification) {
+      return <button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void openOperationVerification()}>打开 PikPak 操作验证</button>;
+    }
     if (!pendingAuthorizationName || !effectiveAuthorizationCapabilities.web) return null;
     return <button className="secondary cloud-authorization-continuation" disabled={operationBusy || webAuthorization !== null} onClick={() => void beginWebAuthorization()}>打开 {label} 授权并继续{pendingAuthorizationName}</button>;
   }
@@ -1022,7 +1066,19 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function logoutConfirmation() {
-    return pendingLogout && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={`确认${logoutLabel}`}><h3>确认{logoutLabel}</h3><p>这只会清除本机授权会话，不会删除网盘中的任何文件。</p><button className="secondary" onClick={() => setPendingLogout(false)}>取消</button><button className="danger-button" onClick={() => { setPendingLogout(false); void runOperation(logoutLabel, async () => { await client.logoutCloud(provider); setActiveAccount(null); setSavedUsername(null); setPassword(''); setDirectory(null); setDirectoryState('idle'); setAuthorizationStatus('未授权。请登录或在网页授权窗口中完成验证。'); onAccountLoggedOut?.(provider); }, false); }}>确认{logoutLabel}</button></section></div>;
+    return pendingLogout && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={`确认${logoutLabel}`}><h3>确认{logoutLabel}</h3><p>这只会清除本机授权会话，不会删除网盘中的任何文件。</p><button className="secondary" onClick={() => setPendingLogout(false)}>取消</button><button className="danger-button" onClick={() => { setPendingLogout(false); void runOperation(logoutLabel, async () => {
+      await client.logoutCloud(provider);
+      passwordFieldsEdited.current = false;
+      passwordInputVersion.current += 1;
+      setUsername('');
+      setSavedUsername(null);
+      setPassword('');
+      setActiveAccount(null);
+      setDirectory(null);
+      setDirectoryState('idle');
+      setAuthorizationStatus('未授权。请登录或在网页授权窗口中完成验证。');
+      onAccountLoggedOut?.(provider);
+    }, false); }}>确认{logoutLabel}</button></section></div>;
   }
 
   function accountManagementView() {

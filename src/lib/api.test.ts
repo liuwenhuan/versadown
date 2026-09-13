@@ -42,7 +42,7 @@ it('maps a share confirmation without inventing an aria2 task', async () => {
   const { parseDownload } = await import('./api');
 
   await expect(parseDownload('https://drive.uc.cn/s/id')).resolves.toMatchObject({
-    confirmation: { taskId: 'cloud-share://uc/a/b' }
+    confirmation: { taskId: 'cloud-share://uc/a/b', processing: [] }
   });
 });
 

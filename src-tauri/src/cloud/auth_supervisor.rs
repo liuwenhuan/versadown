@@ -28,6 +28,22 @@ pub struct AuthMaintenanceRecord {
     pub health: AuthHealth,
 }
 
+/// Only an explicitly persisted disconnect blocks automatic recovery. A missing
+/// record is a legacy session, not a user request to log out.
+pub fn is_manually_disconnected(
+    store: &impl CredentialStore,
+    provider: CloudProvider,
+) -> Result<bool, CloudError> {
+    let Some(bytes) = store.load(&format!("cloud-auth-maintenance-{}", provider.key()))? else {
+        return Ok(false);
+    };
+    let record: AuthMaintenanceRecord = serde_json::from_slice(&bytes).map_err(|_| CloudError::Storage)?;
+    if record.schema_version != 1 || record.provider != provider {
+        return Err(CloudError::Storage);
+    }
+    Ok(record.health == AuthHealth::Disconnected)
+}
+
 pub struct AuthSupervisor {
     clock: Box<dyn Fn() -> i64 + Send + Sync>,
     jitter: Box<dyn Fn() -> i64 + Send + Sync>,
@@ -363,6 +379,9 @@ impl AuthSupervisor {
     ) -> Result<(), CloudError> {
         self.with_provider(provider, || {
             self.seed_locked(store, provider)?;
+            if is_manually_disconnected(store, provider)? {
+                return Err(CloudError::NotAuthorized);
+            }
             let mut record = self.record(store, provider)?;
             if revision.is_some_and(|revision| revision != record.session_revision) {
                 return Ok(());
@@ -440,6 +459,9 @@ impl AuthSupervisor {
         check()?;
         if kind == SessionWorkKind::Logout {
             return self.with_provider(provider, || work(store));
+        }
+        if is_manually_disconnected(store, provider)? {
+            return Err(CloudError::NotAuthorized);
         }
         let mut continuation = None;
         if self.is_due(store, provider)? {
@@ -626,6 +648,9 @@ pub fn recover_in_order(
     phase: impl Into<RecoveryPhase>,
     mut profile: impl FnMut() -> Result<bool, CloudError>,
 ) -> Result<(), CloudError> {
+    if is_manually_disconnected(store, provider)? {
+        return Err(CloudError::NotAuthorized);
+    }
     let phase = phase.into();
     fn auth_failure(error: &CloudError) -> bool {
         matches!(

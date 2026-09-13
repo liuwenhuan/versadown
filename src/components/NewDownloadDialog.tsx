@@ -12,12 +12,24 @@ export interface NewDownloadDialogProps {
   initialInput?: string;
 }
 
+// Parse errors currently cross IPC as text. Match explicit share failures,
+// not provider names or generic request/auth failures, which may be retried.
+function isUnavailableShare(message: string | null): boolean {
+  if (!message) return false;
+  // These messages are provider catch-alls, not confirmed terminal statuses.
+  if (/分享已失效或无权访问|分享无效或已过期/.test(message)) return false;
+  return /分享(?:链接|地址|文件|内容|的文件)?(?:已(?:被)?(?:取消|删除|失效|过期|屏蔽|封禁)|不存在)/.test(message)
+    || /(?:已|已经)(?:被)?(?:取消|停止)(?:了)?分享/.test(message)
+    || /分享[^。；\n]*封禁[^。；\n]*(?:无法访问|受限)/.test(message);
+}
+
 export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClose, onOpenTaskList, initialInput }: NewDownloadDialogProps) {
   const [input, setInput] = useState('');
   const [accessCode, setAccessCode] = useState('');
   const [accessCodePrompt, setAccessCodePrompt] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const unavailableShare = isUnavailableShare(error);
   const dialogRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const accessCodeRef = useRef<HTMLInputElement>(null);
@@ -40,7 +52,7 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
   }, [open]);
 
   useEffect(() => {
-    if (open) setInput(initialInput ?? '');
+    if (open) { setInput(initialInput ?? ''); setError(null); }
   }, [initialInput, open]);
 
   useEffect(() => {
@@ -64,6 +76,7 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (isSubmitting) return;
+    if (unavailableShare) { requestClose(); return; }
     const text = input.trim();
     if (!text) return;
     setIsSubmitting(true);
@@ -107,19 +120,30 @@ export function NewDownloadDialog({ open, placement = 'launcher', onParse, onClo
 
   if (!open) return null;
 
+  const actionClass = accessCodePrompt ? 'primary cloud-toolbar-primary cloud-authorization-continuation' : 'primary';
+  const parseAction = unavailableShare
+    ? <button className={actionClass} type="button" onClick={requestClose}>关闭</button>
+    : <button className={actionClass} type="submit" disabled={isSubmitting || !input.trim()}>{isSubmitting ? '正在解析…' : '开始解析下载'}</button>;
+
   const dialog = (
     <aside ref={dialogRef} className={placement === 'launcher' ? 'launcher-panel new-download-dialog' : placement === 'header' ? 'new-download-dialog header-download-dialog' : 'new-download-dialog modal'} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapModalFocus}>
       <div className="launcher-title"><span>新建下载</span><button aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={isSubmitting} onClick={requestClose}>×</button></div>
       <form onSubmit={submit} aria-busy={isSubmitting}>
         {placement !== 'launcher' && <label htmlFor="download-input">下载内容</label>}
-        <textarea ref={inputRef} id="download-input" aria-label="下载内容" value={input} disabled={isSubmitting} onChange={(event) => setInput(event.target.value)} placeholder="粘贴链接、分享地址、文本或网页地址" />
-        {accessCodePrompt && <label htmlFor="share-access-code">访问码<input ref={accessCodeRef} id="share-access-code" type="password" autoComplete="off" value={accessCode} disabled={isSubmitting} onChange={(event) => setAccessCode(event.target.value)} /></label>}
+        <textarea ref={inputRef} id="download-input" aria-label="下载内容" value={input} disabled={isSubmitting} onChange={(event) => {
+          const value = event.target.value;
+          if (value.trim() !== input.trim()) { setError(null); setAccessCode(''); setAccessCodePrompt(null); }
+          setInput(value);
+        }} placeholder="粘贴链接、分享地址、文本或网页地址" />
         {placement !== 'launcher' && <p>标准链接直接规则解析；复杂内容才会请求 AI 辅助。</p>}
-        {accessCodePrompt && <p role="status">{accessCodePrompt}</p>}
-        {error && <p role="alert">{error}</p>}
-        <div className="new-download-actions">
+        <div className={`new-download-actions${accessCodePrompt ? ' cloud-toolbar' : ''}`}>
           {placement === 'launcher' && <button type="button" onClick={openTaskList} disabled={isSubmitting}>打开任务列表</button>}
-          <button className="primary" type="submit" disabled={isSubmitting || !input.trim()}>{isSubmitting ? '正在解析…' : '开始解析下载'}</button>
+          {error && <span role="alert" className="parse-failure">{error}</span>}
+          {accessCodePrompt ? <div className="new-download-tab-access-code">
+            <span id="share-access-code-prompt" role="status">{accessCodePrompt}</span>
+            <input ref={accessCodeRef} id="share-access-code" aria-label="访问码" aria-describedby="share-access-code-prompt" type="password" autoComplete="off" value={accessCode} disabled={isSubmitting} onChange={(event) => setAccessCode(event.target.value)} />
+            {parseAction}
+          </div> : parseAction}
         </div>
       </form>
     </aside>

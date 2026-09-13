@@ -308,6 +308,7 @@ pub fn run() {
             cloud::commands::cloud_provider_catalog,
             cloud::commands::cloud_begin_authorization,
             cloud::commands::cloud_complete_authorization,
+            cloud::commands::cloud_open_operation_verification,
             cloud::commands::cloud_completed_authorization,
             cloud::commands::resume_reauthorized_provider_tasks,
             cloud::commands::cloud_reauthorize_failed_task,

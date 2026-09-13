@@ -255,6 +255,9 @@ fn capture_persistent_authorization(
     provider: CloudProvider,
     http: &impl CloudHttpTransport,
 ) -> Result<bool, CloudError> {
+    if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
+        return Err(CloudError::NotAuthorized);
+    }
     let record = state.auth_supervisor.record(&state.store, provider)?;
     let expected = record.account_id.or(
         if cloud_session_policy(provider).supports_password_fallback {

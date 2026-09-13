@@ -2,15 +2,6 @@ import { render, screen } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { ParseConfirmDialog } from './ParseConfirmDialog';
-import { cloudCatalog } from '../test/cloudCatalog';
-const catalogApi = vi.hoisted(() => ({ getCloudProviderCatalog: vi.fn() }));
-vi.mock('../lib/cloudApi', () => catalogApi);
-
-it('uses the catalog share label instead of a fixed provider label', async () => {
-  catalogApi.getCloudProviderCatalog.mockResolvedValue([{ ...cloudCatalog[0], shareDisplayName: '动态分享名称' }]);
-  render(<ParseConfirmDialog result={{ ...result, taskId: 'cloud-share://quark/plan/entry' }} onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
-  expect(await screen.findByText('动态分享名称分享')).toBeVisible();
-});
 
 const result = {
   taskId: 'task-1', requiresConfirmation: true,
@@ -100,18 +91,35 @@ it('keeps selection controls hidden while BitTorrent metadata is loading', () =>
   expect(screen.queryByRole('checkbox', { name: '全选文件' })).not.toBeInTheDocument();
 });
 
-it('identifies an opaque cloud share and explains that transfer happens automatically without exposing credentials', async () => {
-  catalogApi.getCloudProviderCatalog.mockResolvedValue([{ ...cloudCatalog[2], shareDisplayName: '百度网盘' }]);
+it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'])('shows the %s share file list directly without a redundant summary', (provider) => {
   render(<ParseConfirmDialog
-    result={{ ...result, taskId: `cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}` }}
+    result={{ ...result, title: '网盘分享文件', taskId: `cloud-share://${provider}/${'a'.repeat(64)}/${'b'.repeat(64)}` }}
     onConfirm={() => {}}
     onSelectionChange={() => {}}
     onClose={() => {}}
   />);
 
-  expect(await screen.findByText('百度网盘分享')).toBeVisible();
-  expect(screen.getByText('必要时会自动转存后下载')).toBeVisible();
+  expect(screen.queryByText('网盘分享文件')).not.toBeInTheDocument();
+  expect(screen.queryByText('必要时会自动转存后下载')).not.toBeInTheDocument();
+  expect(screen.getAllByText('已选 2 / 2 个文件')).toHaveLength(1);
+  expect(screen.getByRole('checkbox', { name: '选择 part-01.zip' })).toBeChecked();
   expect(screen.queryByText('pass-123')).not.toBeInTheDocument();
+});
+
+it.each([{ processing: [] }, { processing: [' ', '\n'] }])('hides empty post-processing and password content: %j', ({ processing }) => {
+  render(<ParseConfirmDialog result={{ ...result, processing, discoveredPassword: ' ' }} onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
+  expect(screen.queryByRole('button', { name: /后处理与密码/ })).not.toBeInTheDocument();
+});
+
+it('removes expanded processing content when the next result has none', async () => {
+  const user = userEvent.setup();
+  const props = { onConfirm: vi.fn(), onSelectionChange: vi.fn(), onClose: vi.fn() };
+  const { rerender } = render(<ParseConfirmDialog result={result} {...props} />);
+  await user.click(screen.getByRole('button', { name: /查看后处理与密码/ }));
+  expect(screen.getByText('解压分卷并合并')).toBeVisible();
+  rerender(<ParseConfirmDialog result={{ ...result, taskId: 'empty', processing: [], discoveredPassword: undefined }} {...props} />);
+  expect(screen.queryByRole('button', { name: /后处理与密码/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('dialog').querySelector('.processing-summary')).toBeNull();
 });
 
 it('uses the torrent root as the title, hides the local path, formats byte sizes, and lets the user choose this task destination', async () => {

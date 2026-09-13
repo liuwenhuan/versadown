@@ -608,6 +608,7 @@ fn cloud_share_failure_code(error: &crate::cloud::QuarkError) -> &'static str {
         QuarkError::NotAuthorized => "not_authorized",
         QuarkError::AuthorizationExpired => "credentials_expired",
         QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
+        QuarkError::PikpakOperationVerificationRequired(_) => "pikpak_operation_verification_required",
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",

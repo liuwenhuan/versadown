@@ -237,6 +237,42 @@ it('submits provided credentials once while automatic password login is pending'
   expect(screen.queryByRole('button', { name: '正在自动登录…' })).not.toBeInTheDocument();
 });
 
+it('refills saved credentials after manual logout and logs in only when clicked', async () => {
+  const client = createCloudFake({ getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', hasSavedPassword: true }) });
+  const user = userEvent.setup();
+  render(<CloudManager provider="tianyi" client={client} authorizationOnly initialAccount={{ id: 'a', displayName: 'alice', provider: 'tianyi', authMethod: 'password' }} restoreOnMount={false} />);
+  await user.click(screen.getByRole('button', { name: '退出登录' }));
+  await user.click(screen.getByRole('button', { name: '确认退出登录' }));
+  await waitFor(() => expect(screen.getByLabelText('账号')).toHaveValue('saved-user'));
+  expect(screen.getByLabelText('密码')).toHaveValue('');
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '***');
+  expect(client.loginCloudWithPassword).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '登录' }));
+  expect(client.loginCloudWithPassword).toHaveBeenCalledWith('tianyi', { username: 'saved-user', useSavedPassword: true });
+});
+
+it('refills the newly saved account after successful replacement and a second logout', async () => {
+  let savedUsername = 'alice';
+  const client = createCloudFake({
+    getSavedCloudCredentials: vi.fn(async () => ({ username: savedUsername, hasSavedPassword: true })),
+    loginCloudWithPassword: vi.fn(async (_provider, credentials) => {
+      savedUsername = credentials.username;
+      return { id: 'b', displayName: 'bob', provider: 'tianyi', authMethod: 'password' };
+    })
+  });
+  const user = userEvent.setup();
+  render(<CloudManager provider="tianyi" client={client} authorizationOnly />);
+  await waitFor(() => expect(screen.getByLabelText('账号')).toHaveValue('alice'));
+  fireEvent.change(screen.getByLabelText('账号'), { target: { value: 'bob' } });
+  fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'new-secret' } });
+  await user.click(screen.getByRole('button', { name: '登录' }));
+  await user.click(await screen.findByRole('button', { name: '退出登录' }));
+  await user.click(screen.getByRole('button', { name: '确认退出登录' }));
+  await waitFor(() => expect(screen.getByLabelText('账号')).toHaveValue('bob'));
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '***');
+  expect(screen.getByLabelText('密码')).toHaveValue('');
+});
+
 it('restores encrypted login input into masked fields and keeps it after a failed attempt', async () => {
   const client = createCloudFake({
     getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', hasSavedPassword: true }),
@@ -249,12 +285,12 @@ it('restores encrypted login input into masked fields and keeps it after a faile
   const passwordInput = screen.getByLabelText('密码');
   expect(passwordInput).toHaveAttribute('type', 'password');
   expect(passwordInput).toHaveValue('');
-  expect(passwordInput).toHaveAttribute('placeholder', '****');
+  expect(passwordInput).toHaveAttribute('placeholder', '***');
   await user.click(screen.getByRole('button', { name: '登录' }));
   await screen.findByText('登录失败');
   expect(screen.getByLabelText('账号')).toHaveValue('saved-user');
   expect(client.loginCloudWithPassword).toHaveBeenCalledWith('tianyi', { username: 'saved-user', useSavedPassword: true });
-  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '****');
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '***');
 });
 
 it('preserves a password edited while an earlier login is pending and submits the newer value next', async () => {
@@ -779,6 +815,21 @@ it('shows normal file commands in the row context menu and opens a folder from i
 
   fireEvent.click(screen.getByRole('menuitem', { name: '打开' }));
   expect(await screen.findByText('说明.txt')).toBeVisible();
+});
+
+it('uses readable file-manager text with compact file rows', async () => {
+  const style = document.createElement('style');
+  style.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(style);
+  try {
+    render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+    const folder = await screen.findByText('归档');
+    const row = folder.closest('.cloud-file-row')!;
+    expect(getComputedStyle(row).fontSize).toBe('14px');
+    expect(getComputedStyle(row).minHeight).toBe('44px');
+    expect(getComputedStyle(document.querySelector('.cloud-columns')!).fontSize).toBe('13px');
+    expect(getComputedStyle(screen.getByRole('button', { name: '上传', exact: true })).fontSize).toBe('14px');
+  } finally { style.remove(); }
 });
 
 it('uses smaller cloud-card typography while preserving the signed-in account name size', async () => {
@@ -1385,6 +1436,79 @@ it('does not resume a protected operation when authorization returns another acc
   expect(downloadCloudFile).toHaveBeenCalledTimes(1);
   expect(await screen.findByRole('alert')).toHaveTextContent('授权账号与当前会话不一致');
   expect(screen.getByRole('button', { name: '打开 PikPak 授权并继续下载' })).toBeVisible();
+});
+
+it('opens PikPak operation verification without reauthorizing or replaying permanent deletion', async () => {
+  const user = userEvent.setup();
+  const recycleBinId = cloudRecycleBinDirectoryId.pikpak;
+  const deleteCloudFiles = vi.fn().mockRejectedValue({
+    code: 'pikpak_operation_verification_required',
+    message: 'PikPak 读取文件信息需要官方操作验证。验证完成后请返回重试。',
+  });
+  const openCloudOperationVerification = vi.fn().mockResolvedValue(undefined);
+  const client = createCloudFake({
+    deleteCloudFiles,
+    listCloudDirectory: vi.fn().mockImplementation((_provider: CloudProvider, parentId = '0') => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [{ id: 'deleted-file', parentId: recycleBinId, name: '待验证.txt', kind: 'file', size: 12 }] }
+      : { id: parentId, items: [] })),
+  });
+  Object.assign(client, { openCloudOperationVerification });
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('回收站'));
+  await user.click(await screen.findByText('待验证.txt'));
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
+  await user.click(await screen.findByRole('button', { name: '打开 PikPak 操作验证' }));
+  expect(openCloudOperationVerification).toHaveBeenCalledWith('pikpak', 'p-1');
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(deleteCloudFiles).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
+  expect(screen.getByRole('alert')).toHaveTextContent('返回后重新执行原操作');
+  expect(screen.getByText('待验证.txt')).toBeVisible();
+});
+
+it('keeps operation verification available when deletion succeeds but directory refresh is challenged', async () => {
+  const user = userEvent.setup();
+  let deleted = false;
+  const client = createCloudFake({
+    deleteCloudFiles: vi.fn().mockImplementation(async () => { deleted = true; }),
+    listCloudDirectory: vi.fn().mockImplementation(async (_provider: CloudProvider, parentId = '0') => {
+      if (deleted) throw { code: 'pikpak_operation_verification_required', message: '读取文件列表需要官方操作验证' };
+      return { id: parentId, items: parentId === cloudRecycleBinDirectoryId.pikpak
+        ? [{ id: 'file', parentId, name: '已删除.txt', kind: 'file', size: 12 }] : [] };
+    }),
+  });
+  Object.assign(client, { openCloudOperationVerification: vi.fn().mockResolvedValue(undefined) });
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('回收站'));
+  await user.click(await screen.findByText('已删除.txt'));
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
+  await waitFor(() => expect(deleted).toBe(true));
+  expect((await screen.findAllByRole('button', { name: '打开 PikPak 操作验证' })).length).toBeGreaterThan(0);
+  expect(screen.queryByText('永久删除成功')).not.toBeInTheDocument();
+});
+
+it('unblocks controls when deletion succeeds but refreshing the directory loses the network', async () => {
+  const user = userEvent.setup();
+  let deleted = false;
+  const client = createCloudFake({
+    deleteCloudFiles: vi.fn().mockImplementation(async () => { deleted = true; }),
+    listCloudDirectory: vi.fn().mockImplementation(async (_provider: CloudProvider, parentId = '0') => {
+      if (deleted) throw { code: 'network_error', message: '网络中断' };
+      return { id: parentId, items: parentId === cloudRecycleBinDirectoryId.pikpak
+        ? [{ id: 'file', parentId, name: '网络测试.txt', kind: 'file', size: 12 }] : [] };
+    }),
+  });
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('回收站'));
+  await user.click(await screen.findByText('网络测试.txt'));
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
+  await screen.findByText('网络中断');
+  expect(screen.getByRole('button', { name: '刷新' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: '退出授权' })).toBeEnabled();
+  expect(screen.queryByText('永久删除进行中…')).not.toBeInTheDocument();
 });
 
 it.each(['provider_error', 'invalid_response', 'credentials_expired'])(

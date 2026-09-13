@@ -91,7 +91,7 @@ export async function parseDownload(input: string, accessCode?: string, requireC
         title: result.title,
         requiresConfirmation: true,
         resources: result.resources,
-        processing: ['确认后开始网盘下载']
+        processing: []
       }
     };
   }

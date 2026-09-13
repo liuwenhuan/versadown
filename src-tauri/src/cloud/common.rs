@@ -337,6 +337,8 @@ pub fn parse_web_tokens(raw: &str) -> Result<PikPakSession, QuarkError> {
             .map(str::to_owned),
         user_id: v["user_id"].as_str().unwrap_or("").into(),
         captcha_expires_at: 0,
+        verification_url: None,
+        operation_verifications: Default::default(),
         auth_method: CloudAuthMethod::Web,
     })
 }

@@ -621,6 +621,9 @@ pub(crate) fn directory_download_failure_fields(
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => {
             ("web_auth_required", "网盘需要网页验证")
         }
+        QuarkError::PikpakOperationVerificationRequired(_) => {
+            ("pikpak_operation_verification_required", "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试")
+        }
         QuarkError::Transport(_) => ("network_error", "网络或下载引擎错误"),
         QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
         QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),

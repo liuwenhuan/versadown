@@ -260,9 +260,8 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
         assert_eq!(session.unwrap(), b"new-session");
         logout_provider(provider, &store).unwrap();
         assert!(store.load(key).unwrap().is_none());
-        assert!(saved_cloud_credential_info(&store, provider)
-            .unwrap()
-            .is_none());
+        assert_eq!(saved_cloud_credential_info(&store, provider)
+            .unwrap().is_some(), direct);
     }
     assert_eq!(catalog.len(), 7);
 }
@@ -911,7 +910,7 @@ fn logout_for_a_connected_new_provider_removes_its_credential() {
 }
 
 #[test]
-fn logout_removes_the_password_recovery_credential_too() {
+fn logout_keeps_the_password_for_explicit_login() {
     let store = MemoryCredentialStore::default();
     store.save("baidu", b"still-authorized").unwrap();
     save_password_credential(
@@ -923,13 +922,12 @@ fn logout_removes_the_password_recovery_credential_too() {
     logout_provider(CloudProvider::Baidu, &store).unwrap();
 
     assert!(store.load("baidu").unwrap().is_none());
-    assert!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap()
-        .is_none());
+    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap().unwrap().username(), "user");
 }
 
 #[test]
-fn logout_attempts_password_recovery_cleanup_when_normal_session_removal_fails() {
+fn failed_logout_never_deletes_the_saved_password() {
     let store = FailingSessionRemovalStore::new();
     store.save("baidu", b"still-authorized").unwrap();
     save_password_credential(
@@ -943,12 +941,11 @@ fn logout_attempts_password_recovery_cleanup_when_normal_session_removal_fails()
         Err(QuarkError::Storage)
     ));
     assert!(store.removals().contains(&"baidu".to_owned()));
-    assert!(store
+    assert!(!store
         .removals()
         .contains(&"cloud-password-baidu".to_owned()));
-    assert!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap()
-        .is_none());
+    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap().unwrap().username(), "user");
 }
 
 #[test]

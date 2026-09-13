@@ -101,6 +101,8 @@ fn action_ticket_rotation_does_not_hide_a_failed_mutations_auth_recovery() {
     let store = MemoryCredentialStore::default();
     let refreshes = std::cell::Cell::new(0);
     store.save("pikpak", b"old").unwrap();
+    // CloudState initializes persisted authorization before executing session work.
+    supervisor.restore(&store, CloudProvider::Pikpak).unwrap();
     let result: Result<(), QuarkError> = supervisor.run(
         &store,
         CloudProvider::Pikpak,
@@ -286,7 +288,7 @@ fn risk_limited_retry_is_bounded_and_interactive_challenge_stops_retry() {
         ]);
         assert!(matches!(
             PikPakClient::new(&http, &store).list("0"),
-            Err(QuarkError::WebAuthorizationRequired)
+            Err(QuarkError::PikpakOperationVerificationRequired(_))
         ));
         assert_eq!(http.0.lock().unwrap().1.len(), expected_requests);
     }
@@ -546,7 +548,7 @@ fn pikpak_cache_risk_for_browser_session_never_falls_back_to_fetch() {
 
     assert!(matches!(
         PikPakClient::new(&http, &store).download("file-1"),
-        Err(QuarkError::WebAuthorizationRequired)
+        Err(QuarkError::PikpakOperationVerificationRequired(_))
     ));
 
     let requests = &http.0.lock().unwrap().1;
@@ -554,6 +556,121 @@ fn pikpak_cache_risk_for_browser_session_never_falls_back_to_fetch() {
     assert!(requests[0]
         .url
         .ends_with("/drive/v1/files/file-1?usage=CACHE"));
+}
+
+#[test]
+fn pikpak_web_delete_renews_each_action_without_relogging_or_changing_client() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"web-device","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"error_code":9}"#,
+        r#"{"captcha_token":"read-cap","expires_in":300}"#,
+        r#"{"trashed":true}"#,
+        r#"{"error_code":9}"#,
+        r#"{"captcha_token":"delete-cap","expires_in":300}"#,
+        r#"{}"#,
+    ]);
+    PikPakClient::new(&http, &store).delete(&["deleted-file".into()]).unwrap();
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 6);
+    for (index, action) in [(1, "GET:/drive/v1/files/"), (4, "POST:/drive/v1/files:batchDelete")] {
+        let body: serde_json::Value = serde_json::from_str(requests[index].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["client_id"], "YUMx5nI8ZU8Ap8pm");
+        assert_eq!(body["action"], action);
+        assert_eq!(body["meta"]["package_name"], "mypikpak.com");
+        assert_eq!(body["meta"]["client_version"], "2.0.0");
+        assert_eq!(body["meta"]["user_id"], "owner");
+    }
+    assert_eq!(requests[5].headers["X-Captcha-Token"], "delete-cap");
+    assert_eq!(requests[5].headers["X-Client-Id"], "YUMx5nI8ZU8Ap8pm");
+    assert_eq!(requests[5].headers["Authorization"], "Bearer access");
+    assert!(requests[5].headers["User-Agent"].contains("Mozilla/"));
+    assert_eq!(requests[5].headers["Origin"], "https://mypikpak.com");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(requests[5].body.as_deref().unwrap()).unwrap()["ids"], serde_json::json!(["deleted-file"]));
+}
+
+#[test]
+fn pikpak_web_delete_challenge_stops_before_deletion_and_preserves_verification_context() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"web-device","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"error_code":9}"#,
+        r#"{"captcha_token":"pending-cap","expires_in":300,"url":"https://user.mypikpak.com/verify?token=private-challenge"}"#,
+    ]);
+    let error = PikPakClient::new(&http, &store).delete(&["deleted-file".into()]).unwrap_err();
+    let public = serde_json::to_value(&error).unwrap();
+    assert_eq!(public["code"], "pikpak_operation_verification_required");
+    assert!(public["message"].as_str().unwrap().contains("读取文件信息"));
+    assert!(!public.to_string().contains("private-challenge"));
+    assert!(!format!("{error:?}").contains("private-challenge"));
+    assert_eq!(http.0.lock().unwrap().1.len(), 2);
+    let saved: serde_json::Value = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+    assert_eq!(saved["captcha_token"], "pending-cap");
+    assert_eq!(saved["access_token"], "access");
+    assert_eq!(saved["verification_url"], "https://user.mypikpak.com/verify?token=private-challenge");
+}
+
+#[test]
+fn pikpak_operation_verification_rejects_other_accounts_and_unsafe_destinations() {
+    use alldownloader_lib::cloud::allows_pikpak_operation_verification_url;
+    for url in ["http://user.mypikpak.com/check", "https://user.mypikpak.com.evil.test/check", "https://mypikpak.com@evil.test/", "https://user.mypikpak.com:444/check", "file:///C:/secret", "https://user:secret@user.mypikpak.com/check"] {
+        assert!(!allows_pikpak_operation_verification_url(url), "{url}");
+    }
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap","captcha_expires_at":9999999999,"verification_url":"https://user.mypikpak.com/check","client_id":"YUMx5nI8ZU8Ap8pm","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[r#"{"sub":"other-owner","name":"other"}"#]);
+    assert!(matches!(PikPakClient::new(&http, &store).operation_verification_url("original-owner"), Err(QuarkError::InvalidInput(_))));
+    assert_eq!(http.0.lock().unwrap().1.len(), 1);
+}
+
+#[test]
+fn pikpak_operation_verification_uses_only_current_unexpired_official_challenge() {
+    for (challenge, expiry, expected) in [
+        ("https://user.mypikpak.com/check", 9999999999_u64, "https://user.mypikpak.com/check"),
+        ("https://user.mypikpak.com/check", 1, "https://mypikpak.com/drive"),
+        ("https://evil.test/check", 9999999999, "https://mypikpak.com/drive"),
+    ] {
+        let store = MemoryCredentialStore::default();
+        store.save("pikpak", &serde_json::to_vec(&serde_json::json!({
+            "access_token":"access", "refresh_token":"refresh", "expires_at":9999999999_u64,
+            "device_id":"device", "captcha_token":"cap", "captcha_expires_at":expiry,
+            "verification_url":challenge, "client_id":"YUMx5nI8ZU8Ap8pm", "auth_method":"web"
+        })).unwrap()).unwrap();
+        let http = Sequence::new(&[r#"{"sub":"owner","name":"owner"}"#]);
+        assert_eq!(PikPakClient::new(&http, &store).operation_verification_url("owner").unwrap(), expected);
+    }
+}
+
+#[test]
+fn pikpak_verified_token_is_used_on_explicit_retry_without_creating_another_challenge() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"verified-cap","client_id":"YUMx5nI8ZU8Ap8pm","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[r#"{"trashed":true}"#, r#"{}"#]);
+    PikPakClient::new(&http, &store).delete(&["original-file".into()]).unwrap();
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].url.ends_with("/drive/v1/files:batchDelete"));
+    assert_eq!(requests[1].headers["X-Captcha-Token"], "verified-cap");
+}
+
+#[test]
+fn pikpak_delete_challenge_survives_metadata_captcha_rotation_on_explicit_retry() {
+    let store = MemoryCredentialStore::default();
+    store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"old","client_id":"YUMx5nI8ZU8Ap8pm","user_id":"owner","auth_method":"web"}"#).unwrap();
+    let http = Sequence::new(&[
+        r#"{"trashed":true}"#, r#"{"error_code":9}"#,
+        r#"{"captcha_token":"verify-delete","expires_in":300,"url":"https://user.mypikpak.com/check"}"#,
+        // The next explicit retry checks the file first, with a different action.
+        r#"{"error_code":9}"#, r#"{"captcha_token":"read-only-cap","expires_in":300}"#,
+        r#"{"trashed":true}"#, r#"{}"#,
+    ]);
+    let client = PikPakClient::new(&http, &store);
+    assert_eq!(serde_json::to_value(client.delete(&["file".into()]).unwrap_err()).unwrap()["code"], "pikpak_operation_verification_required");
+    client.delete(&["file".into()]).unwrap();
+    let requests = &http.0.lock().unwrap().1;
+    assert_eq!(requests.len(), 7);
+    assert_eq!(requests[5].headers["X-Captcha-Token"], "read-only-cap");
+    assert_eq!(requests[6].headers["X-Captcha-Token"], "verify-delete");
 }
 
 #[test]

@@ -102,6 +102,66 @@ it('keeps the input open and reports a parsing failure', async () => {
   expect(screen.getByRole('button', { name: '开始解析下载' })).toBeEnabled();
 });
 
+it.each([
+  '网盘请求失败：夸克分享已被取消',
+  '网盘请求失败：夸克分享因账号封禁而无法访问',
+  '网盘请求失败：PikPak 分享的文件不存在',
+  '网盘请求失败：百度网盘分享链接已过期',
+  '网盘请求失败：天翼云盘分享已取消',
+  '网盘请求失败：阿里云盘分享已删除',
+  '网盘请求失败：迅雷分享已删除',
+  '网盘请求失败：UC 分享已失效或已停止分享',
+])('closes instead of reparsing unavailable shares across providers: %s', async (message) => {
+  const user = userEvent.setup();
+  const onParse = vi.fn().mockRejectedValue(message);
+  const onClose = vi.fn();
+  render(<NewDownloadDialog open placement="header" initialInput="https://example.test/share" onParse={onParse} onClose={onClose} />);
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(message);
+  const close = screen.getByRole('button', { name: '关闭', exact: true });
+  expect(close.parentElement).toContainElement(alert);
+  expect(alert).toHaveClass('parse-failure');
+  expect(screen.queryByRole('button', { name: '开始解析下载' })).not.toBeInTheDocument();
+  await user.click(close);
+  expect(onClose).toHaveBeenCalledOnce();
+  expect(onParse).toHaveBeenCalledOnce();
+});
+
+it.each([
+  '网盘请求失败：分享下载准备已取消',
+  '分享请求超时，请重试',
+  '阿里云盘分享请求频繁，请稍后重试',
+  '百度网盘授权已过期，请重新授权',
+  '分享访问码错误或缺失',
+  '天翼云盘分享不可用，请检查访问码、有效期及权限',
+  '百度分享无效或请求被拒绝',
+  '分享令牌已过期，请重新获取',
+  '迅雷分享已失效或无权访问',
+  'PikPak 分享已失效或无权访问',
+  '夸克分享无效或已过期',
+])('keeps retry available for recoverable or ambiguous failures: %s', async (message) => {
+  const user = userEvent.setup();
+  render(<NewDownloadDialog open initialInput="https://example.test/share" onParse={() => Promise.reject(new Error(message))} onClose={vi.fn()} />);
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(message);
+  expect(screen.getByRole('button', { name: '开始解析下载' })).toBeEnabled();
+});
+
+it('clears an unavailable-share failure when the user changes the link', async () => {
+  const user = userEvent.setup();
+  const onParse = vi.fn().mockRejectedValueOnce(new Error('PikPak 分享已删除')).mockResolvedValueOnce(undefined);
+  render(<NewDownloadDialog open initialInput="https://example.test/old" onParse={onParse} onClose={vi.fn()} />);
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  expect(await screen.findByRole('button', { name: '关闭', exact: true })).toBeEnabled();
+  await user.clear(screen.getByLabelText('下载内容'));
+  await user.type(screen.getByLabelText('下载内容'), 'https://example.test/new');
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  expect(onParse).toHaveBeenLastCalledWith('https://example.test/new', undefined);
+});
+
 it('keeps the share link open, focuses an access-code field, and resubmits the code when required', async () => {
   const user = userEvent.setup();
   const onParse = vi.fn()
@@ -129,6 +189,38 @@ function ModalHost() {
   const [open, setOpen] = useState(false);
   return <><button onClick={() => setOpen(true)}>打开新建下载</button><NewDownloadDialog open={open} placement="modal" onParse={() => {}} onClose={() => setOpen(false)} /></>;
 }
+
+it.each(['header', 'modal', 'launcher'] as const)('places the access-code prompt and styled input beside the parse button in %s', async (placement) => {
+  const user = userEvent.setup();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  const onParse = vi.fn()
+    .mockResolvedValueOnce({ shareAccessCodeRequired: { provider: 'quark', message: '此分享需要访问码，请输入后重新解析' } })
+    .mockResolvedValueOnce(undefined);
+  try {
+    render(<NewDownloadDialog open placement={placement} initialInput="https://pan.quark.cn/s/example" onParse={onParse} onClose={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+    const code = await screen.findByLabelText('访问码');
+    const prompt = screen.getByRole('status');
+    const submit = screen.getByRole('button', { name: '开始解析下载' });
+    expect(code.parentElement).toBe(submit.parentElement);
+    expect(prompt.parentElement).toBe(submit.parentElement);
+    expect(getComputedStyle(code.parentElement!).display).toBe('flex');
+    expect(getComputedStyle(code.parentElement!).flexWrap).not.toBe('wrap');
+    expect(prompt.compareDocumentPosition(code) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(code.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(getComputedStyle(code).height).toBe('36px');
+    expect(getComputedStyle(code).borderRadius).toBe('8px');
+    expect(code).toHaveAccessibleDescription('此分享需要访问码，请输入后重新解析');
+    expect(code).toHaveFocus();
+    await user.type(code, '1234');
+    await user.keyboard('{Enter}');
+    expect(onParse).toHaveBeenLastCalledWith('https://pan.quark.cn/s/example', '1234');
+  } finally {
+    stylesheet.remove();
+  }
+});
 
 it('traps modal Tab navigation and restores focus to its opener when closed', async () => {
   const user = userEvent.setup();

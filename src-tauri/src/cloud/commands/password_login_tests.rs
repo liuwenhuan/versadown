@@ -1,5 +1,6 @@
 use super::super::password_login_with_browser;
 use super::*;
+use crate::cloud::{load_saved_password_login, prepare_password_account_login, reset_password_profile_if_required};
 
 struct PostLoginFailure {
     stage: &'static str,
@@ -86,6 +87,23 @@ fn tianyi_post_login_root_failure_does_not_open_browser() {
 }
 
 struct NativeLoginFailure(Option<QuarkError>);
+
+#[test]
+fn failed_browser_account_switch_forces_reset_before_reusing_saved_login() {
+    for provider in [CloudProvider::Baidu, CloudProvider::Tianyi] {
+        let store = MemoryCredentialStore::default();
+        save_password_credential(&store, CloudPasswordCredential::new(provider, "a", "alice", "secret-a")).unwrap();
+        let reset = prepare_password_account_login(&store, provider, "bob").unwrap();
+        reset_password_profile_if_required(&store, provider, reset, || Ok(())).unwrap();
+        let result = password_login_with_browser(provider, &store,
+            &mut NativeLoginFailure(Some(QuarkError::WebAuthorizationRequired)), "bob", "secret-b",
+            |_| Err(QuarkError::Transport("post-cookie validation failed".into())));
+        assert!(result.is_err());
+        assert_eq!(load_saved_password_login(&store, provider).unwrap().unwrap().username(), "alice");
+        assert!(prepare_password_account_login(&store, provider, "alice").unwrap(),
+            "a failed browser attempt may have installed Bob's cookies");
+    }
+}
 
 impl crate::cloud::driver::ProviderAuth for NativeLoginFailure {
     fn login_password(

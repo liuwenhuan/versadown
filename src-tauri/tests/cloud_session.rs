@@ -403,13 +403,12 @@ fn replacement_removes_old_session_even_when_password_persistence_fails() {
     )
     .is_err());
     assert!(store.load("baidu").unwrap().is_none());
-    assert!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap()
-        .is_none());
+    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap().unwrap().username(), "alice");
 }
 
 #[test]
-fn password_replacement_clears_all_old_owners_before_saving_the_new_draft() {
+fn password_replacement_isolates_the_old_session_but_keeps_validated_login() {
     use alldownloader_lib::cloud::{
         baidu_browser_profile_username, prepare_password_account_login, save_password_login_draft,
         saved_cloud_credential_info, set_baidu_browser_profile_username,
@@ -424,9 +423,8 @@ fn password_replacement_clears_all_old_owners_before_saving_the_new_draft() {
     set_baidu_browser_profile_username(&store, Some("alice")).unwrap();
     assert!(prepare_password_account_login(&store, CloudProvider::Baidu, "bob").unwrap());
     assert!(store.load("baidu").unwrap().is_none());
-    assert!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap()
-        .is_none());
+    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
+        .unwrap().unwrap().username(), "alice");
     assert!(baidu_browser_profile_username(&store).unwrap().is_none());
     save_password_login_draft(&store, CloudProvider::Baidu, "bob", "secret-b").unwrap();
     assert_eq!(
@@ -434,7 +432,7 @@ fn password_replacement_clears_all_old_owners_before_saving_the_new_draft() {
             .unwrap()
             .unwrap()
             .username,
-        "bob"
+        "alice"
     );
 }
 
@@ -470,7 +468,7 @@ fn unreadable_old_credentials_abort_persistence_and_clear_the_session() {
 }
 
 #[test]
-fn replacing_pikpak_clears_credentials_without_requesting_an_unsupported_browser_profile() {
+fn replacing_pikpak_keeps_credentials_without_requesting_an_unsupported_browser_profile() {
     use alldownloader_lib::cloud::prepare_password_account_login;
     let store = MemoryCredentialStore::default();
     save_password_credential(
@@ -483,9 +481,8 @@ fn replacing_pikpak_clears_credentials_without_requesting_an_unsupported_browser
         prepare_password_account_login(&store, CloudProvider::Pikpak, "bob").unwrap();
     assert!(!reset_password_profile);
     assert!(store.load("pikpak").unwrap().is_none());
-    assert!(load_password_credential(&store, CloudProvider::Pikpak)
-        .unwrap()
-        .is_none());
+    assert_eq!(load_password_credential(&store, CloudProvider::Pikpak)
+        .unwrap().unwrap().username(), "alice");
 }
 
 #[derive(Default)]
@@ -533,7 +530,9 @@ fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
     .unwrap();
     assert_eq!(reset_calls.get(), 1);
     assert!(reopened.load(&marker).unwrap().is_none());
-    assert!(!prepare_password_account_login(&reopened, provider, "bob").unwrap());
+    // Until Bob logs in successfully, Alice remains the saved login, so a new
+    // attempt for Bob still isolates the previous profile.
+    assert!(prepare_password_account_login(&reopened, provider, "bob").unwrap());
 }
 
 #[test]

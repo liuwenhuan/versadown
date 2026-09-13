@@ -316,9 +316,13 @@ pub fn save_password_credential(
     credential: CloudPasswordCredential,
 ) -> Result<(), QuarkError> {
     let provider = credential.provider();
+    let previous = store.load(password_credential_key(provider)?).map_err(|error| {
+        let _ = store.remove(provider.key());
+        error
+    })?.map(Zeroizing::new);
     let mut credentials = load_password_credentials(store, provider)
         .map_err(|error| {
-            let _ = clear_password_account(store, provider);
+            let _ = store.remove(provider.key());
             error
         })?
         .unwrap_or(LoadedPasswordCredentials {
@@ -346,7 +350,16 @@ pub fn save_password_credential(
     let result = persist_password_credentials(store, &credentials);
     credentials.zeroize();
     if let Err(error) = result {
-        let _ = clear_password_account(store, provider);
+        let _ = store.remove(provider.key());
+        return Err(error);
+    }
+    if let Err(error) = store.remove(password_login_draft_key(provider)?) {
+        // Do not report a replacement as failed while silently keeping its password.
+        match previous.as_deref() {
+            Some(bytes) => store.save(password_credential_key(provider)?, bytes)?,
+            None => store.remove(password_credential_key(provider)?)?,
+        }
+        store.remove(provider.key())?;
         return Err(error);
     }
     Ok(())
@@ -540,8 +553,8 @@ pub fn reset_password_profile_if_required(
     store.remove(key)
 }
 
-/// Clears a previous account and returns whether its password WebView profile
-/// also needs resetting. Direct-only providers have no such profile.
+/// Clear the previous session/profile, but retain the last successful password
+/// until the replacement login has actually succeeded.
 pub fn prepare_password_account_login(
     store: &impl CredentialStore,
     provider: CloudProvider,
@@ -571,7 +584,11 @@ pub fn prepare_password_account_login(
             // old owner. CredentialStore encrypts and atomically publishes it.
             store.save(key, b"1")?;
         }
-        clear_password_account(store, provider)?;
+        store.remove(provider.key())?;
+        if provider == CloudProvider::Baidu {
+            set_baidu_browser_profile_username(store, None)?;
+            set_browser_password_login_preferred(store, provider, false)?;
+        }
     }
     Ok(pending_reset || (changed && uses_password_browser_profile(provider)))
 }
@@ -583,6 +600,12 @@ pub fn run_with_session_recovery<T>(
     mut work: impl FnMut() -> Result<T, QuarkError>,
     password_relogin: impl FnOnce(&CloudPasswordCredential) -> Result<(), QuarkError>,
 ) -> Result<T, QuarkError> {
+    if kind != SessionWorkKind::Logout
+        && cloud_session_policy(provider).supports_password_fallback
+        && super::auth_supervisor::is_manually_disconnected(store, provider)?
+    {
+        return Err(QuarkError::NotAuthorized);
+    }
     let first_result = work();
     let error = match first_result {
         Ok(value) => return Ok(value),
@@ -763,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn logout_removes_the_single_saved_login_for_every_password_provider() {
+    fn explicit_credential_deletion_removes_the_single_saved_login_for_every_password_provider() {
         for provider in [
             CloudProvider::Pikpak,
             CloudProvider::Baidu,
@@ -786,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_account_replacement_removes_the_old_password_and_draft() {
+    fn failed_account_replacement_preserves_the_old_password() {
         let store = FailOnceCredentialStore::default();
         save_password_credential(
             &store,
@@ -802,9 +825,26 @@ mod tests {
         )
         .is_err());
 
-        assert!(load_saved_password_login(&store, CloudProvider::Tianyi)
-            .unwrap()
-            .is_none());
+        let saved = load_saved_password_login(&store, CloudProvider::Tianyi).unwrap().unwrap();
+        assert_eq!(saved.username(), "alice");
+        assert_eq!(saved.password(), "secret-a");
+    }
+
+    #[test]
+    fn failed_draft_cleanup_rolls_back_password_replacement() {
+        let store = FailOnceCredentialStore::default();
+        let provider = CloudProvider::Tianyi;
+        save_password_credential(&store,
+            CloudPasswordCredential::new(provider, "a", "alice", "secret-a")).unwrap();
+        save_password_login_draft(&store, provider, "alice", "secret-a").unwrap();
+        store.save(provider.key(), b"new-session").unwrap();
+        store.fail_next_draft_remove.store(true, Ordering::SeqCst);
+        assert!(save_password_credential(&store,
+            CloudPasswordCredential::new(provider, "b", "bob", "secret-b")).is_err());
+        let saved = load_saved_password_login(&store, provider).unwrap().unwrap();
+        assert_eq!(saved.username(), "alice");
+        assert_eq!(saved.password(), "secret-a");
+        assert!(store.load(provider.key()).unwrap().is_none());
     }
 
     #[test]
@@ -1016,16 +1056,14 @@ pub fn load_saved_password_login(
     store: &impl CredentialStore,
     provider: CloudProvider,
 ) -> Result<Option<CloudPasswordLoginDraft>, QuarkError> {
-    if let Some(draft) = load_password_login_draft(store, provider)? {
-        return Ok(Some(draft));
-    }
-    Ok(
-        load_password_credential(store, provider)?.map(|credential| CloudPasswordLoginDraft {
+    if let Some(credential) = load_password_credential(store, provider)? {
+        return Ok(Some(CloudPasswordLoginDraft {
             provider,
             username: Zeroizing::new(credential.username().to_owned()),
             password: Zeroizing::new(credential.password().to_owned()),
-        }),
-    )
+        }));
+    }
+    load_password_login_draft(store, provider)
 }
 
 pub struct CloudPasswordLoginDraft {

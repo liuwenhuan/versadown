@@ -28,6 +28,21 @@ export function AboutPanel({ icon, update, onOpenUpdate }: { icon: string; updat
         <li>在“设置”中选择下载保存位置，并按需要调整网络及下载选项。</li>
       </ol>
     </section>
-    <aside className="about-notice" aria-label="使用提醒">请仅下载和管理您有权访问的内容。网盘功能需要本人授权，并受服务商接口、账号权限和使用条款限制。本软件不会破解网盘的会员机制和分享密码，也只收集用于改进软件，以及提供更好服务所需要的最小化运行信息。</aside>
+    <section className="about-section" aria-labelledby="about-declaration-title">
+      <h3 id="about-declaration-title">声明</h3>
+      <ol className="about-instructions">
+        <li>本项目仅供个人使用，未经许可请勿用于商业用途或大规模滥用。</li>
+        <li>所用网盘接口均来自各网盘官方开放平台、官方公开接口及已知开源项目，仅解析用户主动提供的分享链接，不涉及破解或绕过版权保护。</li>
+        <li>本项目用于自动化程序代替用户发起请求，提供基本使用功能，不会提升或绕过任何会员权限，不提供各网盘提供的增强服务，也不会突破网盘的限速策略；</li>
+        <li>使用者应遵守各网盘服务商的用户协议与使用条款，以及所在地区的法律法规，违反所产生的后果自行承担。</li>
+        <li>高频调用可能触发网盘风控，导致账号限流、封禁或来源 IP 被屏蔽，请合理控制请求频率，避免高并发与批量请求。</li>
+        <li>网盘接口调整、风控策略变更等因素可能导致功能失效，本项目不对可用性与稳定性作任何担保。</li>
+        <li>开发者不对使用本项目产生的任何直接或间接损失（账号封禁、数据丢失、法律纠纷等）承担责任。</li>
+        <li>开发者保留随时修改本免责声明的权利，恕不另行通知。</li>
+        <li>为了改进软件，以及提供更好服务，我们会收集所需的最小化运行信息。</li>
+        <li>我们鼓励用户开通官方 VIP/SVIP以获得更好的下载与加速体验。</li>
+      </ol>
+      <p className="about-declaration-acceptance">下载或使用本项目，即视为您已阅读并接受上述全部条款。</p>
+    </section>
   </article>;
 }

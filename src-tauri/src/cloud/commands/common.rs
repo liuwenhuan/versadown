@@ -9,6 +9,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static s
         QuarkError::SessionRenewedRetryOperation => "登录已自动恢复，请重新执行本次操作",
         QuarkError::WebAuthorizationRequired => "此登录方式需要网页验证，请点击网页授权完成登录",
         QuarkError::CaptchaRequired => "网盘要求完成官方操作验证后重试",
+        QuarkError::PikpakOperationVerificationRequired(_) => "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试",
         QuarkError::PikpakRegionalMembershipRestricted => {
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
         }
@@ -33,6 +34,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::AuthorizationExpired => "credentials_expired",
         QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
+        QuarkError::PikpakOperationVerificationRequired(_) => "pikpak_operation_verification_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
         QuarkError::InvalidResponse => "invalid_response",
