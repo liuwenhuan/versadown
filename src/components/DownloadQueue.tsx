@@ -140,6 +140,15 @@ function taskSubtitle(task: QueueTask): string | undefined {
   return undefined;
 }
 
+function taskPeerMetric(task: QueueTask): string | undefined {
+  if (task.status !== 'downloading') return undefined;
+  const connections = task.connections ?? 0;
+  if (task.kind === 'magnet' || task.kind === 'torrent') {
+    return '已连接 ' + connections + ' / 已发现 ' + (task.discovered_nodes ?? 0);
+  }
+  return task.kind === 'ed2k' ? '已连接 ' + connections : undefined;
+}
+
 function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   if (kind === 'folder') return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7a2.2 2.2 0 0 1 2.2 2.2v1.8" /></svg>;
   if (kind === 'magnet' || kind === 'torrent') return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v8a5 5 0 0 0 10 0V4" /><path d="M7 8h4M13 8h4M7 4h4M13 4h4" /></svg>;
@@ -440,6 +449,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const hasSpeed = !isPaused && (task.speed !== undefined || task.speedBytes !== undefined || task.download_speed !== undefined);
         const transferSize = task.total_length !== undefined || task.completed_length !== undefined ? transferProgress(task) : task.size;
         const subtitle = taskSubtitle(task);
+        const peerMetric = taskPeerMetric(task);
         const primaryAction = task.status === 'downloading' ? 'pause' as const
           : task.status === 'paused' ? 'resume' as const
           : task.status === 'failed' ? (task.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
@@ -453,7 +463,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
-              <span className="task-copy"><b title={taskName}>{taskName}</b></span>
+              <span className="task-copy"><b title={taskName}>{taskName}</b>{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}</span>
             </div>
             {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</>}</span></div></div>}
             <div className="task-actions">

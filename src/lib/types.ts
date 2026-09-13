@@ -17,6 +17,7 @@ export interface QueueTask {
   eta?: string;
   eta_seconds?: number;
   connections?: number;
+  discovered_nodes?: number;
   statusMessage?: string;
   source?: string;
   children?: readonly QueueTask[];
