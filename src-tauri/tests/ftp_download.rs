@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use alldownloader_lib::{
     list_queue_tasks_for_scope, parse_ftp_url, Aria2GlobalStat, DownloadTask, EventSink,
-    FtpDownloadEngine, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
+    FtpDownloadEngine, FtpSegment, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use tempfile::tempdir;
 use tokio::{
@@ -47,6 +47,7 @@ fn ftp_credentials_are_not_exposed_by_the_queue_projection() {
             source: "ftp://alice:top-secret@example.test/archive.zip".into(),
             name: "archive.zip".into(),
             kind: "ftp".into(),
+            is_private: false,
         })
         .unwrap();
 
@@ -55,6 +56,47 @@ fn ftp_credentials_are_not_exposed_by_the_queue_projection() {
     assert!(!serde_json::to_string(&queue)
         .unwrap()
         .contains("top-secret"));
+}
+
+#[test]
+fn ftp_segments_are_ordered_updated_and_deleted() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let task = store
+        .create(NewTask {
+            source: "ftp://example.test/a.bin".into(),
+            name: "a.bin".into(),
+            kind: "ftp".into(),
+            is_private: false,
+        })
+        .unwrap();
+
+    store
+        .replace_ftp_segments(
+            task.id,
+            &[
+                FtpSegment {
+                    index: 1,
+                    start_offset: 8,
+                    end_offset: 16,
+                    completed_length: 0,
+                },
+                FtpSegment {
+                    index: 0,
+                    start_offset: 0,
+                    end_offset: 8,
+                    completed_length: 3,
+                },
+            ],
+        )
+        .unwrap();
+    store.update_ftp_segment(task.id, 1, 4).unwrap();
+
+    let segments = store.ftp_segments(task.id).unwrap();
+    assert_eq!(segments[0].index, 0);
+    assert_eq!(segments[1].completed_length, 4);
+
+    store.remove_task_record(task.id).unwrap();
+    assert!(store.ftp_segments(task.id).unwrap().is_empty());
 }
 
 struct NoEvents;
@@ -212,6 +254,7 @@ async fn ftp_engine_resumes_a_partial_file_and_completes_the_existing_task() {
             source: source.clone(),
             name: "payload.bin".into(),
             kind: "ftp".into(),
+            is_private: false,
         })
         .unwrap();
     let engine = Arc::new(FtpDownloadEngine::new(
@@ -258,6 +301,7 @@ async fn ftp_engine_pauses_and_resumes_the_same_durable_task() {
             source: source.clone(),
             name: "payload.bin".into(),
             kind: "ftp".into(),
+            is_private: false,
         })
         .unwrap();
     let engine = Arc::new(FtpDownloadEngine::new(
@@ -338,6 +382,7 @@ async fn ftp_connection_failure_becomes_a_retryable_failed_task() {
             source: source.clone(),
             name: "missing.bin".into(),
             kind: "ftp".into(),
+            is_private: false,
         })
         .unwrap();
     let engine = Arc::new(FtpDownloadEngine::new(
@@ -379,6 +424,7 @@ async fn ftp_engine_recovers_an_active_task_after_restart() {
             source: source.clone(),
             name: "payload.bin".into(),
             kind: "ftp".into(),
+            is_private: false,
         })
         .unwrap();
     task.status = TaskStatus::Downloading;

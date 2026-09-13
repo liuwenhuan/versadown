@@ -47,8 +47,8 @@ pub use launcher::{
 pub use magnet_metadata::{resolve_magnet_torrent, MagnetMetadataError, ResolvedMagnetTorrent};
 pub use models::{
     may_transition, AiSettings, AiSettingsInput, AppSettings, Aria2Settings, DownloadTask,
-    DuplicateDownloadState, LauncherVisibility, MagnetMetadataSettings, NewTask, ProxySettings,
-    TaskStatus,
+    DuplicateDownloadState, FtpSegment, LauncherVisibility, MagnetMetadataSettings, NewTask,
+    ProxySettings, TaskStatus,
 };
 pub use parser::{
     classify_input, extract_candidates, extract_cloud_share_candidate, Candidate, CandidateKind,

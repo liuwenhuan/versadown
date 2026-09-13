@@ -5,14 +5,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, params_from_iter, Connection, Row, Transaction};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     cloud::CloudProvider,
     models::{
-        may_transition, CloudDirectoryGroup, CloudDirectoryGroupItem, DownloadTask,
+        may_transition, CloudDirectoryGroup, CloudDirectoryGroupItem, DownloadTask, FtpSegment,
         NewCloudDirectoryGroup, NewCloudDirectoryGroupItem, NewTask, TaskStatus,
     },
 };
@@ -33,6 +33,8 @@ pub enum StoreError {
     IntegerOutOfRange { field: &'static str },
     #[error("invalid cloud directory group data: {0}")]
     InvalidCloudDirectoryGroupData(&'static str),
+    #[error("invalid FTP segment data: {0}")]
+    InvalidFtpSegmentData(&'static str),
     #[error("file operation failed: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -1108,6 +1110,93 @@ impl TaskStore {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    pub fn replace_ftp_segments(&self, id: Uuid, segments: &[FtpSegment]) -> Result<(), StoreError> {
+        validate_ftp_segments(segments)?;
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        if find_with_transaction(&transaction, id)?.is_none() {
+            return Err(StoreError::NotFound(id));
+        }
+        transaction.execute("DELETE FROM ftp_segments WHERE task_id = ?1", [id.to_string()])?;
+        for segment in segments {
+            transaction.execute(
+                "INSERT INTO ftp_segments (task_id, segment_index, start_offset, end_offset, completed_length)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    id.to_string(),
+                    segment.index,
+                    sqlite_i64("start_offset", segment.start_offset)?,
+                    sqlite_i64("end_offset", segment.end_offset)?,
+                    sqlite_i64("completed_length", segment.completed_length)?,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn ftp_segments(&self, id: Uuid) -> Result<Vec<FtpSegment>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT segment_index, start_offset, end_offset, completed_length
+             FROM ftp_segments WHERE task_id = ?1 ORDER BY segment_index",
+        )?;
+        let rows = statement.query_map([id.to_string()], |row| {
+            Ok(FtpSegment {
+                index: row.get(0)?,
+                start_offset: required_u64(row, 1)?,
+                end_offset: required_u64(row, 2)?,
+                completed_length: required_u64(row, 3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn update_ftp_segment(
+        &self,
+        id: Uuid,
+        index: u32,
+        completed_length: u64,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let segment = transaction
+            .query_row(
+                "SELECT start_offset, end_offset FROM ftp_segments WHERE task_id = ?1 AND segment_index = ?2",
+                params![id.to_string(), index],
+                |row| Ok((required_u64(row, 0)?, required_u64(row, 1)?)),
+            )
+            .optional()?;
+        let Some((start_offset, end_offset)) = segment else {
+            return Err(if find_with_transaction(&transaction, id)?.is_none() {
+                StoreError::NotFound(id)
+            } else {
+                StoreError::InvalidFtpSegmentData("segment does not exist")
+            });
+        };
+        if completed_length > end_offset.saturating_sub(start_offset) {
+            return Err(StoreError::InvalidFtpSegmentData(
+                "completed length exceeds the segment range",
+            ));
+        }
+        transaction.execute(
+            "UPDATE ftp_segments SET completed_length = ?3 WHERE task_id = ?1 AND segment_index = ?2",
+            params![
+                id.to_string(),
+                index,
+                sqlite_i64("completed_length", completed_length)?,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_ftp_segments(&self, id: Uuid) -> Result<(), StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.execute("DELETE FROM ftp_segments WHERE task_id = ?1", [id.to_string()])?;
+        Ok(())
+    }
 }
 
 enum ManagedFileRemoval {
@@ -1234,7 +1323,20 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             "ALTER TABLE cloud_directory_groups ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
-    transaction.execute_batch("PRAGMA user_version = 9;")?;
+    if version < 10 {
+        transaction.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ftp_segments (
+                task_id TEXT NOT NULL,
+                segment_index INTEGER NOT NULL,
+                start_offset INTEGER NOT NULL,
+                end_offset INTEGER NOT NULL,
+                completed_length INTEGER NOT NULL,
+                PRIMARY KEY(task_id, segment_index),
+                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );",
+        )?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 10;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -1254,6 +1356,27 @@ fn column_exists(
 
 fn sqlite_i64(field: &'static str, value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::IntegerOutOfRange { field })
+}
+
+fn validate_ftp_segments(segments: &[FtpSegment]) -> Result<(), StoreError> {
+    let mut seen = HashSet::with_capacity(segments.len());
+    for segment in segments {
+        if !seen.insert(segment.index) {
+            return Err(StoreError::InvalidFtpSegmentData("duplicate segment index"));
+        }
+        if segment.start_offset >= segment.end_offset {
+            return Err(StoreError::InvalidFtpSegmentData("empty or inverted range"));
+        }
+        if segment.completed_length > segment.end_offset - segment.start_offset {
+            return Err(StoreError::InvalidFtpSegmentData(
+                "completed length exceeds the segment range",
+            ));
+        }
+        sqlite_i64("start_offset", segment.start_offset)?;
+        sqlite_i64("end_offset", segment.end_offset)?;
+        sqlite_i64("completed_length", segment.completed_length)?;
+    }
+    Ok(())
 }
 
 fn current_timestamp() -> i64 {
