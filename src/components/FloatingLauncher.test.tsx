@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -130,4 +131,18 @@ it('switches the launcher graphic when the theme changes', () => {
     theme.listeners.forEach((listener) => listener());
   });
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
+});
+
+it('renders the transparent launcher image without a second hexagon crop edge', () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<FloatingLauncher onParse={vi.fn()} />);
+
+    const image = screen.getByRole('button', { name: '打开下载输入' }).querySelector('img');
+    expect(getComputedStyle(image!).clipPath).not.toContain('polygon');
+  } finally {
+    stylesheet.remove();
+  }
 });
