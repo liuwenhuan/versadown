@@ -86,9 +86,13 @@ it('controls the current upload with pause resume and cancel and preserves compl
   expect(screen.queryByRole('button', { name: '继续上传' })).not.toBeInTheDocument();
   await act(async () => { acknowledge(); });
   const resumeButton = await screen.findByRole('button', { name: '继续上传' });
+  expect(screen.getByText(/10 B\/s/)).toBeVisible();
   expect(resumeButton).toHaveTextContent('');
   expect(resumeButton.querySelector('svg')).toBeVisible();
   await user.click(resumeButton);
+  expect(screen.getByText(/10 B\/s/)).toBeVisible();
+  await act(async () => { receive({ ...progress, speedBytesPerSecond: 25 }); });
+  expect(screen.getByText(/25 B\/s/)).toBeVisible();
   await user.click(await screen.findByRole('button', { name: '取消上传' }));
   expect(controlCloudUpload.mock.calls).toEqual(['pause', 'resume', 'cancel'].map(action => ['quark', 'upload-1', action]));
   expect(await screen.findByRole('button', { name: '正在取消…' })).toBeDisabled();

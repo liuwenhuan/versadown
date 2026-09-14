@@ -1164,7 +1164,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       await client.controlCloudUpload(provider, progress.uploadId, action);
       const latest = latestUploadProgress.current;
       if (!latest || latest.uploadId !== progress.uploadId || ['completed', 'failed', 'cancelled', 'cancelling'].includes(latest.phase)) return;
-      const next: CloudUploadProgress = { ...latest, phase: action === 'pause' ? 'paused' : action === 'cancel' ? 'cancelling' : 'uploading', speedBytesPerSecond: 0 };
+      const next: CloudUploadProgress = { ...latest, phase: action === 'pause' ? 'paused' : action === 'cancel' ? 'cancelling' : 'uploading' };
       latestUploadProgress.current = next;
       setOperation(current => current?.uploadProgress?.uploadId === progress.uploadId ? { ...current, uploadProgress: next } : current);
     } catch (error) {

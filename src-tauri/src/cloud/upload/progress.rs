@@ -203,7 +203,11 @@ impl UploadProgressTracker {
             .control
             .as_ref()
             .is_some_and(|control| control.is_cancelled());
-        let speed = if terminal || paused || cancelling || elapsed.is_zero() {
+        // `traffic_since_sample` is incremented only when reqwest asks the
+        // streaming body for more file bytes. Do not hide that real traffic
+        // merely because a pause or cancel request raced with the sample; the
+        // following sample will naturally become zero once the reader stops.
+        let speed = if terminal || elapsed.is_zero() {
             0.0
         } else {
             state.traffic_since_sample as f64 / elapsed.as_secs_f64()
@@ -274,7 +278,7 @@ mod upload_progress_tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn upload_control_progress_keeps_id_and_bytes_while_paused_and_cancelling() {
+    fn upload_control_progress_reports_recent_traffic_before_a_pause_takes_effect() {
         let tracker = UploadProgressTracker::new(CloudProvider::Xunlei);
         let control = super::super::UploadControl::default();
         tracker.bind_session("fixture-upload".into(), control.clone());
@@ -285,7 +289,7 @@ mod upload_progress_tests {
         let paused = tracker.sample(Duration::from_millis(250));
         assert_eq!(paused.phase, "paused");
         assert_eq!(paused.uploaded_bytes, 20);
-        assert_eq!(paused.speed_bytes_per_second, 0.0);
+        assert_eq!(paused.speed_bytes_per_second, 80.0);
         assert_eq!(
             serde_json::to_value(&paused).unwrap()["uploadId"],
             "fixture-upload"

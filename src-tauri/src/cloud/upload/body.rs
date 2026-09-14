@@ -10,6 +10,10 @@ use std::{
     time::SystemTime,
 };
 
+/// Keep HTTP upload readers responsive to pause and cancellation without adding
+/// enough read-call overhead to affect normal internet upload throughput.
+const MAX_UPLOAD_READ_SIZE: usize = 256 * 1024;
+
 #[derive(Clone, Default)]
 pub struct UploadControl {
     signal: Arc<UploadSignal>,
@@ -350,7 +354,8 @@ impl Read for SliceReader {
         if buffer.is_empty() || self.remaining == 0 {
             return Ok(0);
         }
-        let count = self.file.read(buffer)?;
+        let read_limit = buffer.len().min(MAX_UPLOAD_READ_SIZE);
+        let count = self.file.read(&mut buffer[..read_limit])?;
         if count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -574,6 +579,40 @@ mod upload_control_body_tests {
         let (result, bytes) = received.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok());
         assert_eq!(bytes, b"PAYLOAD");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn upload_control_bounds_file_reads_to_256_kib_and_pauses_before_the_next_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload.bin");
+        let payload = vec![0x5A; 512 * 1024];
+        std::fs::write(&path, &payload).unwrap();
+        let control = UploadControl::default();
+        let mut reader = UploadFileSnapshot::capture(&path)
+            .unwrap()
+            .slice(0, payload.len() as u64)
+            .unwrap()
+            .reader(control.clone())
+            .unwrap();
+        let mut buffer = vec![0; payload.len()];
+
+        assert_eq!(reader.read(&mut buffer).unwrap(), 256 * 1024);
+        assert_eq!(control.bytes_read(), 256 * 1024);
+
+        control.pause().unwrap();
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || sent.send(reader.read(&mut buffer)).unwrap());
+        assert!(received.recv_timeout(Duration::from_millis(75)).is_err());
+
+        control.resume().unwrap();
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            256 * 1024
+        );
         worker.join().unwrap();
     }
 
