@@ -40,10 +40,10 @@ it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
     { id: 'file', name: 'file.iso', kind: 'file', status: 'downloading', progress: 25, connections: 99 },
   ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
 
-  expect(screen.getByText('已连接 3 / 已发现 8')).toBeVisible();
-  expect(screen.getByText('已连接 1 / 已发现 4')).toBeVisible();
+  expect(screen.getByText('下载源 3/8')).toBeVisible();
+  expect(screen.getByText('下载源 1/4')).toBeVisible();
   expect(screen.getByText('已连接 2')).toBeVisible();
-  expect(screen.queryByText('已连接 6 / 已发现 9')).not.toBeInTheDocument();
+  expect(screen.queryByText('下载源 6/9')).not.toBeInTheDocument();
   expect(screen.queryByText('已连接 99')).not.toBeInTheDocument();
 });
 
@@ -223,6 +223,22 @@ it('shows an active cloud directory with the standard transfer metrics', () => {
   expect(screen.getByText('剩余 8 分 49 秒')).toBeVisible();
   expect(screen.getByText('313.5 KB/s')).toBeVisible();
   expect(screen.queryByText('目录任务 · 1 个文件')).not.toBeInTheDocument();
+});
+
+it('keeps the remaining-time and speed values in dedicated stable layout slots', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'stable-live-metrics', name: 'large-file.bin', kind: 'file', status: 'downloading', progress: 34,
+      total_length: 500 * 1024 * 1024, completed_length: 170 * 1024 * 1024,
+      download_speed: Math.round(6.6 * 1024 * 1024), eta_seconds: 49,
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('剩余 49 秒')).toHaveClass('transfer-eta');
+  expect(screen.getByText('6.6 MB/s')).toHaveClass('transfer-speed');
 });
 
 it('does not expose expansion for a single-file torrent task', () => {

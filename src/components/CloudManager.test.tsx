@@ -563,6 +563,52 @@ it.each([
 });
 
 it.each([
+  ['quark', '夸克', 'https://pan.quark.cn'],
+  ['pikpak', 'PikPak', 'https://mypikpak.com/drive'],
+  ['baidu', '百度', 'https://pan.baidu.com'],
+  ['tianyi', '天翼', 'https://cloud.189.cn'],
+  ['aliyun', '阿里', 'https://www.aliyundrive.com/drive'],
+  ['xunlei', '迅雷', 'https://pan.xunlei.com'],
+  ['uc', 'UC', 'https://drive.uc.cn']
+] as const)('opens the %s provider information from its authorization card', async (provider, label, authorizationUrl) => {
+  const user = userEvent.setup();
+  const descriptor = { ...cloudCatalog.find(item => item.provider === provider)!, authorizationUrl };
+  render(<NativeCloudManager descriptor={descriptor} provider={provider} client={createCloudFake()} authorizationOnly />);
+
+  await user.click(screen.getByRole('button', { name: `查看${label}网盘信息` }));
+
+  const dialog = screen.getByRole('dialog', { name: `${label}网盘信息` });
+  expect(within(dialog).getByRole('link', { name: `${label}网盘官方网站` })).toHaveAttribute('href', authorizationUrl);
+  expect(within(dialog).getByRole('link', { name: '插件制作者 aigutta' })).toHaveAttribute('href', 'https://versadown.aigutta.com');
+  await user.click(within(dialog).getByRole('button', { name: `关闭${label}网盘信息` }));
+  expect(screen.queryByRole('dialog', { name: `${label}网盘信息` })).not.toBeInTheDocument();
+});
+
+it('shows the regional access notice only for PikPak', async () => {
+  const user = userEvent.setup();
+  const pikpak = { ...cloudCatalog.find(item => item.provider === 'pikpak')!, authorizationUrl: 'https://mypikpak.com/drive' };
+  const view = render(<NativeCloudManager descriptor={pikpak} provider="pikpak" client={createCloudFake()} authorizationOnly />);
+  await user.click(screen.getByRole('button', { name: '查看PikPak网盘信息' }));
+  expect(screen.getByRole('dialog', { name: 'PikPak网盘信息' })).toHaveTextContent('本网盘中国大陆无法直接访问。');
+
+  view.rerender(<CloudManager provider="quark" client={createCloudFake()} authorizationOnly />);
+  await user.click(screen.getByRole('button', { name: '查看夸克网盘信息' }));
+  expect(screen.getByRole('dialog', { name: '夸克网盘信息' })).not.toHaveTextContent('中国大陆无法直接访问');
+});
+
+it('shows Tianyi device-lock guidance and keeps provider information available after authorization', async () => {
+  const user = userEvent.setup();
+  const descriptor = { ...cloudCatalog.find(item => item.provider === 'tianyi')!, authorizationUrl: 'https://cloud.189.cn' };
+  render(<NativeCloudManager descriptor={descriptor} provider="tianyi" client={createCloudFake()} authorizationOnly initialAccount={{ id: 't-1', displayName: 'alice', provider: 'tianyi', authMethod: 'password' }} restoreOnMount={false} />);
+
+  await user.click(screen.getByRole('button', { name: '查看天翼网盘信息' }));
+  const dialog = screen.getByRole('dialog', { name: '天翼网盘信息' });
+  expect(dialog).toHaveTextContent('如果通过账号和密码登录，推荐登录门户网址');
+  expect(dialog).toHaveTextContent('点击“账号安全”，关闭“设备锁”，这样无需每次登录做短信认证。');
+  expect(within(dialog).getByRole('link', { name: '天翼账号登录门户' })).toHaveAttribute('href', 'https://e.dlife.cn');
+});
+
+it.each([
   ['aliyun', '阿里'],
   ['xunlei', '迅雷'],
   ['uc', 'UC']

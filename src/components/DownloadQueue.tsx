@@ -152,7 +152,7 @@ function taskPeerMetric(task: QueueTask): string | undefined {
   if (task.status !== 'downloading') return undefined;
   const connections = task.connections ?? 0;
   if (task.kind === 'magnet' || task.kind === 'torrent') {
-    return '已连接 ' + connections + ' / 已发现 ' + (task.discovered_nodes ?? 0);
+    return '下载源 ' + connections + '/' + (task.discovered_nodes ?? 0);
   }
   return task.kind === 'ed2k' ? '已连接 ' + connections : undefined;
 }
@@ -494,7 +494,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
               <span className="task-copy"><b title={taskName}>{taskName}</b>{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}</span>
             </div>
-            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span>剩余 {eta}</span>}{hasSpeed && <span>{speed}</span>}</>}</span></div></div>}
+            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span className="transfer-eta">剩余 {eta}</span>}{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></div></div>}
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasPlayableMedia ? `播放 ${taskName}` : completedFileType ? `${associatedFileLabels[completedFileType]} ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasPlayableMedia ? '播放视频或音频' : completedFileType ? '使用系统默认应用打开' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasPlayableMedia ? 'play_videos' : completedFileType ? 'open_file' : 'open_directory'); }}><ActionIcon action={completedHasPlayableMedia ? 'play' : completedFileType ?? 'folder'} /></button>}

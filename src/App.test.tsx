@@ -51,7 +51,7 @@ it('places authorized cloud submenus below My Cloud and opens their files from a
     expect(labels.indexOf('夸克网盘')).toBeGreaterThan(labels.indexOf('我的网盘'));
     expect(labels.indexOf('PikPak网盘')).toBeLessThan(labels.indexOf('设置'));
     expect(quark.querySelector('svg')).toBeNull();
-    expect(quark).toHaveStyle({ fontSize: '13px', paddingLeft: '44px' });
+    expect(quark).toHaveStyle({ fontSize: '14px', paddingLeft: '44px' });
     expect(within(navigation).getByRole('button', { name: '我的网盘' })).toHaveStyle({ fontSize: '15px', gridTemplateColumns: '28px 1fr auto', gap: '6px', paddingLeft: '10px' });
     expect(quark).not.toHaveAttribute('aria-current');
 

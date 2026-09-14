@@ -26,6 +26,86 @@ fn torrent_task(source: impl Into<String>) -> NewTask {
 }
 
 #[tokio::test]
+async fn torrent_metadata_name_replaces_the_local_torrent_filename() {
+    for (source, content_name, files) in [
+        (
+            "C:\\Downloads\\release-bundle.torrent",
+            "发布合集",
+            json!([
+                {"index":"1","path":"发布合集/episode.mp4","length":"70","completedLength":"0","selected":"true"},
+                {"index":"2","path":"发布合集/readme.txt","length":"30","completedLength":"0","selected":"true"}
+            ]),
+        ),
+        (
+            "C:\\Downloads\\opaque-name.torrent",
+            "actual-video.mkv",
+            json!([
+                {"index":"1","path":"actual-video.mkv","length":"100","completedLength":"0","selected":"true"}
+            ]),
+        ),
+    ] {
+        let content_name_for_server = content_name.to_string();
+        let (client, server) =
+            fixture::server(move |request| match request["method"].as_str().unwrap() {
+                "aria2.addTorrent" => json!("torrent-name-gid"),
+                "aria2.tellStatus" => {
+                    let mut status = fixture::status("torrent-name-gid", "paused", 0);
+                    status["bittorrent"] = json!({"info":{"name":content_name_for_server}});
+                    status["files"] = files.clone();
+                    status
+                }
+                other => panic!("unexpected method {other}"),
+            })
+            .await;
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let task = store.create(torrent_task(source)).unwrap();
+        let service = DownloadService::new(Arc::new(client), store.clone());
+
+        let pending = service
+            .submit_torrent(
+                task.id,
+                "dG9ycmVudC1ieXRlcw==".into(),
+                vec![],
+                Default::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(pending.name, content_name);
+        assert_eq!(store.find(task.id).unwrap().name, content_name);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn reconcile_replaces_a_legacy_torrent_filename_with_its_content_name() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "system.multicall" => {
+            let mut status = fixture::status("legacy-torrent-gid", "paused", 0);
+            status["bittorrent"] = json!({"info":{"name":"旧任务内容目录"}});
+            status["files"] = json!([
+                {"index":"1","path":"旧任务内容目录/episode.mp4","length":"100","completedLength":"0","selected":"true"}
+            ]);
+            json!([[status]])
+        }
+        "aria2.getGlobalStat" => fixture::global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(torrent_task("C:\\Downloads\\legacy-file.torrent"))
+        .unwrap();
+    store.bind_gid(task.id, "legacy-torrent-gid").unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    service.reconcile_now().await.unwrap();
+
+    assert_eq!(store.find(task.id).unwrap().name, "旧任务内容目录");
+    server.abort();
+}
+
+#[tokio::test]
 async fn reconcile_tracks_unique_peers_for_an_active_torrent() {
     let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
         "system.multicall" => json!([[fixture::status("torrent-gid", "active", 0)]]),

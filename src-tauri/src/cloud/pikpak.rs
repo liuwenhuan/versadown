@@ -114,6 +114,61 @@ mod tests {
     fn cap() -> Value {
         json!({"captcha_token":"share-captcha","expires_in":300,"url":""})
     }
+    #[test]
+    fn pikpak_account_restore_does_not_request_drive_captcha_for_auth_endpoint() {
+        let store = credentials();
+        let mut session: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+        session.captcha_action = Some("GET:/drive/v1/files".into());
+        store.save("pikpak", &serde_json::to_vec(&session).unwrap()).unwrap();
+        let http = Http::new(vec![json!({"sub":"u1","name":"fixture"})]);
+        let account = ProviderRegistry::global().driver(CloudProvider::Pikpak, &store, &http).account().unwrap();
+        assert_eq!(account.id, "u1");
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+        assert!(http.requests.lock().unwrap()[0].url.ends_with("/v1/user/me"));
+    }
+    #[test]
+    fn pikpak_share_rotation_does_not_relabel_share_ticket_as_recycle_permission() {
+        struct ScopedTickets;
+        impl CloudHttpTransport for ScopedTickets {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                let url = url::Url::parse(&request.url).unwrap();
+                let body: Value = request.body.as_deref().map(|body| serde_json::from_str(body).unwrap()).unwrap_or(Value::Null);
+                let token = request.headers.get("X-Captcha-Token").map(String::as_str);
+                let response = match (request.method, url.path()) {
+                    ("POST", "/v1/shield/captcha/init") => {
+                        let ticket = match body["action"].as_str().unwrap() {
+                            "GET:/drive/v1/share" => "share-only",
+                            "GET:/drive/v1/files" => "list-only",
+                            "POST:/drive/v1/files:batchDelete" => "delete-only",
+                            _ => panic!("unexpected verification action"),
+                        };
+                        json!({"captcha_token":ticket,"expires_in":300})
+                    }
+                    ("GET", "/drive/v1/files") if token == Some("list-only") =>
+                        json!({"files":[{"id":"fixture","name":"test","kind":"drive#folder"}],"next_page_token":""}),
+                    ("POST", "/drive/v1/files:batchDelete") if token == Some("delete-only") => {
+                        assert_eq!(body["ids"], json!(["fixture"]));
+                        json!({"task_id":"deletion"})
+                    }
+                    _ => return Ok(CloudHttpResponse {
+                        status: 400,
+                        body: json!({"error_code":3,"error":"invalid_argument"}).to_string(),
+                        set_cookies: vec![],
+                    }),
+                };
+                Ok(CloudHttpResponse { status: 200, body: response.to_string(), set_cookies: vec![] })
+            }
+        }
+        let store = credentials();
+        let mut saved: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+        saved.captcha_action = Some("GET:/drive/v1/files".into());
+        store.save("pikpak", &serde_json::to_vec(&saved).unwrap()).unwrap();
+        let http = ScopedTickets;
+        let adapter = PikPakShareAdapter { credentials: &store, http: &http };
+        adapter.session().unwrap().refresh_action_captcha("GET", &format!("{SHARE_DRIVE}/drive/v1/share")).unwrap();
+        ProviderRegistry::global().driver(CloudProvider::Pikpak, &store, &http)
+            .delete(&["fixture".into()]).unwrap();
+    }
     fn pass() -> Value {
         json!({"share_status":"OK","pass_code_token":"pass-secret"})
     }
@@ -857,7 +912,12 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
             action.as_str(),
             "POST:/drive/v1/files:batchDelete" | "POST:/drive/v1/files:batchUntrash"
         );
-        if (requires_explicit_action_token || s.captcha_action.is_some()) && !has_action_token {
+        // Drive tickets do not scope the separate authentication service.
+        // Account restoration must remain usable after a drive/share operation.
+        if url.starts_with(&format!("{DRIVE}/"))
+            && (requires_explicit_action_token || s.captcha_action.is_some())
+            && !has_action_token
+        {
             s = self.refresh_action_captcha(method, &url, s)?;
             captcha_refreshed = true;
         }
@@ -1533,6 +1593,9 @@ impl PikPakShareSession<'_> {
         self.session.captcha_token = token.clone();
         self.session.captcha_expires_at =
             now().saturating_add(value["expires_in"].as_u64().unwrap_or(300));
+        // Persist the ticket and its scope together. A share ticket must not
+        // inherit a previous drive/list/delete action when reusing the session.
+        self.session.captcha_action = Some(action.clone());
         self.headers.insert("X-Captcha-Token".into(), token);
         if let Some(challenge) = challenge.as_deref() {
             self.session.verification_url =

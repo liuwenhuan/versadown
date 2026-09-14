@@ -442,6 +442,7 @@ impl DownloadService {
                 .cleanup_rejected_torrent(task_id, &gid, Aria2Error::MalformedResponse.into())
                 .await);
         }
+        let content_name = super::recovery::recovery_name(&status);
         let mut aria_status = status.status.clone();
         let mut snapshot = match TransferSnapshot::try_from(status) {
             Ok(snapshot) => snapshot,
@@ -496,7 +497,7 @@ impl DownloadService {
                         .cleanup_rejected_torrent(task_id, &gid, DownloadServiceError::EmptyTorrent)
                         .await);
                 }
-                let current = match if rebind_existing_task {
+                let mut current = match if rebind_existing_task {
                     self.store
                         .rebind_for_resubmission(task_id, &gid)
                         .and_then(|_| self.store.bind_awaiting_gid(task_id, &gid))
@@ -507,9 +508,12 @@ impl DownloadService {
                     Err(error) => {
                         return Err(self
                             .cleanup_rejected_torrent(task_id, &gid, error.into())
-                            .await)
+                        .await)
                     }
                 };
+                if let Some(name) = content_name {
+                    current.name = name;
+                }
                 if rebind_existing_task {
                     self.clear_observed_peers(task_id);
                 }
@@ -966,7 +970,7 @@ impl DownloadService {
                 return Err(Aria2Error::MalformedResponse.into());
             }
             let Some(next) = status.followed_by.first().cloned() else {
-                if super::recovery::needs_recovery_name(&current) {
+                if current.kind == "torrent" || super::recovery::needs_recovery_name(&current) {
                     let name = super::recovery::recovery_name(&status).or_else(|| {
                         let files = self.store.files(current.id).ok()?;
                         super::recovery::recovery_file_name(
