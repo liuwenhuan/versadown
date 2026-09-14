@@ -922,7 +922,6 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                         println!(
                             "LIVE_ALIYUN_PREFLIGHT state=insufficient no_task=true remote={remote}"
                         );
-                        return Ok(());
                     }
                     Ok(()) => {
                         println!(
@@ -931,6 +930,32 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                     }
                     Err(error) => return Err(error.into()),
                 }
+                let reusable_ids = sources
+                    .iter()
+                    .map(|source| {
+                        Ok(plans
+                            .resolve_entry(source)?
+                            .entry
+                            .entry_fingerprint)
+                    })
+                    .collect::<Result<Vec<_>, QuarkError>>()?;
+                let reusable_selection = selected_share_download(
+                    &plans,
+                    &confirmation.plan_source,
+                    &reusable_ids,
+                )?;
+                let before = transport.observation_count();
+                preflight_selected_share_download(
+                    &plans,
+                    adapter.as_ref(),
+                    &reusable_selection,
+                )?;
+                let remote = transport.observations_since(before);
+                assert!(
+                    remote.is_empty(),
+                    "reusable Aliyun samples unexpectedly made a remote preflight request: {remote}"
+                );
+                println!("LIVE_ALIYUN_PREFLIGHT state=reusable no_transfer=true remote=none");
                 (confirmation.resources.len(), sources)
             }
             ShareConfirmationOutcome::AccessCodeRequired => {
