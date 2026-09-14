@@ -370,6 +370,23 @@ pub async fn parse_download(
                 if require_confirmation.unwrap_or(false) {
                     return Ok(ParseDownloadOutcome::ShareConfirmation(confirmation));
                 }
+                let cloud = app
+                    .try_state::<Arc<crate::cloud::commands::CloudState>>()
+                    .ok_or_else(|| "网盘分享下载状态不可用，请重新解析分享链接".to_string())?;
+                let selected_ids = confirmation
+                    .resources
+                    .iter()
+                    .map(|resource| resource.id.clone())
+                    .collect::<Vec<_>>();
+                let selection = crate::cloud::share::selected_share_download(
+                    &cloud.share_plans,
+                    &confirmation.plan_source,
+                    &selected_ids,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::cloud::commands::preflight_cloud_share_download(app.clone(), &selection)
+                    .await
+                    .map_err(|error| error.to_string())?;
                 let configured = download_submission_options(&state)?;
                 let action = crate::cloud::commands::submit_cloud_share_file(
                     app, &state, source, configured, false, None,
@@ -523,6 +540,7 @@ pub async fn confirm_cloud_share_download(
     let private_download = private_download.unwrap_or(false);
     ensure_private_download_enabled(&state, private_download)
         .map_err(crate::cloud::QuarkError::InvalidInput)?;
+    crate::cloud::commands::preflight_cloud_share_download(app.clone(), &selection).await?;
     if selection.directory_name.is_some() {
         let plan = crate::cloud::commands::plan_cloud_share_directory_download(&selection)?;
         let store = Arc::clone(&state.store);
@@ -3188,6 +3206,35 @@ mod tests {
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
         DuplicateDownloadState, NewTask,
     };
+
+    #[test]
+    fn confirmed_share_preflight_precedes_directory_and_file_submission() {
+        let body = include_str!("commands.rs")
+            .split_once("pub async fn confirm_cloud_share_download(")
+            .unwrap()
+            .1
+            .split_once("fn mark_cloud_share_outcomes_private(")
+            .unwrap()
+            .0;
+        let preflight = body.find("preflight_cloud_share_download").unwrap();
+        assert!(preflight < body.find("submit_cloud_directory_plan_with_group_event").unwrap());
+        assert!(preflight < body.find("submit_cloud_share_batch_with").unwrap());
+    }
+
+    #[test]
+    fn automatic_share_preflight_precedes_file_submission() {
+        let body = include_str!("commands.rs")
+            .split_once("pub async fn parse_download(")
+            .unwrap()
+            .1
+            .split_once("let mut outcome = prepare_download")
+            .unwrap()
+            .0;
+        assert!(
+            body.find("preflight_cloud_share_download").unwrap()
+                < body.find("submit_cloud_share_file").unwrap()
+        );
+    }
 
     #[cfg(windows)]
     #[test]

@@ -26,6 +26,29 @@ pub async fn inspect_cloud_share(
     .await
 }
 
+pub async fn preflight_cloud_share_download(
+    app: AppHandle,
+    selection: &share::CloudShareDownloadSelection,
+) -> Result<(), QuarkError> {
+    let provider = selection.provider;
+    let selection = selection.clone();
+    let result = run_share_session_read_work(app, provider, move |state, http| {
+        let retrying_http = share::RetryingShareReadTransport::new(http);
+        let adapter = share::provider_share_adapter(provider, &state.store, &retrying_http)?;
+        share::preflight_selected_share_download(&state.share_plans, adapter.as_ref(), &selection)
+    })
+    .await;
+    result.map_err(share_preflight_user_error)
+}
+
+fn share_preflight_user_error(error: QuarkError) -> QuarkError {
+    if error.to_string().contains("未建立下载任务") {
+        error
+    } else {
+        QuarkError::InvalidInput(format!("{error}，未建立下载任务。"))
+    }
+}
+
 pub async fn resolve_stable_cloud_share_download(
     app: AppHandle,
     source: &str,
