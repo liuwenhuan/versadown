@@ -787,6 +787,7 @@ pub(crate) fn cloud_directory_group_task_outcome(
                 download_speed: queue_task.download_speed,
                 upload_speed: queue_task.upload_speed,
                 connections: queue_task.connections,
+                discovered_nodes: queue_task.discovered_nodes,
                 eta_seconds: queue_task.eta_seconds,
                 aria_error_code: None,
                 created_at: group.created_at,

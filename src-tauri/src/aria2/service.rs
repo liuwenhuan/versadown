@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -136,6 +136,7 @@ pub struct DownloadService {
     published: std::sync::Mutex<BTreeMap<Uuid, serde_json::Value>>,
     global: std::sync::Mutex<Option<Aria2GlobalStat>>,
     resume_versions: std::sync::Mutex<BTreeMap<String, u64>>,
+    observed_peers: std::sync::Mutex<HashMap<Uuid, HashSet<String>>>,
     pub(super) operation: tokio::sync::Mutex<()>,
     restart_budget: super::recovery::RestartBudget,
 }
@@ -151,6 +152,7 @@ impl DownloadService {
             published: Default::default(),
             global: Default::default(),
             resume_versions: Default::default(),
+            observed_peers: Default::default(),
             operation: Default::default(),
             restart_budget: Default::default(),
         }
@@ -291,6 +293,7 @@ impl DownloadService {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
+        self.clear_observed_peers(task_id);
         self.finish_directory_uri(task_id, &gid, directory).await
     }
 
@@ -315,6 +318,7 @@ impl DownloadService {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
+        self.clear_observed_peers(task_id);
         self.finish_directory_uri(task_id, &gid, directory).await
     }
 
@@ -350,6 +354,7 @@ impl DownloadService {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
         }
+        self.clear_observed_peers(expected.id);
         self.finish_directory_uri(expected.id, &gid, directory)
             .await
             .map(Some)
@@ -505,6 +510,9 @@ impl DownloadService {
                             .await)
                     }
                 };
+                if rebind_existing_task {
+                    self.clear_observed_peers(task_id);
+                }
                 snapshot.status = TaskStatus::AwaitingUser;
                 self.persist_snapshot(current, snapshot)
             }
@@ -531,6 +539,9 @@ impl DownloadService {
                             .await)
                     }
                 };
+                if rebind_existing_task {
+                    self.clear_observed_peers(task_id);
+                }
                 self.persist_snapshot(current, snapshot)?;
                 Err(DownloadServiceError::TorrentNotSelectable(aria_status))
             }
@@ -911,10 +922,10 @@ impl DownloadService {
             for (task, response) in chunk.iter().zip(responses) {
                 let result = match response {
                     Ok(value) => match serde_json::from_value::<Aria2Status>(value) {
-                        Ok(status) => self
-                            .apply_status(task.clone(), status, false)
-                            .await
-                            .map(|_| ()),
+                        Ok(status) => match self.apply_status(task.clone(), status, false).await {
+                            Ok(updated) => self.sync_discovered_nodes(updated).await,
+                            Err(error) => Err(error),
+                        },
                         Err(_) => Err(Aria2Error::MalformedResponse.into()),
                     },
                     Err(fault) => Err(Aria2Error::Rpc(fault).into()),
@@ -1095,6 +1106,10 @@ impl DownloadService {
                     }
                     *owned = Some(process);
                     *self.api.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(client.clone());
+                    self.observed_peers
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clear();
                     client
                 };
                 let recovery = self.recover_native(&download_root).await;
@@ -1120,6 +1135,7 @@ impl DownloadService {
         task.download_speed = 0;
         task.upload_speed = 0;
         let task = self.store.apply_transfer_snapshot(task)?;
+        self.clear_observed_peers(task.id);
         self.publish_task(&task)?;
         Ok(task)
     }
@@ -1190,6 +1206,57 @@ impl DownloadService {
             .apply_transfer_snapshot_with_files(task, &files)?;
         self.publish_task(&task)?;
         Ok(task)
+    }
+
+    async fn sync_discovered_nodes(
+        &self,
+        mut updated: DownloadTask,
+    ) -> Result<(), DownloadServiceError> {
+        if !matches!(updated.kind.as_str(), "magnet" | "torrent") {
+            return Ok(());
+        }
+        if !matches!(updated.status, TaskStatus::Downloading) {
+            if matches!(
+                updated.status,
+                TaskStatus::Completed
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Recycled
+            ) {
+                self.clear_observed_peers(updated.id);
+            }
+            return Ok(());
+        }
+        let Some(gid) = updated.aria_gid.as_deref() else {
+            return Ok(());
+        };
+        if let Ok(peers) = self.api().get_peers(gid).await {
+            let mut observed = self
+                .observed_peers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let seen = observed.entry(updated.id).or_default();
+            seen.extend(
+                peers
+                    .into_iter()
+                    .map(|peer| format!("{}:{}", peer.ip, peer.port)),
+            );
+            let discovered_nodes = seen.len().try_into().unwrap_or(u32::MAX);
+            drop(observed);
+            if updated.discovered_nodes != discovered_nodes {
+                updated.discovered_nodes = discovered_nodes;
+                let updated = self.store.apply_transfer_snapshot(updated)?;
+                self.publish_task(&updated)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_observed_peers(&self, task_id: Uuid) {
+        self.observed_peers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&task_id);
     }
 
     pub(super) fn publish_task(&self, task: &DownloadTask) -> Result<(), DownloadServiceError> {

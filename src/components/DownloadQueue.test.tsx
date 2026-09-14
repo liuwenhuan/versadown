@@ -4,6 +4,22 @@ import { vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { DownloadQueue, taskContextMenuPosition } from './DownloadQueue';
 
+it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
+  render(<DownloadQueue tasks={[
+    { id: 'magnet', name: 'movie.mkv', kind: 'magnet', status: 'downloading', progress: 25, connections: 3, discovered_nodes: 8 },
+    { id: 'torrent', name: 'bundle', kind: 'torrent', status: 'downloading', progress: 25, connections: 1, discovered_nodes: 4 },
+    { id: 'ed2k', name: 'archive.zip', kind: 'ed2k', status: 'downloading', progress: 25, connections: 2 },
+    { id: 'paused', name: 'paused.torrent', kind: 'torrent', status: 'paused', progress: 25, connections: 6, discovered_nodes: 9 },
+    { id: 'file', name: 'file.iso', kind: 'file', status: 'downloading', progress: 25, connections: 99 },
+  ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+
+  expect(screen.getByText('已连接 3 / 已发现 8')).toBeVisible();
+  expect(screen.getByText('已连接 1 / 已发现 4')).toBeVisible();
+  expect(screen.getByText('已连接 2')).toBeVisible();
+  expect(screen.queryByText('已连接 6 / 已发现 9')).not.toBeInTheDocument();
+  expect(screen.queryByText('已连接 99')).not.toBeInTheDocument();
+});
+
 const folderTask = {
   id: 'folder-1', name: 'Season 1', kind: 'folder', status: 'downloading', progress: 42,
   children: [{ id: 'file-1', name: 'episode-01.mkv', kind: 'file', status: 'downloading', progress: 50, size: '8 MB / 161.2 MB' }]

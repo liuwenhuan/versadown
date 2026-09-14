@@ -8,7 +8,7 @@ const rawMagnet = 'magnet:?xt=urn:btih:46A00FD699618BC0319C45F7075C067D564A0819&
 const tasks: QueueTask[] = [
   {
     id: 'magnet-visual', name: rawMagnet, source: rawMagnet, kind: 'magnet', status: 'downloading', progress: 37,
-    speed: '12.8 MB/s', size: '1.2 GB / 3.1 GB', eta: '2分31秒', connections: 18,
+    speed: '12.8 MB/s', size: '1.2 GB / 3.1 GB', eta: '2分31秒', connections: 18, discovered_nodes: 42,
     children: [
       { id: 'episode-1', name: 'Lanterns.S01E04.1080p.HMAX.WEBRip.AAC5.1.10bits.x265-Rapta.mkv', kind: 'file', status: 'downloading', progress: 41, size: '1.2 GB / 2.9 GB' },
       { id: 'subtitle-1', name: 'Lanterns.S01E04.English.Forced.Subtitle.with.an.intentionally.long.file.name.ass', kind: 'file', status: 'completed', progress: 100, size: '218 KB / 218 KB' },

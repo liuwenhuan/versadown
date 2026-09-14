@@ -143,6 +143,34 @@ async fn protected_call_prepends_secret_and_preserves_options() {
 }
 
 #[tokio::test]
+async fn get_peers_sends_the_gid_and_decodes_peer_addresses() {
+    let (url, calls, handle) = fixture(
+        json!({"jsonrpc":"2.0","id":"1","result":[
+            {"ip":"203.0.113.10","port":"51413"},
+            {"ip":"2001:db8::7","port":"51414"}
+        ]}),
+        StatusCode::OK,
+        Duration::ZERO,
+    )
+    .await;
+    let client = Aria2RpcClient::new(url, RpcSecret::from_bytes([0xab; 32])).unwrap();
+
+    let peers = client.get_peers("bt-gid").await.unwrap();
+    handle.abort();
+
+    assert_eq!(peers.len(), 2);
+    assert_eq!(peers[0].ip, "203.0.113.10");
+    assert_eq!(peers[1].port, "51414");
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[0]["method"], "aria2.getPeers");
+    assert_eq!(calls[0]["params"][1], "bt-gid");
+    assert!(calls[0]["params"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("token:"));
+}
+
+#[tokio::test]
 async fn response_failures_are_typed() {
     for (reply, status, expected) in [
         (

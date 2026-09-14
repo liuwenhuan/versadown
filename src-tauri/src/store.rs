@@ -244,6 +244,7 @@ impl TaskStore {
             download_speed: 0,
             upload_speed: 0,
             connections: 0,
+            discovered_nodes: 0,
             eta_seconds: None,
             aria_error_code: None,
             created_at,
@@ -957,7 +958,7 @@ impl TaskStore {
         connection.execute(
             "UPDATE tasks SET status='parsing',progress=0,error=NULL,failure_code=NULL,aria_gid=?1,followed_by_gid=NULL,
              metadata_gid=NULL,total_length=NULL,completed_length=0,download_speed=0,upload_speed=0,
-             connections=0,eta_seconds=NULL,aria_error_code=NULL,selection_confirmed=0,completed_at=NULL,updated_at=?2
+             connections=0,discovered_nodes=0,eta_seconds=NULL,aria_error_code=NULL,selection_confirmed=0,completed_at=NULL,updated_at=?2
              WHERE id=?3",
             params![gid, current_timestamp(), id.to_string()],
         )?;
@@ -1094,12 +1095,12 @@ impl TaskStore {
         let changed = transaction.execute(
             "UPDATE tasks SET name = ?1, status = ?2, progress = ?3, error = ?4, failure_code = ?5, aria_gid = ?6, followed_by_gid = ?7,
              total_length = ?8, completed_length = ?9, download_speed = ?10, upload_speed = ?11,
-             connections = ?12, eta_seconds = ?13, aria_error_code = ?14, updated_at = ?15, completed_at = ?16 WHERE id = ?17",
+             connections = ?12, discovered_nodes = ?13, eta_seconds = ?14, aria_error_code = ?15, updated_at = ?16, completed_at = ?17 WHERE id = ?18",
             params![
                 snapshot.name, snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.failure_code, snapshot.aria_gid,
                 snapshot.followed_by_gid, snapshot.total_length.map(|value| sqlite_i64("total_length", value)).transpose()?,
                 sqlite_i64("completed_length", snapshot.completed_length)?, sqlite_i64("download_speed", snapshot.download_speed)?,
-                sqlite_i64("upload_speed", snapshot.upload_speed)?, snapshot.connections,
+                sqlite_i64("upload_speed", snapshot.upload_speed)?, snapshot.connections, snapshot.discovered_nodes,
                 snapshot.eta_seconds.map(|value| sqlite_i64("eta_seconds", value)).transpose()?,
                 snapshot.aria_error_code, current_timestamp(), completed_at, snapshot.id.to_string(),
             ],
@@ -1301,7 +1302,7 @@ fn remove_managed_payload_file(
     Ok(ManagedFileRemoval::Removed)
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1381,6 +1382,11 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     if !column_exists(&transaction, "tasks", "is_private")? {
         transaction
             .execute_batch("ALTER TABLE tasks ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    if !column_exists(&transaction, "tasks", "discovered_nodes")? {
+        transaction.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN discovered_nodes INTEGER NOT NULL DEFAULT 0;",
+        )?;
     }
     if !column_exists(&transaction, "cloud_directory_groups", "is_private")? {
         transaction.execute_batch(
@@ -1523,13 +1529,14 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         download_speed: required_u64(row, 12)?,
         upload_speed: required_u64(row, 13)?,
         connections: row.get(14)?,
-        eta_seconds: optional_u64(row, 15)?,
-        aria_error_code: row.get(16)?,
-        updated_at: row.get(17)?,
-        completed_at: row.get(18)?,
-        metadata_gid: row.get(19)?,
-        created_at: row.get(20)?,
-        is_private: row.get(21)?,
+        discovered_nodes: row.get(15)?,
+        eta_seconds: optional_u64(row, 16)?,
+        aria_error_code: row.get(17)?,
+        updated_at: row.get(18)?,
+        completed_at: row.get(19)?,
+        metadata_gid: row.get(20)?,
+        created_at: row.get(21)?,
+        is_private: row.get(22)?,
     })
 }
 

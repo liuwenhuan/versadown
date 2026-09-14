@@ -1,4 +1,6 @@
-use super::types::{Aria2Error, Aria2GlobalStat, Aria2Status, Aria2Version, RpcFault, RpcSecret};
+use super::types::{
+    Aria2Error, Aria2GlobalStat, Aria2Peer, Aria2Status, Aria2Version, RpcFault, RpcSecret,
+};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -43,6 +45,9 @@ pub trait Aria2Api: Send + Sync {
     async fn tell_waiting(&self, offset: i64, count: u32) -> Result<Vec<Aria2Status>, Aria2Error>;
     async fn tell_stopped(&self, offset: i64, count: u32) -> Result<Vec<Aria2Status>, Aria2Error>;
     async fn get_global_stat(&self) -> Result<Aria2GlobalStat, Aria2Error>;
+    async fn get_peers(&self, _gid: &str) -> Result<Vec<Aria2Peer>, Aria2Error> {
+        Ok(vec![])
+    }
     async fn multicall(
         &self,
         calls: Vec<RpcCall>,
@@ -232,6 +237,9 @@ impl Aria2Api for Aria2RpcClient {
     }
     async fn get_global_stat(&self) -> Result<Aria2GlobalStat, Aria2Error> {
         self.call("aria2.getGlobalStat", vec![]).await
+    }
+    async fn get_peers(&self, gid: &str) -> Result<Vec<Aria2Peer>, Aria2Error> {
+        self.call("aria2.getPeers", vec![json!(gid)]).await
     }
     async fn pause(&self, gid: &str) -> Result<String, Aria2Error> {
         self.call("aria2.pause", vec![json!(gid)]).await
