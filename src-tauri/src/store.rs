@@ -344,6 +344,51 @@ impl TaskStore {
         Ok(groups)
     }
 
+    /// Membership and transfer rows must belong to the same SQLite snapshot.
+    /// During submission a new link must never be projected with an older list
+    /// of tasks, otherwise a real member briefly appears missing with zero bytes.
+    pub(crate) fn cloud_directory_snapshot(
+        &self,
+        id: Uuid,
+    ) -> Result<
+        Option<(
+            CloudDirectoryGroup,
+            Vec<CloudDirectoryGroupItem>,
+            Vec<DownloadTask>,
+        )>,
+        StoreError,
+    > {
+        use rusqlite::OptionalExtension;
+        validate_uuid(id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        let group = transaction.query_row(
+            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
+             FROM cloud_directory_groups WHERE id = ?1", [id.to_string()], cloud_directory_group_from_row,
+        ).optional()?;
+        let Some(group) = group else {
+            return Ok(None);
+        };
+        let items = {
+            let mut statement = transaction.prepare(
+                "SELECT id, group_id, item_index, remote_file_id, relative_directory, output_name, size, task_id, failure_code, failure_message
+                 FROM cloud_directory_group_items WHERE group_id = ?1 ORDER BY item_index",
+            )?;
+            let rows =
+                statement.query_map([id.to_string()], cloud_directory_group_item_from_row)?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let tasks = {
+            let mut statement = transaction.prepare(&format!(
+                "{TASK_SELECT} WHERE id IN (SELECT task_id FROM cloud_directory_group_items WHERE group_id = ?1)"
+            ))?;
+            let rows = statement.query_map([id.to_string()], task_from_row)?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        transaction.commit()?;
+        Ok(Some((group, items, tasks)))
+    }
+
     pub fn set_cloud_directory_group_private(
         &self,
         id: Uuid,

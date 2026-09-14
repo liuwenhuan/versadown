@@ -4,6 +4,7 @@ use tauri::{Emitter, Manager};
 mod ai;
 pub mod aria2;
 pub mod cloud;
+mod cloud_directory_events;
 mod commands;
 mod connectors;
 mod downloader;
@@ -77,19 +78,69 @@ struct TauriDownloadEvents {
     app: tauri::AppHandle,
     store: std::sync::Arc<TaskStore>,
     cloud: std::sync::Arc<cloud::commands::CloudState>,
+    directory_refreshes: std::sync::Arc<cloud_directory_events::CloudDirectoryRefreshes>,
+}
+
+impl TauriDownloadEvents {
+    fn schedule_directory_refresh(&self, root: uuid::Uuid) {
+        if !self.directory_refreshes.queue(root) {
+            return;
+        }
+        let refreshes = std::sync::Arc::clone(&self.directory_refreshes);
+        let app = self.app.clone();
+        let store = std::sync::Arc::clone(&self.store);
+        tauri::async_runtime::spawn(async move {
+            refreshes
+                .flush_pending(|roots| {
+                    let app = app.clone();
+                    let store = std::sync::Arc::clone(&store);
+                    async move {
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            for root in roots {
+                                if let Ok(payload) =
+                                    commands::cloud_directory_group_queue_task(&store, root)
+                                {
+                                    // Recheck privacy after the delayed projection:
+                                    // the user may have locked the session meanwhile.
+                                    let visible = app
+                                        .try_state::<commands::AppState>()
+                                        .map(|state| {
+                                            commands::should_emit_task_update(
+                                                &state,
+                                                payload.is_private,
+                                            )
+                                        })
+                                        .unwrap_or(!payload.is_private);
+                                    if visible {
+                                        let _ = app.emit(
+                                            "download-task-updated",
+                                            commands::TaskUpdatePayload::Queue(payload),
+                                        );
+                                    }
+                                }
+                            }
+                        })
+                        .await;
+                    }
+                })
+                .await;
+        });
+    }
 }
 
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
-        let private_visible = self
-            .app
-            .try_state::<commands::AppState>()
-            .and_then(|state| commands::privacy_task_visibility(&state).ok())
-            .is_some_and(|visibility| visibility.unlocked);
-        if let Ok(payload) =
+        if let Ok(Some(group)) = self.store.cloud_directory_group_for_task(task.id) {
+            self.schedule_directory_refresh(group.id);
+        } else if let Ok(payload) =
             commands::task_update_payload(&self.store, Some(&self.cloud.share_plans), task.clone())
         {
-            if !task.is_private || private_visible {
+            let visible = self
+                .app
+                .try_state::<commands::AppState>()
+                .map(|state| commands::should_emit_task_update(&state, task.is_private))
+                .unwrap_or(!task.is_private);
+            if visible {
                 let _ = self.app.emit("download-task-updated", payload);
             }
         }
@@ -231,6 +282,7 @@ pub fn run() {
                 app: app.handle().clone(),
                 store: std::sync::Arc::clone(&store),
                 cloud,
+                directory_refreshes: Default::default(),
             });
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,

@@ -783,7 +783,7 @@ pub fn cloud_directory_group_queue_task(
     store: &TaskStore,
     group_id: Uuid,
 ) -> Result<QueueTaskPayload, String> {
-    list_queue_tasks_for_scope(store, None)?
+    project_cloud_directory_groups_inner(store, Vec::new(), None, Some(group_id))?
         .into_iter()
         .find(|task| task.id == group_id.to_string())
         .ok_or_else(|| "网盘目录下载任务不存在".to_string())
@@ -1134,11 +1134,32 @@ fn aggregate_cloud_directory_folder(
     } else if group.status == TaskStatus::Paused && !all_completed {
         TaskStatus::Paused
     } else if has_active {
-        leaves
+        // A preparing/queued child is part of the directory's submission
+        // pipeline, not the lifecycle of the aggregate task. Pick by activity,
+        // never by filename/order; keep a running directory stable between files.
+        if leaves
             .iter()
-            .find(|item| task_is_active(item.status))
-            .map(|item| item.status)
+            .any(|item| item.status == TaskStatus::Downloading)
+            || (group.status != TaskStatus::Cancelled
+                && !linked_leaves.is_empty()
+                && leaves
+                    .iter()
+                    .any(|item| matches!(item.status, TaskStatus::Parsing | TaskStatus::Queued)))
+        {
+            TaskStatus::Downloading
+        } else {
+            [
+                TaskStatus::Processing,
+                TaskStatus::Parsing,
+                TaskStatus::AwaitingUser,
+                TaskStatus::Draft,
+                TaskStatus::Paused,
+                TaskStatus::Queued,
+            ]
+            .into_iter()
+            .find(|status| leaves.iter().any(|item| item.status == *status))
             .unwrap_or(TaskStatus::Queued)
+        }
     } else if group.status == TaskStatus::Cancelled {
         TaskStatus::Cancelled
     } else if all_completed {
@@ -1235,30 +1256,48 @@ pub(crate) fn project_cloud_directory_groups(
     leaves: Vec<DownloadTask>,
     scope: Option<&str>,
 ) -> Result<Vec<QueueTaskPayload>, String> {
-    let groups = store
-        .cloud_directory_groups()
-        .map_err(|error| error.to_string())?;
-    let mut group_items = Vec::with_capacity(groups.len());
+    project_cloud_directory_groups_inner(store, leaves, scope, None)
+}
+
+fn project_cloud_directory_groups_inner(
+    store: &TaskStore,
+    leaves: Vec<DownloadTask>,
+    scope: Option<&str>,
+    requested_group: Option<Uuid>,
+) -> Result<Vec<QueueTaskPayload>, String> {
+    let group_ids = if let Some(id) = requested_group {
+        vec![id]
+    } else {
+        store
+            .cloud_directory_groups()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|group| group.id)
+            .collect()
+    };
+    let mut group_items = Vec::with_capacity(group_ids.len());
     let mut grouped_task_ids = HashSet::new();
-    for group in &groups {
-        let items = store
-            .cloud_directory_group_items(group.id)
-            .map_err(|error| error.to_string())?;
+    for group_id in group_ids {
+        let Some((group, items, tasks)) = store
+            .cloud_directory_snapshot(group_id)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
         grouped_task_ids.extend(items.iter().filter_map(|item| item.task_id));
-        group_items.push(items);
+        group_items.push((group, items, tasks));
     }
-    let mut task_by_id = leaves
-        .iter()
-        .cloned()
-        .map(|task| (task.id, task))
-        .collect::<HashMap<_, _>>();
     let mut projected = leaves
         .into_iter()
         .filter(|task| !grouped_task_ids.contains(&task.id))
         .filter(|task| status_in_scope(task.status, scope).unwrap_or(false))
         .map(|task| queue_task_payload_from_task(store, task))
         .collect::<Result<Vec<_>, _>>()?;
-    for (group, items) in groups.into_iter().zip(group_items) {
+    for (group, items, group_tasks) in group_items {
+        let mut task_by_id = group_tasks
+            .into_iter()
+            .map(|task| (task.id, task))
+            .collect::<HashMap<_, _>>();
         let legacy_share_root = legacy_share_directory_root(&group, &items);
         let mut root = cloud_directory_folder_payload(&group, &[]);
         root.id = group.id.to_string();
@@ -3088,6 +3127,159 @@ mod tests {
     }
 
     #[test]
+    fn cloud_directory_resume_keeps_aggregate_state_across_child_submission_phases() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Pikpak,
+                    "remote",
+                    "Series",
+                    "C:\\Downloads",
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new(
+                        "preparing",
+                        &["Series"],
+                        "next.bin",
+                        Some(100),
+                    ),
+                    NewCloudDirectoryGroupItem::new("active", &["Series"], "active.bin", Some(900)),
+                    NewCloudDirectoryGroupItem::new(
+                        "pending",
+                        &["Series"],
+                        "pending.bin",
+                        Some(1000),
+                    ),
+                ],
+            )
+            .unwrap();
+        let items = store.cloud_directory_group_items(group.id).unwrap();
+        let preparing = store
+            .create(NewTask::direct("cloud://pikpak/preparing"))
+            .unwrap();
+        let active = store
+            .create(NewTask::direct("cloud://pikpak/active"))
+            .unwrap();
+        for (item, id) in [(&items[0], preparing.id), (&items[1], active.id)] {
+            store
+                .link_cloud_directory_group_item_task(group.id, item.id, id)
+                .unwrap();
+        }
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Downloading,
+                completed_length: 450,
+                total_length: Some(900),
+                download_speed: 128,
+                ..active.clone()
+            })
+            .unwrap();
+        for phase in [
+            TaskStatus::Parsing,
+            TaskStatus::Queued,
+            TaskStatus::Paused,
+            TaskStatus::Downloading,
+        ] {
+            let updated = store
+                .apply_transfer_snapshot(DownloadTask {
+                    status: phase,
+                    ..preparing.clone()
+                })
+                .unwrap();
+            let TaskUpdatePayload::Queue(root) =
+                task_update_payload(&store, None, updated).unwrap()
+            else {
+                panic!("expected root");
+            };
+            assert_eq!(root.id, group.id.to_string());
+            assert_eq!(
+                root.status,
+                TaskStatus::Downloading,
+                "child phase {phase:?} must not override active siblings"
+            );
+            assert_eq!(
+                (
+                    root.total_length,
+                    root.completed_length,
+                    root.progress,
+                    root.download_speed
+                ),
+                (Some(2000), 450, 22, 128)
+            );
+        }
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                completed_length: 900,
+                total_length: Some(900),
+                ..active
+            })
+            .unwrap();
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Parsing,
+                ..preparing
+            })
+            .unwrap();
+        let root = cloud_directory_group_queue_task(&store, group.id).unwrap();
+        assert_eq!(
+            root.status,
+            TaskStatus::Downloading,
+            "preparing remaining members is still the same running directory"
+        );
+        assert_eq!(
+            (root.total_length, root.completed_length, root.progress),
+            (Some(2000), 900, 45)
+        );
+    }
+
+    #[test]
+    fn cloud_directory_projection_does_not_mix_new_membership_with_older_leaf_snapshot() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Pikpak,
+                    "remote",
+                    "Series",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "file",
+                    &["Series"],
+                    "file.bin",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let old_leaves = store.list().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://pikpak/file"))
+            .unwrap();
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                total_length: Some(100),
+                completed_length: 100,
+                ..task.clone()
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(
+                group.id,
+                store.cloud_directory_group_items(group.id).unwrap()[0].id,
+                task.id,
+            )
+            .unwrap();
+        let roots = project_cloud_directory_groups(&store, old_leaves, None).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].status, TaskStatus::Completed);
+        assert_eq!(roots[0].completed_length, 100);
+        assert!(roots[0].children[0].error.is_none());
+    }
+
+    #[test]
     fn cloud_directory_group_progress_tracks_every_nested_file() {
         let store = TaskStore::open_in_memory().unwrap();
         let group = store
@@ -3222,8 +3414,9 @@ mod tests {
             .link_cloud_directory_group_item_task(group.id, item.id, task.id)
             .unwrap();
 
-        let json = serde_json::to_value(cloud_directory_group_queue_task(&store, group.id).unwrap())
-            .unwrap();
+        let json =
+            serde_json::to_value(cloud_directory_group_queue_task(&store, group.id).unwrap())
+                .unwrap();
 
         for node in [&json, &json["children"][0]] {
             assert_eq!(node["total_length"], 1_000);
