@@ -1392,6 +1392,7 @@ fn list_tasks_with_cleanup_projection_for_scope(
     .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn list_tasks_with_cleanup_projection(
     store: &TaskStore,
     plans: Option<&crate::cloud::share::CloudSharePlanStore>,

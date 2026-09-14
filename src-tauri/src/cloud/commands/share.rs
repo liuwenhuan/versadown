@@ -174,6 +174,7 @@ pub async fn submit_cloud_share_directory_leaf(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn submit_new_cloud_share_file_with<S, SFut, R, RFut>(
     tasks: Arc<TaskStore>,
     plans: &share::CloudSharePlanStore,

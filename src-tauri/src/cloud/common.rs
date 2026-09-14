@@ -161,6 +161,7 @@ pub(crate) fn load_provider_session<T: DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)
 }
 
+#[cfg(test)]
 pub(crate) fn run_cloud_work<T>(
     provider: CloudProvider,
     kind: SessionWorkKind,
@@ -419,6 +420,7 @@ pub(crate) fn xunlei_web_context_from_selected_tokens(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn recover_provider_password_session(
     provider: CloudProvider,
     store: &impl CredentialStore,
