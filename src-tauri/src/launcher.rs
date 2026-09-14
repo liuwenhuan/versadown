@@ -271,22 +271,14 @@ pub fn launcher_hexagon_region(
 }
 
 pub fn launcher_hexagon_points(region: LauncherRegion) -> [LauncherPoint; 6] {
-    static HEXAGON: std::sync::LazyLock<[[i32; 2]; 6]> = std::sync::LazyLock::new(|| {
+    static HEXAGON: std::sync::LazyLock<[[f64; 2]; 6]> = std::sync::LazyLock::new(|| {
         serde_json::from_str(include_str!("../../src/assets/launcher/hexagon.json"))
             .expect("bundled launcher hexagon must contain six percentage coordinates")
     });
-    // Use the renderer's outline with a one-physical-pixel inward guard.
-    // CSS keeps fractional dimensions while HWND sizes are integral; the guard
-    // also covers half-pixel apex shifts at odd diameters and antialiased edges.
-    let scale = |coordinate: i32, size: i32| {
-        let value = f64::from(coordinate) * f64::from(size) / 100.0;
-        if coordinate < 50 {
-            value.ceil() as i32 + 1
-        } else if coordinate > 50 {
-            value.floor() as i32 - 1
-        } else {
-            value.round() as i32
-        }
+    // Match the SVG shell exactly so removing the native clip for click menus
+    // does not make the launcher appear to grow.
+    let scale = |coordinate: f64, size: i32| {
+        (coordinate * f64::from(size) / 100.0).round() as i32
     };
     HEXAGON.map(|[x, y]| LauncherPoint {
         x: region.x + scale(x, region.width),

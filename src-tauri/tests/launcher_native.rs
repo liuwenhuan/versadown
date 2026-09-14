@@ -42,7 +42,7 @@ fn compact_region_follows_the_icon_inside_a_larger_windows_webview() {
 }
 
 #[test]
-fn compact_region_matches_the_icon_hexagon_edge() {
+fn compact_region_matches_the_full_rendered_icon_hexagon() {
     let region = LauncherRegion {
         x: 141,
         y: 8,
@@ -53,18 +53,18 @@ fn compact_region_matches_the_icon_hexagon_edge() {
     assert_eq!(
         launcher_hexagon_points(region),
         [
-            LauncherPoint { x: 183, y: 17 },
-            LauncherPoint { x: 212, y: 36 },
-            LauncherPoint { x: 212, y: 64 },
-            LauncherPoint { x: 183, y: 83 },
-            LauncherPoint { x: 154, y: 64 },
-            LauncherPoint { x: 154, y: 36 },
+            LauncherPoint { x: 183, y: 15 },
+            LauncherPoint { x: 215, y: 33 },
+            LauncherPoint { x: 215, y: 67 },
+            LauncherPoint { x: 183, y: 85 },
+            LauncherPoint { x: 152, y: 67 },
+            LauncherPoint { x: 152, y: 33 },
         ]
     );
 }
 
 #[test]
-fn compact_region_does_not_expose_pixels_outside_the_css_clip() {
+fn compact_region_uses_the_same_outline_when_the_native_clip_is_removed() {
     let region = LauncherRegion {
         x: 0,
         y: 0,
@@ -75,12 +75,12 @@ fn compact_region_does_not_expose_pixels_outside_the_css_clip() {
     assert_eq!(
         launcher_hexagon_points(region),
         [
-            LauncherPoint { x: 64, y: 13 },
-            LauncherPoint { x: 109, y: 41 },
-            LauncherPoint { x: 109, y: 87 },
-            LauncherPoint { x: 64, y: 115 },
-            LauncherPoint { x: 19, y: 87 },
-            LauncherPoint { x: 19, y: 41 },
+            LauncherPoint { x: 64, y: 10 },
+            LauncherPoint { x: 112, y: 38 },
+            LauncherPoint { x: 112, y: 91 },
+            LauncherPoint { x: 64, y: 118 },
+            LauncherPoint { x: 16, y: 91 },
+            LauncherPoint { x: 16, y: 38 },
         ]
     );
 }
@@ -107,34 +107,23 @@ fn live_region_contains_only_the_hexagon_and_short_speed_strip() {
 }
 
 #[test]
-fn launcher_clip_stays_inside_the_visible_polygon_at_common_dpi_scales() {
-    // Independently specified CSS geometry; native points must never expand it.
+fn launcher_clip_tracks_the_visible_polygon_at_common_dpi_scales() {
+    // Independently specified SVG geometry; native rounding must follow it at every DPI.
     let polygon = [
-        (50.0, 9.0),
-        (86.0, 31.0),
-        (86.0, 69.0),
-        (50.0, 91.0),
-        (14.0, 69.0),
-        (14.0, 31.0),
+        (50.0, 7.8125),
+        (87.5, 29.296875),
+        (87.5, 70.703125),
+        (50.0, 92.1875),
+        (12.5, 70.703125),
+        (12.5, 29.296875),
     ];
     for scale in [1.0, 1.01, 1.1, 1.25, 1.3, 1.5, 1.55, 1.75, 2.0, 2.5, 3.0] {
         let region = launcher_hexagon_region((3, 7), (640, 480), scale);
-        for point in launcher_hexagon_points(region) {
-            // CSS retains the fractional 64 * scale size and anchors bottom/right.
-            let diameter = 64.0 * scale;
-            let left = f64::from(region.x + region.width) - diameter;
-            let top = f64::from(region.y + region.height) - diameter;
-            let x = (f64::from(point.x) - left) * 100.0 / diameter;
-            let y = (f64::from(point.y) - top) * 100.0 / diameter;
-            for edge in 0..6 {
-                let (ax, ay) = polygon[edge];
-                let (bx, by) = polygon[(edge + 1) % 6];
-                assert!(
-                    (bx - ax) * (y - ay) - (by - ay) * (x - ax) >= -0.000001,
-                    "native point {point:?} leaks past clip at scale {scale}"
-                );
-            }
-        }
+        let expected = polygon.map(|(x, y)| LauncherPoint {
+            x: region.x + (x * f64::from(region.width) / 100.0).round() as i32,
+            y: region.y + (y * f64::from(region.height) / 100.0).round() as i32,
+        });
+        assert_eq!(launcher_hexagon_points(region), expected, "scale {scale}");
     }
 }
 
