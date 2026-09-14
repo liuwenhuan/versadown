@@ -100,7 +100,7 @@ button,input,textarea{font:inherit}button{color:inherit}
 .new-download-tab-access-code{display:flex;align-items:center;gap:12px;margin-top:14px;color:var(--muted);font-size:13px}.new-download-tab-access-code input{width:180px;height:36px;padding:0 10px;border:1px solid var(--border-strong);border-radius:8px;outline:none;background:var(--surface);color:var(--text)}
 .new-download-tab-panel footer{display:flex;min-height:38px;align-items:center;justify-content:flex-end;gap:16px;margin-top:14px}.new-download-tab-panel footer span{margin-right:auto;color:var(--muted);font-size:12px}.new-download-tab-panel footer span[role="alert"]{color:var(--danger)}
 .new-download-tab-panel .primary{height:38px;padding:0 18px;border:1px solid var(--accent);border-radius:9px;background:var(--accent);color:#fff;cursor:pointer;font:inherit}.new-download-tab-panel .primary:disabled{cursor:wait;opacity:.55}
-.download-queue{overflow:hidden;background:var(--surface)}.queue-heading{display:none}.task-group+.task-group{border-top:0}.task-group:not(.is-expanded){content-visibility:auto;contain-intrinsic-size:auto 72px}.task-group.completed-task-group:not(.is-expanded){contain-intrinsic-size:auto 64px}
+.download-queue{overflow:hidden;background:var(--surface)}.queue-heading{display:none}.task-group+.task-group{border-top:0}.task-group:not(.is-expanded){content-visibility:auto;contain-intrinsic-size:auto 72px}.task-group.completed-task-group:not(.is-expanded){contain-intrinsic-size:auto 72px}
 .task-row{position:relative;display:grid;min-width:0;min-height:72px;grid-template-areas:"expand icon name actions" "expand icon progress actions";grid-template-columns:0 46px minmax(0,1fr) max-content;align-content:center;align-items:center;column-gap:10px;padding:8px 12px;cursor:pointer;transition:background .14s}
 .task-row:hover{background:var(--surface-hover)}.task-row.selected{background:color-mix(in srgb,var(--accent) 10%,var(--surface))}
 .task-name{display:contents}.expand-slot{display:grid;grid-area:expand;width:20px;place-items:center}.task-row.has-children .expand-slot{position:absolute;top:0;right:auto;bottom:0;left:0;width:22px;grid-area:auto;transform:none}.task-copy{display:flex;grid-area:name;min-width:0;align-items:center;gap:12px;align-self:end}.task-name b{display:block;min-width:0;overflow:hidden;flex:1 1 auto;color:var(--text);font-size:13px;font-weight:620;line-height:1.35;text-overflow:ellipsis;white-space:nowrap}.task-peer-metric{flex:0 0 auto;margin-left:auto;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -200,17 +200,17 @@ button,input,textarea{font:inherit}button{color:inherit}
 .cloud-file-manager{border:0;border-radius:0;background:transparent}
 .cloud-toolbar button.cloud-refresh-button{display:grid;place-items:center;padding:0}
 
-/* Terminal tasks have a compact, metadata-only row instead of transfer telemetry. */
+/* Terminal tasks keep metadata-only content while sharing the standard row geometry. */
 .download-queue{border-radius:12px}
-.task-row.completed-task{min-height:64px;grid-template-areas:"expand icon name actions" "expand icon completed actions";padding-top:8px;padding-bottom:8px}
+.task-row.completed-task{min-height:72px;grid-template-areas:"expand icon name actions" "expand icon completed actions";padding-top:8px;padding-bottom:8px}
 .completed-task .task-copy{align-self:end}
-.completed-task .kind-icon{width:42px;height:42px}
+.completed-task .kind-icon{width:46px;height:46px}
 .completed-summary{display:flex;grid-area:completed;align-items:center;gap:12px;min-width:0;color:var(--muted);font-size:11px;white-space:nowrap}
 .completed-summary strong{color:var(--muted);font-size:11px;font-weight:600}
 .completed-summary span{overflow:hidden;text-overflow:ellipsis}
 .completed-task .task-actions{gap:8px}
 .completed-task .completed-quick-action{width:34px;height:34px}
-.transfer-live .transfer-paused{color:var(--warning)}
+.transfer-live .transfer-paused{grid-column:2;justify-content:flex-end;color:var(--warning)}
 .cloud-filebar{display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--surface)}
 .cloud-pathbar{min-width:220px;flex:1}.cloud-filebar .cloud-toolbar{flex:0 0 auto}.cloud-filebar .cloud-refresh-button{margin-left:4px}
 .cloud-file-name>i.folder{color:var(--accent)}
@@ -238,7 +238,7 @@ button,input,textarea{font:inherit}button{color:inherit}
 
 /* Typography stays regular by default; hierarchy comes from size, color, and spacing. */
 body *{font-weight:400!important}
-.brand h1{font-weight:700!important}
+.brand h1,.speed-summary strong,.transfer-live .transfer-speed{font-weight:700!important}
 .cloud-provider-auths .cloud-manager{font-size:13px}.cloud-provider-auths .cloud-heading h2{font-size:18px}.cloud-provider-auths .cloud-manager button,.cloud-provider-auths .cloud-manager input{font-size:13px}.cloud-provider-auths .cloud-authorization-feedback,.cloud-provider-auths .cloud-operation-status{font-size:11px}.cloud-provider-auths .cloud-connected-account .cloud-account-name{font-size:13px}
 .cloud-operation-status{display:flex;align-items:center;justify-content:space-between;gap:12px}.cloud-authorization-continuation{flex:0 0 auto}
 .cloud-upload-status-content{display:grid;gap:6px;min-width:0;flex:1;overflow-wrap:anywhere}.cloud-upload-status-content p{margin:0}

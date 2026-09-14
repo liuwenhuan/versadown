@@ -143,8 +143,6 @@ function taskSubtitle(task: QueueTask): string | undefined {
   if (task.kind === 'ftp') return 'FTP 下载';
   if (task.kind === 'hls') return 'HLS 流媒体下载';
   if (task.kind === 'dash') return 'MPEG-DASH 流媒体下载';
-  if (task.kind === 'folder') return '网盘下载任务';
-  if (task.kind === 'cloud') return '网盘下载任务';
   return undefined;
 }
 

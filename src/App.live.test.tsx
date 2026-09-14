@@ -486,6 +486,22 @@ it('places recycle clear immediately after the tabs without page-wide start or p
   expect(screen.queryByRole('button', { name: /全部暂停/ })).not.toBeInTheDocument();
 });
 
+it('renders the total download speed in bold', async () => {
+  state.list.mockResolvedValueOnce([
+    { id: 'speed-task', name: 'speed.zip', kind: 'file', status: 'downloading', progress: 25, download_speed: 409_600 }
+  ]);
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<App />);
+    const speed = await screen.findByLabelText('当前总下载速度');
+    expect(getComputedStyle(within(speed).getByText('400.0 KB/s')).fontWeight).toBe('700');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
 it('sorts only the active task tab from the menu beside total speed', async () => {
   state.list.mockResolvedValueOnce([
     { id: 'active-old', name: 'alpha.zip', kind: 'file', status: 'downloading', progress: 80, total_length: 800, created_at: 100 },

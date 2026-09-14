@@ -219,7 +219,7 @@ it('shows an active cloud directory with the standard transfer metrics', () => {
   />);
 
   expect(screen.getByText('15.8 MB / 178 MB')).toBeVisible();
-  expect(screen.getByText('网盘下载任务')).toBeVisible();
+  expect(screen.queryByText('网盘下载任务')).not.toBeInTheDocument();
   expect(screen.getByText('剩余 8 分 49 秒')).toBeVisible();
   expect(screen.getByText('313.5 KB/s')).toBeVisible();
   expect(screen.queryByText('目录任务 · 1 个文件')).not.toBeInTheDocument();
@@ -239,6 +239,52 @@ it('keeps the remaining-time and speed values in dedicated stable layout slots',
 
   expect(screen.getByText('剩余 49 秒')).toHaveClass('transfer-eta');
   expect(screen.getByText('6.6 MB/s')).toHaveClass('transfer-speed');
+});
+
+it('renders completed and active task rows with the same geometry', () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const { container } = render(<DownloadQueue
+      tasks={[
+        { id: 'active-row', name: 'active.bin', kind: 'file', status: 'downloading', progress: 40 },
+        { id: 'completed-row', name: 'completed.bin', kind: 'file', status: 'completed', progress: 100 },
+      ]}
+      selectedTaskId={null}
+      onSelect={() => {}}
+      onCommand={() => {}}
+    />);
+
+    const activeRow = container.querySelector<HTMLElement>('[data-task-id="active-row"]')!;
+    const completedRow = container.querySelector<HTMLElement>('[data-task-id="completed-row"]')!;
+    expect(getComputedStyle(completedRow).minHeight).toBe(getComputedStyle(activeRow).minHeight);
+    expect(getComputedStyle(completedRow.querySelector('.kind-icon')! as Element).width)
+      .toBe(getComputedStyle(activeRow.querySelector('.kind-icon')! as Element).width);
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('renders task download speed in bold', () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<DownloadQueue
+      tasks={[{
+        id: 'bold-speed', name: 'large-file.bin', kind: 'file', status: 'downloading', progress: 34,
+        download_speed: Math.round(6.6 * 1024 * 1024),
+      }]}
+      selectedTaskId={null}
+      onSelect={() => {}}
+      onCommand={() => {}}
+    />);
+
+    expect(getComputedStyle(screen.getByText('6.6 MB/s')).fontWeight).toBe('700');
+  } finally {
+    stylesheet.remove();
+  }
 });
 
 it('does not expose expansion for a single-file torrent task', () => {
@@ -523,21 +569,31 @@ it('shows transferred bytes, live speed and ETA without exposing peer-count nois
 });
 
 it('replaces paused transfer estimates with a single paused label and no status pill', () => {
-  render(<DownloadQueue
-    tasks={[{
-      id: 'paused-transfer', name: 'episode.mkv', kind: 'file', status: 'paused', progress: 42,
-      completed_length: 42 * 1024 * 1024, total_length: 100 * 1024 * 1024,
-      download_speed: 329_700, eta_seconds: 921,
-    }]}
-    selectedTaskId={null}
-    onSelect={() => {}}
-    onCommand={() => {}}
-  />);
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<DownloadQueue
+      tasks={[{
+        id: 'paused-transfer', name: 'episode.mkv', kind: 'file', status: 'paused', progress: 42,
+        completed_length: 42 * 1024 * 1024, total_length: 100 * 1024 * 1024,
+        download_speed: 329_700, eta_seconds: 921,
+      }]}
+      selectedTaskId={null}
+      onSelect={() => {}}
+      onCommand={() => {}}
+    />);
 
-  expect(screen.getByText('已暂停')).toBeVisible();
-  expect(screen.queryByText('剩余 15 分 21 秒')).not.toBeInTheDocument();
-  expect(screen.queryByText('322.0 KB/s')).not.toBeInTheDocument();
-  expect(screen.queryByText('失败')).not.toBeInTheDocument();
+    const paused = screen.getByText('已暂停');
+    expect(paused).toBeVisible();
+    expect(getComputedStyle(paused).gridColumn).toBe('2');
+    expect(getComputedStyle(paused).justifyContent).toBe('flex-end');
+    expect(screen.queryByText('剩余 15 分 21 秒')).not.toBeInTheDocument();
+    expect(screen.queryByText('322.0 KB/s')).not.toBeInTheDocument();
+    expect(screen.queryByText('失败')).not.toBeInTheDocument();
+  } finally {
+    stylesheet.remove();
+  }
 });
 
 it('does not render a failure status pill in task rows', () => {
