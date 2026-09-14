@@ -115,6 +115,32 @@ mod tests {
         json!({"captcha_token":"share-captcha","expires_in":300,"url":""})
     }
     #[test]
+    fn pikpak_password_captcha_uses_origin_device_without_changing_session_identity() {
+        for device in [
+            "wdi10.0123456789abcdef0123456789abcdefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "div101.0123456789abcdef0123456789abcdefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0123456789abcdef0123456789abcdef",
+        ] {
+            let store = credentials();
+            let mut session: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+            session.client_id = Some("YNxT9w7GMdWvEOKa".into());
+            session.device_id = device.into();
+            session.auth_method = CloudAuthMethod::Password;
+            store.save("pikpak", &serde_json::to_vec(&session).unwrap()).unwrap();
+            let http = Http::new(vec![cap(), json!({"task_id":"deleted"})]);
+            PikPakClient::new(&http, &store).request("POST", format!("{DRIVE}/drive/v1/files:batchDelete"), Some(json!({"ids":["fixture"]}))).unwrap();
+            let requests = http.requests.lock().unwrap();
+            let body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
+            assert_eq!(body["device_id"], "0123456789abcdef0123456789abcdef");
+            assert_eq!(body["client_id"], "YNxT9w7GMdWvEOKa");
+            assert_eq!(requests[0].headers["X-Device-Id"], device);
+            assert_eq!(requests[1].headers["X-Device-Id"], device);
+            let saved: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+            assert_eq!(saved.device_id, device);
+            assert_eq!(saved.access_token, session.access_token);
+        }
+    }
+    #[test]
     fn pikpak_account_restore_does_not_request_drive_captcha_for_auth_endpoint() {
         let store = credentials();
         let mut session: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
@@ -977,7 +1003,7 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         let captcha_device_id = if web {
             pikpak_web_origin_device_id(&s.device_id)?
         } else {
-            s.device_id.clone()
+            pikpak_android_origin_device_id(&s.device_id).to_owned()
         };
         let mut meta = if web {
             json!({
@@ -1466,6 +1492,15 @@ fn pikpak_web_origin_device_id(raw: &str) -> Result<String, QuarkError> {
         return Err(QuarkError::WebAuthorizationRequired);
     }
     Ok(device.to_ascii_lowercase())
+}
+// A persisted login may carry the SDK's device signature, not just its device
+// ID. Keep that session/header identity intact, but sign captcha requests with
+// the original ID, as the provider does. Do not truncate arbitrary opaque IDs.
+fn pikpak_android_origin_device_id(raw: &str) -> &str {
+    match raw.strip_prefix("wdi10.").or_else(|| raw.strip_prefix("div101.")) {
+        Some(signed) if signed.len() == 64 && signed.bytes().all(|b| b.is_ascii_hexdigit()) => &signed[..32],
+        _ => raw,
+    }
 }
 impl PikPakShareSession<'_> {
     fn request(
