@@ -1101,11 +1101,11 @@ impl DownloadService {
         &self,
         mut task: DownloadTask,
     ) -> Result<DownloadTask, DownloadServiceError> {
-        self.clear_observed_peers(task.id);
         task.status = TaskStatus::Cancelled;
         task.download_speed = 0;
         task.upload_speed = 0;
         let task = self.store.apply_transfer_snapshot(task)?;
+        self.clear_observed_peers(task.id);
         self.publish_task(&task)?;
         Ok(task)
     }
@@ -1182,10 +1182,19 @@ impl DownloadService {
         &self,
         mut updated: DownloadTask,
     ) -> Result<(), DownloadServiceError> {
-        if !matches!(updated.status, TaskStatus::Downloading)
-            || !matches!(updated.kind.as_str(), "magnet" | "torrent")
-        {
-            self.clear_observed_peers(updated.id);
+        if !matches!(updated.kind.as_str(), "magnet" | "torrent") {
+            return Ok(());
+        }
+        if !matches!(updated.status, TaskStatus::Downloading) {
+            if matches!(
+                updated.status,
+                TaskStatus::Completed
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Recycled
+            ) {
+                self.clear_observed_peers(updated.id);
+            }
             return Ok(());
         }
         let Some(gid) = updated.aria_gid.as_deref() else {

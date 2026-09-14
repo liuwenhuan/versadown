@@ -40,6 +40,58 @@ async fn reconcile_tracks_unique_peers_for_an_active_torrent() {
 }
 
 #[tokio::test]
+async fn reconcile_retains_observed_peers_across_paused_and_queued_same_gid() {
+    let stage = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let wire_stage = stage.clone();
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "system.multicall" => {
+                let status = match wire_stage.load(std::sync::atomic::Ordering::SeqCst) {
+                    0 => "active",
+                    1 => "paused",
+                    2 => "waiting",
+                    3 => "active",
+                    stage => panic!("unexpected reconciliation stage {stage}"),
+                };
+                json!([[fixture::status("torrent-gid", status, 0)]])
+            }
+            "aria2.getPeers" => match wire_stage.load(std::sync::atomic::Ordering::SeqCst) {
+                0 => json!([
+                    {"ip":"203.0.113.10","port":"51413"},
+                    {"ip":"203.0.113.11","port":"51413"}
+                ]),
+                3 => json!([{"ip":"2001:db8::7","port":"51414"}]),
+                stage => panic!("getPeers must not run while stage {stage} is not active"),
+            },
+            "aria2.getGlobalStat" => fixture::global(),
+            other => panic!("unexpected method {other}"),
+        })
+        .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:test".into(),
+            name: "test".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
+        .unwrap();
+    store.bind_gid(task.id, "torrent-gid").unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    service.reconcile_now().await.unwrap();
+    stage.store(1, std::sync::atomic::Ordering::SeqCst);
+    service.reconcile_now().await.unwrap();
+    stage.store(2, std::sync::atomic::Ordering::SeqCst);
+    service.reconcile_now().await.unwrap();
+    stage.store(3, std::sync::atomic::Ordering::SeqCst);
+    service.reconcile_now().await.unwrap();
+
+    assert_eq!(store.find(task.id).unwrap().discovered_nodes, 3);
+    server.abort();
+}
+
+#[tokio::test]
 async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
     let retried = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let retry_state = retried.clone();
@@ -188,18 +240,43 @@ async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_star
 }
 
 #[tokio::test]
-async fn confirmed_magnet_overwrite_restarts_the_saved_file_selection() {
+async fn confirmed_magnet_overwrite_restarts_selection_and_clears_observed_peers() {
     let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let wire_running = running.clone();
     let selection_applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let wire_selection_applied = selection_applied.clone();
+    let resubmitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_resubmitted = resubmitted.clone();
     let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
         "aria2.addTorrent" => {
             assert_eq!(request["params"][3]["pause"], "true");
             assert_eq!(request["params"][3]["check-integrity"], "true");
             assert_eq!(request["params"][3]["allow-overwrite"], "true");
+            wire_resubmitted.store(true, std::sync::atomic::Ordering::SeqCst);
             json!("replacement-gid")
         }
+        "system.multicall" => json!([[
+            fixture::status(
+                if wire_resubmitted.load(std::sync::atomic::Ordering::SeqCst) {
+                    "replacement-gid"
+                } else {
+                    "previous-gid"
+                },
+                "active",
+                0,
+            )
+        ]]),
+        "aria2.getPeers" => {
+            if wire_resubmitted.load(std::sync::atomic::Ordering::SeqCst) {
+                json!([{"ip":"2001:db8::7","port":"51414"}])
+            } else {
+                json!([
+                    {"ip":"203.0.113.10","port":"51413"},
+                    {"ip":"203.0.113.11","port":"51413"}
+                ])
+            }
+        }
+        "aria2.getGlobalStat" => fixture::global(),
         "aria2.tellStatus" => {
             let status = if wire_running.load(std::sync::atomic::Ordering::SeqCst) {
                 "active"
@@ -229,10 +306,14 @@ async fn confirmed_magnet_overwrite_restarts_the_saved_file_selection() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:fixture".into(),
+            name: "fixture".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
         .unwrap();
     store.bind_gid(task.id, "previous-gid").unwrap();
-    store.fail(task.id, "interrupted").unwrap();
     store
         .upsert_files(
             task.id,
@@ -243,6 +324,10 @@ async fn confirmed_magnet_overwrite_restarts_the_saved_file_selection() {
         )
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
+
+    service.reconcile_now().await.unwrap();
+    assert_eq!(store.find(task.id).unwrap().discovered_nodes, 2);
+    store.fail(task.id, "interrupted").unwrap();
 
     let restarted = service
         .resubmit_torrent_with_options(
@@ -261,6 +346,8 @@ async fn confirmed_magnet_overwrite_restarts_the_saved_file_selection() {
     assert_eq!(restarted.status, TaskStatus::Downloading);
     assert_eq!(restarted.aria_gid.as_deref(), Some("replacement-gid"));
     assert!(!store.files(task.id).unwrap()[0].selected);
+    service.reconcile_now().await.unwrap();
+    assert_eq!(store.find(task.id).unwrap().discovered_nodes, 1);
     server.abort();
 }
 
