@@ -326,7 +326,6 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     return <div className="queue-tree-node" key={node.id}>
       <article className={`child-row queue-tree-row${hasChildren ? ' has-children' : ''}`} style={{ paddingLeft: `${21 + depth * 22}px` }}>
         <span className="child-name">
-          <i aria-hidden="true">↳</i>
           {hasChildren && <button className="queue-tree-expand" aria-label={`${isExpanded ? '收起' : '展开'} ${nodeName}`} onClick={() => onToggle(node.id)}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}
           <b title={nodeName}>{nodeName}</b>
           {error && <small className="queue-tree-error" title={error}>{error}</small>}
