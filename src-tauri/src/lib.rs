@@ -38,7 +38,7 @@ pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };
-pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpTarget};
+pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpDownloadLimits, FtpTarget};
 pub use launcher::{
     launcher_hexagon_points, launcher_hexagon_region, launcher_live_regions, launcher_menu_entries,
     launcher_native_chrome_policy, launcher_window_style_without_frame,
@@ -48,8 +48,8 @@ pub use launcher::{
 pub use magnet_metadata::{resolve_magnet_torrent, MagnetMetadataError, ResolvedMagnetTorrent};
 pub use models::{
     may_transition, AiSettings, AiSettingsInput, AppSettings, Aria2Settings, DownloadTask,
-    DuplicateDownloadState, LauncherVisibility, MagnetMetadataSettings, NewTask, ProxySettings,
-    TaskStatus,
+    DuplicateDownloadState, FtpSegment, LauncherVisibility, MagnetMetadataSettings, NewTask,
+    ProxySettings, TaskStatus,
 };
 pub use parser::{
     classify_input, extract_candidates, extract_cloud_share_candidate, Candidate, CandidateKind,

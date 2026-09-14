@@ -1354,6 +1354,35 @@ it('keeps live task events working while focus snapshots wait for native draggin
   expect(state.list.mock.calls.filter(([scope]) => scope === 'active')).toHaveLength(1);
 });
 
+it('refreshes an active HTTP task when a progress event is missed', async () => {
+  vi.useFakeTimers();
+  try {
+    let snapshotPhase = 0;
+    const submitted: QueueTask = { ...oldTask, progress: 0, completed_length: 0 };
+    const progressed: QueueTask = { ...oldTask, progress: 40, completed_length: 40 };
+    const completed: QueueTask = { ...oldTask, status: 'completed', progress: 100, completed_length: 100 };
+    state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active'
+      ? snapshotPhase === 1 ? [progressed] : []
+      : scope === 'terminal' && snapshotPhase === 2 ? [completed] : []
+    ));
+    render(<App />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(state.onTask).toBeDefined();
+
+    act(() => { state.onTask?.(submitted); });
+    snapshotPhase = 1;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(screen.getByRole('progressbar', { name: 'archive.iso 下载进度' })).toHaveAttribute('aria-valuenow', '40');
+    snapshotPhase = 2;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    fireEvent.click(screen.getByRole('tab', { name: /已完成 1/ }));
+    expect(screen.getByRole('button', { name: '打开 archive.iso 所在目录' })).toBeVisible();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('reconciles an existing task from a later focus snapshot without dropping a new event task', async () => {
   let terminalRequests = 0;
   state.list.mockImplementation((scope?: string) => {

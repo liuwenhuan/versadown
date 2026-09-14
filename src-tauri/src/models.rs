@@ -323,6 +323,14 @@ pub struct NewTask {
     pub is_private: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FtpSegment {
+    pub index: u32,
+    pub start_offset: u64,
+    pub end_offset: u64,
+    pub completed_length: u64,
+}
+
 impl NewTask {
     pub fn direct(source: impl Into<String>) -> Self {
         let source = source.into();

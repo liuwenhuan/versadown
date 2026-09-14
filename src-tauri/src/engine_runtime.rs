@@ -218,6 +218,10 @@ impl EngineRuntime {
             Arc::clone(&store),
             Arc::clone(&download_events),
         ));
+        ftp.set_limits(
+            launch_config.aria2.max_concurrent_downloads,
+            launch_config.aria2.max_connections_per_server,
+        );
         Self {
             launch_config: RwLock::new(launch_config),
             store,
@@ -526,6 +530,18 @@ impl EngineRuntime {
         );
         let state = self.retry_locked(&mut slot).await;
         if state.available {
+            let (max_active_tasks, max_connections_per_task) = {
+                let launch_config = self
+                .launch_config
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+                (
+                    launch_config.aria2.max_concurrent_downloads,
+                    launch_config.aria2.max_connections_per_server,
+                )
+            };
+            self.ftp
+                .set_limits(max_active_tasks, max_connections_per_task);
             Ok(state)
         } else {
             let error = state.error.unwrap_or_else(|| "aria2 配置应用失败".into());
