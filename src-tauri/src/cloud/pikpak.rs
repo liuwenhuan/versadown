@@ -117,6 +117,7 @@ mod tests {
     #[test]
     fn pikpak_password_captcha_uses_origin_device_without_changing_session_identity() {
         for device in [
+            "wdi10.0123456789abcdef0123456789abcdefzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
             "wdi10.0123456789abcdef0123456789abcdefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "div101.0123456789abcdef0123456789abcdefaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "0123456789abcdef0123456789abcdef",
@@ -1498,7 +1499,9 @@ fn pikpak_web_origin_device_id(raw: &str) -> Result<String, QuarkError> {
 // the original ID, as the provider does. Do not truncate arbitrary opaque IDs.
 fn pikpak_android_origin_device_id(raw: &str) -> &str {
     match raw.strip_prefix("wdi10.").or_else(|| raw.strip_prefix("div101.")) {
-        Some(signed) if signed.len() == 64 && signed.bytes().all(|b| b.is_ascii_hexdigit()) => &signed[..32],
+        Some(signed) if signed.len() == 64
+            && signed.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            && signed[..32].bytes().all(|b| b.is_ascii_hexdigit()) => &signed[..32],
         _ => raw,
     }
 }
