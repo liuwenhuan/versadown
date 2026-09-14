@@ -27,6 +27,8 @@ use crate::{
 
 const ANONYMOUS_PASSWORD: &str = "anonymous@alldownloader.local";
 const MIN_SEGMENT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SESSION_LIMIT_RETRIES_PER_SEGMENT: u8 = 3;
+const SESSION_LIMIT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 pub struct FtpTarget {
@@ -795,25 +797,76 @@ impl FtpDownloadEngine {
             sample_completed: completed,
             last_published: Instant::now(),
         }));
+        let mut pending_segments: VecDeque<_> = segments
+            .into_iter()
+            .filter(|segment| {
+                segment.completed_length < segment.end_offset - segment.start_offset
+            })
+            .collect();
+        let mut max_parallel_connections = connections.max(1) as usize;
         let mut workers = FuturesUnordered::new();
-        for segment in segments {
-            if segment.completed_length < segment.end_offset - segment.start_offset {
-                workers.push(self.run_segment(
-                    task_id,
-                    target.clone(),
-                    output.to_path_buf(),
-                    total,
-                    segment,
-                    command.clone(),
-                    Arc::clone(&publish_state),
-                    connections,
-                ));
-            }
-        }
-
+        let mut session_limit_retries = HashMap::new();
         let mut stopped = false;
-        while let Some(result) = workers.next().await {
-            stopped |= result?;
+        loop {
+            while !stopped && workers.len() < max_parallel_connections {
+                let Some(segment) = pending_segments.pop_front() else {
+                    break;
+                };
+                let segment_index = segment.index;
+                let segment_target = target.clone();
+                let segment_output = output.to_path_buf();
+                let segment_command = command.clone();
+                let segment_publish_state = Arc::clone(&publish_state);
+                workers.push(async move {
+                    (
+                        segment_index,
+                        self.run_segment(
+                            task_id,
+                            segment_target,
+                            segment_output,
+                            total,
+                            segment,
+                            segment_command,
+                            segment_publish_state,
+                            max_parallel_connections as u32,
+                        )
+                        .await,
+                    )
+                });
+            }
+
+            let Some((segment_index, result)) = workers.next().await else {
+                break;
+            };
+            match result {
+                Ok(segment_stopped) => stopped |= segment_stopped,
+                Err(error) if is_session_limit_error(&error) => {
+                    let retries = session_limit_retries.entry(segment_index).or_insert(0);
+                    if *retries >= MAX_SESSION_LIMIT_RETRIES_PER_SEGMENT {
+                        return Err(error);
+                    }
+                    *retries += 1;
+                    max_parallel_connections =
+                        max_parallel_connections.min(workers.len().max(1));
+                    let retry_segment = self
+                        .store
+                        .ftp_segments(task_id)?
+                        .into_iter()
+                        .find(|segment| segment.index == segment_index)
+                        .ok_or_else(|| {
+                            FtpDownloadError::Protocol("缺少待重试的 FTP 分片".into())
+                        })?;
+                    if retry_segment.completed_length
+                        < retry_segment.end_offset - retry_segment.start_offset
+                    {
+                        pending_segments.push_back(retry_segment);
+                    }
+                    if workers.is_empty() {
+                        tokio::time::sleep(SESSION_LIMIT_RETRY_DELAY).await;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         if stopped {
             return Ok(());
@@ -1102,6 +1155,23 @@ fn segments_match_total(segments: &[crate::FtpSegment], total: u64) -> bool {
 
 fn protocol_error(error: suppaftp::FtpError) -> FtpDownloadError {
     FtpDownloadError::Protocol(error.to_string())
+}
+
+fn is_session_limit_error(error: &FtpDownloadError) -> bool {
+    let FtpDownloadError::Protocol(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("530")
+        && [
+            "maximum number of client",
+            "maximum number of connection",
+            "maximum number of session",
+            "too many client",
+            "too many connection",
+        ]
+        .iter()
+        .any(|marker| message.contains(marker))
 }
 
 fn valid_output_name(value: &str) -> bool {

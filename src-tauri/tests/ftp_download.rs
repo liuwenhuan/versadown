@@ -219,7 +219,8 @@ async fn spawn_ftp_server(
     payload: Vec<u8>,
     chunk_delay: Duration,
 ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
-    let server = spawn_test_ftp_server(payload, chunk_delay, false, false, 8 * 1024).await;
+    let server =
+        spawn_test_ftp_server(payload, chunk_delay, false, false, 8 * 1024, None).await;
     (server.source, server.resumed_at)
 }
 
@@ -228,11 +229,35 @@ async fn spawn_observable_ftp_server(
     chunk_delay: Duration,
     reject_nonzero_rest: bool,
 ) -> FtpServer {
-    spawn_test_ftp_server(payload, chunk_delay, reject_nonzero_rest, false, 64 * 1024).await
+    spawn_test_ftp_server(
+        payload,
+        chunk_delay,
+        reject_nonzero_rest,
+        false,
+        64 * 1024,
+        None,
+    )
+    .await
 }
 
 async fn spawn_no_size_ftp_server(payload: Vec<u8>, chunk_delay: Duration) -> FtpServer {
-    spawn_test_ftp_server(payload, chunk_delay, false, true, 64 * 1024).await
+    spawn_test_ftp_server(payload, chunk_delay, false, true, 64 * 1024, None).await
+}
+
+async fn spawn_session_limited_ftp_server(
+    payload: Vec<u8>,
+    chunk_delay: Duration,
+    maximum_control_sessions: usize,
+) -> FtpServer {
+    spawn_test_ftp_server(
+        payload,
+        chunk_delay,
+        false,
+        false,
+        64 * 1024,
+        Some(maximum_control_sessions),
+    )
+    .await
 }
 
 async fn spawn_test_ftp_server(
@@ -241,6 +266,7 @@ async fn spawn_test_ftp_server(
     reject_nonzero_rest: bool,
     reject_size: bool,
     chunk_size: usize,
+    maximum_control_sessions: Option<usize>,
 ) -> FtpServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -248,6 +274,7 @@ async fn spawn_test_ftp_server(
     let rest_offsets = Arc::new(Mutex::new(Vec::new()));
     let active_data_connections = Arc::new(AtomicUsize::new(0));
     let max_active_data_connections = Arc::new(AtomicUsize::new(0));
+    let active_control_sessions = Arc::new(AtomicUsize::new(0));
     let observed_resume = Arc::clone(&resumed_at);
     let observed_offsets = Arc::clone(&rest_offsets);
     let observed_active = Arc::clone(&active_data_connections);
@@ -259,6 +286,7 @@ async fn spawn_test_ftp_server(
             let observed_offsets = Arc::clone(&observed_offsets);
             let observed_active = Arc::clone(&observed_active);
             let observed_max_active = Arc::clone(&observed_max_active);
+            let observed_control_sessions = Arc::clone(&active_control_sessions);
             tokio::spawn(async move {
                 handle_ftp_client(
                     stream,
@@ -267,10 +295,12 @@ async fn spawn_test_ftp_server(
                     observed_offsets,
                     observed_active,
                     observed_max_active,
+                    observed_control_sessions,
                     reject_nonzero_rest,
                     reject_size,
                     chunk_size,
                     chunk_delay,
+                    maximum_control_sessions,
                 )
                 .await;
             });
@@ -291,10 +321,12 @@ async fn handle_ftp_client(
     rest_offsets: Arc<Mutex<Vec<usize>>>,
     active_data_connections: Arc<AtomicUsize>,
     max_active_data_connections: Arc<AtomicUsize>,
+    active_control_sessions: Arc<AtomicUsize>,
     reject_nonzero_rest: bool,
     reject_size: bool,
     chunk_size: usize,
     chunk_delay: Duration,
+    maximum_control_sessions: Option<usize>,
 ) {
     let mut control = BufReader::new(stream);
     control
@@ -305,10 +337,11 @@ async fn handle_ftp_client(
     let mut line = String::new();
     let mut passive = None;
     let mut offset = 0usize;
-    loop {
+    let mut logged_in = false;
+    'session: loop {
         line.clear();
         if control.read_line(&mut line).await.unwrap_or(0) == 0 {
-            return;
+            break;
         }
         let command = line.trim_end();
         let (verb, argument) = command.split_once(' ').unwrap_or((command, ""));
@@ -318,11 +351,24 @@ async fn handle_ftp_client(
                 .write_all(b"331 password required\r\n")
                 .await
                 .unwrap(),
-            "PASS" => control
-                .get_mut()
-                .write_all(b"230 logged in\r\n")
-                .await
-                .unwrap(),
+            "PASS" => {
+                if reserve_control_session(&active_control_sessions, maximum_control_sessions) {
+                    logged_in = true;
+                    control
+                        .get_mut()
+                        .write_all(b"230 logged in\r\n")
+                        .await
+                        .unwrap();
+                } else {
+                    control
+                        .get_mut()
+                        .write_all(
+                            b"530 Sorry, the maximum number of clients from your host are already connected.\r\n",
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
             "TYPE" => control
                 .get_mut()
                 .write_all(b"200 binary mode\r\n")
@@ -398,7 +444,7 @@ async fn handle_ftp_client(
                 let _ = data.shutdown().await;
                 active_data_connections.fetch_sub(1, Ordering::SeqCst);
                 if write_failed {
-                    return;
+                    break 'session;
                 }
                 control
                     .get_mut()
@@ -408,13 +454,42 @@ async fn handle_ftp_client(
             }
             "QUIT" => {
                 control.get_mut().write_all(b"221 bye\r\n").await.unwrap();
-                return;
+                break;
             }
             _ => control
                 .get_mut()
                 .write_all(b"502 unsupported\r\n")
                 .await
                 .unwrap(),
+        }
+    }
+    if logged_in {
+        active_control_sessions.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn reserve_control_session(
+    active_control_sessions: &AtomicUsize,
+    maximum_control_sessions: Option<usize>,
+) -> bool {
+    let Some(maximum) = maximum_control_sessions else {
+        active_control_sessions.fetch_add(1, Ordering::SeqCst);
+        return true;
+    };
+
+    let mut active = active_control_sessions.load(Ordering::SeqCst);
+    loop {
+        if active >= maximum {
+            return false;
+        }
+        match active_control_sessions.compare_exchange(
+            active,
+            active + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(current) => active = current,
         }
     }
 }
@@ -469,6 +544,52 @@ async fn ftp_uses_disjoint_ranges_up_to_the_connection_limit() {
     assert!(server.rest_offsets().iter().any(|offset| *offset > 0));
     assert_eq!(completed.connections, 0);
     assert!(store.ftp_segments(task.id).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ftp_requeues_segments_when_the_server_limits_control_sessions() {
+    let payload = deterministic_payload(12 * 1024 * 1024);
+    let server =
+        spawn_session_limited_ftp_server(payload.clone(), Duration::from_millis(2), 2).await;
+    let directory = tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask {
+            source: server.source.clone(),
+            name: "payload.bin".into(),
+            kind: "ftp".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let engine = Arc::new(FtpDownloadEngine::new(
+        directory.path(),
+        Arc::clone(&store),
+        Arc::new(NoEvents),
+    ));
+    engine.set_limits(5, 3);
+    engine
+        .submit_uri(task.id, &server.source, UriSubmissionOptions::default())
+        .await
+        .unwrap();
+
+    let completed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let current = store.find(task.id).unwrap();
+            if matches!(current.status, TaskStatus::Completed | TaskStatus::Failed) {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("FTP task reaches a terminal state");
+
+    assert_eq!(completed.status, TaskStatus::Completed, "{completed:?}");
+    assert_eq!(
+        std::fs::read(directory.path().join("payload.bin")).unwrap(),
+        payload
+    );
+    assert_eq!(server.max_active_data_connections(), 2);
 }
 
 #[tokio::test]
