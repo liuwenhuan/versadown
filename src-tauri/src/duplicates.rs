@@ -43,9 +43,21 @@ fn has_existing_payload(store: &TaskStore, task: &DownloadTask) -> Result<bool, 
 
 fn can_resume(store: &TaskStore, task: &DownloadTask) -> Result<bool, StoreError> {
     let files = store.files(task.id)?;
-    Ok(task.aria_gid.is_some()
+    let has_resumable_progress = task.status == TaskStatus::Paused
+        || (task.completed_length > 0
+            && task
+                .total_length
+                .map(|total_length| task.completed_length < total_length)
+                .unwrap_or(true));
+    Ok(has_resumable_progress
+        && task.aria_gid.is_some()
         && !files.is_empty()
-        && files.iter().any(|file| Path::new(&file.path).is_file()))
+        && files.iter().any(|file| {
+            let payload = Path::new(&file.path);
+            let mut control = payload.as_os_str().to_os_string();
+            control.push(".aria2");
+            payload.is_file() && Path::new(&control).is_file()
+        }))
 }
 
 /// Classifies an existing task without contacting aria2. The caller must show
@@ -155,9 +167,17 @@ mod tests {
         );
 
         let resumable = task_with_status(&store, "https://example.test/resume", TaskStatus::Failed);
+        let resumable = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(3),
+                completed_length: 1,
+                ..resumable
+            })
+            .unwrap();
         let resumable = store.bind_gid(resumable.id, "native-resume-gid").unwrap();
         let resumable_file = root.join("resume.bin");
         std::fs::write(&resumable_file, b"a").unwrap();
+        std::fs::write(format!("{}.aria2", resumable_file.display()), b"control").unwrap();
         store
             .upsert_files(
                 resumable.id,
@@ -185,5 +205,64 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_preallocated_file_without_aria2_control_file_requires_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let failed = task_with_status(
+            &store,
+            "https://example.test/preallocated.bin",
+            TaskStatus::Failed,
+        );
+        let failed = store.bind_gid(failed.id, "failed-gid").unwrap();
+        let payload = root.path().join("preallocated.bin");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        store
+            .upsert_files(
+                failed.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 7, true)],
+            )
+            .unwrap();
+
+        assert_eq!(
+            duplicate_state(&store, &failed).unwrap(),
+            DuplicateDownloadState::OverwriteRequired,
+            "a preallocated payload alone cannot prove aria2 knows which bytes are complete"
+        );
+    }
+
+    #[test]
+    fn failed_zero_progress_with_an_aria2_control_file_requires_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let failed = task_with_status(
+            &store,
+            "https://example.test/zero-progress.bin",
+            TaskStatus::Failed,
+        );
+        let failed = store.bind_gid(failed.id, "failed-gid").unwrap();
+        let payload = root.path().join("zero-progress.bin");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        std::fs::write(format!("{}.aria2", payload.display()), b"control").unwrap();
+        store
+            .upsert_files(
+                failed.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 0, true)],
+            )
+            .unwrap();
+
+        assert_eq!(
+            duplicate_state(&store, &failed).unwrap(),
+            DuplicateDownloadState::OverwriteRequired,
+            "a control file cannot make an unstarted preallocated payload resumable"
+        );
     }
 }

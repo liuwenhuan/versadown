@@ -6,6 +6,7 @@ use std::{
 
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
+    cloud::{commands::apply_cloud_download_policy, CloudProvider},
     prepare_download, DownloadAction, DownloadService, DownloadTask, NewTask, TaskStatus,
     TaskStore, UriSubmissionOptions,
 };
@@ -158,6 +159,47 @@ impl Aria2Api for RecordingAria2 {
     async fn shutdown(&self) -> Result<String, Aria2Error> {
         unimplemented!()
     }
+}
+
+#[test]
+fn cloud_download_connection_policy_caps_xunlei_user_value_of_eight_to_one() {
+    let options =
+        apply_cloud_download_policy(CloudProvider::Xunlei, 8, UriSubmissionOptions::default());
+
+    assert_eq!(options.max_connections_per_server, Some(1));
+}
+
+#[test]
+fn cloud_download_connection_policy_retains_user_value_below_provider_cap() {
+    let options =
+        apply_cloud_download_policy(CloudProvider::Quark, 2, UriSubmissionOptions::default());
+
+    assert_eq!(options.max_connections_per_server, Some(2));
+}
+
+#[tokio::test]
+async fn cloud_download_connection_policy_sets_both_aria2_keys_to_the_same_literal() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepare_download("https://example.test/cloud-file.bin", &store)
+        .unwrap()
+        .task;
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+    let options =
+        apply_cloud_download_policy(CloudProvider::Xunlei, 8, UriSubmissionOptions::default());
+
+    service
+        .submit_uri_with_options(task.id, vec![task.source], options)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        api.added_options(),
+        vec![BTreeMap::from([
+            ("max-connection-per-server".into(), "1".into()),
+            ("split".into(), "1".into()),
+        ])]
+    );
 }
 
 #[tokio::test]
@@ -666,6 +708,7 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
                     ("Referer".into(), "https://pan.quark.cn/".into()),
                 ],
                 proxy: Some("http://127.0.0.1:7890".into()),
+                max_connections_per_server: None,
                 allow_overwrite: true,
                 continue_download: false,
             },
@@ -684,6 +727,8 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
             ),
             ("all-proxy".into(), "http://127.0.0.1:7890".into()),
             ("allow-overwrite".into(), "true".into()),
+            ("continue".into(), "false".into()),
+            ("remove-control-file".into(), "true".into()),
         ])]
     );
     assert_eq!(store.find(task.id).unwrap().source, "cloud://quark/file-1");
@@ -731,6 +776,38 @@ async fn resumed_submission_keeps_one_task_and_sets_aria2_continue() {
             .last()
             .and_then(|options| options.get("continue")),
         Some(&"true".to_string())
+    );
+}
+
+#[tokio::test]
+async fn overwrite_submission_starts_fresh_instead_of_inheriting_global_resume() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepare_download("https://example.test/preallocated.bin", &store)
+        .unwrap()
+        .task;
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+
+    service
+        .submit_uri_with_options(
+            task.id,
+            vec![task.source],
+            UriSubmissionOptions {
+                allow_overwrite: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        api.added_options(),
+        vec![BTreeMap::from([
+            ("allow-overwrite".into(), "true".into()),
+            ("continue".into(), "false".into()),
+            ("remove-control-file".into(), "true".into()),
+        ])],
+        "an explicit overwrite must discard stale aria2 state instead of inheriting --continue=true"
     );
 }
 

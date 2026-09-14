@@ -603,6 +603,7 @@ pub(super) fn share_submission_options(
     options.directory = configured.directory;
     options.output_name = configured.output_name.or(options.output_name);
     options.proxy = configured.proxy;
+    options.max_connections_per_server = configured.max_connections_per_server;
     options.allow_overwrite = configured.allow_overwrite;
     options.continue_download = configured.continue_download;
     options

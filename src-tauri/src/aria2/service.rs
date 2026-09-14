@@ -34,6 +34,7 @@ pub struct UriSubmissionOptions {
     pub output_name: Option<String>,
     pub headers: Vec<(String, String)>,
     pub proxy: Option<String>,
+    pub max_connections_per_server: Option<u8>,
     pub allow_overwrite: bool,
     pub continue_download: bool,
 }
@@ -71,10 +72,16 @@ impl UriSubmissionOptions {
             }
             options.insert("all-proxy".into(), proxy);
         }
+        if let Some(max_connections_per_server) = self.max_connections_per_server {
+            let value = max_connections_per_server.to_string();
+            options.insert("split".into(), value.clone());
+            options.insert("max-connection-per-server".into(), value);
+        }
         if self.allow_overwrite {
             options.insert("allow-overwrite".into(), "true".into());
-        }
-        if self.continue_download {
+            options.insert("continue".into(), "false".into());
+            options.insert("remove-control-file".into(), "true".into());
+        } else if self.continue_download {
             options.insert("continue".into(), "true".into());
         }
         Ok(options)

@@ -499,6 +499,7 @@ pub(crate) async fn submit_cloud_file(
     options.directory = configured.directory;
     options.output_name = configured.output_name.or(options.output_name);
     options.proxy = configured.proxy;
+    options.max_connections_per_server = configured.max_connections_per_server;
     options.allow_overwrite = configured.allow_overwrite;
     options.continue_download = configured.continue_download;
     let service = state
@@ -520,6 +521,22 @@ pub(crate) async fn submit_cloud_file(
     Ok(CloudFileSubmission::Queued(
         task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)?,
     ))
+}
+
+pub fn apply_cloud_download_policy(
+    provider: CloudProvider,
+    configured_connections: u8,
+    mut options: UriSubmissionOptions,
+) -> UriSubmissionOptions {
+    options.max_connections_per_server = Some(
+        configured_connections.min(
+            ProviderRegistry::global()
+                .get(provider)
+                .download_concurrency
+                .max_connections_per_file,
+        ),
+    );
+    options
 }
 
 pub(crate) fn planned_relative_path(file: &PlannedCloudFile) -> String {
