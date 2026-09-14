@@ -29,15 +29,33 @@ fn app_data_root() -> Result<PathBuf, &'static str> {
 }
 
 fn configured_proxy_client(root: &PathBuf) -> Result<reqwest::blocking::Client, &'static str> {
-    let bytes = fs::read(root.join("settings.json")).map_err(|_| "settings-unavailable")?;
-    let settings: AppSettings = serde_json::from_slice(&bytes).map_err(|_| "settings-invalid")?;
-    let proxy_url = proxy_url(&settings.proxy)?;
+    let proxy_url = match std::env::var("ALLDOWNLOADER_LIVE_PROXY") {
+        Ok(value) => live_proxy_url(&value)?,
+        Err(std::env::VarError::NotPresent) => {
+            let bytes = fs::read(root.join("settings.json")).map_err(|_| "settings-unavailable")?;
+            let settings: AppSettings =
+                serde_json::from_slice(&bytes).map_err(|_| "settings-invalid")?;
+            proxy_url(&settings.proxy)?
+        }
+        Err(std::env::VarError::NotUnicode(_)) => return Err("proxy-invalid"),
+    };
     let proxy = reqwest::Proxy::all(proxy_url.as_str()).map_err(|_| "proxy-invalid")?;
     reqwest::blocking::Client::builder()
         .proxy(proxy)
         .timeout(Duration::from_secs(45))
         .build()
         .map_err(|_| "proxy-client-unavailable")
+}
+
+fn live_proxy_url(value: &str) -> Result<url::Url, &'static str> {
+    let value = url::Url::parse(value).map_err(|_| "proxy-invalid")?;
+    if !matches!(value.scheme(), "http" | "https")
+        || value.host_str().is_none()
+        || value.port_or_known_default().is_none()
+    {
+        return Err("proxy-invalid");
+    }
+    Ok(value)
 }
 
 fn proxy_url(proxy: &ProxySettings) -> Result<url::Url, &'static str> {
