@@ -1950,6 +1950,9 @@ pub(crate) async fn resubmit_task(
         options.proxy = configured.proxy;
     }
     if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
+        options = state
+            .cloud_download_dispatch
+            .retry_submission_options(task.id, options);
         if state
             .store
             .cloud_directory_group_for_task(task.id)
@@ -4938,6 +4941,33 @@ mod tests {
         assert!(reserve < provider);
         assert!(body.contains("share_resolution_failure_message"));
         assert!(!body.contains("无法重新获取网盘下载地址：{error}"));
+    }
+
+    #[test]
+    fn cloud_resubmission_reapplies_runtime_retry_intent_before_dispatch() {
+        let body = include_str!("commands.rs")
+            .split_once("pub(crate) async fn resubmit_task(")
+            .expect("resubmit task exists")
+            .1
+            .split_once("fn task_output_directory")
+            .expect("resubmit task has a stable end")
+            .0;
+        let retry_intent = body
+            .find("retry_submission_options")
+            .expect("cloud retry must restore its runtime duplicate intent");
+        let dispatch = body
+            .find("queue_cloud_dispatch")
+            .expect("cloud retry reaches the shared dispatch");
+        assert!(retry_intent < dispatch);
+
+        let queue = include_str!("cloud/commands/download.rs")
+            .split_once("pub async fn queue_cloud_dispatch(")
+            .expect("queue cloud dispatch exists")
+            .1
+            .split_once("fn check_dispatch_owner")
+            .expect("queue cloud dispatch has a stable end")
+            .0;
+        assert!(queue.contains("prepare_expected_with_retry_intent"));
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use super::{
     download_scheduler::{AdmissionOutcome, CloudDownloadScheduler},
     CloudProvider, QuarkError,
 };
-use crate::{DownloadAction, DownloadTask, TaskStatus, TaskStore};
+use crate::{DownloadAction, DownloadTask, TaskStatus, TaskStore, UriSubmissionOptions};
 use std::{
     collections::HashMap,
     future::Future,
@@ -22,6 +22,14 @@ struct TaskDispatch {
     submission: Arc<AsyncMutex<()>>,
     job: AsyncMutex<()>,
     changed: Notify,
+    retry_intent: Mutex<RetryIntent>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RetryIntent {
+    original_gid: Option<String>,
+    allow_overwrite: bool,
+    continue_download: bool,
 }
 
 #[derive(Clone, Default)]
@@ -74,8 +82,33 @@ impl CloudDownloadDispatch {
         store: &TaskStore,
         expected: &DownloadTask,
     ) -> Result<(DownloadTask, u64), QuarkError> {
+        self.prepare_expected_inner(store, expected, None).await
+    }
+
+    pub async fn prepare_expected_with_retry_intent(
+        &self,
+        store: &TaskStore,
+        expected: &DownloadTask,
+        allow_overwrite: bool,
+        continue_download: bool,
+    ) -> Result<(DownloadTask, u64), QuarkError> {
+        self.prepare_expected_inner(
+            store,
+            expected,
+            Some((allow_overwrite, continue_download)),
+        )
+        .await
+    }
+
+    async fn prepare_expected_inner(
+        &self,
+        store: &TaskStore,
+        expected: &DownloadTask,
+        retry_options: Option<(bool, bool)>,
+    ) -> Result<(DownloadTask, u64), QuarkError> {
         let id = expected.id;
-        let _guard = self.submission_lock(id).await;
+        let state = self.task(id);
+        let _guard = state.submission.clone().lock_owned().await;
         let mut task = store.find(id).map_err(|_| QuarkError::Storage)?;
         if task.status != expected.status
             || task.aria_gid != expected.aria_gid
@@ -94,6 +127,16 @@ impl CloudDownloadDispatch {
         {
             return Err(QuarkError::InvalidInput("任务正在下载或已回收".into()));
         }
+        {
+            let mut intent = state.retry_intent.lock().unwrap();
+            if task.aria_gid.is_some() {
+                intent.original_gid.clone_from(&task.aria_gid);
+            }
+            if let Some((allow_overwrite, continue_download)) = retry_options {
+                intent.allow_overwrite = allow_overwrite;
+                intent.continue_download = continue_download && !allow_overwrite;
+            }
+        }
         self.invalidate(id);
         task.status = TaskStatus::Queued;
         task.aria_gid = None;
@@ -107,6 +150,21 @@ impl CloudDownloadDispatch {
             .apply_transfer_snapshot(task)
             .map_err(|_| QuarkError::Storage)?;
         Ok((task, self.task(id).version.load(Ordering::SeqCst)))
+    }
+
+    pub fn retry_submission_options(
+        &self,
+        id: Uuid,
+        mut options: UriSubmissionOptions,
+    ) -> UriSubmissionOptions {
+        let intent = self.task(id).retry_intent.lock().unwrap().clone();
+        if intent.allow_overwrite {
+            options.allow_overwrite = true;
+            options.continue_download = false;
+        } else if intent.continue_download {
+            options.continue_download = true;
+        }
+        options
     }
 
     /// Returns None once aria2 owns the task; callers then use normal engine control.
@@ -131,6 +189,9 @@ impl CloudDownloadDispatch {
         };
         self.invalidate(id);
         task.status = status;
+        if action == DownloadAction::Cancel {
+            task.aria_gid = self.task(id).retry_intent.lock().unwrap().original_gid.clone();
+        }
         task.download_speed = 0;
         task.upload_speed = 0;
         store
@@ -217,18 +278,26 @@ impl CloudDownloadDispatch {
                         | TaskStatus::Cancelled
                         | TaskStatus::Recycled
                 );
+                *state.retry_intent.lock().unwrap() = RetryIntent::default();
                 return Some(task);
             }
         }
         match result {
             Ok(task) => Some(task),
-            Err(error) => store
-                .fail_with_code(
-                    id,
-                    Some(super::commands::cloud_failure_code(&error)),
-                    super::commands::share_resolution_failure_message(&error),
-                )
-                .ok(),
+            Err(error) => {
+                let original_gid = state.retry_intent.lock().unwrap().original_gid.clone();
+                if let (Some(original_gid), Ok(mut current)) = (original_gid, store.find(id)) {
+                    current.aria_gid = Some(original_gid);
+                    let _ = store.apply_transfer_snapshot(current);
+                }
+                store
+                    .fail_with_code(
+                        id,
+                        Some(super::commands::cloud_failure_code(&error)),
+                        super::commands::share_resolution_failure_message(&error),
+                    )
+                    .ok()
+            }
         }
     }
 }

@@ -350,6 +350,95 @@ async fn scheduler_gidless_pause_cancel_resume_never_dispatches_stale_work() {
 }
 
 #[tokio::test]
+async fn scheduler_gidless_resume_retains_confirmed_overwrite_intent() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    let dispatch = CloudDownloadDispatch::default();
+    let store = TaskStore::open_in_memory().unwrap();
+    let task = prepared_cloud_share_task(&store, "cloud://quark/file", "file.bin");
+    let failed = store
+        .fail(task.id, "preallocated output is not resumable")
+        .unwrap();
+    let failed = store.bind_gid(failed.id, "stale-gid").unwrap();
+    dispatch
+        .prepare_expected_with_retry_intent(&store, &failed, true, false)
+        .await
+        .unwrap();
+    let paused = dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Pause)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(paused.aria_gid.is_none());
+
+    let options = dispatch.retry_submission_options(
+        task.id,
+        UriSubmissionOptions {
+            continue_download: true,
+            ..Default::default()
+        },
+    );
+
+    assert!(options.allow_overwrite);
+    assert!(
+        !options.continue_download,
+        "a resumed pre-admission overwrite must still discard stale aria2 state"
+    );
+}
+
+#[tokio::test]
+async fn failed_share_resume_dispatch_restores_original_gid_and_resume_eligibility() {
+    use alldownloader_lib::cloud::{
+        download_dispatch::CloudDownloadDispatch, share::stable_share_source,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let dispatch = CloudDownloadDispatch::default();
+    let store = TaskStore::open_in_memory().unwrap();
+    let source = stable_share_source(CloudProvider::Quark, "plan", "entry");
+    let task = prepared_cloud_share_task(&store, &source, "partial.bin");
+    let failed = store
+        .apply_transfer_snapshot(DownloadTask {
+            status: TaskStatus::Failed,
+            total_length: Some(100),
+            completed_length: 25,
+            ..task
+        })
+        .unwrap();
+    let failed = store.bind_gid(failed.id, "resume-gid").unwrap();
+    let payload = root.path().join("partial.bin");
+    std::fs::write(&payload, b"partial").unwrap();
+    std::fs::write(format!("{}.aria2", payload.display()), b"control").unwrap();
+    store
+        .upsert_files(
+            failed.id,
+            &[(0, payload.to_string_lossy().into_owned(), 100, 25, true)],
+        )
+        .unwrap();
+    let (_, version) = dispatch.prepare(&store, failed.id).await.unwrap();
+
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            failed.id,
+            version,
+            || async {
+                Err::<(), _>(alldownloader_lib::cloud::QuarkError::Transport(
+                    "temporary resolver failure".into(),
+                ))
+            },
+            |_: ()| async { panic!("failed resolution must not submit") },
+        )
+        .await;
+
+    let failed_again = store.find(failed.id).unwrap();
+    assert_eq!(failed_again.aria_gid.as_deref(), Some("resume-gid"));
+    assert_eq!(
+        alldownloader_lib::duplicate_state(&store, &failed_again).unwrap(),
+        alldownloader_lib::DuplicateDownloadState::ResumeAvailable
+    );
+}
+
+#[tokio::test]
 async fn scheduler_pause_during_resolution_releases_slot_and_resume_uses_a_fresh_resolver() {
     use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
     let dispatch = CloudDownloadDispatch::default();

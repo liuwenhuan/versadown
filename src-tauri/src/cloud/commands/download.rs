@@ -520,7 +520,12 @@ pub async fn queue_cloud_dispatch(
         .map_err(|_| QuarkError::InvalidInput("下载路径或文件名无效".into()))?;
     let (queued, version) = state
         .cloud_download_dispatch
-        .prepare_expected(&state.store, &task)
+        .prepare_expected_with_retry_intent(
+            &state.store,
+            &task,
+            configured.allow_overwrite,
+            configured.continue_download,
+        )
         .await?;
     emit_cloud_dispatch_update(&app, state, &queued);
     let id = queued.id;
