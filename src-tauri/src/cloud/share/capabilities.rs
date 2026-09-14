@@ -49,6 +49,12 @@ pub trait ShareTransfer: Send + Sync {
         &self,
         entry: &CloudShareResolvedEntry,
     ) -> Result<Option<String>, QuarkError>;
+    fn transfer_capacity(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<CloudTransferCapacity, QuarkError> {
+        Err(QuarkError::ProviderUnsupported)
+    }
 }
 
 pub trait RecordedTransferResolver: Send + Sync {
