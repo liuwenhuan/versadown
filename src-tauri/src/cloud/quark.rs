@@ -54,6 +54,67 @@ mod tests {
             json!({"status":200,"code":0,"data":{"list":[{"fid":"11","file_name":"movie.mp4","dir":false,"size":123,"share_fid_token":"file-secret"}]},"metadata":{"_total":1}}),
         ]
     }
+    fn capacity_entry(provider: CloudProvider) -> CloudShareResolvedEntry {
+        let plan = CloudSharePlan::new(
+            provider,
+            "capacity-share".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "capacity-share",
+                "entry-1".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            json!({}),
+        );
+        CloudShareResolvedEntry {
+            provider,
+            entry: plan.entries[0].clone(),
+            plan,
+        }
+    }
+    #[test]
+    fn quark_share_transfer_capacity_uses_member_bytes() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("quark", b"__uid=account-7; sid=current")
+            .unwrap();
+        let http = Http::new(vec![json!({
+            "status": 200, "code": 0,
+            "data": {"total_capacity": "1000", "use_capacity": 250}
+        })]);
+        let adapter = QuarkShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        assert_eq!(
+            adapter
+                .transfer_capacity(&capacity_entry(CloudProvider::Quark))
+                .unwrap(),
+            CloudTransferCapacity::Limited {
+                total_bytes: 1000,
+                used_bytes: 250
+            }
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert!(requests[0].url.contains("/1/clouddrive/member?"));
+        assert!(!requests[0].url.contains("sharepage/save"));
+        drop(requests);
+
+        let invalid_quark = Http::new(vec![json!({
+            "status": 200, "code": 0,
+            "data": {"total_capacity": 100, "use_capacity": 101}
+        })]);
+        assert!(QuarkShareAdapter {
+            credentials: &credentials,
+            http: &invalid_quark
+        }
+        .transfer_capacity(&capacity_entry(CloudProvider::Quark))
+        .is_err());
+    }
     #[test]
     fn quark_share_direct_requests_file_download_with_share_context() {
         let credentials = MemoryCredentialStore::default();
@@ -831,9 +892,9 @@ fn validate_recycle_record_ids(record_ids: &[String]) -> Result<(), QuarkError> 
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
-    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
-    TransferRequest,
+    CloudShareResolvedEntry, CloudTransferCapacity, RecordedTransferDownload,
+    RecordedTransferResolver, ShareInspect, ShareInspection, ShareOperationResult, ShareResolution,
+    ShareResolve, ShareTransfer, TransferRequest,
 };
 
 pub struct QuarkShareAdapter<'a> {
@@ -1067,6 +1128,24 @@ impl ShareResolve for QuarkShareAdapter<'_> {
     }
 }
 impl ShareTransfer for QuarkShareAdapter<'_> {
+    fn transfer_capacity(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<CloudTransferCapacity, QuarkError> {
+        let client = self.client()?;
+        let response = client.request(
+            "GET",
+            "member?fetch_subscribe=true&_ch=home&fetch_identity=true",
+            None,
+        )?;
+        let value = response_json(&response)?;
+        CloudTransferCapacity::from_json(
+            &value["data"]["total_capacity"],
+            &value["data"]["use_capacity"],
+            false,
+        )
+    }
+
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
