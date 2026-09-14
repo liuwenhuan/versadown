@@ -2439,16 +2439,36 @@ fn remove_recorded_download_file(path: &Path) -> Result<(), String> {
     }
 }
 
-fn remove_task_payload_files(store: &TaskStore, task_id: Uuid) -> Result<(), String> {
+fn recorded_task_payload_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
     for file in store.files(task_id).map_err(|error| error.to_string())? {
         if file.path.trim().is_empty() {
             continue;
         }
         let path = PathBuf::from(file.path);
-        remove_recorded_download_file(&path)?;
+        if !path.is_absolute() {
+            return Err(format!("拒绝删除非绝对路径的下载文件：{}", path.display()));
+        }
+        paths.push(path.clone());
         let mut sidecar = path.into_os_string();
         sidecar.push(".aria2");
-        remove_recorded_download_file(Path::new(&sidecar))?;
+        paths.push(PathBuf::from(sidecar));
+    }
+    for path in &paths {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => return Err(format!("拒绝删除非文件下载项：{}", path.display())),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("无法读取下载文件 {}：{error}", path.display())),
+        }
+    }
+    Ok(paths)
+}
+
+fn remove_task_payload_files(store: &TaskStore, task_id: Uuid) -> Result<(), String> {
+    for path in recorded_task_payload_paths(store, task_id)? {
+        remove_recorded_download_file(&path)?;
     }
     Ok(())
 }
@@ -2456,10 +2476,10 @@ fn remove_task_payload_files(store: &TaskStore, task_id: Uuid) -> Result<(), Str
 // Engine snapshots can be missing after an interrupted submission/recovery.
 // Use durable membership only when there is no authoritative engine filename;
 // never guess from the display name or recursively remove a shared directory.
-fn remove_directory_payload_fallbacks(
+fn directory_payload_fallback_paths(
     store: &TaskStore,
     tasks: &[DownloadTask],
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
     let mut groups = HashMap::new();
     let mut paths = Vec::new();
     for task in tasks {
@@ -2507,10 +2527,101 @@ fn remove_directory_payload_fallbacks(
     }
     // Validate every fallback before deleting any of them. Errors retain task
     // records, allowing the user to fix permissions/paths and retry the purge.
-    for path in paths {
+    for path in &paths {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+            }
+            Ok(_) => return Err(format!("拒绝删除非文件下载项：{}", path.display())),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("无法读取下载文件 {}：{error}", path.display())),
+        }
+    }
+    Ok(paths)
+}
+
+fn remove_directory_payload_fallbacks(
+    store: &TaskStore,
+    tasks: &[DownloadTask],
+) -> Result<(), String> {
+    for path in directory_payload_fallback_paths(store, tasks)? {
         remove_recorded_download_file(&path)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TianyiLocalStatePurgeReport {
+    pub removed_tasks: usize,
+    pub removed_directory_groups: usize,
+    pub removed_share_plans: usize,
+}
+
+fn is_tianyi_task_source(source: &str) -> bool {
+    source.starts_with("cloud://tianyi/") || source.starts_with("cloud-share://tianyi/")
+}
+
+/// Removes application-owned Tianyi downloads and durable records. Every
+/// payload path is validated before any file, task or credential is deleted.
+pub(crate) fn purge_tianyi_local_state(
+    store: &TaskStore,
+    cloud: &crate::cloud::commands::CloudState,
+) -> Result<TianyiLocalStatePurgeReport, String> {
+    cloud
+        .preflight_tianyi_persisted_state()
+        .map_err(|error| error.to_string())?;
+    let groups = store
+        .cloud_directory_groups()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|group| group.provider == crate::cloud::CloudProvider::Tianyi)
+        .collect::<Vec<_>>();
+    let mut task_ids = store
+        .list()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|task| is_tianyi_task_source(&task.source))
+        .map(|task| task.id)
+        .collect::<std::collections::HashSet<_>>();
+    for group in &groups {
+        for item in store
+            .cloud_directory_group_items(group.id)
+            .map_err(|error| error.to_string())?
+        {
+            if let Some(task_id) = item.task_id {
+                task_ids.insert(task_id);
+            }
+        }
+    }
+    let tasks = task_ids
+        .iter()
+        .map(|id| store.find(*id).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut paths = directory_payload_fallback_paths(store, &tasks)?;
+    for task in &tasks {
+        paths.extend(recorded_task_payload_paths(store, task.id)?);
+    }
+    for path in &paths {
+        remove_recorded_download_file(path)?;
+    }
+
+    let removed_share_plans = cloud
+        .purge_tianyi_persisted_state()
+        .map_err(|error| error.to_string())?;
+    let ids = task_ids.into_iter().collect::<Vec<_>>();
+    store
+        .remove_task_records(&ids)
+        .map_err(|error| error.to_string())?;
+    for group in &groups {
+        store
+            .remove_cloud_directory_group(group.id)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(TianyiLocalStatePurgeReport {
+        removed_tasks: ids.len(),
+        removed_directory_groups: groups.len(),
+        removed_share_plans,
+    })
 }
 
 fn directory_payload_fallback_path(
@@ -3071,11 +3182,170 @@ mod tests {
     use crate::{
         aria2::{Aria2Error, RpcFault},
         cloud::{
-            share::CloudShareEntry, share::CloudSharePlan, CloudProvider, MemoryCredentialStore,
+            commands::CloudState, share::CloudShareEntry, share::CloudSharePlan, CloudProvider,
+            CredentialStore, MemoryCredentialStore,
         },
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
         DuplicateDownloadState, NewTask,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn tianyi_local_state_purge_removes_only_tianyi_files_tasks_plans_and_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        let cloud = CloudState::new(root.path().join("cloud-sessions")).unwrap();
+        let tianyi_payload = root.path().join("tianyi.mp4");
+        let baidu_payload = root.path().join("baidu.mp4");
+        std::fs::write(&tianyi_payload, b"tianyi").unwrap();
+        std::fs::write(&baidu_payload, b"baidu").unwrap();
+        let profile = root.path().join("web-auth").join("tianyi");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("Cookies"), b"private browser state").unwrap();
+        cloud.store.save("tianyi", b"session").unwrap();
+        cloud
+            .store
+            .save("cloud-password-tianyi", b"password")
+            .unwrap();
+
+        let tianyi_plan = CloudSharePlan::new(
+            CloudProvider::Tianyi,
+            "retired-share".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "retired-share",
+                "file".into(),
+                "tianyi.mp4".into(),
+                vec![],
+                Some(6),
+            )],
+            serde_json::json!({}),
+        );
+        let tianyi_share_source = tianyi_plan.source_for("file");
+        cloud.share_plans.upsert(&tianyi_plan).unwrap();
+
+        let store = TaskStore::open_in_memory().unwrap();
+        let tianyi = store
+            .create(NewTask::direct("cloud://tianyi/tianyi-file"))
+            .unwrap();
+        store
+            .upsert_files(
+                tianyi.id,
+                &[(0, tianyi_payload.to_string_lossy().into_owned(), 6, 6, true)],
+            )
+            .unwrap();
+        let baidu = store
+            .create(NewTask::direct("cloud://baidu/baidu-file"))
+            .unwrap();
+        store
+            .upsert_files(
+                baidu.id,
+                &[(0, baidu_payload.to_string_lossy().into_owned(), 5, 5, true)],
+            )
+            .unwrap();
+
+        let directory_payload = root.path().join("tianyi-directory.mp4");
+        std::fs::write(&directory_payload, b"tianyi directory").unwrap();
+        let directory_group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Tianyi,
+                    "tianyi-directory",
+                    "Tianyi directory",
+                    root.path(),
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "tianyi-directory-file",
+                    &[] as &[&str],
+                    "tianyi-directory.mp4",
+                    Some(16),
+                )],
+            )
+            .unwrap();
+        let directory_item = store
+            .cloud_directory_group_items(directory_group.id)
+            .unwrap()[0]
+            .clone();
+        let directory_task = store
+            .create(NewTask::direct("https://example.test/directory-file"))
+            .unwrap();
+        store
+            .upsert_files(
+                directory_task.id,
+                &[(
+                    0,
+                    directory_payload.to_string_lossy().into_owned(),
+                    16,
+                    16,
+                    true,
+                )],
+            )
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(
+                directory_group.id,
+                directory_item.id,
+                directory_task.id,
+            )
+            .unwrap();
+
+        let report = purge_tianyi_local_state(&store, &cloud).unwrap();
+
+        assert_eq!(report.removed_tasks, 2);
+        assert_eq!(report.removed_directory_groups, 1);
+        assert_eq!(report.removed_share_plans, 1);
+        assert!(!tianyi_payload.exists());
+        assert!(!directory_payload.exists());
+        assert!(matches!(
+            store.find(tianyi.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
+        assert!(matches!(
+            store.find(directory_task.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
+        assert!(store
+            .cloud_directory_group(directory_group.id)
+            .unwrap()
+            .is_none());
+        assert!(cloud.store.load("tianyi").unwrap().is_none());
+        assert!(cloud.store.load("cloud-password-tianyi").unwrap().is_none());
+        assert!(cloud
+            .share_plans
+            .resolve_entry(&tianyi_share_source)
+            .is_err());
+        assert!(!profile.exists());
+        assert!(baidu_payload.exists());
+        assert!(store.find(baidu.id).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tianyi_local_state_purge_keeps_everything_when_its_profile_path_is_unsafe() {
+        let root = tempfile::tempdir().unwrap();
+        let cloud = CloudState::new(root.path().join("cloud-sessions")).unwrap();
+        let profile_parent = root.path().join("web-auth");
+        std::fs::create_dir_all(&profile_parent).unwrap();
+        std::fs::write(profile_parent.join("tianyi"), b"not a profile directory").unwrap();
+        let payload = root.path().join("tianyi.mp4");
+        std::fs::write(&payload, b"tianyi").unwrap();
+        cloud.store.save("tianyi", b"session").unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://tianyi/tianyi-file"))
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 6, 6, true)],
+            )
+            .unwrap();
+
+        assert!(purge_tianyi_local_state(&store, &cloud).is_err());
+
+        assert!(payload.exists());
+        assert!(store.find(task.id).is_ok());
+        assert!(cloud.store.load("tianyi").unwrap().is_some());
+    }
 
     #[test]
     fn queue_cleanup_projection_reads_the_journal_once_for_nested_completed_files() {

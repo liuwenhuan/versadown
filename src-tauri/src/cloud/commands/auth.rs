@@ -247,6 +247,9 @@ pub async fn cloud_tianyi_resolve_download_for_test(
 }
 
 pub(crate) fn require_connected_provider(provider: CloudProvider) -> Result<(), QuarkError> {
+    if !provider.is_enabled() {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     let _ = ProviderRegistry::global().get(provider);
     Ok(())
 }
@@ -266,6 +269,7 @@ pub async fn cloud_begin_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAuthorization, QuarkError> {
+    require_connected_provider(provider)?;
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
@@ -605,6 +609,7 @@ pub fn cloud_completed_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<Option<CloudAccount>, QuarkError> {
+    require_connected_provider(provider)?;
     app.try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?
         .completed_authorization(provider)
@@ -615,6 +620,7 @@ pub async fn cloud_complete_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
+    require_connected_provider(provider)?;
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
@@ -743,6 +749,7 @@ pub async fn cloud_login_password(
     password: Option<String>,
     use_saved_password: Option<bool>,
 ) -> Result<CloudAccount, QuarkError> {
+    require_connected_provider(provider)?;
     let request = PasswordLoginRequest {
         provider,
         username,

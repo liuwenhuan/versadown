@@ -90,6 +90,9 @@ async fn run_initialized<T: Send + 'static>(
     initialization_timeout: std::time::Duration,
     exclusive: bool,
 ) -> Result<T, QuarkError> {
+    if !provider.is_enabled() {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     // The webview can issue IPC before setup has registered CloudState.
     // Wait without holding provider locks or occupying the blocking pool;
     // initialization errors remain distinct from errors in actual cloud work.

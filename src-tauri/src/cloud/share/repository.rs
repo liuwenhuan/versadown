@@ -424,6 +424,18 @@ impl CloudSharePlanStore {
         self.save(&document)
     }
 
+    /// Drops every encrypted share plan and transfer journal for one provider.
+    /// The document write remains serialized with ordinary share operations.
+    pub fn remove_provider(&self, provider: CloudProvider) -> Result<usize, QuarkError> {
+        self.update(|document, _| {
+            let before = document.plans.len();
+            document
+                .plans
+                .retain(|_, stored| stored.plan.provider != provider);
+            Ok(before.saturating_sub(document.plans.len()))
+        })
+    }
+
     pub fn resolve_entry(&self, source: &str) -> Result<CloudShareResolvedEntry, QuarkError> {
         let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
         self.update(|document, now| {

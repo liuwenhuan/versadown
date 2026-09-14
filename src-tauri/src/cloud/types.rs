@@ -21,6 +21,13 @@ impl CloudProvider {
         Self::Xunlei,
         Self::Uc,
     ];
+
+    /// Tianyi remains a known serialized provider so historical task records
+    /// can be purged safely, but it is not an active product integration.
+    pub fn is_enabled(self) -> bool {
+        self != Self::Tianyi
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             Self::Quark => "quark",
@@ -52,6 +59,14 @@ pub enum PasswordLoginMode {
 }
 
 pub fn provider_capabilities(provider: CloudProvider) -> CloudAuthorizationCapabilities {
+    if !provider.is_enabled() {
+        return CloudAuthorizationCapabilities {
+            provider,
+            web: false,
+            password: false,
+            password_login_mode: PasswordLoginMode::None,
+        };
+    }
     super::ProviderRegistry::global()
         .get(provider)
         .authorization

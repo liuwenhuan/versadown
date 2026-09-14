@@ -561,10 +561,6 @@ mod tests {
                 CloudProvider::Pikpak,
             ),
             ("https://pan.baidu.com/s/a?pwd=1234", CloudProvider::Baidu),
-            (
-                "https://cloud.189.cn/t/a 访问码：1234",
-                CloudProvider::Tianyi,
-            ),
             ("https://www.alipan.com/s/a?pwd=1234", CloudProvider::Aliyun),
             ("https://pan.xunlei.com/s/a?pwd=1234", CloudProvider::Xunlei),
             ("https://drive.uc.cn/s/a?pwd=1234", CloudProvider::Uc),
@@ -574,6 +570,24 @@ mod tests {
             assert_eq!(value.access_code.as_deref(), Some("1234"));
             assert_eq!(value.url, input.split_whitespace().next().unwrap());
         }
+    }
+
+    #[test]
+    fn rejects_decommissioned_tianyi_share_links_instead_of_treating_them_as_direct_urls() {
+        let source = "https://cloud.189.cn/t/retired-share?pwd=1234";
+
+        assert_eq!(
+            validate_download_input(source),
+            Err(InputValidationError::InvalidCloudShare)
+        );
+        assert_eq!(
+            extract_cloud_share_candidate(source, None),
+            Err(ShareInputError::InvalidShare)
+        );
+        assert!(crate::cloud::ProviderRegistry::global()
+            .catalog()
+            .iter()
+            .all(|descriptor| descriptor.provider != CloudProvider::Tianyi));
     }
 
     #[test]

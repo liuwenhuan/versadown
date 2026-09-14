@@ -153,6 +153,17 @@ impl AuthSupervisor {
             health: AuthHealth::Disconnected,
         })
     }
+
+    /// Removes an in-memory snapshot after its provider's durable credentials
+    /// have been deleted. This prevents a decommissioned provider from
+    /// retaining a session until the next application restart.
+    pub fn forget(&self, provider: CloudProvider) -> Result<(), CloudError> {
+        self.published
+            .lock()
+            .map_err(|_| CloudError::Storage)?
+            .remove(&provider);
+        Ok(())
+    }
     fn publish_locked(
         &self,
         store: &impl CredentialStore,

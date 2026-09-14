@@ -98,6 +98,54 @@ impl CloudState {
             .remove(&provider);
         Ok(())
     }
+
+    pub(crate) fn preflight_tianyi_persisted_state(&self) -> Result<(), QuarkError> {
+        let root = self.store.root();
+        if !root.is_absolute() {
+            return Err(QuarkError::Storage);
+        }
+        let app_data = root.parent().ok_or(QuarkError::Storage)?;
+        let profile = app_data.join("web-auth").join(CloudProvider::Tianyi.key());
+        match std::fs::symlink_metadata(profile) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+            Ok(_) => Err(QuarkError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(QuarkError::Storage),
+        }
+    }
+
+    /// Deletes the stored and in-memory authorization material for Tianyi.
+    /// This is deliberately separate from task payload removal so callers can
+    /// retain credentials if path preflight rejects a destructive purge.
+    pub(crate) fn purge_tianyi_persisted_state(&self) -> Result<usize, QuarkError> {
+        let provider = CloudProvider::Tianyi;
+        self.preflight_tianyi_persisted_state()?;
+        let removed_plans = self.share_plans.remove_provider(provider)?;
+        for key in [
+            "tianyi",
+            "cloud-password-tianyi",
+            "cloud-password-draft-tianyi",
+            "cloud-password-profile-reset-tianyi",
+            "cloud-auth-maintenance-tianyi",
+        ] {
+            self.store.remove(key)?;
+        }
+        self.auth_supervisor.forget(provider)?;
+        self.clear_authorization_completion(provider)?;
+
+        let root = self.store.root();
+        let app_data = root.parent().ok_or(QuarkError::Storage)?;
+        let profile = app_data.join("web-auth").join(provider.key());
+        match std::fs::symlink_metadata(&profile) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                std::fs::remove_dir_all(profile).map_err(|_| QuarkError::Storage)?;
+            }
+            Ok(_) => return Err(QuarkError::Storage),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(QuarkError::Storage),
+        }
+        Ok(removed_plans)
+    }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         let state = Self {
             share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
@@ -118,7 +166,11 @@ impl CloudState {
         Ok(state)
     }
     pub fn start_authorization_maintenance(self: &Arc<Self>) {
-        for descriptor in ProviderRegistry::global().all() {
+        for descriptor in ProviderRegistry::global()
+            .all()
+            .iter()
+            .filter(|descriptor| descriptor.provider.is_enabled())
+        {
             let state = Arc::downgrade(self);
             let provider = descriptor.provider;
             tauri::async_runtime::spawn(async move {

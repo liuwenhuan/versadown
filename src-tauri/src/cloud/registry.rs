@@ -171,11 +171,17 @@ impl ProviderRegistry {
     }
 
     pub fn catalog(&self) -> Vec<ProviderDescriptorDto> {
-        self.descriptors.clone()
+        self.descriptors
+            .iter()
+            .filter(|descriptor| descriptor.provider.is_enabled())
+            .cloned()
+            .collect()
     }
 
     pub fn for_share_url(&self, url: &Url) -> Option<&ProviderDescriptor> {
-        self.descriptors.iter().find(|d| d.accepts_share_url(url))
+        self.descriptors.iter().find(|descriptor| {
+            descriptor.provider.is_enabled() && descriptor.accepts_share_url(url)
+        })
     }
 
     pub fn for_candidate_url(&self, url: &Url) -> Option<&ProviderDescriptor> {

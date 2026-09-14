@@ -217,10 +217,11 @@ pub fn run() {
             };
             std::fs::create_dir_all(&data_dir)?;
             let store = std::sync::Arc::new(TaskStore::open_path(&data_dir.join("tasks.sqlite"))?);
-            store.recover_interrupted_cloud_directories()?;
             let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
                 data_dir.join("cloud-sessions"),
             )?);
+            commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
+            store.recover_interrupted_cloud_directories()?;
             let ai_secrets = cloud::DpapiCredentialStore::new(data_dir.join("ai-secrets"))?;
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
