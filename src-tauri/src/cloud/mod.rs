@@ -6,6 +6,7 @@ pub mod commands;
 mod common;
 mod credentials;
 pub mod driver;
+pub mod download_scheduler;
 mod http;
 mod pikpak;
 mod quark;
