@@ -43,12 +43,11 @@ fn has_existing_payload(store: &TaskStore, task: &DownloadTask) -> Result<bool, 
 
 fn can_resume(store: &TaskStore, task: &DownloadTask) -> Result<bool, StoreError> {
     let files = store.files(task.id)?;
-    let has_resumable_progress = task.status == TaskStatus::Paused
-        || (task.completed_length > 0
-            && task
-                .total_length
-                .map(|total_length| task.completed_length < total_length)
-                .unwrap_or(true));
+    let has_resumable_progress = task.completed_length > 0
+        && task
+            .total_length
+            .map(|total_length| task.completed_length < total_length)
+            .unwrap_or(true);
     Ok(has_resumable_progress
         && task.aria_gid.is_some()
         && !files.is_empty()
@@ -263,6 +262,80 @@ mod tests {
             duplicate_state(&store, &failed).unwrap(),
             DuplicateDownloadState::OverwriteRequired,
             "a control file cannot make an unstarted preallocated payload resumable"
+        );
+    }
+
+    #[test]
+    fn paused_zero_progress_with_an_aria2_control_file_requires_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let paused = task_with_status(
+            &store,
+            "https://example.test/paused-zero-progress.bin",
+            TaskStatus::Paused,
+        );
+        let paused = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(128),
+                completed_length: 0,
+                ..paused
+            })
+            .unwrap();
+        let paused = store.bind_gid(paused.id, "paused-zero-gid").unwrap();
+        let payload = root.path().join("paused-zero-progress.bin");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        std::fs::write(format!("{}.aria2", payload.display()), b"control").unwrap();
+        store
+            .upsert_files(
+                paused.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 0, true)],
+            )
+            .unwrap();
+
+        assert_eq!(
+            duplicate_state(&store, &paused).unwrap(),
+            DuplicateDownloadState::OverwriteRequired,
+            "a paused task still needs positive progress before it is resumable"
+        );
+    }
+
+    #[test]
+    fn paused_fully_progressed_with_an_aria2_control_file_requires_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let paused = task_with_status(
+            &store,
+            "https://example.test/paused-fully-progressed.bin",
+            TaskStatus::Paused,
+        );
+        let paused = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(128),
+                completed_length: 128,
+                ..paused
+            })
+            .unwrap();
+        let paused = store.bind_gid(paused.id, "paused-complete-gid").unwrap();
+        let payload = root.path().join("paused-fully-progressed.bin");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        std::fs::write(format!("{}.aria2", payload.display()), b"control").unwrap();
+        store
+            .upsert_files(
+                paused.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 128, true)],
+            )
+            .unwrap();
+
+        assert_eq!(
+            duplicate_state(&store, &paused).unwrap(),
+            DuplicateDownloadState::OverwriteRequired,
+            "a paused task at its known total length is not an incomplete resume"
         );
     }
 }

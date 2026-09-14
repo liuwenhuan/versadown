@@ -794,6 +794,7 @@ async fn overwrite_submission_starts_fresh_instead_of_inheriting_global_resume()
             vec![task.source],
             UriSubmissionOptions {
                 allow_overwrite: true,
+                continue_download: true,
                 ..Default::default()
             },
         )
