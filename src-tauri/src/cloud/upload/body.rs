@@ -376,7 +376,7 @@ impl Read for SliceReader {
 /// CloudDrive compares the actual streamed bytes to its registered MD5/SHA1.
 /// Only digest state is shared across parts; file buffers remain in the reader.
 #[derive(Clone, Default)]
-pub struct UploadDigest(Arc<std::sync::Mutex<(md5::Context, Sha1)>>);
+pub struct UploadDigest(Arc<std::sync::Mutex<(md5::Context, Sha1, super::QuarkSha1Context)>>);
 impl UploadDigest {
     fn update(&self, bytes: &[u8]) -> io::Result<()> {
         let mut state = self
@@ -385,7 +385,14 @@ impl UploadDigest {
             .map_err(|_| io::Error::other("upload digest unavailable"))?;
         state.0.consume(bytes);
         state.1.update(bytes);
+        state
+            .2
+            .update(bytes)
+            .map_err(|_| io::Error::other("upload digest unavailable"))?;
         Ok(())
+    }
+    pub(crate) fn quark_hash_context(&self) -> Result<String, QuarkError> {
+        self.0.lock().map_err(|_| changed_file())?.2.encoded()
     }
     pub(crate) fn verify(&self, md5: &str, sha1: &str) -> Result<(), QuarkError> {
         let state = self.0.lock().map_err(|_| changed_file())?;

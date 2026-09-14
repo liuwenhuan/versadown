@@ -9,8 +9,9 @@ use alldownloader_lib::cloud::{
     commands::CloudState,
     driver::ProviderDriver,
     CloudError, CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
-    CloudUploadTransport, ProviderRegistry, ReqwestTransport, ResolvedCloudDownload,
-    SessionWorkKind, UploadHttpRequest, UploadHttpResponse,
+    CloudUploadTransport, CredentialStore, DpapiCredentialStore, ProviderRegistry, QuarkClient,
+    ReqwestTransport, ResolvedCloudDownload, SessionWorkKind, UploadHttpRequest,
+    UploadHttpResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -578,10 +579,75 @@ fn audit_provider_residuals(provider: CloudProvider) -> LiveResult<(usize, usize
     ))
 }
 
+fn run_requested_quark_upload() -> LiveResult<()> {
+    require_live_authorization()?;
+    let path = std::env::var_os("ALLDOWNLOADER_LIVE_QUARK_UPLOAD_PATH")
+        .map(PathBuf::from)
+        .ok_or_else(|| failure("ALLDOWNLOADER_LIVE_QUARK_UPLOAD_PATH is required"))?;
+    let metadata = fs::metadata(&path)?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| failure("requested upload filename is invalid"))?;
+    let provider = CloudProvider::Quark;
+    let http = LiveHttp::new()?;
+    let root_id = ProviderRegistry::global().get(provider).root_directory_id;
+    let store = DpapiCredentialStore::new(session_root()?)?;
+    let cookie = store
+        .load(provider.key())?
+        .ok_or_else(|| failure("Quark is not currently authorized"))?;
+    let cookie = String::from_utf8(cookie)
+        .map_err(|_| failure("stored Quark session is not valid UTF-8"))?;
+    let client = QuarkClient::new(cookie, &http);
+
+    client.account()?;
+    let check_directory_name = unique_name(provider, "upload-check");
+    let check_directory_response = client.mkdir(root_id, &check_directory_name)?;
+    let check_directory_value: serde_json::Value =
+        serde_json::from_str(&check_directory_response.body)?;
+    let check_directory_id = check_directory_value
+        .pointer("/data/fid")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| failure("Quark did not return the check directory id"))?;
+    let root_listing = client.directory(root_id)?;
+    if !root_listing
+        .items
+        .iter()
+        .any(|item| item.id == check_directory_id)
+    {
+        return Err(failure("Quark did not list the created check directory"));
+    }
+
+    let uploaded = client.upload_file(check_directory_id, &path, &http)?;
+    if uploaded.name != name || uploaded.size != Some(metadata.len()) {
+        return Err(failure("requested upload returned mismatched metadata"));
+    }
+    let listed = client
+        .directory(check_directory_id)?
+        .items
+        .into_iter()
+        .find(|item| item.name == name && item.kind == "file")
+        .ok_or_else(|| failure("Quark did not list the requested uploaded file"))?;
+    if listed.size != Some(metadata.len()) {
+        return Err(failure("requested upload listing returned mismatched size"));
+    }
+    eprintln!(
+        "Quark requested upload: PASS (kept in {check_directory_name}/{name}, {} bytes)",
+        metadata.len()
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's Quark session"]
 fn live_quark_complete_crud() -> LiveResult<()> {
     run_provider(CloudProvider::Quark)
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, ALLDOWNLOADER_LIVE_QUARK_UPLOAD_PATH and the current user's Quark session"]
+fn live_quark_requested_file_upload() -> LiveResult<()> {
+    run_requested_quark_upload()
 }
 
 #[test]

@@ -5,6 +5,7 @@ use alldownloader_lib::cloud::{
     CloudHttpTransport, CloudUploadTransport, CredentialStore, MemoryCredentialStore, QuarkClient,
     QuarkError, UploadHttpRequest, UploadHttpResponse,
 };
+use base64::Engine;
 use std::{collections::VecDeque, io::Write, sync::Mutex};
 
 struct RecordingHttp(Mutex<Vec<CloudHttpRequest>>);
@@ -248,6 +249,12 @@ fn upload_fixture() -> tempfile::NamedTempFile {
     fixture
 }
 
+fn multipart_upload_fixture() -> tempfile::NamedTempFile {
+    let fixture = tempfile::Builder::new().suffix(".bin").tempfile().unwrap();
+    fixture.as_file().set_len(1024 * 1024 + 1).unwrap();
+    fixture
+}
+
 #[test]
 fn quark_upload_runs_pre_hash_authorize_multipart_and_finish() {
     // Break caught: skipping a CloudDrive stage can leave an uploaded object
@@ -321,6 +328,71 @@ fn quark_upload_runs_pre_hash_authorize_multipart_and_finish() {
             .map(String::as_str),
         Some("OSS temporary-complete")
     );
+}
+
+#[test]
+fn quark_upload_signs_and_sends_the_hash_context_for_later_parts() {
+    // Break caught: Quark rejects later OSS parts unless their cumulative SHA-1
+    // context is both signed in `auth_meta` and sent with the upload request.
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":{"task_id":"task-1","auth_info":"one-shot","upload_id":"upload-1","obj_key":"objects/upload.bin","bucket":"ul-zb","upload_url":"https://pds.quark.cn","callback":"callback"},"metadata":{"part_size":1048576}}"#,
+        r#"{"code":0,"data":{"finish":false}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-part-1"}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-part-2"}}"#,
+        r#"{"code":0,"data":{"auth_key":"OSS temporary-complete"}}"#,
+        r#"{"code":0,"data":{"fid":"uploaded-1","file_name":"upload.bin","size":1048577}}"#,
+    ]);
+    let upload = RecordingUpload::new([
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "\"part-1\"".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: [("etag".into(), "\"part-2\"".into())].into(),
+            body: String::new(),
+        },
+        UploadHttpResponse {
+            status: 200,
+            headers: Default::default(),
+            body: "<CompleteMultipartUploadResult/>".into(),
+        },
+    ]);
+    let fixture = multipart_upload_fixture();
+
+    QuarkClient::new("sid=local-session".into(), &http)
+        .upload_file("0", fixture.path(), &upload)
+        .unwrap();
+
+    let upload_requests = upload.requests();
+    let context = upload_requests[1]
+        .headers
+        .get("x-oss-hash-ctx")
+        .expect("second part must send a cumulative hash context");
+    let context_json: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(context)
+            .expect("hash context must be base64 JSON"),
+    )
+    .unwrap();
+    assert_eq!(context_json["hash_type"], "sha1");
+    assert_eq!(context_json["Nl"], "8388608");
+    assert_eq!(context_json["Nh"], "0");
+    assert_eq!(context_json["data"], "");
+    assert_eq!(context_json["num"], "0");
+
+    let authorizations: Vec<_> = http
+        .requests()
+        .into_iter()
+        .filter(|request| request.url.contains("file/upload/auth"))
+        .collect();
+    let part_two_auth: serde_json::Value =
+        serde_json::from_str(authorizations[1].body.as_deref().unwrap()).unwrap();
+    assert!(part_two_auth["auth_meta"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("x-oss-hash-ctx:{context}\n")));
 }
 
 #[test]

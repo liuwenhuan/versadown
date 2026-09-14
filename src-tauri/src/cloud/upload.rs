@@ -7,7 +7,7 @@ use super::{
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
-use sha1::{Digest, Sha1};
+use sha1::{Digest, Sha1, Sha1Core};
 use std::{collections::BTreeMap, io::Read, path::Path};
 mod body;
 pub use body::*;
@@ -399,6 +399,9 @@ pub(crate) fn upload_cloud_drive_file(
             "partNumber={number}&uploadId={}",
             encoded(&contract.upload_id)
         );
+        let hash_context = (number > 1)
+            .then(|| uploaded_digest.quark_hash_context())
+            .transpose()?;
         let request = cloud_drive_authorized_request(
             &contract,
             "PUT",
@@ -406,6 +409,7 @@ pub(crate) fn upload_cloud_drive_file(
             content_type,
             bytes,
             None,
+            hash_context.as_deref(),
             profile.object_store_user_agent,
             &authorize,
         )?;
@@ -435,6 +439,7 @@ pub(crate) fn upload_cloud_drive_file(
         "application/xml",
         manifest.into(),
         contract.callback.as_deref(),
+        None,
         profile.object_store_user_agent,
         &authorize,
     )?)?)?;
@@ -604,6 +609,92 @@ fn cloud_drive_part_size(pre: &Value) -> Result<usize, QuarkError> {
     usize::try_from(part_size).map_err(|_| QuarkError::InvalidResponse)
 }
 
+/// The CloudDrive object store requires every part after the first to carry
+/// the SHA-1 state of the bytes already accepted. Its JSON shape mirrors the
+/// browser's OpenSSL-compatible SHA-1 context.
+#[derive(Clone)]
+struct QuarkSha1Context {
+    state: [u32; 5],
+    total_bytes: u64,
+    pending: Vec<u8>,
+}
+
+impl Default for QuarkSha1Context {
+    fn default() -> Self {
+        Self {
+            state: [
+                0x6745_2301,
+                0xEFCD_AB89,
+                0x98BA_DCFE,
+                0x1032_5476,
+                0xC3D2_E1F0,
+            ],
+            total_bytes: 0,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl QuarkSha1Context {
+    fn update(&mut self, mut bytes: &[u8]) -> Result<(), QuarkError> {
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or(QuarkError::InvalidResponse)?;
+        if !self.pending.is_empty() {
+            let needed = 64 - self.pending.len();
+            let take = needed.min(bytes.len());
+            self.pending.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.pending.len() == 64 {
+                let block: [u8; 64] = self.pending.as_slice().try_into().unwrap();
+                self.compress(block);
+                self.pending.clear();
+            }
+        }
+        while bytes.len() >= 64 {
+            let (block, rest) = bytes.split_at(64);
+            self.compress(block.try_into().unwrap());
+            bytes = rest;
+        }
+        self.pending.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn compress(&mut self, block: [u8; 64]) {
+        let block = sha1::digest::core_api::Block::<Sha1Core>::clone_from_slice(&block);
+        sha1::compress(&mut self.state, std::slice::from_ref(&block));
+    }
+
+    fn encoded(&self) -> Result<String, QuarkError> {
+        // Quark's server-issued part sizes are MiB-aligned, so every preceding
+        // part must leave a fully compressed SHA-1 state for the next request.
+        if !self.pending.is_empty() {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let bits = self
+            .total_bytes
+            .checked_mul(8)
+            .ok_or(QuarkError::InvalidResponse)?;
+        let value = json!({
+            "hash_type": "sha1",
+            "h0": self.state[0].to_string(),
+            "h1": self.state[1].to_string(),
+            "h2": self.state[2].to_string(),
+            "h3": self.state[3].to_string(),
+            "h4": self.state[4].to_string(),
+            "Nl": (bits as u32).to_string(),
+            "Nh": ((bits >> 32) as u32).to_string(),
+            "data": "",
+            "num": "0",
+        });
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&value).map_err(|_| QuarkError::InvalidResponse)?);
+        checked_temporary_header(&encoded)?;
+        Ok(encoded)
+    }
+}
+
 fn cloud_drive_authorized_request(
     contract: &CloudDriveUploadContract,
     method: &'static str,
@@ -611,6 +702,7 @@ fn cloud_drive_authorized_request(
     content_type: &str,
     body: UploadBody,
     callback: Option<&str>,
+    hash_context: Option<&str>,
     object_store_user_agent: &str,
     authorize: &impl Fn(Value) -> Result<Value, QuarkError>,
 ) -> Result<UploadHttpRequest, QuarkError> {
@@ -629,6 +721,10 @@ fn cloud_drive_authorized_request(
         oss_headers.push_str(&format!("x-oss-callback:{callback}\n"));
     }
     oss_headers.push_str(&format!("x-oss-date:{date}\n"));
+    if let Some(hash_context) = hash_context {
+        checked_temporary_header(hash_context)?;
+        oss_headers.push_str(&format!("x-oss-hash-ctx:{hash_context}\n"));
+    }
     checked_temporary_header(object_store_user_agent)?;
     oss_headers.push_str(&format!("x-oss-user-agent:{object_store_user_agent}\n"));
     let auth = authorize(json!({
@@ -657,6 +753,10 @@ fn cloud_drive_authorized_request(
     if let Some(callback) = callback {
         checked_temporary_header(callback)?;
         headers.insert("x-oss-callback".into(), callback.into());
+    }
+    if let Some(hash_context) = hash_context {
+        checked_temporary_header(hash_context)?;
+        headers.insert("x-oss-hash-ctx".into(), hash_context.into());
     }
     Ok(UploadHttpRequest {
         method,
