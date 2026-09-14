@@ -431,7 +431,10 @@ fn aliyun_forbidden_direct_url_transfers_once_and_reuses_the_personal_copy() {
 
     assert_eq!(download.url, "https://cdn.example/personal-file");
     assert_eq!(download.name, "sample.bin");
-    assert!(download.headers.is_empty());
+    assert_eq!(
+        download.headers,
+        vec![("Referer".into(), "https://www.aliyundrive.com/".into())]
+    );
     let records = store.resolve_entry(&source).unwrap().plan.transfers;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].created_file_id, "personal-file");
@@ -468,6 +471,116 @@ fn aliyun_forbidden_direct_url_transfers_once_and_reuses_the_personal_copy() {
             .filter(|request| request.url.ends_with("/v2/file/copy"))
             .count(),
         1
+    );
+}
+
+#[test]
+fn aliyun_transfer_waits_until_the_personal_copy_has_a_download_url() {
+    use crate::cloud::aliyun::AliyunShareAdapter;
+    use std::collections::VecDeque;
+
+    struct StatusHttp {
+        replies: Mutex<VecDeque<CloudHttpResponse>>,
+        requests: Mutex<Vec<CloudHttpRequest>>,
+    }
+    impl CloudHttpTransport for StatusHttp {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.requests.lock().unwrap().push(request);
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(QuarkError::InvalidResponse)
+        }
+    }
+
+    let (store, credentials, _) = memory_store();
+    credentials
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"personal","drive_id":"drive-7"}"#,
+        )
+        .unwrap();
+    let plan = CloudSharePlan::new(
+        CloudProvider::Aliyun,
+        "share-7".into(),
+        None,
+        vec![CloudShareEntry::new(
+            "share-7",
+            "shared-file".into(),
+            "sample.bin".into(),
+            vec![],
+            Some(7),
+        )],
+        serde_json::json!({"share_token":"share-token"}),
+    );
+    let source = plan.source_for("shared-file");
+    store.upsert(&plan).unwrap();
+    let http = StatusHttp {
+        replies: Mutex::new(
+            vec![
+                CloudHttpResponse {
+                    status: 403,
+                    body: serde_json::json!({"code":"Forbidden"}).to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({"drive_id":"drive-7","file_id":"personal-file"})
+                        .to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 404,
+                    body: serde_json::json!({"code":"NotFound.File"}).to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({}).to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({"url":"https://cdn.example/personal-file"})
+                        .to_string(),
+                    set_cookies: vec![],
+                },
+            ]
+            .into(),
+        ),
+        requests: Mutex::new(vec![]),
+    };
+    let adapter = AliyunShareAdapter {
+        credentials: credentials.as_ref(),
+        http: &http,
+    };
+
+    let download = resolve_current_share_download(&store, &adapter, &source).unwrap();
+
+    assert_eq!(download.url, "https://cdn.example/personal-file");
+    assert_eq!(
+        download.headers,
+        vec![("Referer".into(), "https://www.aliyundrive.com/".into())]
+    );
+    let records = store.resolve_entry(&source).unwrap().plan.transfers;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].created_file_id, "personal-file");
+    let requests = http.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.ends_with("/v2/file/copy"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.ends_with("/v2/file/get_download_url"))
+            .count(),
+        4
     );
 }
 

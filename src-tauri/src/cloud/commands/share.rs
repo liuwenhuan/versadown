@@ -259,10 +259,8 @@ where
         None
     };
 
-    let retry = tasks
-        .find_by_source(&source)
-        .map_err(|_| QuarkError::Storage)?
-        .filter(is_retryable_cloud_share_prepare);
+    let retry =
+        retryable_cloud_share_task_for_submission(&tasks, &source, directory_context.as_ref())?;
     let retrying_directory_leaf = directory_context.is_some() && retry.is_some();
     let new_task = crate::NewTask {
         source: source.clone(),
@@ -381,9 +379,32 @@ pub(crate) fn cloud_share_failure_outcome(
 pub(crate) fn is_retryable_cloud_share_prepare(task: &DownloadTask) -> bool {
     task.kind == "cloud"
         && task.aria_gid.is_none()
-        && (task.status == TaskStatus::Parsing
-            || (task.status == TaskStatus::Failed
-                && task.error.as_deref() == Some(CLOUD_SHARE_PREPARE_FAILURE)))
+        && matches!(task.status, TaskStatus::Parsing | TaskStatus::Failed)
+}
+
+pub(crate) fn retryable_cloud_share_task_for_submission(
+    tasks: &TaskStore,
+    source: &str,
+    directory_context: Option<&DirectoryLeafContext>,
+) -> Result<Option<DownloadTask>, QuarkError> {
+    let retry = tasks
+        .find_by_source(source)
+        .map_err(|_| QuarkError::Storage)?
+        .filter(is_retryable_cloud_share_prepare);
+    let (Some(context), Some(task)) = (directory_context, retry.as_ref()) else {
+        return Ok(retry);
+    };
+    if tasks
+        .cloud_directory_group_item_links_task(context.group_id, context.item_id, task.id)
+        .map_err(|_| QuarkError::Storage)?
+    {
+        Ok(retry)
+    } else {
+        // Re-adding the same share creates a new directory journal. A failed
+        // leaf already owned by an older journal must not be moved between
+        // groups; the new item gets its own task instead.
+        Ok(None)
+    }
 }
 
 pub(crate) fn cloud_share_task_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskActionOutcome {

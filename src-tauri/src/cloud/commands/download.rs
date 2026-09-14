@@ -881,10 +881,8 @@ where
         }
         // A resume may have submitted this item while the original loop waited.
         if store
-            .cloud_directory_group_items(group.id)
+            .cloud_directory_group_item_is_linked(group.id, item.id)
             .map_err(|_| QuarkError::Storage)?
-            .iter()
-            .any(|current| current.id == item.id && current.task_id.is_some())
         {
             continue;
         }

@@ -2,12 +2,12 @@
 //!
 //! The test uses the current Windows user's DPAPI-protected sessions through the
 //! production credential store.  An opt-in PikPak account read may rotate its existing
-//! refresh token before the share operation; it never creates, moves, or saves cloud files.
+//! refresh token before the share operation. The opt-in Aliyun acceptance test may save at
+//! most two selected share files when the provider does not issue a direct share URL.
 //! It never prints sessions, share URLs, access codes, identifiers, request headers, or
 //! direct download URLs.
 
 use alldownloader_lib::cloud::{
-    aliyun::AliyunClient,
     commands::{parse_stable_cloud_source, resolve_download, restore_account},
     share::{
         inspect_share_with_adapter, provider_share_adapter, resolve_current_share_download,
@@ -68,6 +68,17 @@ impl CloudHttpTransport for RedactedTransport {
             if url.path().starts_with("/1/clouddrive/") {
                 fields.insert(format!("request-path:{}", url.path()));
             }
+            if url.host_str() == Some("api.aliyundrive.com")
+                && matches!(
+                    url.path(),
+                    "/v2/share_link/get_share_token"
+                        | "/adrive/v3/file/list"
+                        | "/v2/file/get_download_url"
+                        | "/v2/file/copy"
+                )
+            {
+                fields.insert(format!("request-path:{}", url.path()));
+            }
         }
         let header_names = request
             .headers
@@ -105,6 +116,15 @@ impl CloudHttpTransport for RedactedTransport {
             .and_then(serde_json::Value::as_i64)
         {
             fields.insert(format!("code:{code}"));
+        }
+        if let Some(code) = value.get("code").and_then(serde_json::Value::as_str) {
+            if code.len() <= 64
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            {
+                fields.insert(format!("response-code:{code}"));
+            }
         }
         let normalized_body = response.body.to_ascii_lowercase();
         for marker in [
@@ -337,6 +357,46 @@ async fn wait_for_download(
                     paused.completed_length,
                     paused.total_length.unwrap_or(total),
                 ));
+            }
+            _ => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+}
+
+async fn wait_for_first_download_bytes(
+    client: &alldownloader_lib::Aria2RpcClient,
+    service: &DownloadService,
+    task_id: uuid::Uuid,
+) -> Result<(String, u64, u64), Box<dyn std::error::Error>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let task = service.reconcile_task(task_id).await?;
+        let gid = task.aria_gid.as_deref().ok_or("aria2 GID missing")?;
+        let status = client.tell_status(gid).await?;
+        let completed = status.completed_length.parse::<u64>()?;
+        let total = status.total_length.parse::<u64>()?;
+        match status.status.as_str() {
+            "complete" if completed > 0 => return Ok(("complete".into(), completed, total)),
+            "error" | "removed" => {
+                return Err(format!(
+                    "aria2 {} {}: {}",
+                    status.status,
+                    status.error_code.as_deref().unwrap_or("unknown"),
+                    status.error_message.as_deref().unwrap_or("unknown")
+                )
+                .into())
+            }
+            _ if completed > 0 => {
+                let paused = service.control(task_id, DownloadAction::Pause).await?;
+                return Ok((
+                    "paused-after-bytes".into(),
+                    paused.completed_length,
+                    paused.total_length.unwrap_or(total),
+                ));
+            }
+            _ if tokio::time::Instant::now() >= deadline => {
+                let _ = service.control(task_id, DownloadAction::Pause).await;
+                return Err("Aliyun share download produced no payload before timeout".into());
             }
             _ => tokio::time::sleep(Duration::from_millis(250)).await,
         }
@@ -765,9 +825,9 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
 }
 
 #[test]
-#[ignore = "requires one previously transferred sample file in the current user's Aliyun root"]
-fn live_aliyun_transferred_sample_starts_real_download_or_pause(
-) -> Result<(), Box<dyn std::error::Error>> {
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, an authorized Aliyun session, and two recorded transfers from the supplied share"]
+fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn std::error::Error>>
+{
     if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
         return Ok(());
     }
@@ -779,88 +839,114 @@ fn live_aliyun_transferred_sample_starts_real_download_or_pause(
     let sessions = app_session_store()?;
     let transport = RedactedTransport::new()?;
     restore_account(CloudProvider::Aliyun, &sessions, &transport)?;
-    let plans =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(temporary.path().join("plans"))?);
+    let plans = CloudSharePlanStore::new(app_session_store()?);
     let candidate = alldownloader_lib::extract_cloud_share_candidate(&url, None)?
         .ok_or("provided URL was not recognized as an Aliyun share")?;
     if candidate.provider != CloudProvider::Aliyun {
         return Err("provided URL was not recognized as an Aliyun share".into());
     }
     let adapter = provider_share_adapter(CloudProvider::Aliyun, &sessions, &transport)?;
-    let source = match inspect_share_with_adapter(&plans, adapter.as_ref(), &candidate)? {
-        ShareConfirmationOutcome::AutoSubmit { source, .. } => source,
-        ShareConfirmationOutcome::Confirmation(confirmation) => confirmation
-            .resources
-            .first()
-            .and_then(|entry| {
-                selected_share_sources(&plans, &confirmation.plan_source, &[entry.id.clone()])
-                    .ok()
-                    .and_then(|sources| sources.into_iter().next())
-            })
-            .ok_or("directory sample had no selectable files")?,
-        ShareConfirmationOutcome::AccessCodeRequired => {
-            return Err("provided share requires an access code".into())
-        }
-    };
-    let entry = plans.resolve_entry(&source)?.entry;
-    let root = AliyunClient::new(&sessions, &transport).directory("root")?;
-    let transferred = root
-        .items
-        .into_iter()
-        .filter(|file| {
-            file.kind.as_str() == "file" && file.name == entry.name && file.size == entry.size
-        })
-        .max_by(|left, right| left.modified_at.cmp(&right.modified_at))
-        .ok_or("the authorized sample transfer was not found in the Aliyun root directory")?;
-    let resolved = resolve_download(
-        CloudProvider::Aliyun,
-        &transferred.id,
-        &sessions,
-        &transport,
-    )?;
-    let expected_size = entry.size;
-    let over_limit = expected_size.is_some_and(|size| size > 20 * 1024 * 1024);
+    let (resource_count, sources) =
+        match inspect_share_with_adapter(&plans, adapter.as_ref(), &candidate)? {
+            ShareConfirmationOutcome::AutoSubmit { .. } => {
+                return Err("expected the Aliyun sample to contain a directory".into())
+            }
+            ShareConfirmationOutcome::Confirmation(confirmation) => {
+                assert_eq!(
+                    confirmation.resources.len(),
+                    2_427,
+                    "the one-shot Aliyun inspection did not return the complete share"
+                );
+                let stored = plans.resolve_entry(&confirmation.plan_source)?.plan;
+                let transferred = stored
+                    .transfers
+                    .iter()
+                    .map(|transfer| transfer.entry_fingerprint.as_str())
+                    .collect::<BTreeSet<_>>();
+                let selected_ids = confirmation
+                    .resources
+                    .iter()
+                    .filter(|entry| transferred.contains(entry.id.as_str()))
+                    .map(|entry| entry.id.clone())
+                    .take(2)
+                    .collect::<Vec<_>>();
+                let sources =
+                    selected_share_sources(&plans, &confirmation.plan_source, &selected_ids)?;
+                (confirmation.resources.len(), sources)
+            }
+            ShareConfirmationOutcome::AccessCodeRequired => {
+                return Err("provided share requires an access code".into())
+            }
+        };
+    assert_eq!(sources.len(), 2);
+    println!(
+        "LIVE_ALIYUN_PARSE state=confirmation entries={} selected={}",
+        resource_count,
+        sources.len()
+    );
+    let mut prepared_downloads = Vec::new();
+    for source in sources {
+        let entry = plans.resolve_entry(&source)?.entry;
+        let before = transport.observation_count();
+        let resolved = match resolve_current_share_download(&plans, adapter.as_ref(), &source) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                println!(
+                    "LIVE_ALIYUN_RESOLVE state={} remote={}",
+                    safe_error(&error),
+                    transport.observations_since(before)
+                );
+                return Err(error.into());
+            }
+        };
+        prepared_downloads.push((source, entry, resolved));
+    }
     let runtime = tokio::runtime::Runtime::new()?;
 
     runtime.block_on(async {
         let engine = IsolatedAria2::start(temporary.path()).await?;
-        let tasks = Arc::new(TaskStore::open_path(&temporary.path().join("tasks.sqlite"))?);
+        let tasks = Arc::new(TaskStore::open_path(
+            &temporary.path().join("tasks.sqlite"),
+        )?);
         let service = DownloadService::new(Arc::new(engine.client.clone()), Arc::clone(&tasks));
-        let prepared = tasks.create(NewTask {
-            source,
-            name: entry.name,
-            kind: "cloud".into(),
-            is_private: false,
-        })?;
-        let submitted = alldownloader_lib::cloud::share::submit_current_share_download(
-            &service,
-            &prepared,
-            resolved,
-            UriSubmissionOptions {
-                directory: Some(engine.downloads.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
-        let (state, completed, total) =
-            wait_for_download(&engine.client, &service, submitted.id, over_limit).await?;
-        println!(
-            "LIVE_REUSE provider=aliyun state={} completed={} total={} expected_size={} size_class={}",
-            state,
-            completed,
-            total,
-            expected_size.map(|size| size.to_string()).as_deref().unwrap_or("unknown"),
-            if over_limit { "over-20MiB" } else { "at-most-20MiB-or-unknown" },
-        );
-        if over_limit {
-            assert_eq!(state, "paused-over-20MiB");
-            assert!(completed > 0, "the transferred sample did not receive content");
-        } else {
-            assert_eq!(state, "complete");
-            assert_eq!(completed, total);
-        }
-        if let Some(expected_size) = expected_size {
-            assert_eq!(total, expected_size);
+        for (index, (source, entry, resolved)) in prepared_downloads.into_iter().enumerate() {
+            let expected_size = entry.size;
+            let prepared = tasks.create(NewTask {
+                source,
+                name: entry.name,
+                kind: "cloud".into(),
+                is_private: false,
+            })?;
+            let submitted = alldownloader_lib::cloud::share::submit_current_share_download(
+                &service,
+                &prepared,
+                resolved,
+                UriSubmissionOptions {
+                    directory: Some(engine.downloads.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            let (state, completed, total) =
+                wait_for_first_download_bytes(&engine.client, &service, submitted.id).await?;
+            println!(
+                "LIVE_ALIYUN_DOWNLOAD sample={} state={} completed={} total={} expected_size={}",
+                index + 1,
+                state,
+                completed,
+                total,
+                expected_size
+                    .map(|size| size.to_string())
+                    .as_deref()
+                    .unwrap_or("unknown"),
+            );
+            assert!(
+                completed > 0,
+                "the transferred sample did not receive content"
+            );
+            if let Some(expected_size) = expected_size {
+                assert_eq!(total, expected_size);
+            }
         }
         engine.shutdown().await
     })

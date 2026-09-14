@@ -25,6 +25,114 @@ use crate::cloud::{
 use crate::TaskStore;
 
 #[test]
+fn failed_share_preparation_without_an_aria_task_can_be_readded() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let prepared = store
+        .create(crate::NewTask {
+            source: "cloud-share://aliyun/share/file".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let failed = store
+        .fail_with_code(
+            prepared.id,
+            Some("provider_error"),
+            "网盘分享下载地址请求失败，请稍后重试",
+        )
+        .unwrap();
+
+    assert!(super::share_commands::is_retryable_cloud_share_prepare(
+        &failed
+    ));
+}
+
+#[test]
+fn failed_share_leaf_is_reused_only_by_its_original_directory_item() {
+    use crate::models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem};
+
+    let store = TaskStore::open_in_memory().unwrap();
+    let source = "cloud-share://aliyun/share/file";
+    let first_group = store
+        .create_cloud_directory_group(
+            NewCloudDirectoryGroup::new(
+                CloudProvider::Aliyun,
+                "cloud-share://aliyun/share",
+                "Share",
+                std::path::Path::new("C:/downloads"),
+            ),
+            &[NewCloudDirectoryGroupItem::new(
+                source,
+                &["Share"],
+                "file.bin",
+                Some(7),
+            )],
+        )
+        .unwrap();
+    let first_item = store.cloud_directory_group_items(first_group.id).unwrap()[0].id;
+    let task = store
+        .prepare_cloud_share_directory_leaf_task(
+            first_group.id,
+            first_item,
+            crate::NewTask {
+                source: source.into(),
+                name: "file.bin".into(),
+                kind: "cloud".into(),
+                is_private: false,
+            },
+            None,
+        )
+        .unwrap();
+    store
+        .fail_with_code(task.id, Some("provider_error"), "temporary")
+        .unwrap();
+    let second_group = store
+        .create_cloud_directory_group(
+            NewCloudDirectoryGroup::new(
+                CloudProvider::Aliyun,
+                "cloud-share://aliyun/share",
+                "Share",
+                std::path::Path::new("C:/downloads"),
+            ),
+            &[NewCloudDirectoryGroupItem::new(
+                source,
+                &["Share"],
+                "file.bin",
+                Some(7),
+            )],
+        )
+        .unwrap();
+    let second_item = store.cloud_directory_group_items(second_group.id).unwrap()[0].id;
+
+    assert_eq!(
+        super::share_commands::retryable_cloud_share_task_for_submission(
+            &store,
+            source,
+            Some(&super::DirectoryLeafContext {
+                group_id: first_group.id,
+                item_id: first_item,
+            }),
+        )
+        .unwrap()
+        .map(|task| task.id),
+        Some(task.id)
+    );
+    assert!(
+        super::share_commands::retryable_cloud_share_task_for_submission(
+            &store,
+            source,
+            Some(&super::DirectoryLeafContext {
+                group_id: second_group.id,
+                item_id: second_item,
+            }),
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
 fn share_cleanup_only_requires_personal_identity_for_a_recorded_transfer() {
     let mut plan = crate::cloud::share::CloudSharePlan::new(
         CloudProvider::Aliyun,

@@ -1,6 +1,66 @@
 use super::*;
 
 #[tokio::test]
+async fn aliyun_share_directory_scheduler_links_all_2427_files() {
+    use crate::cloud::commands::{
+        submit_cloud_directory_plan_with_group_event, CloudDirectoryDownloadPlan,
+        DirectoryLeafSubmission, PlannedCloudFile,
+    };
+
+    let store = TaskStore::open_in_memory().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let plan = CloudDirectoryDownloadPlan {
+        files: (0..2_427)
+            .map(|index| PlannedCloudFile {
+                file_id: format!("cloud-share://aliyun/share-large/file-{index}"),
+                relative_directory: vec!["Large Share".into()],
+                output_name: format!("file-{index}.bin"),
+                size: Some(1_024),
+            })
+            .collect(),
+    };
+    let configured = crate::UriSubmissionOptions {
+        directory: Some(output.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let outcome = submit_cloud_directory_plan_with_group_event(
+        &store,
+        CloudProvider::Aliyun,
+        "cloud-share://aliyun/share-large",
+        plan,
+        configured,
+        false,
+        |_| Ok(()),
+        |_, source, _, context| {
+            let task = store
+                .prepare_cloud_share_directory_leaf_task(
+                    context.group_id,
+                    context.item_id,
+                    NewTask {
+                        source,
+                        name: format!("file-{}.bin", context.item_id),
+                        kind: "cloud".into(),
+                        is_private: false,
+                    },
+                    None,
+                )
+                .unwrap();
+            std::future::ready(Ok(DirectoryLeafSubmission::Queued(task.id)))
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.queued_count, 2_427);
+    assert!(outcome.failures.is_empty());
+    let group_id = uuid::Uuid::parse_str(&outcome.task.payload.task.id.to_string()).unwrap();
+    let items = store.cloud_directory_group_items(group_id).unwrap();
+    assert_eq!(items.len(), 2_427);
+    assert!(items.iter().all(|item| item.task_id.is_some()));
+}
+
+#[tokio::test]
 async fn all_registered_cloud_directories_keep_one_root_when_resuming_after_reopen() {
     use crate::cloud::commands::{
         recover_interrupted_directory_preparation, retry_cloud_directory_group_with,

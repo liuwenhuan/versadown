@@ -18,6 +18,7 @@ const TOKEN_URL: &str = "https://api.aliyundrive.com/token/refresh";
 const API: &str = "https://api.aliyundrive.com";
 const WEB_REFERER: &str = "https://www.aliyundrive.com/";
 const SHARE_REFERER: &str = "https://www.alipan.com/";
+const ALIYUN_TRANSIENT_RETRY_DELAYS_MS: [u64; 5] = [300, 700, 1_500, 3_000, 5_000];
 pub(crate) const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
  if (location.protocol !== 'https:' || !(['aliyundrive.com','alipan.com'].some(h => location.hostname === h || location.hostname.endsWith('.' + h)))) return null;
  const out = {}; const seen = new Set();
@@ -50,6 +51,23 @@ mod tests {
         share::{test_support::*, *},
         MemoryCredentialStore,
     };
+
+    struct StatusHttp {
+        replies: std::sync::Mutex<std::collections::VecDeque<CloudHttpResponse>>,
+        requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
+    }
+
+    impl CloudHttpTransport for StatusHttp {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            self.requests.lock().unwrap().push(request);
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(QuarkError::InvalidResponse)
+        }
+    }
+
     fn listing() -> Value {
         json!({"items":[{"file_id":"f1","name":"verify.mp4","type":"file","size":7}],"next_marker":""})
     }
@@ -268,29 +286,57 @@ mod tests {
     }
 
     #[test]
-    fn aliyun_share_refreshes_token_once_after_block_exception_while_listing() {
-        struct StatusHttp {
-            replies: std::sync::Mutex<std::collections::VecDeque<CloudHttpResponse>>,
-            requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
-        }
-        impl CloudHttpTransport for StatusHttp {
-            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
-                self.requests.lock().unwrap().push(request);
-                self.replies
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .ok_or(QuarkError::InvalidResponse)
-            }
-        }
+    fn aliyun_share_retries_block_exception_from_initial_token_request() {
+        let credentials = MemoryCredentialStore::default();
+        let http = StatusHttp {
+            replies: std::sync::Mutex::new(
+                vec![
+                    CloudHttpResponse {
+                        status: 429,
+                        body: json!({"code":"BlockException"}).to_string(),
+                        set_cookies: vec![],
+                    },
+                    CloudHttpResponse {
+                        status: 200,
+                        body: json!({"share_token":"share-token"}).to_string(),
+                        set_cookies: vec![],
+                    },
+                    CloudHttpResponse {
+                        status: 200,
+                        body: listing().to_string(),
+                        set_cookies: vec![],
+                    },
+                ]
+                .into(),
+            ),
+            requests: std::sync::Mutex::new(vec![]),
+        };
 
+        let ShareInspection::Plan(plan) =
+            provider_share_adapter(CloudProvider::Aliyun, &credentials, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Aliyun))
+                .unwrap()
+        else {
+            panic!();
+        };
+        assert_eq!(plan.entries.len(), 1);
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].url.ends_with("/v2/share_link/get_share_token"));
+        assert_eq!(requests[0].url, requests[1].url);
+        assert_eq!(requests[0].body, requests[1].body);
+    }
+
+    #[test]
+    fn aliyun_share_retries_consecutive_block_exceptions_while_listing() {
         let credentials = MemoryCredentialStore::default();
         let http = StatusHttp {
             replies: std::sync::Mutex::new(
                 vec![
                     CloudHttpResponse {
                         status: 200,
-                        body: json!({"share_token":"first-token"}).to_string(),
+                        body: json!({"share_token":"share-token"}).to_string(),
                         set_cookies: vec![],
                     },
                     CloudHttpResponse {
@@ -304,8 +350,8 @@ mod tests {
                         set_cookies: vec![],
                     },
                     CloudHttpResponse {
-                        status: 200,
-                        body: json!({"share_token":"second-token"}).to_string(),
+                        status: 429,
+                        body: json!({"code":"BlockException"}).to_string(),
                         set_cookies: vec![],
                     },
                     CloudHttpResponse {
@@ -331,11 +377,11 @@ mod tests {
         assert_eq!(plan.entries[0].relative_directory, vec!["folder"]);
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 5);
-        assert!(requests[3].url.ends_with("/v2/share_link/get_share_token"));
-        assert_eq!(
-            serde_json::from_str::<Value>(requests[3].body.as_ref().unwrap()).unwrap()["share_pwd"],
-            "a123"
-        );
+        assert!(requests[2].url.ends_with("/adrive/v3/file/list"));
+        assert_eq!(requests[2].url, requests[3].url);
+        assert_eq!(requests[3].url, requests[4].url);
+        assert_eq!(requests[2].body, requests[3].body);
+        assert_eq!(requests[3].body, requests[4].body);
     }
 }
 
@@ -1056,7 +1102,7 @@ impl AliyunShareAdapter<'_> {
         path: &str,
         body: Value,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        self.http.send(CloudHttpRequest {
+        self.send_with_rate_limit_retry(CloudHttpRequest {
             method: "POST",
             url: format!("{API}{path}"),
             headers: BTreeMap::from([
@@ -1093,18 +1139,36 @@ impl AliyunShareAdapter<'_> {
         file_id: &str,
         name: &str,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-        let value = self.personal_request(
-            session,
-            "/v2/file/get_download_url",
-            json!({"drive_id":session.drive_id,"file_id":file_id,"expire_sec":900}),
-        )?;
-        let url = required(&value, "url").or_else(|_| required(&value, "download_url"))?;
-        super::share::validate_direct_url(&url)?;
-        Ok(super::commands::ResolvedCloudDownload {
-            url,
-            name: name.into(),
-            headers: vec![],
-        })
+        let body = json!({"drive_id":session.drive_id,"file_id":file_id,"expire_sec":900});
+        for attempt in 0..=ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() {
+            let result = (|| {
+                let value =
+                    self.personal_request(session, "/v2/file/get_download_url", body.clone())?;
+                let url = required(&value, "url").or_else(|_| required(&value, "download_url"))?;
+                super::share::validate_direct_url(&url)?;
+                Ok(super::commands::ResolvedCloudDownload {
+                    url,
+                    name: name.into(),
+                    headers: vec![("Referer".into(), WEB_REFERER.into())],
+                })
+            })();
+            match result {
+                Ok(download) => return Ok(download),
+                Err(error)
+                    if attempt < ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len()
+                        && matches!(
+                            error,
+                            QuarkError::Transport(_)
+                                | QuarkError::Provider(_)
+                                | QuarkError::InvalidResponse
+                        ) =>
+                {
+                    aliyun_transient_retry_pause(attempt);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(QuarkError::InvalidResponse)
     }
     fn raw(
         &self,
@@ -1121,12 +1185,27 @@ impl AliyunShareAdapter<'_> {
         body: Value,
         include_account_bearer: bool,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        self.http.send(CloudHttpRequest {
+        self.send_with_rate_limit_retry(CloudHttpRequest {
             method: "POST",
             url: format!("{API}{path}"),
             headers: self.headers(token, include_account_bearer),
             body: Some(body.to_string()),
         })
+    }
+    fn send_with_rate_limit_retry(
+        &self,
+        request: CloudHttpRequest,
+    ) -> Result<CloudHttpResponse, QuarkError> {
+        for attempt in 0..=ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() {
+            let response = self.http.send(request.clone())?;
+            if !aliyun_share_rate_limited(&response)
+                || attempt == ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len()
+            {
+                return Ok(response);
+            }
+            aliyun_transient_retry_pause(attempt);
+        }
+        Err(QuarkError::InvalidResponse)
     }
     fn request(&self, path: &str, token: Option<&str>, body: Value) -> Result<Value, QuarkError> {
         aliyun_share_json(&self.raw(path, token, body)?)
@@ -1189,12 +1268,20 @@ fn aliyun_share_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> 
 }
 
 fn aliyun_share_rate_limited(response: &CloudHttpResponse) -> bool {
-    response.status == 429
-        && serde_json::from_str::<Value>(&response.body)
-            .ok()
-            .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))
-            .as_deref()
-            == Some("BlockException")
+    serde_json::from_str::<Value>(&response.body)
+        .ok()
+        .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))
+        .as_deref()
+        == Some("BlockException")
+}
+
+fn aliyun_transient_retry_pause(attempt: usize) {
+    #[cfg(not(test))]
+    if let Some(delay_ms) = ALIYUN_TRANSIENT_RETRY_DELAYS_MS.get(attempt) {
+        std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
+    }
+    #[cfg(test)]
+    let _ = attempt;
 }
 
 fn stored_aliyun_share_token(context: &Value) -> Option<String> {

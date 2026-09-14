@@ -503,6 +503,48 @@ impl TaskStore {
         Ok(items)
     }
 
+    pub(crate) fn cloud_directory_group_item_is_linked(
+        &self,
+        group_id: Uuid,
+        item_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        validate_uuid(group_id)?;
+        validate_uuid(item_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection
+            .query_row(
+                "SELECT task_id IS NOT NULL FROM cloud_directory_group_items
+                 WHERE group_id = ?1 AND id = ?2",
+                params![group_id.to_string(), item_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub(crate) fn cloud_directory_group_item_links_task(
+        &self,
+        group_id: Uuid,
+        item_id: Uuid,
+        task_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        validate_uuid(group_id)?;
+        validate_uuid(item_id)?;
+        validate_uuid(task_id)?;
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM cloud_directory_group_items
+                 WHERE group_id = ?1 AND id = ?2 AND task_id = ?3)",
+                params![
+                    group_id.to_string(),
+                    item_id.to_string(),
+                    task_id.to_string()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
     pub fn recycle_cloud_directory_group(
         &self,
         group_id: Uuid,
