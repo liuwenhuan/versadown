@@ -21,7 +21,7 @@ interface SettingsPanelProps {
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
 const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
-const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 };
+const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 };
 const themeLabels: Record<ThemeMode, string> = { auto: '跟随系统', light: '浅色', dark: '深色' };
 
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, configurePrivacyDownload }: SettingsPanelProps) {

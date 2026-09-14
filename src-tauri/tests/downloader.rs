@@ -6,6 +6,7 @@ use std::{
 
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
+    cloud::{commands::apply_cloud_download_policy, CloudProvider},
     prepare_download, DownloadAction, DownloadService, DownloadTask, NewTask, TaskStatus,
     TaskStore, UriSubmissionOptions,
 };
@@ -158,6 +159,480 @@ impl Aria2Api for RecordingAria2 {
     async fn shutdown(&self) -> Result<String, Aria2Error> {
         unimplemented!()
     }
+}
+
+#[test]
+fn cloud_download_connection_policy_caps_xunlei_user_value_of_eight_to_one() {
+    let options =
+        apply_cloud_download_policy(CloudProvider::Xunlei, 8, UriSubmissionOptions::default());
+
+    assert_eq!(options.max_connections_per_server, Some(1));
+}
+
+#[test]
+fn cloud_download_connection_policy_retains_user_value_below_provider_cap() {
+    let options =
+        apply_cloud_download_policy(CloudProvider::Baidu, 2, UriSubmissionOptions::default());
+
+    assert_eq!(options.max_connections_per_server, Some(2));
+}
+
+#[tokio::test]
+async fn cloud_download_connection_policy_sets_both_aria2_keys_to_the_same_literal() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepare_download("https://example.test/cloud-file.bin", &store)
+        .unwrap()
+        .task;
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+    let options =
+        apply_cloud_download_policy(CloudProvider::Xunlei, 8, UriSubmissionOptions::default());
+
+    service
+        .submit_uri_with_options(task.id, vec![task.source], options)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        api.added_options(),
+        vec![BTreeMap::from([
+            ("max-connection-per-server".into(), "1".into()),
+            ("split".into(), "1".into()),
+        ])]
+    );
+}
+
+#[tokio::test]
+async fn scheduler_shared_personal_share_defers_resolver_and_other_provider_is_independent() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dispatch = CloudDownloadDispatch::default();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut jobs = Vec::new();
+    let mut ids = Vec::new();
+    for (index, provider) in [
+        CloudProvider::Quark,
+        CloudProvider::Quark,
+        CloudProvider::Quark,
+        CloudProvider::Quark,
+        CloudProvider::Quark,
+        CloudProvider::Xunlei,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source = if index % 2 == 0 {
+            format!("cloud://{}/file-{index}", provider.key())
+        } else {
+            alldownloader_lib::cloud::share::stable_share_source(
+                provider,
+                "plan",
+                &format!("entry-{index}"),
+            )
+        };
+        let task = prepared_cloud_share_task(&store, &source, "file.bin");
+        let (queued, version) = dispatch.prepare(&store, task.id).await.unwrap();
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert!(queued.aria_gid.is_none());
+        ids.push(task.id);
+        let (dispatch, store, count) = (dispatch.clone(), store.clone(), count.clone());
+        jobs.push(tokio::spawn(async move {
+            dispatch
+                .run(
+                    &store,
+                    provider,
+                    task.id,
+                    version,
+                    || async {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    |_| async {
+                        let task = store.bind_gid(task.id, &format!("gid-{index}")).unwrap();
+                        Ok(task)
+                    },
+                )
+                .await
+        }));
+        tokio::task::yield_now().await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while count.load(Ordering::SeqCst) != 5
+            || dispatch.scheduler.pending(CloudProvider::Quark).is_empty()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        dispatch.scheduler.pending(CloudProvider::Quark),
+        vec![ids[4]]
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 5);
+    dispatch.scheduler.release(ids[0]);
+    for job in jobs {
+        job.await.unwrap();
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
+async fn scheduler_gidless_pause_cancel_resume_never_dispatches_stale_work() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dispatch = CloudDownloadDispatch::default();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepared_cloud_share_task(&store, "cloud://quark/file", "file.bin");
+    let (_, old_version) = dispatch.prepare(&store, task.id).await.unwrap();
+    let paused = dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Pause)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(paused.status, TaskStatus::Paused);
+    let count = AtomicUsize::new(0);
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            task.id,
+            old_version,
+            || async {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| async { panic!("stale dispatch reached aria2") },
+        )
+        .await;
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    let cancelled = dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            task.id,
+            version,
+            || async {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| async { panic!("cancelled dispatch reached aria2") },
+        )
+        .await;
+    assert_eq!(cancelled.status, TaskStatus::Cancelled);
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            task.id,
+            version,
+            || async {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| async { Ok(store.bind_gid(task.id, "resumed").unwrap()) },
+        )
+        .await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store.find(task.id).unwrap().aria_gid.as_deref(),
+        Some("resumed")
+    );
+}
+
+#[tokio::test]
+async fn scheduler_gidless_resume_retains_confirmed_overwrite_intent() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    let dispatch = CloudDownloadDispatch::default();
+    let store = TaskStore::open_in_memory().unwrap();
+    let task = prepared_cloud_share_task(&store, "cloud://quark/file", "file.bin");
+    let failed = store
+        .fail(task.id, "preallocated output is not resumable")
+        .unwrap();
+    let failed = store.bind_gid(failed.id, "stale-gid").unwrap();
+    dispatch
+        .prepare_expected_with_retry_intent(&store, &failed, true, false)
+        .await
+        .unwrap();
+    let paused = dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Pause)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(paused.aria_gid.is_none());
+
+    let options = dispatch.retry_submission_options(
+        task.id,
+        UriSubmissionOptions {
+            continue_download: true,
+            ..Default::default()
+        },
+    );
+
+    assert!(options.allow_overwrite);
+    assert!(
+        !options.continue_download,
+        "a resumed pre-admission overwrite must still discard stale aria2 state"
+    );
+}
+
+#[tokio::test]
+async fn failed_share_resume_dispatch_restores_original_gid_and_resume_eligibility() {
+    use alldownloader_lib::cloud::{
+        download_dispatch::CloudDownloadDispatch, share::stable_share_source,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let dispatch = CloudDownloadDispatch::default();
+    let store = TaskStore::open_in_memory().unwrap();
+    let source = stable_share_source(CloudProvider::Quark, "plan", "entry");
+    let task = prepared_cloud_share_task(&store, &source, "partial.bin");
+    let failed = store
+        .apply_transfer_snapshot(DownloadTask {
+            status: TaskStatus::Failed,
+            total_length: Some(100),
+            completed_length: 25,
+            ..task
+        })
+        .unwrap();
+    let failed = store.bind_gid(failed.id, "resume-gid").unwrap();
+    let payload = root.path().join("partial.bin");
+    std::fs::write(&payload, b"partial").unwrap();
+    std::fs::write(format!("{}.aria2", payload.display()), b"control").unwrap();
+    store
+        .upsert_files(
+            failed.id,
+            &[(0, payload.to_string_lossy().into_owned(), 100, 25, true)],
+        )
+        .unwrap();
+    let (_, version) = dispatch.prepare(&store, failed.id).await.unwrap();
+
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            failed.id,
+            version,
+            || async {
+                Err::<(), _>(alldownloader_lib::cloud::QuarkError::Transport(
+                    "temporary resolver failure".into(),
+                ))
+            },
+            |_: ()| async { panic!("failed resolution must not submit") },
+        )
+        .await;
+
+    let failed_again = store.find(failed.id).unwrap();
+    assert_eq!(failed_again.aria_gid.as_deref(), Some("resume-gid"));
+    assert_eq!(
+        alldownloader_lib::duplicate_state(&store, &failed_again).unwrap(),
+        alldownloader_lib::DuplicateDownloadState::ResumeAvailable
+    );
+}
+
+#[tokio::test]
+async fn scheduler_pause_during_resolution_releases_slot_and_resume_uses_a_fresh_resolver() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    let dispatch = CloudDownloadDispatch::default();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepared_cloud_share_task(&store, "cloud://xunlei/file", "file.bin");
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    let (started, start) = tokio::sync::oneshot::channel();
+    let (worker, tasks) = (dispatch.clone(), store.clone());
+    let job = tokio::spawn(async move {
+        worker
+            .run(
+                &tasks,
+                CloudProvider::Xunlei,
+                task.id,
+                version,
+                || async {
+                    started.send(()).unwrap();
+                    std::future::pending::<Result<(), alldownloader_lib::cloud::QuarkError>>().await
+                },
+                |_| async { panic!("paused resolver must not submit") },
+            )
+            .await
+    });
+    start.await.unwrap();
+    dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Pause)
+        .await
+        .unwrap();
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(2), job)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Xunlei,
+            task.id,
+            version,
+            || async { Ok(()) },
+            |_| async {
+                service
+                    .submit_uri_with_options(
+                        task.id,
+                        vec!["https://example.test/fresh".into()],
+                        apply_cloud_download_policy(
+                            CloudProvider::Xunlei,
+                            8,
+                            UriSubmissionOptions {
+                                continue_download: true,
+                                proxy: Some("http://proxy.test:1234".into()),
+                                ..Default::default()
+                            },
+                        ),
+                    )
+                    .await
+                    .map_err(|_| alldownloader_lib::cloud::QuarkError::Storage)
+            },
+        )
+        .await;
+    let options = api.added_options();
+    assert_eq!(options[0].get("continue").map(String::as_str), Some("true"));
+    assert_eq!(options[0].get("split").map(String::as_str), Some("1"));
+    assert_eq!(
+        options[0]
+            .get("max-connection-per-server")
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        options[0].get("all-proxy").map(String::as_str),
+        Some("http://proxy.test:1234")
+    );
+}
+
+#[tokio::test]
+async fn scheduler_failure_releases_slot_redacts_error_and_accepted_rpc_retains_slot() {
+    use alldownloader_lib::cloud::{
+        download_dispatch::CloudDownloadDispatch, download_scheduler::AdmissionOutcome, QuarkError,
+    };
+    let dispatch = CloudDownloadDispatch::default();
+    let store = TaskStore::open_in_memory().unwrap();
+    let task = prepared_cloud_share_task(&store, "cloud://xunlei/file", "file.bin");
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Xunlei,
+            task.id,
+            version,
+            || async {
+                Err::<(), _>(QuarkError::Transport(
+                    "https://secret?token=hidden Authorization: secret".into(),
+                ))
+            },
+            |_| async { panic!("failed resolution cannot submit") },
+        )
+        .await;
+    let failed = store.find(task.id).unwrap();
+    assert_eq!(failed.status, TaskStatus::Failed);
+    assert!(!failed.error.unwrap().contains("secret"));
+    let probe = uuid::Uuid::new_v4();
+    assert_eq!(
+        dispatch
+            .scheduler
+            .enqueue(CloudProvider::Xunlei, probe)
+            .await,
+        AdmissionOutcome::Granted
+    );
+    dispatch.scheduler.release(probe);
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Xunlei,
+            task.id,
+            version,
+            || async { Ok(()) },
+            |_| async {
+                store.bind_gid(task.id, "accepted").unwrap();
+                Err(QuarkError::Transport("status polling failed".into()))
+            },
+        )
+        .await;
+    assert!(store.find(task.id).unwrap().aria_gid.is_some());
+    assert!(
+        dispatch.scheduler.release(task.id),
+        "accepted aria2 task must still own a provider slot"
+    );
+    assert!(
+        !dispatch.scheduler.release(task.id),
+        "terminal release is idempotent"
+    );
+    assert_eq!(
+        dispatch
+            .scheduler
+            .enqueue(CloudProvider::Xunlei, probe)
+            .await,
+        AdmissionOutcome::Granted
+    );
+}
+
+#[tokio::test]
+async fn scheduler_queued_share_task_can_submit_after_admission() {
+    use alldownloader_lib::cloud::{
+        commands::ResolvedCloudDownload,
+        share::{stable_share_source, submit_current_share_download},
+    };
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepared_cloud_share_task(
+        &store,
+        &stable_share_source(CloudProvider::Quark, "plan", "entry"),
+        "file.bin",
+    );
+    let mut task = task;
+    task.status = TaskStatus::Queued;
+    let task = store.apply_transfer_snapshot(task).unwrap();
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+    let result = submit_current_share_download(
+        &service,
+        &task,
+        ResolvedCloudDownload {
+            url: "https://example.test/file?secret=ephemeral".into(),
+            name: "file.bin".into(),
+            headers: vec![],
+        },
+        Default::default(),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "queued task must be accepted after admission: {result:?}"
+    );
+    assert_eq!(
+        api.calls()
+            .iter()
+            .filter(|call| *call == "aria2.addUri")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn scheduler_queued_resolution_failure_is_retryable() {
+    let store = TaskStore::open_in_memory().unwrap();
+    let mut task = prepared_cloud_share_task(&store, "cloud://quark/file", "file.bin");
+    task.status = TaskStatus::Queued;
+    let task = store.apply_transfer_snapshot(task).unwrap();
+    assert!(store.fail(task.id, "网盘下载准备失败").is_ok());
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Failed);
 }
 
 #[tokio::test]
@@ -666,6 +1141,7 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
                     ("Referer".into(), "https://pan.quark.cn/".into()),
                 ],
                 proxy: Some("http://127.0.0.1:7890".into()),
+                max_connections_per_server: None,
                 allow_overwrite: true,
                 continue_download: false,
             },
@@ -684,6 +1160,8 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
             ),
             ("all-proxy".into(), "http://127.0.0.1:7890".into()),
             ("allow-overwrite".into(), "true".into()),
+            ("continue".into(), "false".into()),
+            ("remove-control-file".into(), "true".into()),
         ])]
     );
     assert_eq!(store.find(task.id).unwrap().source, "cloud://quark/file-1");
@@ -731,6 +1209,39 @@ async fn resumed_submission_keeps_one_task_and_sets_aria2_continue() {
             .last()
             .and_then(|options| options.get("continue")),
         Some(&"true".to_string())
+    );
+}
+
+#[tokio::test]
+async fn overwrite_submission_starts_fresh_instead_of_inheriting_global_resume() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = prepare_download("https://example.test/preallocated.bin", &store)
+        .unwrap()
+        .task;
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+
+    service
+        .submit_uri_with_options(
+            task.id,
+            vec![task.source],
+            UriSubmissionOptions {
+                allow_overwrite: true,
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        api.added_options(),
+        vec![BTreeMap::from([
+            ("allow-overwrite".into(), "true".into()),
+            ("continue".into(), "false".into()),
+            ("remove-control-file".into(), "true".into()),
+        ])],
+        "an explicit overwrite must discard stale aria2 state instead of inheriting --continue=true"
     );
 }
 

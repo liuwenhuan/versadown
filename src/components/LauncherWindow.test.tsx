@@ -54,7 +54,7 @@ beforeEach(() => {
     debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
     proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 }
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 }
   });
   state.getManagerVisible.mockResolvedValue(true);
 });
@@ -95,7 +95,7 @@ it('keeps the compact launcher visible for an active task in download-only mode'
     debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'downloading',
     proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 }
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 }
   });
   state.getGlobalStat.mockResolvedValueOnce({ download_speed: 0, num_active: 1 });
   render(<LauncherWindow />);

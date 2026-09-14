@@ -14,6 +14,38 @@ use std::{
     sync::Mutex,
 };
 
+// Breaks caught: a provider missing its download safety ceiling, an incorrect
+// ceiling, an accidental zero ceiling, or a camelCase DTO regression.
+#[test]
+fn provider_download_concurrency_matches_the_literal_safety_matrix() {
+    use alldownloader_lib::cloud::ProviderRegistry;
+
+    let rows = [
+        (CloudProvider::Quark, 1, 4),
+        (CloudProvider::Pikpak, 4, 4),
+        (CloudProvider::Baidu, 4, 4),
+        (CloudProvider::Tianyi, 1, 1),
+        (CloudProvider::Aliyun, 4, 4),
+        (CloudProvider::Xunlei, 1, 4),
+        (CloudProvider::Uc, 4, 4),
+    ];
+
+    let registry = ProviderRegistry::global();
+    for (provider, max_connections_per_file, max_concurrent_tasks) in rows {
+        let descriptor = registry.get(provider);
+        assert_ne!(descriptor.download_concurrency.max_connections_per_file, 0);
+        assert_ne!(descriptor.download_concurrency.max_concurrent_tasks, 0);
+        assert_eq!(
+            serde_json::to_value(descriptor).unwrap()["downloadConcurrency"],
+            serde_json::json!({
+                "maxConnectionsPerFile": max_connections_per_file,
+                "maxConcurrentTasks": max_concurrent_tasks,
+            }),
+            "{provider:?}"
+        );
+    }
+}
+
 // Breaks caught: omitting a catalog entry, routing a stable source to the wrong
 // provider, leaking/reusing an old password, changing recovery order, or enabling
 // cookie keepalive. Expectations are literal compatibility fixtures.
@@ -115,13 +147,19 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
         ),
     ];
     let registry = ProviderRegistry::global();
-    let catalog = registry.catalog();
+    let descriptors = registry.all();
     for (provider, key, root, password_mode, scheduled, transfer, share_url) in rows {
-        let descriptor = catalog
+        let descriptor = descriptors
             .iter()
             .find(|d| d.provider == provider)
             .unwrap_or_else(|| panic!("missing provider descriptor: {key}"));
-        assert_eq!(catalog.iter().filter(|d| d.provider == provider).count(), 1);
+        assert_eq!(
+            descriptors
+                .iter()
+                .filter(|d| d.provider == provider)
+                .count(),
+            1
+        );
         assert_eq!(registry.by_key(key).unwrap().provider, provider);
         assert_eq!(descriptor.root_directory_id, root);
         let recycle = format!("__all_downloader_{key}_recycle_bin__");
@@ -141,7 +179,11 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             (provider, "folder/file name".into())
         );
         let share = url::Url::parse(share_url).unwrap();
-        assert_eq!(registry.for_share_url(&share).unwrap().provider, provider);
+        if provider.is_enabled() {
+            assert_eq!(registry.for_share_url(&share).unwrap().provider, provider);
+        } else {
+            assert!(registry.for_share_url(&share).is_none());
+        }
         let share_hash = "a".repeat(64);
         let entry_hash = "b".repeat(64);
         assert_eq!(
@@ -151,6 +193,9 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             .unwrap(),
             (provider, share_hash, entry_hash)
         );
+        if !provider.is_enabled() {
+            continue;
+        }
 
         let store = MemoryCredentialStore::default();
         let capabilities = registry.share_capabilities(provider, &store, &NoNetwork);
@@ -267,7 +312,8 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             direct
         );
     }
-    assert_eq!(catalog.len(), 7);
+    assert_eq!(descriptors.len(), 7);
+    assert_eq!(registry.catalog().len(), 6);
 }
 
 #[test]
@@ -542,7 +588,14 @@ fn public_command_exports_keep_all_provider_codes_and_file_kind_json() {
             serde_json::to_value(error).unwrap()["code"],
             "not_authorized"
         );
-        commands::logout_provider(provider, &store).unwrap();
+        if provider.is_enabled() {
+            commands::logout_provider(provider, &store).unwrap();
+        } else {
+            assert!(matches!(
+                commands::logout_provider(provider, &store),
+                Err(QuarkError::ProviderUnsupported)
+            ));
+        }
     }
     assert_eq!(serde_json::to_value(CloudFileKind::File).unwrap(), "file");
     assert_eq!(
@@ -695,7 +748,12 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
     use std::collections::HashSet;
     let registry = ProviderRegistry::global();
     let descriptors = registry.all();
+    let catalog = registry.catalog();
     assert_eq!(descriptors.len(), 7);
+    assert_eq!(catalog.len(), 6);
+    assert!(catalog
+        .iter()
+        .all(|descriptor| descriptor.provider.is_enabled()));
     assert_eq!(
         descriptors
             .iter()
@@ -731,10 +789,14 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
                 descriptor.share_patterns[0]
             ))
             .unwrap();
-            assert_eq!(
-                registry.for_share_url(&url).unwrap().provider,
-                descriptor.provider
-            );
+            if descriptor.provider.is_enabled() {
+                assert_eq!(
+                    registry.for_share_url(&url).unwrap().provider,
+                    descriptor.provider
+                );
+            } else {
+                assert!(registry.for_share_url(&url).is_none());
+            }
             let spoof = url::Url::parse(&format!(
                 "https://{host}.evil.test{}example",
                 descriptor.share_patterns[0]
@@ -883,8 +945,11 @@ fn new_providers_have_stable_sources_and_declared_login_methods() {
         ("cloud://uc/f1", CloudProvider::Uc, false),
     ] {
         assert_eq!(parse_stable_cloud_source(source).unwrap().0, provider);
-        assert!(provider_capabilities(provider).web);
-        assert_eq!(provider_capabilities(provider).password, password);
+        assert_eq!(provider_capabilities(provider).web, provider.is_enabled());
+        assert_eq!(
+            provider_capabilities(provider).password,
+            provider.is_enabled() && password
+        );
     }
 }
 

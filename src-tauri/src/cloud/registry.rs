@@ -21,6 +21,13 @@ pub struct ProviderCapabilities {
     pub recorded_transfer_resolve: bool,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadConcurrencyPolicy {
+    pub max_connections_per_file: u8,
+    pub max_concurrent_tasks: u16,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDescriptor {
@@ -51,6 +58,7 @@ pub struct ProviderDescriptor {
     #[serde(skip)]
     candidate_aliases: &'static [(&'static str, &'static str)],
     pub max_upload_concurrency: usize,
+    pub download_concurrency: DownloadConcurrencyPolicy,
 }
 
 pub type ProviderDescriptorDto = ProviderDescriptor;
@@ -372,5 +380,23 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         share_hosts,
         share_patterns,
         max_upload_concurrency: 2,
+        download_concurrency: match provider {
+            Quark => DownloadConcurrencyPolicy {
+                max_connections_per_file: 1,
+                max_concurrent_tasks: 4,
+            },
+            Pikpak | Baidu | Aliyun | Uc => DownloadConcurrencyPolicy {
+                max_connections_per_file: 4,
+                max_concurrent_tasks: 4,
+            },
+            Tianyi => DownloadConcurrencyPolicy {
+                max_connections_per_file: 1,
+                max_concurrent_tasks: 1,
+            },
+            Xunlei => DownloadConcurrencyPolicy {
+                max_connections_per_file: 1,
+                max_concurrent_tasks: 4,
+            },
+        },
     }
 }

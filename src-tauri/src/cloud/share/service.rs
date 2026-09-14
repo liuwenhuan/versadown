@@ -526,7 +526,10 @@ pub async fn submit_current_share_download(
         .map_err(|_| QuarkError::Storage)?;
     if task.source != prepared.source
         || task.kind != "cloud"
-        || task.status != crate::TaskStatus::Parsing
+        || !matches!(
+            task.status,
+            crate::TaskStatus::Parsing | crate::TaskStatus::Queued
+        )
         || task.aria_gid.is_some()
     {
         return Err(QuarkError::InvalidResponse);
@@ -593,7 +596,7 @@ pub async fn resubmit_current_cloud_download(
         .map_err(|_| QuarkError::Transport("aria2 未能接受网盘下载任务".into()))
 }
 
-pub(super) fn share_submission_options(
+pub(crate) fn share_submission_options(
     resolved: crate::cloud::commands::ResolvedCloudDownload,
     configured: crate::UriSubmissionOptions,
 ) -> Result<(String, crate::UriSubmissionOptions), QuarkError> {
@@ -603,6 +606,7 @@ pub(super) fn share_submission_options(
     options.directory = configured.directory;
     options.output_name = configured.output_name.or(options.output_name);
     options.proxy = configured.proxy;
+    options.max_connections_per_server = configured.max_connections_per_server;
     options.allow_overwrite = configured.allow_overwrite;
     options.continue_download = configured.continue_download;
     options

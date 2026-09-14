@@ -5,6 +5,8 @@ mod browser_login;
 pub mod commands;
 mod common;
 mod credentials;
+pub mod download_dispatch;
+pub mod download_scheduler;
 pub mod driver;
 mod http;
 mod pikpak;

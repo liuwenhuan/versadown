@@ -144,35 +144,79 @@ pub(crate) async fn submit_cloud_share_file_internal(
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
-    let resolve_source = source.clone();
-    let outcome = submit_new_cloud_share_file_scoped_with(
-        state.store.clone(),
-        &cloud.share_plans,
-        source,
-        configured,
-        directory_context,
-        append_entry_directory,
-        private_download,
-        on_created.map(|channel| {
-            let store = state.store.clone();
-            Arc::new(move |task: &DownloadTask| {
-                if let Ok(root) =
-                    crate::commands::queue_task_payload_from_task(&store, task.clone())
-                {
-                    let _ = channel.send(root);
-                }
-            }) as Arc<dyn Fn(&DownloadTask) + Send + Sync>
-        }),
-        || async {
-            state
-                .runtime
-                .service()
-                .await
-                .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))
-        },
-        || resolve_stable_cloud_share_download(app.clone(), &resolve_source),
-    )
-    .await?;
+    let mut configured = configured;
+    let entry = cloud.share_plans.resolve_entry(&source)?;
+    if append_entry_directory {
+        if let Some(directory) = configured.directory.as_ref() {
+            configured.directory = Some(directory_download_output_directory(
+                directory,
+                &entry.entry.relative_directory,
+            )?);
+        } else if !entry.entry.relative_directory.is_empty() {
+            return Err(QuarkError::InvalidInput(
+                "分享目录下载需要设置绝对下载目录".into(),
+            ));
+        }
+    }
+    configured
+        .output_name
+        .get_or_insert_with(|| safe_filename(&entry.entry.name));
+    configured
+        .clone()
+        .into_aria2_options()
+        .map_err(|_| QuarkError::InvalidInput("下载路径或文件名无效".into()))?;
+    let retry = retryable_cloud_share_task_for_submission(
+        &state.store,
+        &source,
+        directory_context.as_ref(),
+    )?;
+    let new_task = NewTask {
+        source: source.clone(),
+        name: configured.output_name.clone().unwrap(),
+        kind: "cloud".into(),
+        is_private: private_download,
+    };
+    let prepared = if let Some(context) = directory_context {
+        state
+            .store
+            .prepare_cloud_share_directory_leaf_task(
+                context.group_id,
+                context.item_id,
+                new_task,
+                retry.map(|task| task.id),
+            )
+            .map_err(|_| QuarkError::Storage)?
+    } else {
+        let task = match retry {
+            Some(task) => task,
+            None => state
+                .store
+                .create(new_task)
+                .map_err(|_| QuarkError::Storage)?,
+        };
+        state
+            .store
+            .set_private(task.id, private_download)
+            .map_err(|_| QuarkError::Storage)?
+    };
+    if cloud
+        .share_plans
+        .reserve_local_task(&source, prepared.id)
+        .is_err()
+    {
+        return Ok(CloudShareFileSubmission::Queued(
+            cloud_share_failure_outcome(&state.store, prepared, None, CLOUD_SHARE_PREPARE_FAILURE),
+        ));
+    }
+    let queued = queue_cloud_dispatch(app, state, prepared, configured).await?;
+    if let Some(channel) = on_created {
+        if let Ok(root) =
+            crate::commands::queue_task_payload_from_task(&state.store, queued.clone())
+        {
+            let _ = channel.send(root);
+        }
+    }
+    let outcome = cloud_share_task_outcome(&state.store, queued);
     Ok(CloudShareFileSubmission::Queued(outcome))
 }
 
@@ -225,6 +269,7 @@ where
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn submit_new_cloud_share_file_scoped_with<S, SFut, R, RFut>(
     tasks: Arc<TaskStore>,
     plans: &share::CloudSharePlanStore,

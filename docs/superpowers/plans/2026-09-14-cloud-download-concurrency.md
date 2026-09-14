@@ -4,7 +4,7 @@
 
 **Goal:** Enforce provider-specific safety ceilings for cloud-file connections and admitted cloud tasks while preserving proxy use, fresh signed URLs, resume correctness, and a new application default of four connections per task.
 
-**Architecture:** `ProviderRegistry` owns immutable provider policies. A focused cloud scheduler persists safe pending requests and admits stable-source tasks per provider before URL resolution; the shared personal/share submission paths apply the policy to per-URI aria2 options. Terminal task events release slots and startup recovery accounts for existing GIDs before dispatching pending work.
+**Architecture:** `ProviderRegistry` owns immutable provider policies. A focused in-memory cloud scheduler admits stable-source tasks per provider before URL resolution; the shared personal/share submission paths apply the policy to per-URI aria2 options. Terminal task events release slots, while GID-less tasks remain retryable rather than adding a separate persistent request state machine.
 
 **Tech Stack:** Rust, Tokio, rusqlite, aria2 JSON-RPC, Tauri, TypeScript/React, Vitest.
 
@@ -101,26 +101,21 @@ git add src-tauri/src/aria2/service.rs src-tauri/src/cloud/commands/download.rs 
 git commit -m "fix: cap cloud file connections by provider"
 ```
 
-### Task 3: Durable provider admission scheduler
+### Task 3: In-memory provider admission scheduler
 
 **Files:**
 - Create: `src-tauri/src/cloud/download_scheduler.rs`
 - Modify: `src-tauri/src/cloud/mod.rs`
-- Modify: `src-tauri/src/store.rs`
-- Modify: `src-tauri/src/models.rs`
-- Modify: `src-tauri/src/commands.rs`
-- Modify: `src-tauri/src/lib.rs`
 - Test: `src-tauri/tests/cloud_download_scheduler.rs`
 
 **Interfaces:**
-- Produces: `PendingCloudDownload { task_id, provider, directory, output_name, allow_overwrite, continue_download }`
-- Produces: `CloudDownloadScheduler::new`, `restore_active`, `enqueue`, `release`, `cancel`, and `pending`.
-- Persists: `cloud_download_requests` without URL, request headers, cookies, bearer tokens, or proxy credentials.
-- Consumed by: Task 4 and the Tauri task event sink.
+- Produces: `CloudDownloadScheduler::new`, `enqueue`, `release`, `cancel`, and `pending`.
+- Stores only provider/task IDs and synchronization metadata in memory.
+- Consumed by: Task 4.
 
 - [ ] **Step 1: Write failing scheduler tests**
 
-Use literal provider limits and real Tokio tasks to prove: the fifth Quark task waits behind four; one Xunlei task does not block one Baidu task; release admits the oldest same-provider waiter; cancellation removes a waiter; restored active tasks consume slots; an active count above the limit admits nothing new until enough tasks end.
+Use literal provider limits and real Tokio tasks to prove: the fifth four-slot provider task waits behind four; providers are independent; release admits the oldest same-provider waiter; cancellation removes a waiter; duplicate IDs do not consume a second slot; dropping a waiting future leaves no phantom FIFO head.
 
 - [ ] **Step 2: Run the tests to verify RED**
 
@@ -128,24 +123,20 @@ Run: `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_download_sche
 
 Expected: compilation fails because the scheduler module and persistence API are absent.
 
-- [ ] **Step 3: Implement persistence and FIFO admission**
+- [ ] **Step 3: Implement FIFO admission**
 
-Add a schema migration for `cloud_download_requests`, typed store methods, a mutex-protected per-provider active/waiting state, and Tokio notifications. Persist only stable/local fields. Treat admitted tasks with a GID as active through terminal status.
+Add a mutex-protected per-provider active/waiting state and Tokio notifications. Never hold the mutex across await. Granted tasks retain their slot until an explicit release from Task 4's runtime integration.
 
-- [ ] **Step 4: Add terminal-event and startup composition**
-
-Store the scheduler in `AppState` and `TauriDownloadEvents`. On startup restore nonterminal cloud tasks with GIDs before pending requests; on completed/failed/cancelled/recycled task events release the provider slot.
-
-- [ ] **Step 5: Run the scheduler tests to verify GREEN**
+- [ ] **Step 4: Run the scheduler tests to verify GREEN**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_download_scheduler`
 
 Expected: all scheduler tests pass without timing sleeps longer than the test timeout.
 
-- [ ] **Step 6: Commit the durable scheduler**
+- [ ] **Step 5: Commit the in-memory scheduler**
 
 ```powershell
-git add src-tauri/src/cloud/download_scheduler.rs src-tauri/src/cloud/mod.rs src-tauri/src/store.rs src-tauri/src/models.rs src-tauri/src/commands.rs src-tauri/src/lib.rs src-tauri/tests/cloud_download_scheduler.rs
+git add src-tauri/src/cloud/download_scheduler.rs src-tauri/src/cloud/mod.rs src-tauri/tests/cloud_download_scheduler.rs
 git commit -m "feat: schedule cloud downloads by provider"
 ```
 
@@ -160,7 +151,7 @@ git commit -m "feat: schedule cloud downloads by provider"
 - Modify: `src-tauri/tests/cloud_directory_download.rs`
 
 **Interfaces:**
-- Consumes: scheduler and pending request from Task 3.
+- Consumes: the in-memory scheduler from Task 3.
 - Produces: one shared dispatcher that resolves `cloud://` and `cloud-share://` only after admission, applies Task 2 limits, and submits/resubmits to aria2.
 
 - [ ] **Step 1: Write failing shared-flow tests**
@@ -179,7 +170,7 @@ Expected: assertions fail because current commands resolve and submit immediatel
 
 - [ ] **Step 4: Implement the shared dispatcher and task actions**
 
-Create/link the durable task and pending request first, enqueue it, then resolve and submit only in the admitted callback. Read proxy settings at dispatch time. Remove the pending request after successful aria2 acceptance or terminal cancellation; keep failure state retryable. Extend legal task transitions only for the new queued-without-GID lifecycle.
+Create/link the stable local task first, enqueue an in-memory job, then resolve and submit only after admission. Read proxy settings at dispatch time. On successful aria2 acceptance keep the slot until a terminal event; on cancellation or pre-submit failure release it. Keep failures retryable and extend legal task transitions only for the queued-without-GID lifecycle.
 
 - [ ] **Step 5: Run the selected tests to verify GREEN**
 

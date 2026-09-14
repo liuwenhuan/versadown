@@ -25,6 +25,114 @@ fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
 }
 
 #[tokio::test]
+async fn scheduler_directory_pause_stops_linked_gidless_resolver_until_resume() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use alldownloader_lib::DownloadAction;
+    let temp = tempfile::tempdir().unwrap();
+    let store = TaskStore::open_in_memory().unwrap();
+    let group_id = cancellation_group(&store, temp.path());
+    let task = store
+        .create(NewTask {
+            source: "cloud://quark/file".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let item = store.cloud_directory_group_items(group_id).unwrap()[0].id;
+    store
+        .link_cloud_directory_group_item_task(group_id, item, task.id)
+        .unwrap();
+    let dispatch = CloudDownloadDispatch::default();
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    store.set_cloud_directory_paused(group_id, true).unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            task.id,
+            version,
+            || async {
+                panic!("paused group must defer URL resolution");
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+            |_| async { panic!("paused group cannot submit") },
+        )
+        .await;
+    dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Pause)
+        .await
+        .unwrap();
+    store.set_cloud_directory_paused(group_id, false).unwrap();
+    let (task, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            task.id,
+            version,
+            || async { Ok(()) },
+            |_| async { Ok(store.bind_gid(task.id, "directory-gid").unwrap()) },
+        )
+        .await;
+    assert_eq!(
+        store.find(task.id).unwrap().aria_gid.as_deref(),
+        Some("directory-gid")
+    );
+}
+
+#[tokio::test]
+async fn directory_gidless_resume_retains_overwrite_and_cancel_restores_original_gid() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use alldownloader_lib::DownloadAction;
+    let temp = tempfile::tempdir().unwrap();
+    let store = TaskStore::open_in_memory().unwrap();
+    let group_id = cancellation_group(&store, temp.path());
+    let task = store
+        .create(NewTask {
+            source: "cloud://quark/file".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let failed = store.fail(task.id, "fixture").unwrap();
+    let failed = store.bind_gid(failed.id, "directory-resume-gid").unwrap();
+    let item = store.cloud_directory_group_items(group_id).unwrap()[0].id;
+    store
+        .link_cloud_directory_group_item_task(group_id, item, failed.id)
+        .unwrap();
+    let dispatch = CloudDownloadDispatch::default();
+    dispatch
+        .prepare_expected_with_retry_intent(&store, &failed, true, false)
+        .await
+        .unwrap();
+    dispatch
+        .control_unsubmitted(&store, failed.id, DownloadAction::Pause)
+        .await
+        .unwrap();
+    let resume = dispatch.retry_submission_options(
+        failed.id,
+        UriSubmissionOptions {
+            continue_download: true,
+            ..Default::default()
+        },
+    );
+    assert!(resume.allow_overwrite);
+    assert!(!resume.continue_download);
+
+    let current = store.find(failed.id).unwrap();
+    dispatch.prepare_expected(&store, &current).await.unwrap();
+    let cancelled = dispatch
+        .control_unsubmitted(&store, failed.id, DownloadAction::Cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.aria_gid.as_deref(), Some("directory-resume-gid"));
+}
+
+#[tokio::test]
 async fn paused_directory_stops_pending_submission_and_can_resume_after_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("paused.db");

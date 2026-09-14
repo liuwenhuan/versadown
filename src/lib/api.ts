@@ -225,7 +225,7 @@ export const defaultSettings: AppSettings = {
   proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 },
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
   deleteTransferredShareFilesAfterDownload: true,
   privacyDownloadEnabled: false,
   privacyPasswordConfigured: false

@@ -458,13 +458,12 @@ pub(crate) async fn submit_cloud_file(
             .bind_cloud_download_account(context.group_id, provider, &account_id)
             .map_err(|_| QuarkError::NotAuthorized)?;
     }
-    let resolved = resolve_stable_cloud_download(app.clone(), &stable_source).await?;
     require_download_account(&app, provider, &account_id)?;
     let task_name = configured
         .output_name
         .as_deref()
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or(&resolved.name);
+        .unwrap_or(&file_id);
     let task = if let Some(context) = directory_context {
         state
             .store
@@ -494,32 +493,143 @@ pub(crate) async fn submit_cloud_file(
             .map_err(|_| QuarkError::Storage)?;
         task
     };
-    let signed_url = resolved.url.clone();
-    let mut options = resolved.into_uri_submission_options();
-    options.directory = configured.directory;
-    options.output_name = configured.output_name.or(options.output_name);
-    options.proxy = configured.proxy;
-    options.allow_overwrite = configured.allow_overwrite;
-    options.continue_download = configured.continue_download;
-    let service = state
-        .runtime
-        .service()
-        .await
-        .map_err(|error| QuarkError::Transport(error.to_string()))?;
-    let task = match service
-        .submit_uri_with_options(task.id, vec![signed_url], options)
-        .await
-    {
-        Ok(task) => task,
-        Err(error) => {
-            let message = format!("aria2 未能接受网盘下载任务：{error}");
-            let _ = state.store.fail(task.id, &message);
-            return Err(QuarkError::Transport(message));
-        }
-    };
+    let task = queue_cloud_dispatch(app, state, task, configured).await?;
     Ok(CloudFileSubmission::Queued(
         task_action_outcome(&state.store, task, None).map_err(QuarkError::Transport)?,
     ))
+}
+
+/// Captures only ephemeral options; the task source and existing group/share
+/// metadata remain the authority for a later user-initiated resume or retry.
+pub async fn queue_cloud_dispatch(
+    app: AppHandle,
+    state: &AppState,
+    task: DownloadTask,
+    mut configured: UriSubmissionOptions,
+) -> Result<DownloadTask, QuarkError> {
+    let share = task.source.starts_with("cloud-share://");
+    let provider = if share {
+        share::parse_stable_cloud_share_source(&task.source)?.0
+    } else {
+        parse_stable_cloud_source(&task.source)?.0
+    };
+    configured.output_name.get_or_insert(task.name.clone());
+    configured
+        .clone()
+        .into_aria2_options()
+        .map_err(|_| QuarkError::InvalidInput("下载路径或文件名无效".into()))?;
+    let (queued, version) = state
+        .cloud_download_dispatch
+        .prepare_expected_with_retry_intent(
+            &state.store,
+            &task,
+            configured.allow_overwrite,
+            configured.continue_download,
+        )
+        .await?;
+    emit_cloud_dispatch_update(&app, state, &queued);
+    let id = queued.id;
+    let source = queued.source.clone();
+    let dispatch = state.cloud_download_dispatch.clone();
+    let store = state.store.clone();
+    tauri::async_runtime::spawn(async move {
+        let worker_app = app.clone();
+        let submit_app = app.clone();
+        let result = dispatch
+            .run(
+                &store,
+                provider,
+                id,
+                version,
+                || async {
+                    if !share {
+                        check_dispatch_owner(&worker_app, &store, provider, id)?;
+                    }
+                    if share {
+                        resolve_stable_cloud_share_download(worker_app, &source).await
+                    } else {
+                        resolve_stable_cloud_download(worker_app, &source).await
+                    }
+                },
+                |resolved| async move {
+                    let state = submit_app.state::<AppState>();
+                    if !share {
+                        check_dispatch_owner(&submit_app, &state.store, provider, id)?;
+                    }
+                    let service = state
+                        .runtime
+                        .service()
+                        .await
+                        .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?;
+                    // Refresh user settings at the last possible moment. Keep the
+                    // configured proxy intact, including authentication and routing.
+                    let current = crate::commands::download_submission_options(&state)
+                        .map_err(|_| QuarkError::Storage)?;
+                    let configured_connections = state
+                        .settings
+                        .lock()
+                        .map_err(|_| QuarkError::Storage)?
+                        .aria2
+                        .max_connections_per_server;
+                    configured.proxy = current.proxy;
+                    let configured =
+                        apply_cloud_download_policy(provider, configured_connections, configured);
+                    let (url, options) = share::share_submission_options(resolved, configured)?;
+                    service
+                        .submit_uri_with_options(id, vec![url], options)
+                        .await
+                        .map_err(|_| QuarkError::Transport("aria2 未能接受网盘下载任务".into()))
+                },
+            )
+            .await;
+        if let Some(task) = result {
+            let state = app.state::<AppState>();
+            emit_cloud_dispatch_update(&app, &state, &task);
+            schedule_cloud_share_cleanup(app.clone(), &task);
+        }
+    });
+    Ok(queued)
+}
+
+fn check_dispatch_owner(
+    app: &AppHandle,
+    store: &TaskStore,
+    provider: CloudProvider,
+    id: uuid::Uuid,
+) -> Result<(), QuarkError> {
+    if let Some(owner) = store
+        .cloud_download_account(id)
+        .map_err(|_| QuarkError::Storage)?
+    {
+        require_download_account(app, provider, &owner)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_cloud_dispatch_update(app: &AppHandle, state: &AppState, task: &DownloadTask) {
+    use tauri::Emitter;
+    if should_emit_task_update(state, task.is_private) {
+        if let Ok(payload) = crate::commands::task_update_payload(&state.store, None, task.clone())
+        {
+            let _ = app.emit("download-task-updated", payload);
+        }
+    }
+}
+
+pub fn apply_cloud_download_policy(
+    provider: CloudProvider,
+    configured_connections: u8,
+    mut options: UriSubmissionOptions,
+) -> UriSubmissionOptions {
+    options.max_connections_per_server = Some(
+        configured_connections.min(
+            ProviderRegistry::global()
+                .get(provider)
+                .download_concurrency
+                .max_connections_per_file,
+        ),
+    );
+    options
 }
 
 pub(crate) fn planned_relative_path(file: &PlannedCloudFile) -> String {
