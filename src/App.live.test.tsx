@@ -1120,6 +1120,26 @@ it('keeps share confirmation open after one rejected submission and ignores conc
   expect(await screen.findByRole('status')).toHaveTextContent('服务器拒绝下载');
 });
 
+it('keeps share confirmation open and creates nothing when transfer capacity preflight rejects', async () => {
+  state.parse.mockResolvedValueOnce({ confirmation: {
+    taskId: 'cloud-share://aliyun/plan', title: '阿里云盘分享', requiresConfirmation: true,
+    resources: [{ id: 'f1', name: 'movie.mp4', size: '92.5 MB', selected: true }], processing: [],
+  } });
+  state.confirmCloud.mockRejectedValueOnce(new Error(
+    '阿里云盘转存空间不足：本次需要 92.5 MB，当前可用 10.0 MB，未建立下载任务。'
+  ));
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  await act(async () => {
+    state.listeners.get('launcher-parse')?.({ payload: 'https://www.alipan.com/s/share' });
+  });
+  fireEvent.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  expect(await screen.findByRole('status')).toHaveTextContent('未建立下载任务');
+  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
+  expect(state.confirmCloud.mock.calls[0][4]).toBeTypeOf('function');
+  expect(within(screen.getByRole('region', { name: '下载队列' })).queryByTitle('movie.mp4')).not.toBeInTheDocument();
+});
+
 it('binds in-flight share confirmation to its plan without blocking or clearing a newer plan', async () => {
   const firstSubmission = deferred<{ outcomes: never[]; failures: never[] }>();
   const secondSubmission = deferred<{ outcomes: never[]; failures: never[] }>();

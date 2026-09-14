@@ -10,8 +10,9 @@
 use alldownloader_lib::cloud::{
     commands::{parse_stable_cloud_source, resolve_download, restore_account},
     share::{
-        inspect_share_with_adapter, provider_share_adapter, resolve_current_share_download,
-        selected_share_sources, CloudShareAdapter, CloudSharePlanStore, ShareConfirmationOutcome,
+        inspect_share_with_adapter, preflight_selected_share_download, provider_share_adapter,
+        resolve_current_share_download, selected_share_download, selected_share_sources,
+        CloudShareAdapter, CloudSharePlanStore, ShareConfirmationOutcome,
     },
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, DpapiCredentialStore,
     QuarkError, ReqwestTransport,
@@ -73,6 +74,7 @@ impl CloudHttpTransport for RedactedTransport {
                     url.path(),
                     "/v2/share_link/get_share_token"
                         | "/adrive/v3/file/list"
+                        | "/v2/drive/get"
                         | "/v2/file/get_download_url"
                         | "/v2/file/copy"
                 )
@@ -857,6 +859,13 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                     2_427,
                     "the one-shot Aliyun inspection did not return the complete share"
                 );
+                let all_ids = confirmation
+                    .resources
+                    .iter()
+                    .map(|resource| resource.id.clone())
+                    .collect::<Vec<_>>();
+                let full_selection =
+                    selected_share_download(&plans, &confirmation.plan_source, &all_ids)?;
                 let stored = plans.resolve_entry(&confirmation.plan_source)?.plan;
                 let transferred = stored
                     .transfers
@@ -886,18 +895,74 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                         break;
                     }
                 }
+                assert_eq!(sources.len(), 2);
+                println!(
+                    "LIVE_ALIYUN_PARSE state=confirmation entries={} selected={}",
+                    confirmation.resources.len(),
+                    sources.len()
+                );
+                let before = transport.observation_count();
+                let preflight = preflight_selected_share_download(
+                    &plans,
+                    adapter.as_ref(),
+                    &full_selection,
+                );
+                let remote = transport.observations_since(before);
+                assert!(
+                    remote.contains("request-path:/v2/drive/get"),
+                    "the Aliyun capacity preflight did not query drive capacity"
+                );
+                assert!(
+                    !remote.contains("request-path:/v2/file/copy"),
+                    "the Aliyun capacity preflight attempted to copy a share file"
+                );
+                match preflight {
+                    Err(error) if error.to_string().contains("转存空间不足") => {
+                        assert!(error.to_string().contains("未建立下载任务"));
+                        println!(
+                            "LIVE_ALIYUN_PREFLIGHT state=insufficient no_task=true remote={remote}"
+                        );
+                    }
+                    Ok(()) => {
+                        println!(
+                            "LIVE_ALIYUN_PREFLIGHT state=sufficient no_task=true remote={remote}"
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                let reusable_ids = sources
+                    .iter()
+                    .map(|source| {
+                        Ok(plans
+                            .resolve_entry(source)?
+                            .entry
+                            .entry_fingerprint)
+                    })
+                    .collect::<Result<Vec<_>, QuarkError>>()?;
+                let reusable_selection = selected_share_download(
+                    &plans,
+                    &confirmation.plan_source,
+                    &reusable_ids,
+                )?;
+                let before = transport.observation_count();
+                preflight_selected_share_download(
+                    &plans,
+                    adapter.as_ref(),
+                    &reusable_selection,
+                )?;
+                let remote = transport.observations_since(before);
+                assert!(
+                    remote.is_empty(),
+                    "reusable Aliyun samples unexpectedly made a remote preflight request: {remote}"
+                );
+                println!("LIVE_ALIYUN_PREFLIGHT state=reusable no_transfer=true remote=none");
                 (confirmation.resources.len(), sources)
             }
             ShareConfirmationOutcome::AccessCodeRequired => {
                 return Err("provided share requires an access code".into())
             }
         };
-    assert_eq!(sources.len(), 2);
-    println!(
-        "LIVE_ALIYUN_PARSE state=confirmation entries={} selected={}",
-        resource_count,
-        sources.len()
-    );
+    assert_eq!(resource_count, 2_427);
     let mut prepared_downloads = Vec::new();
     for source in sources {
         let entry = plans.resolve_entry(&source)?.entry;

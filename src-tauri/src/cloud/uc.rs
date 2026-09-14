@@ -640,9 +640,9 @@ fn https_download_url(value: &str) -> Result<String, QuarkError> {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
-    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
-    TransferRequest,
+    CloudShareResolvedEntry, CloudTransferCapacity, RecordedTransferDownload,
+    RecordedTransferResolver, ShareInspect, ShareInspection, ShareOperationResult, ShareResolution,
+    ShareResolve, ShareTransfer, TransferRequest,
 };
 
 pub struct UcShareAdapter<'a> {
@@ -992,6 +992,24 @@ impl ShareResolve for UcShareAdapter<'_> {
     }
 }
 impl ShareTransfer for UcShareAdapter<'_> {
+    fn transfer_capacity(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<CloudTransferCapacity, QuarkError> {
+        let client = UcClient::new(self.stored_session()?, self.http);
+        let value = client.request_json(
+            "GET",
+            "member",
+            "fetch_subscribe=true&_ch=home&fetch_identity=true",
+            None,
+        )?;
+        CloudTransferCapacity::from_json(
+            &value["data"]["total_capacity"],
+            &value["data"]["use_capacity"],
+            false,
+        )
+    }
+
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
@@ -1246,6 +1264,42 @@ mod tests {
             )],
             json!({"stoken":"old-token","files":{"f1":{"token":"file-token","parent":"0"}}}),
         ))
+    }
+
+    #[test]
+    fn uc_share_transfer_capacity_uses_member_bytes() {
+        let credentials = share_credentials();
+        let http = Http::new(vec![json!({
+            "code": 0, "status": 200,
+            "data": {"total_capacity": 1000, "use_capacity": "250"}
+        })]);
+        let adapter = UcShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        assert_eq!(
+            adapter.transfer_capacity(&share_entry()).unwrap(),
+            CloudTransferCapacity::Limited {
+                total_bytes: 1000,
+                used_bytes: 250
+            }
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("/member?fetch_subscribe=true"));
+        assert!(!requests[0].url.contains("sharepage/save"));
+        drop(requests);
+
+        let invalid_uc = Http::new(vec![json!({
+            "code": 0, "status": 200,
+            "data": {"total_capacity": "unknown", "use_capacity": 1}
+        })]);
+        assert!(UcShareAdapter {
+            credentials: &credentials,
+            http: &invalid_uc
+        }
+        .transfer_capacity(&share_entry())
+        .is_err());
     }
 
     #[test]

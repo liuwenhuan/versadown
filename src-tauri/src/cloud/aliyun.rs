@@ -71,6 +71,120 @@ mod tests {
     fn listing() -> Value {
         json!({"items":[{"file_id":"f1","name":"verify.mp4","type":"file","size":7}],"next_marker":""})
     }
+    fn aliyun_capacity_entry() -> CloudShareResolvedEntry {
+        entry(CloudSharePlan::new(
+            CloudProvider::Aliyun,
+            "capacity-share".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "capacity-share",
+                "entry-1".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            json!({"share_token":"share-token"}),
+        ))
+    }
+
+    fn aliyun_capacity_credentials() -> MemoryCredentialStore {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"refresh","access_token":"personal-secret","drive_id":"drive-secret"}"#,
+            )
+            .unwrap();
+        credentials
+    }
+
+    #[test]
+    fn aliyun_share_transfer_capacity_uses_current_drive() {
+        let credentials = aliyun_capacity_credentials();
+        let http = Http::new(vec![json!({
+            "total_size":"1099511627776",
+            "used_size":1024
+        })]);
+        let adapter = AliyunShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        assert_eq!(
+            adapter.transfer_capacity(&aliyun_capacity_entry()).unwrap(),
+            CloudTransferCapacity::Limited {
+                total_bytes: 1_099_511_627_776,
+                used_bytes: 1024
+            }
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/v2/drive/get"));
+        assert_eq!(
+            requests[0].headers["Authorization"],
+            "Bearer personal-secret"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(requests[0].body.as_ref().unwrap()).unwrap()["drive_id"],
+            "drive-secret"
+        );
+        assert!(!requests[0].url.ends_with("/v2/file/copy"));
+    }
+
+    #[test]
+    fn aliyun_share_transfer_capacity_accepts_unlimited_drive() {
+        let credentials = aliyun_capacity_credentials();
+        let http = Http::new(vec![json!({"total_size":-1,"used_size":"1024"})]);
+        let adapter = AliyunShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        assert_eq!(
+            adapter.transfer_capacity(&aliyun_capacity_entry()).unwrap(),
+            CloudTransferCapacity::Unlimited
+        );
+    }
+
+    #[test]
+    fn aliyun_share_transfer_capacity_rejects_invalid_bytes() {
+        for response in [
+            json!({"used_size":1}),
+            json!({"total_size":100,"used_size":-1}),
+            json!({"total_size":100,"used_size":101}),
+        ] {
+            let credentials = aliyun_capacity_credentials();
+            let http = Http::new(vec![response]);
+            assert!(AliyunShareAdapter {
+                credentials: &credentials,
+                http: &http
+            }
+            .transfer_capacity(&aliyun_capacity_entry())
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn aliyun_share_transfer_capacity_preserves_expired_authorization() {
+        let credentials = aliyun_capacity_credentials();
+        let http = StatusHttp {
+            replies: std::sync::Mutex::new(
+                [CloudHttpResponse {
+                    status: 401,
+                    body: "{}".into(),
+                    ..Default::default()
+                }]
+                .into(),
+            ),
+            requests: std::sync::Mutex::new(vec![]),
+        };
+        assert!(matches!(
+            AliyunShareAdapter {
+                credentials: &credentials,
+                http: &http
+            }
+            .transfer_capacity(&aliyun_capacity_entry()),
+            Err(QuarkError::AuthorizationExpired)
+        ));
+    }
     #[test]
     fn aliyun_share_reuses_the_inspected_token_without_a_personal_bearer() {
         let credentials = MemoryCredentialStore::default();
@@ -1204,9 +1318,9 @@ fn parse_file(value: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
-    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
-    TransferRequest,
+    CloudShareResolvedEntry, CloudTransferCapacity, RecordedTransferDownload,
+    RecordedTransferResolver, ShareInspect, ShareInspection, ShareOperationResult, ShareResolution,
+    ShareResolve, ShareTransfer, TransferRequest,
 };
 
 /// Share-token authorization is deliberately separate from personal-drive sessions.
@@ -1618,6 +1732,19 @@ impl ShareResolve for AliyunShareAdapter<'_> {
     }
 }
 impl ShareTransfer for AliyunShareAdapter<'_> {
+    fn transfer_capacity(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<CloudTransferCapacity, QuarkError> {
+        let session = self.personal_session()?;
+        let value = self.personal_request(
+            &session,
+            "/v2/drive/get",
+            json!({"drive_id": session.drive_id}),
+        )?;
+        CloudTransferCapacity::from_json(&value["total_size"], &value["used_size"], true)
+    }
+
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,

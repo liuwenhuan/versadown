@@ -4,6 +4,7 @@ use serde_json::Value;
 pub struct CountingPlanCredentials {
     inner: crate::cloud::MemoryCredentialStore,
     pub reads: std::sync::atomic::AtomicUsize,
+    pub writes: std::sync::atomic::AtomicUsize,
 }
 impl CredentialStore for CountingPlanCredentials {
     fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
@@ -11,6 +12,8 @@ impl CredentialStore for CountingPlanCredentials {
         self.inner.load(key)
     }
     fn save(&self, key: &str, value: &[u8]) -> Result<(), QuarkError> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.save(key, value)
     }
     fn remove(&self, key: &str) -> Result<(), QuarkError> {
@@ -21,6 +24,7 @@ pub fn counted_plan_store() -> (CloudSharePlanStore, Arc<CountingPlanCredentials
     let credentials = Arc::new(CountingPlanCredentials {
         inner: Default::default(),
         reads: Default::default(),
+        writes: Default::default(),
     });
     let store = CloudSharePlanStore {
         repository: None,

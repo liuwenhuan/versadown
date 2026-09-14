@@ -61,6 +61,84 @@ mod tests {
         }
     }
 
+    fn baidu_capacity_entry() -> CloudShareResolvedEntry {
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "capacity-share".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "capacity-share",
+                "1".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            json!({}),
+        );
+        CloudShareResolvedEntry {
+            provider: CloudProvider::Baidu,
+            entry: plan.entries[0].clone(),
+            plan,
+        }
+    }
+
+    #[test]
+    fn baidu_share_transfer_capacity_uses_quota_bytes() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "baidu",
+                &serde_json::to_vec(&BaiduSession::cookie("BDUSS=current")).unwrap(),
+            )
+            .unwrap();
+        let http = Http::new(vec![json!({"errno": 0, "total": "2048", "used": 512})]);
+        let adapter = BaiduShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        assert_eq!(
+            adapter.transfer_capacity(&baidu_capacity_entry()).unwrap(),
+            CloudTransferCapacity::Limited {
+                total_bytes: 2048,
+                used_bytes: 512
+            }
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("/api/quota?"));
+        assert!(!requests[0].url.contains("/share/transfer"));
+    }
+
+    struct FixedStatusHttp(u16);
+    impl CloudHttpTransport for FixedStatusHttp {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            Ok(CloudHttpResponse {
+                status: self.0,
+                body: "{}".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn baidu_share_transfer_capacity_preserves_expired_authorization() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "baidu",
+                &serde_json::to_vec(&BaiduSession::cookie("BDUSS=current")).unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            BaiduShareAdapter {
+                credentials: &credentials,
+                http: &FixedStatusHttp(401)
+            }
+            .transfer_capacity(&baidu_capacity_entry()),
+            Err(QuarkError::AuthorizationExpired)
+        ));
+    }
+
     #[test]
     fn locatedownload_signature_matches_the_known_baidupcs_go_fixture() {
         assert_eq!(
@@ -2226,9 +2304,9 @@ fn write_query(token: &str, operation: &str) -> String {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
-    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
-    TransferRequest,
+    CloudShareResolvedEntry, CloudTransferCapacity, RecordedTransferDownload,
+    RecordedTransferResolver, ShareInspect, ShareInspection, ShareOperationResult, ShareResolution,
+    ShareResolve, ShareTransfer, TransferRequest,
 };
 
 pub struct BaiduShareAdapter<'a> {
@@ -2538,6 +2616,20 @@ impl ShareResolve for BaiduShareAdapter<'_> {
     }
 }
 impl ShareTransfer for BaiduShareAdapter<'_> {
+    fn transfer_capacity(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<CloudTransferCapacity, QuarkError> {
+        let value = self.client()?.request(
+            "GET",
+            format!(
+                "{PAN}/api/quota?checkexpire=1&checkfree=1&channel=chunlei&web=1&app_id=250528&clienttype=0"
+            ),
+            None,
+        )?;
+        CloudTransferCapacity::from_json(&value["total"], &value["used"], false)
+    }
+
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,

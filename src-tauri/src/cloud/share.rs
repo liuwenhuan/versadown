@@ -13,10 +13,13 @@ use zeroize::Zeroizing;
 
 pub mod capabilities;
 mod models;
+mod preflight;
 pub mod repository;
 pub mod service;
 pub use capabilities::*;
 pub use models::*;
+#[allow(unused_imports)]
+pub use preflight::*;
 pub use repository::*;
 pub use service::*;
 #[cfg(test)]

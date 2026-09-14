@@ -119,6 +119,71 @@ mod tests {
             json!({"pass_code_token":"old-pass"}),
         ))
     }
+    #[test]
+    fn xunlei_share_transfer_capacity_uses_drive_about_quota() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            json!({"captcha_token":"read-token","expires_in":300}),
+            json!({"quota":{"limit":"4096","usage":1024}}),
+        ]);
+        let adapter = XunleiShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        assert_eq!(
+            adapter.transfer_capacity(&selected()).unwrap(),
+            CloudTransferCapacity::Limited {
+                total_bytes: 4096,
+                used_bytes: 1024
+            }
+        );
+        let requests = http.requests.lock().unwrap();
+        assert!(requests
+            .iter()
+            .any(|request| request.url.ends_with("/drive/v1/about")));
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.contains("/share/restore")));
+    }
+
+    struct CapacityStatusHttp(std::sync::atomic::AtomicUsize);
+    impl CapacityStatusHttp {
+        fn new() -> Self {
+            Self(std::sync::atomic::AtomicUsize::new(0))
+        }
+    }
+    impl CloudHttpTransport for CapacityStatusHttp {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            let index = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(if index == 0 {
+                CloudHttpResponse {
+                    status: 200,
+                    body: json!({"captcha_token":"read-token","expires_in":300}).to_string(),
+                    ..Default::default()
+                }
+            } else {
+                CloudHttpResponse {
+                    status: 412,
+                    body: "{}".into(),
+                    ..Default::default()
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn xunlei_share_transfer_capacity_preserves_web_verification() {
+        let stored = credentials();
+        let http = CapacityStatusHttp::new();
+        assert!(matches!(
+            XunleiShareAdapter {
+                credentials: &stored,
+                http: &http
+            }
+            .transfer_capacity(&selected()),
+            Err(QuarkError::WebAuthorizationRequired)
+        ));
+    }
     fn cap() -> Value {
         json!({"captcha_token":"share-captcha","expires_in":300})
     }
@@ -549,9 +614,9 @@ mod tests {
 
 use super::share::{
     CloudShareAdapter, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, RecordedTransferDownload, RecordedTransferResolver, ShareInspect,
-    ShareInspection, ShareOperationResult, ShareResolution, ShareResolve, ShareTransfer,
-    TransferRequest,
+    CloudShareResolvedEntry, CloudTransferCapacity, RecordedTransferDownload,
+    RecordedTransferResolver, ShareInspect, ShareInspection, ShareOperationResult, ShareResolution,
+    ShareResolve, ShareTransfer, TransferRequest,
 };
 
 pub struct XunleiShareAdapter<'a> {
@@ -892,6 +957,31 @@ impl ShareResolve for XunleiShareAdapter<'_> {
     }
 }
 impl ShareTransfer for XunleiShareAdapter<'_> {
+    fn transfer_capacity(
+        &self,
+        _: &CloudShareResolvedEntry,
+    ) -> Result<CloudTransferCapacity, QuarkError> {
+        let bytes = self
+            .credentials
+            .load("xunlei")?
+            .ok_or(QuarkError::NotAuthorized)?;
+        let session: XunleiSession =
+            serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
+        let transport = XunleiShareTransport(self.http);
+        let client = XunleiClient::new(session, &transport);
+        let client = if self.credentials.automatic_session_recovery() {
+            client
+        } else {
+            client.supervised()
+        };
+        let result = client.drive_capacity();
+        self.credentials.save(
+            "xunlei",
+            &serde_json::to_vec(&client.session()).map_err(|_| QuarkError::Storage)?,
+        )?;
+        result
+    }
+
     fn transfer_owner_fingerprint(
         &self,
         _: &CloudShareResolvedEntry,
@@ -1532,6 +1622,11 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         url.into()
     }
 
+    fn drive_capacity(&self) -> Result<CloudTransferCapacity, QuarkError> {
+        let value = self.request("GET", self.drive_url("/drive/v1/about"), None)?;
+        CloudTransferCapacity::from_json(&value["quota"]["limit"], &value["quota"]["usage"], false)
+    }
+
     fn challenge(value: &Value, _status: u16) -> bool {
         let error = value
             .get("error")
@@ -1574,7 +1669,8 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             {
                 return Err(QuarkError::AuthorizationExpired);
             }
-            if matches!(code, 4001 | 4002)
+            if response.status == 412
+                || matches!(code, 4001 | 4002)
                 || matches!(error, "captcha_required" | "captcha_invalid")
             {
                 return Err(QuarkError::WebAuthorizationRequired);
