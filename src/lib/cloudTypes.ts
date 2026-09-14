@@ -8,6 +8,10 @@ export interface ProviderCapabilities {
   trash: boolean; delete: boolean; restore: boolean; download: boolean; upload: boolean;
   shareInspect: boolean; shareTransfer: boolean; recordedTransferResolve: boolean;
 }
+export interface DownloadConcurrencyPolicy {
+  maxConnectionsPerFile: number;
+  maxConcurrentTasks: number;
+}
 export interface ProviderDescriptor {
   provider: CloudProvider;
   displayName: string;
@@ -23,6 +27,7 @@ export interface ProviderDescriptor {
   shareHosts: readonly string[];
   sharePatterns: readonly string[];
   maxUploadConcurrency: number;
+  downloadConcurrency: DownloadConcurrencyPolicy;
 }
 
 export interface CloudAccount { provider: CloudProvider; id: string; displayName: string; authMethod: CloudAuthMethod; expiresAt?: string; }
