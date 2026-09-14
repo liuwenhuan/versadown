@@ -307,6 +307,7 @@ fn build_directory_upload_plan_with_limits(
     })
 }
 
+#[cfg(test)]
 fn collect_directory_upload_entries(root: &Path) -> Result<Vec<DirectoryUploadEntry>, QuarkError> {
     Ok(build_directory_upload_plan_with_limits(
         CloudProvider::Xunlei,

@@ -1,9 +1,11 @@
 import { MouseEvent, useRef, useState, useSyncExternalStore } from 'react';
 import { NewDownloadDialog } from './NewDownloadDialog';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
+import type { ScanDownloadResult } from '../lib/types';
 
 interface FloatingLauncherProps {
   onParse(input: string): void | Promise<void>;
+  onScan?(input: string): Promise<ScanDownloadResult[]>;
   onOpenTaskList?(): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
   onDragStart?(): void;
@@ -23,7 +25,7 @@ function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
   );
 }
 
-export function FloatingLauncher({ onParse, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ onParse, onScan, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
   const [expanded, setExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
@@ -75,7 +77,7 @@ export function FloatingLauncher({ onParse, onOpenTaskList, onExpandedChange, on
           <LauncherMark variant={resolvedTheme} />
         </button>
       </div>
-      {expanded && <NewDownloadDialog open onParse={onParse} onClose={() => setLauncherExpanded(false)} onOpenTaskList={() => { void onOpenTaskList?.(); setLauncherExpanded(false); }} />}
+      {expanded && <NewDownloadDialog open onParse={onParse} onScan={onScan} onClose={() => setLauncherExpanded(false)} onOpenTaskList={() => { void onOpenTaskList?.(); setLauncherExpanded(false); }} />}
     </>
   );
 }

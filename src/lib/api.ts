@@ -1,4 +1,4 @@
-import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './types';
+import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 
@@ -115,6 +115,29 @@ export async function parseDownload(input: string, accessCode?: string, requireC
       isBitTorrent: result.task.kind === 'magnet' || result.task.kind === 'torrent'
     }
   };
+}
+
+export async function scanDownloadInputs(input: string): Promise<ScanDownloadResult[]> {
+  if (!isTauriRuntime()) {
+    const source = input.trim();
+    try {
+      const url = new URL(source);
+      if (url.hostname && (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'ftp:')) {
+        const path = url.pathname.toLowerCase();
+        const kind = url.protocol === 'ftp:' ? 'ftp'
+          : path.endsWith('.m3u8') ? 'hls'
+            : path.endsWith('.mpd') ? 'dash'
+              : path.endsWith('.torrent') ? 'torrent'
+                : 'direct';
+        return [{ input: source, valid: true, kind }];
+      }
+    } catch {
+      // The native parser is authoritative. The browser fallback only keeps
+      // ordinary URL-based workflows usable in tests and web previews.
+    }
+    return [{ input: source, valid: false, message: '未发现受支持的有效下载链接' }];
+  }
+  return invoke<ScanDownloadResult[]>('scan_download_inputs', { input });
 }
 
 export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false): Promise<QueueTask | undefined> {

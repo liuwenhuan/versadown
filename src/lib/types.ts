@@ -104,6 +104,12 @@ export interface ParseResult {
   isBitTorrent?: boolean;
 }
 
+export type DownloadInputKind = 'direct' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'magnet' | 'torrent' | 'thunder' | 'cloud_share' | 'quark_share' | 'pik_pak_share';
+
+export type ScanDownloadResult =
+  | { input: string; valid: true; kind: DownloadInputKind; message?: never }
+  | { input: string; valid: false; kind?: never; message: string };
+
 export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
 
 export interface CloudShareAccessCodeRequired {

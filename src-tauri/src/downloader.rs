@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::parser::{extract_cloud_share_candidate, ShareInputError};
 use crate::{
-    classify_input, duplicate_state, CandidateKind, DownloadTask, DuplicateDownloadState, NewTask,
-    StoreError, TaskStatus, TaskStore,
+    duplicate_state, validate_download_input, CandidateKind, DownloadTask, DuplicateDownloadState,
+    InputValidationError, NewTask, StoreError, TaskStatus, TaskStore,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -38,6 +38,8 @@ pub enum DownloadError {
     ThunderInput(String),
     #[error(transparent)]
     ShareInput(#[from] ShareInputError),
+    #[error(transparent)]
+    Input(#[from] InputValidationError),
     #[error("分享链接必须先通过网盘分享解析流程处理")]
     CloudShareInput,
 }
@@ -159,49 +161,21 @@ pub fn aria2_binary_name() -> &'static str {
 }
 
 fn decode_thunder_source(source: &str) -> Result<String, DownloadError> {
-    let encoded = source
-        .get("thunder://".len()..)
-        .ok_or_else(|| DownloadError::ThunderInput("迅雷链接格式无效".into()))?;
-    let decoded = STANDARD
-        .decode(encoded)
-        .map_err(|_| DownloadError::ThunderInput("迅雷链接编码无效".into()))?;
-    let decoded = String::from_utf8(decoded)
-        .map_err(|_| DownloadError::ThunderInput("迅雷链接内容不是有效文本".into()))?;
-    let target = decoded
-        .strip_prefix("AA")
-        .and_then(|value| value.strip_suffix("ZZ"))
-        .ok_or_else(|| DownloadError::ThunderInput("迅雷链接缺少标准 AA/ZZ 包装".into()))?;
-    let scheme = url::Url::parse(target)
-        .map_err(|_| DownloadError::ThunderInput("迅雷链接中的下载地址无效".into()))?
-        .scheme()
-        .to_ascii_lowercase();
-    if !matches!(scheme.as_str(), "http" | "https" | "ftp") {
-        return Err(DownloadError::ThunderInput(
-            "该迅雷链接不是可下载的 HTTP/HTTPS/FTP 地址".into(),
-        ));
-    }
-    Ok(target.to_string())
+    crate::parser::decode_thunder_target(source).map_err(DownloadError::from)
 }
 
 pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, DownloadError> {
     if extract_cloud_share_candidate(input, None)?.is_some() {
         return Err(DownloadError::CloudShareInput);
     }
-    let candidate = classify_input(input);
-    let source = if candidate.kind == CandidateKind::Thunder {
-        decode_thunder_source(&candidate.uri)?
+    let requested = validate_download_input(input)?;
+    let candidate = if requested.kind == CandidateKind::Thunder {
+        validate_download_input(&decode_thunder_source(&requested.source)?)?
     } else {
-        candidate.uri.clone()
+        requested
     };
-    let effective_kind = match &candidate.kind {
-        CandidateKind::Thunder if source.to_ascii_lowercase().starts_with("ftp://") => {
-            CandidateKind::Ftp
-        }
-        CandidateKind::Thunder => CandidateKind::Direct,
-        kind => kind.clone(),
-    };
-    let mut new_task = NewTask::direct(source);
-    new_task.kind = match effective_kind {
+    let mut new_task = NewTask::direct(candidate.source.clone());
+    new_task.kind = match &candidate.kind {
         CandidateKind::Ed2k => "ed2k",
         CandidateKind::Ftp => "ftp",
         CandidateKind::Hls => "hls",
@@ -274,6 +248,8 @@ pub fn confirm_download(id: Uuid, store: &TaskStore) -> Result<DownloadTask, Dow
 
 #[cfg(test)]
 mod tests {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
     use super::*;
 
     #[test]
@@ -326,6 +302,32 @@ mod tests {
             Err(DownloadError::CloudShareInput)
         ));
         assert!(store.find_by_source(source).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_magnet_creates_no_task() {
+        let store = TaskStore::open_in_memory().unwrap();
+
+        assert_eq!(
+            prepare_download("magnet:?xt=urn:btih:short", &store)
+                .unwrap_err()
+                .to_string(),
+            "磁链格式无效"
+        );
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn malformed_ftp_source_creates_no_task() {
+        let store = TaskStore::open_in_memory().unwrap();
+
+        assert_eq!(
+            prepare_download("ftp://example.test/", &store)
+                .unwrap_err()
+                .to_string(),
+            "FTP 链接格式无效"
+        );
+        assert!(store.list().unwrap().is_empty());
     }
 
     #[test]

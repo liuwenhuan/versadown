@@ -62,6 +62,31 @@ it('maps an access-code requirement without creating a task', async () => {
   });
 });
 
+it('returns every scanned candidate without creating a download task', async () => {
+  native.invoke.mockResolvedValueOnce([
+    { input: 'https://example.test/fixture.iso', valid: true, kind: 'direct' },
+    { input: 'magnet:?xt=urn:btih:short', valid: false, message: '磁链格式无效' }
+  ]);
+  const { scanDownloadInputs } = await import('./api');
+
+  await expect(scanDownloadInputs('https://example.test/fixture.iso magnet:?xt=urn:btih:short')).resolves.toEqual([
+    { input: 'https://example.test/fixture.iso', valid: true, kind: 'direct' },
+    { input: 'magnet:?xt=urn:btih:short', valid: false, message: '磁链格式无效' }
+  ]);
+  expect(native.invoke).toHaveBeenCalledWith('scan_download_inputs', {
+    input: 'https://example.test/fixture.iso magnet:?xt=urn:btih:short'
+  });
+});
+
+it('keeps an ordinary direct link valid in the browser scan fallback', async () => {
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  const { scanDownloadInputs } = await import('./api');
+
+  await expect(scanDownloadInputs('https://example.test/archive.zip')).resolves.toEqual([
+    { input: 'https://example.test/archive.zip', valid: true, kind: 'direct' }
+  ]);
+});
+
 it('passes a transient access code only to the parse command', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'access_code_required',

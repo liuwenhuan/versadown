@@ -52,8 +52,9 @@ pub use models::{
     ProxySettings, TaskStatus,
 };
 pub use parser::{
-    classify_input, extract_candidates, extract_cloud_share_candidate, Candidate, CandidateKind,
-    CloudShareCandidate,
+    classify_input, extract_candidates, extract_cloud_share_candidate, scan_download_inputs,
+    validate_download_input, validate_task_source, Candidate, CandidateKind, CloudShareCandidate,
+    InputValidationError, ScannedInput, ValidatedCandidate,
 };
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
@@ -331,6 +332,7 @@ pub fn run() {
             check_for_app_update,
             local_upload_picker::local_upload_entries,
             main_window_interaction_state,
+            commands::scan_download_inputs,
             commands::parse_download,
             commands::confirm_cloud_share_download,
             commands::confirm_download_command,

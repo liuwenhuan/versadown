@@ -285,6 +285,64 @@ pub(crate) fn download_submission_options(
     download_submission_options_for_directory(state, None)
 }
 
+fn fail_invalid_task_submission(store: &TaskStore, task: &DownloadTask) -> Result<(), String> {
+    match crate::validate_task_source(&task.kind, &task.source) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let message = error.to_string();
+            let _ = store.fail(task.id, message.clone());
+            Err(message)
+        }
+    }
+}
+
+fn download_engine_submission_message(error: &DownloadServiceError) -> String {
+    match error {
+        DownloadServiceError::Input(error) => error.to_string(),
+        DownloadServiceError::Aria2(crate::Aria2Error::HttpStatus(400)) => {
+            "下载引擎拒绝请求（HTTP 400）".into()
+        }
+        DownloadServiceError::Aria2(crate::Aria2Error::Rpc(fault))
+            if fault.code == -32602
+                && ["uri", "magnet"]
+                    .iter()
+                    .any(|term| fault.message.to_ascii_lowercase().contains(term)) =>
+        {
+            "下载引擎拒绝该链接：链接格式无效".into()
+        }
+        _ => "下载引擎未能接受下载任务".into(),
+    }
+}
+
+fn safe_engine_submission_message(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("http status 400") {
+        return "下载引擎拒绝请求（HTTP 400）".into();
+    }
+    "下载引擎未能接受下载任务".into()
+}
+
+fn fail_engine_submission(
+    store: &TaskStore,
+    task: &DownloadTask,
+    error: DownloadServiceError,
+) -> String {
+    let message = download_engine_submission_message(&error);
+    let _ = store.fail(task.id, message.clone());
+    message
+}
+
+fn fail_engine_submission_text(store: &TaskStore, task: &DownloadTask, error: String) -> String {
+    let message = safe_engine_submission_message(&error);
+    let _ = store.fail(task.id, message.clone());
+    message
+}
+
+#[tauri::command]
+pub fn scan_download_inputs(input: String) -> Vec<crate::ScannedInput> {
+    crate::scan_download_inputs(&input)
+}
+
 #[tauri::command]
 pub async fn parse_download(
     app: AppHandle,
@@ -364,25 +422,23 @@ pub async fn parse_download(
         {
             Ok(task) => task,
             Err(error) => {
-                let message = error.to_string();
-                if state
-                    .store
-                    .find(outcome.task.id)
-                    .is_ok_and(|task| task.status == TaskStatus::Parsing)
-                {
-                    let _ = state.store.fail(outcome.task.id, message.clone());
-                }
+                let message = fail_engine_submission(&state.store, &outcome.task, error);
                 return Err(message);
             }
         };
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     } else if !outcome.requires_confirmation {
         let options = download_submission_options(&state)?;
-        outcome.task = state
+        outcome.task = match state
             .runtime
             .submit_uri_with_options(outcome.task.id, vec![outcome.task.source.clone()], options)
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            Ok(task) => task,
+            Err(error) => {
+                return Err(fail_engine_submission_text(&state.store, &outcome.task, error))
+            }
+        };
     } else if outcome.task.kind == "magnet" {
         let service = state
             .runtime
@@ -416,19 +472,21 @@ pub async fn parse_download(
                         .map_err(|error| error.to_string())?,
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| fail_engine_submission(&state.store, &outcome.task, error))?;
         } else {
             outcome.task = service
                 .prepare_magnet_with_options(outcome.task.id, outcome.task.source.clone(), options)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| fail_engine_submission(&state.store, &outcome.task, error))?;
             match service
                 .wait_for_metadata(outcome.task.id, std::time::Duration::from_secs(12))
                 .await
             {
                 Ok(task) => outcome.task = task,
                 Err(DownloadServiceError::MetadataTimeout) => {}
-                Err(error) => return Err(error.to_string()),
+                Err(error) => {
+                    return Err(fail_engine_submission(&state.store, &outcome.task, error))
+                }
             }
         }
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
@@ -666,6 +724,7 @@ pub async fn confirm_download_command(
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let current = state.store.find(id).map_err(|error| error.to_string())?;
     ensure_private_task_access(&state, &current)?;
+    fail_invalid_task_submission(&state.store, &current)?;
     let current = state
         .store
         .set_private(id, private_download)
@@ -680,7 +739,7 @@ pub async fn confirm_download_command(
         let task = service
             .select_files_with_options(id, indices, options)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| fail_engine_submission(&state.store, &current, error))?;
         return task_payload(&state.store, task);
     }
     if let Some(error) = unbound_torrent_confirmation_error(&current) {
@@ -688,9 +747,9 @@ pub async fn confirm_download_command(
     }
     let task = confirm_download(id, &state.store).map_err(|error| error.to_string())?;
     let task = service
-        .submit_uri_with_options(task.id, vec![task.source], options)
+        .submit_uri_with_options(task.id, vec![task.source.clone()], options)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| fail_engine_submission(&state.store, &task, error))?;
     task_payload(&state.store, task)
 }
 
@@ -1372,6 +1431,7 @@ fn list_tasks_with_cleanup_projection_for_scope(
     .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn list_tasks_with_cleanup_projection(
     store: &TaskStore,
     plans: Option<&crate::cloud::share::CloudSharePlanStore>,
@@ -1750,6 +1810,7 @@ pub(crate) async fn resubmit_task(
     mut task: DownloadTask,
     mut options: UriSubmissionOptions,
 ) -> Result<DownloadTask, String> {
+    fail_invalid_task_submission(&state.store, &task)?;
     // Match the cleanup worker's source gate for both retry and overwrite.
     let _directory_submission =
         crate::cloud::commands::lock_directory_member_submission(&state.store, task.id)
@@ -2859,12 +2920,27 @@ pub async fn update_settings(
 mod tests {
     use super::*;
     use crate::{
+        aria2::{Aria2Error, RpcFault},
         cloud::{
             share::CloudShareEntry, share::CloudSharePlan, CloudProvider, MemoryCredentialStore,
         },
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
         DuplicateDownloadState, NewTask,
     };
+
+    #[test]
+    fn engine_submission_mapper_only_labels_structured_link_rejections_as_invalid_links() {
+        assert_eq!(
+            download_engine_submission_message(&DownloadServiceError::InvalidUriOption("proxy")),
+            "下载引擎未能接受下载任务"
+        );
+        assert_eq!(
+            download_engine_submission_message(&DownloadServiceError::Aria2(Aria2Error::Rpc(
+                RpcFault { code: -32602, message: "Invalid URI".into() }
+            ))),
+            "下载引擎拒绝该链接：链接格式无效"
+        );
+    }
 
     #[test]
     fn private_visibility_requires_the_configured_password_for_this_session() {

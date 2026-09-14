@@ -10,7 +10,10 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{DownloadTask, StoreError, TaskStatus, TaskStore};
+use crate::{
+    validate_download_input, validate_task_source, DownloadTask, InputValidationError, StoreError,
+    TaskStatus, TaskStore,
+};
 
 use super::sync::{EventSink, NoEvents};
 use super::{
@@ -95,6 +98,8 @@ fn valid_header(name: &str, value: &str) -> bool {
 #[derive(Debug, Error)]
 pub enum DownloadServiceError {
     #[error(transparent)]
+    Input(#[from] InputValidationError),
+    #[error(transparent)]
     Aria2(#[from] Aria2Error),
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -173,6 +178,15 @@ impl DownloadService {
         Arc::clone(&self.store)
     }
 
+    fn task_for_uri_submission(&self, task_id: Uuid) -> Result<DownloadTask, DownloadServiceError> {
+        let task = self.store.find(task_id)?;
+        if let Err(error) = validate_task_source(&task.kind, &task.source) {
+            let _ = self.store.fail(task.id, error.to_string());
+            return Err(error.into());
+        }
+        Ok(task)
+    }
+
     pub async fn submit_uri(
         &self,
         task_id: Uuid,
@@ -181,7 +195,7 @@ impl DownloadService {
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        if self.store.find(task_id)?.aria_gid.is_some() {
+        if self.task_for_uri_submission(task_id)?.aria_gid.is_some() {
             return Err(DownloadServiceError::AlreadySubmitted);
         }
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
@@ -270,6 +284,7 @@ impl DownloadService {
         let mut options = options.into_aria2_options()?;
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
+        self.task_for_uri_submission(task_id)?;
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
@@ -293,6 +308,7 @@ impl DownloadService {
         options.insert("media".into(), media.into());
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
+        self.task_for_uri_submission(task_id)?;
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
@@ -327,6 +343,7 @@ impl DownloadService {
         {
             return Ok(None);
         }
+        validate_task_source(&current.kind, &current.source)?;
         let directory = self.prepare_directory_uri(expected.id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(expected.id, &gid) {
@@ -393,7 +410,8 @@ impl DownloadService {
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        if self.store.find(task_id)?.aria_gid.is_some() && !rebind_existing_task {
+        let task = self.task_for_uri_submission(task_id)?;
+        if task.aria_gid.is_some() && !rebind_existing_task {
             return Err(DownloadServiceError::AlreadySubmitted);
         }
         // A torrent must remain paused until the user has reviewed aria2's real
@@ -714,7 +732,19 @@ impl DownloadService {
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        let task = self.store.find(task_id)?;
+        let task = self.task_for_uri_submission(task_id)?;
+        let requested = match validate_download_input(&magnet) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                let _ = self.store.fail(task.id, error.to_string());
+                return Err(error.into());
+            }
+        };
+        if requested.kind != crate::CandidateKind::Magnet || requested.source != task.source {
+            let error = InputValidationError::InvalidMagnet;
+            let _ = self.store.fail(task.id, error.to_string());
+            return Err(error.into());
+        }
         if task.aria_gid.is_some() {
             return self.reconcile_task_unlocked(task_id).await;
         }

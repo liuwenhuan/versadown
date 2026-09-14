@@ -192,6 +192,7 @@ pub(crate) fn tianyi_browser_send(
     Err(QuarkError::WebAuthorizationRequired)
 }
 
+#[cfg(test)]
 pub(crate) fn should_attempt_native_password_recovery(
     provider: CloudProvider,
     kind: SessionWorkKind,
@@ -555,6 +556,7 @@ pub(crate) fn browser_password_login(
 /// authorized official web tab, then keeps it only if the original read-only
 /// operation succeeds.  A rejected candidate never destroys the saved
 /// session that the user could still use after reopening the tab.
+#[cfg(test)]
 pub(crate) fn retry_read_with_refreshed_web_session<T>(
     provider: CloudProvider,
     store: &impl CredentialStore,
@@ -578,6 +580,7 @@ pub(crate) fn retry_read_with_refreshed_web_session<T>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn can_retry_read_with_web_session(error: &QuarkError) -> bool {
     matches!(
         error,
