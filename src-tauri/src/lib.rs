@@ -80,6 +80,7 @@ struct TauriDownloadEvents {
     store: std::sync::Arc<TaskStore>,
     cloud: std::sync::Arc<cloud::commands::CloudState>,
     directory_refreshes: std::sync::Arc<cloud_directory_events::CloudDirectoryRefreshes>,
+    cloud_download_dispatch: cloud::download_dispatch::CloudDownloadDispatch,
 }
 
 impl TauriDownloadEvents {
@@ -131,6 +132,20 @@ impl TauriDownloadEvents {
 
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
+        if matches!(
+            task.status,
+            TaskStatus::Completed
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Recycled
+        ) && self
+            .store
+            .find(task.id)
+            .is_ok_and(|current| current.status == task.status && current.aria_gid == task.aria_gid)
+        {
+            self.cloud_download_dispatch.scheduler.release(task.id);
+            self.cloud_download_dispatch.scheduler.cancel(task.id);
+        }
         if let Ok(Some(group)) = self.store.cloud_directory_group_for_task(task.id) {
             self.schedule_directory_refresh(group.id);
         } else if let Ok(payload) =
@@ -280,11 +295,14 @@ pub fn run() {
                 peer_discovery: should_enable_peer_discovery(background_ui_test.as_deref()),
                 aria2: settings.aria2.clone(),
             };
+            let cloud_download_dispatch =
+                cloud::download_dispatch::CloudDownloadDispatch::default();
             let events = std::sync::Arc::new(TauriDownloadEvents {
                 app: app.handle().clone(),
                 store: std::sync::Arc::clone(&store),
                 cloud,
                 directory_refreshes: Default::default(),
+                cloud_download_dispatch: cloud_download_dispatch.clone(),
             });
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,
@@ -301,6 +319,7 @@ pub fn run() {
                 ai_secrets,
                 privacy_session: Default::default(),
                 cloud_download_sources: Default::default(),
+                cloud_download_dispatch,
             });
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),

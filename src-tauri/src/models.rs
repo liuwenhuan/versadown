@@ -245,7 +245,10 @@ pub fn may_transition(from: TaskStatus, to: TaskStatus) -> bool {
             )
             | (
                 TaskStatus::Queued,
-                TaskStatus::Downloading | TaskStatus::Paused | TaskStatus::Cancelled
+                TaskStatus::Downloading
+                    | TaskStatus::Paused
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Failed
             )
             | (
                 TaskStatus::Downloading,

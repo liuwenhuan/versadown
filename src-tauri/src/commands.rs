@@ -40,6 +40,7 @@ pub struct AppState {
     pub ai_secrets: DpapiCredentialStore,
     pub privacy_session: crate::privacy::PrivacySession,
     pub cloud_download_sources: crate::cloud::commands::CloudDownloadSourceGate,
+    pub cloud_download_dispatch: crate::cloud::download_dispatch::CloudDownloadDispatch,
 }
 
 #[derive(Clone, Serialize)]
@@ -1590,6 +1591,14 @@ async fn run_cloud_directory_group_action(
             .store
             .cloud_directory_group_items(group.id)
             .map_err(|e| e.to_string())?;
+        for id in items.iter().filter_map(|item| item.task_id) {
+            if action == "pause" {
+                let _ = state
+                    .cloud_download_dispatch
+                    .control_unsubmitted(&state.store, id, DownloadAction::Pause)
+                    .await;
+            }
+        }
         let targets = items
             .iter()
             .filter_map(|item| item.task_id)
@@ -1626,10 +1635,21 @@ async fn run_cloud_directory_group_action(
                 for id in items.iter().filter_map(|item| item.task_id) {
                     if let Ok(task) = state.store.find(id) {
                         if task.aria_gid.is_none()
-                            && matches!(task.status, TaskStatus::Parsing | TaskStatus::Paused)
+                            && matches!(
+                                task.status,
+                                TaskStatus::Parsing | TaskStatus::Paused | TaskStatus::Queued
+                            )
                         {
-                            if let Err(error) =
-                                resubmit_task(app.clone(), &state, task, Default::default()).await
+                            if let Err(error) = resubmit_task(
+                                app.clone(),
+                                &state,
+                                task,
+                                UriSubmissionOptions {
+                                    continue_download: true,
+                                    ..Default::default()
+                                },
+                            )
+                            .await
                             {
                                 if let Ok(current) = state.store.find(id) {
                                     let still_running = state
@@ -1738,7 +1758,7 @@ async fn run_local_task_action(
 ) -> Result<TaskActionOutcome, String> {
     let state = app.state::<AppState>();
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    let current = state.store.find(id).map_err(|error| error.to_string())?;
+    let mut current = state.store.find(id).map_err(|error| error.to_string())?;
     ensure_private_task_access(&state, &current)?;
     if action == "retry_cleanup" {
         let task = crate::cloud::commands::cleanup_cloud_share_task(app.clone(), id, true)
@@ -1754,6 +1774,42 @@ async fn run_local_task_action(
             duplicate: None,
             queue_task: None,
         });
+    }
+    if current.kind == "cloud" && matches!(action.as_str(), "pause" | "cancel") {
+        let control = if action == "pause" {
+            DownloadAction::Pause
+        } else {
+            DownloadAction::Cancel
+        };
+        if let Some(task) = state
+            .cloud_download_dispatch
+            .control_unsubmitted(&state.store, id, control)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            crate::cloud::commands::emit_cloud_dispatch_update(&app, &state, &task);
+            return task_action_outcome(&state.store, task, None);
+        }
+        // addUri may have completed while control waited for the submission
+        // guard. Use its fresh GID instead of locally cancelling a stale copy.
+        current = state.store.find(id).map_err(|error| error.to_string())?;
+    }
+    if action == "resume"
+        && current.kind == "cloud"
+        && current.aria_gid.is_none()
+        && current.status == TaskStatus::Paused
+    {
+        let task = resubmit_task(
+            app.clone(),
+            &state,
+            current,
+            UriSubmissionOptions {
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+        return task_action_outcome(&state.store, task, None);
     }
     if action == "cancel" && current.aria_gid.is_none() && current.kind != "ftp" {
         let task = force_cancel_unsubmitted_task(&state.store, current)?;
@@ -1894,78 +1950,46 @@ pub(crate) async fn resubmit_task(
         options.proxy = configured.proxy;
     }
     if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
-        let owner = state
+        if state
             .store
-            .cloud_download_account(task.id)
-            .map_err(|error| error.to_string())?;
-        let provider = if task.source.starts_with("cloud://") {
-            Some(
-                crate::cloud::commands::parse_stable_cloud_source(&task.source)
-                    .map_err(|error| error.to_string())?
-                    .0,
-            )
-        } else {
-            None
-        };
-        if let (Some(provider), Some(owner)) = (provider, owner.as_deref()) {
-            crate::cloud::commands::require_download_account(&app, provider, owner)
-                .map_err(|error| error.to_string())?;
-        }
-        let service = state
-            .runtime
-            .service()
-            .await
-            .map_err(|error| error.to_string())?;
-        let share = task.source.starts_with("cloud-share://");
-        let resolved = if share {
-            crate::cloud::commands::resolve_stable_cloud_share_download(app.clone(), &task.source)
-                .await
-        } else {
-            crate::cloud::commands::resolve_stable_cloud_download(app.clone(), &task.source).await
-        };
-        let resolved = match resolved {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                let message = crate::cloud::commands::share_resolution_failure_message(&error);
-                // A failed cloud task remains the same durable task while a
-                // retry discovers that its session now needs verification.
-                // Preserve a typed reason for the queue instead of making
-                // the frontend guess from this localized message.
-                if task.status == TaskStatus::Failed {
-                    let _ = state.store.update_failed_failure(
-                        task.id,
-                        Some(crate::cloud::commands::cloud_failure_code(&error)),
-                        message,
-                    );
-                    if let Ok(updated) = state.store.find(task.id) {
-                        if should_emit_task_update(state, updated.is_private) {
-                            if let Ok(payload) = task_update_payload(&state.store, None, updated) {
-                                let _ = app.emit("download-task-updated", payload);
-                            }
-                        }
-                    }
-                }
-                return Err(message.to_string());
+            .cloud_directory_group_for_task(task.id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+            && task.source.starts_with("cloud-share://")
+        {
+            let cloud = app.state::<Arc<crate::cloud::commands::CloudState>>();
+            let entry = cloud
+                .share_plans
+                .resolve_entry(&task.source)
+                .map_err(|e| e.to_string())?;
+            if let Some(directory) = options.directory.as_ref() {
+                options.directory = Some(
+                    crate::cloud::commands::directory_download_output_directory(
+                        directory,
+                        &entry.entry.relative_directory,
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
             }
-        };
-        if let (Some(provider), Some(owner)) = (provider, owner.as_deref()) {
-            crate::cloud::commands::require_download_account(&app, provider, owner)
-                .map_err(|error| error.to_string())?;
         }
-        if share {
-            return crate::cloud::share::resubmit_current_share_download(
-                &service, &task, resolved, options,
-            )
+        if let Some(file) = state
+            .store
+            .files(task.id)
+            .map_err(|e| e.to_string())?
+            .first()
+        {
+            let path = Path::new(&file.path);
+            if path.is_absolute() {
+                options.directory = path.parent().map(Path::to_path_buf);
+                options.output_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned);
+            }
+        }
+        return crate::cloud::commands::queue_cloud_dispatch(app.clone(), state, task, options)
             .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "任务状态已变化，本次重试已跳过".into());
-        }
-        return crate::cloud::share::resubmit_current_cloud_download(
-            &service, &task, resolved, options,
-        )
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "任务状态已变化，本次重试已跳过".into());
+            .map_err(|e| e.to_string());
     }
     if task.kind == "torrent" {
         return Err("种子任务请重新添加后再选择文件下载".to_string());
@@ -2099,60 +2123,30 @@ pub(crate) fn schedule_cloud_download_refresh(app: AppHandle, task: &DownloadTas
         if !matches!(retry_duplicate_state(&state.store, &current), Ok(None)) {
             return;
         }
-        // One attempt only. If refresh identifies an expired session or an
-        // official verification challenge, preserve that durable reason for
-        // the Failed tab instead of leaving the stale aria2 error there.
-        let resolution = if share {
-            crate::cloud::commands::resolve_stable_cloud_share_download(
-                app.clone(),
-                &current.source,
-            )
-            .await
-        } else {
-            crate::cloud::commands::resolve_stable_cloud_download(app.clone(), &current.source)
-                .await
-        };
-        let resolved = match resolution {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                let code = crate::cloud::commands::cloud_failure_code(&error);
-                if crate::cloud::commands::requires_cloud_reauthorization_failure(Some(code)) {
-                    let _ = state.store.update_failed_failure(
-                        current.id,
-                        Some(code),
-                        crate::cloud::commands::share_resolution_failure_message(&error),
-                    );
-                    if let Ok(task) = state.store.find(current.id) {
-                        if should_emit_task_update(&state, task.is_private) {
-                            if let Ok(payload) = task_update_payload(&state.store, None, task) {
-                                let _ = app.emit("download-task-updated", payload);
-                            }
-                        }
-                    }
-                }
-                return;
-            }
-        };
-        // Network resolution may outlive a user cancellation or manual retry.
-        let Ok(latest) = state.store.find(failed.id) else {
-            return;
-        };
-        if latest.status != TaskStatus::Failed || latest.aria_gid != failed.aria_gid {
-            return;
-        }
-        if !matches!(retry_duplicate_state(&state.store, &latest), Ok(None)) {
-            return;
-        }
         let Ok(options) = download_submission_options(&state) else {
             return;
         };
-        let Ok(service) = state.runtime.service().await else {
+        let Ok(mut options) = crate::cloud::commands::cloud_directory_member_retry_options(
+            &state.store,
+            current.id,
+            options,
+        ) else {
             return;
         };
-        let _ = crate::cloud::share::resubmit_current_cloud_download(
-            &service, &failed, resolved, options,
-        )
-        .await;
+        if let Ok(files) = state.store.files(current.id) {
+            if let Some(file) = files.first() {
+                let path = Path::new(&file.path);
+                if path.is_absolute() {
+                    options.directory = path.parent().map(Path::to_path_buf);
+                    options.output_name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned);
+                }
+            }
+        }
+        let _ = crate::cloud::commands::queue_cloud_dispatch(app.clone(), &state, current, options)
+            .await;
     });
 }
 

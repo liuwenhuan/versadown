@@ -25,6 +25,64 @@ fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
 }
 
 #[tokio::test]
+async fn scheduler_directory_pause_stops_linked_gidless_resolver_until_resume() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use alldownloader_lib::DownloadAction;
+    let temp = tempfile::tempdir().unwrap();
+    let store = TaskStore::open_in_memory().unwrap();
+    let group_id = cancellation_group(&store, temp.path());
+    let task = store
+        .create(NewTask {
+            source: "cloud://quark/file".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let item = store.cloud_directory_group_items(group_id).unwrap()[0].id;
+    store
+        .link_cloud_directory_group_item_task(group_id, item, task.id)
+        .unwrap();
+    let dispatch = CloudDownloadDispatch::default();
+    let (_, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    store.set_cloud_directory_paused(group_id, true).unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            task.id,
+            version,
+            || async {
+                panic!("paused group must defer URL resolution");
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+            |_| async { panic!("paused group cannot submit") },
+        )
+        .await;
+    dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Pause)
+        .await
+        .unwrap();
+    store.set_cloud_directory_paused(group_id, false).unwrap();
+    let (task, version) = dispatch.prepare(&store, task.id).await.unwrap();
+    dispatch
+        .run(
+            &store,
+            CloudProvider::Quark,
+            task.id,
+            version,
+            || async { Ok(()) },
+            |_| async { Ok(store.bind_gid(task.id, "directory-gid").unwrap()) },
+        )
+        .await;
+    assert_eq!(
+        store.find(task.id).unwrap().aria_gid.as_deref(),
+        Some("directory-gid")
+    );
+}
+
+#[tokio::test]
 async fn paused_directory_stops_pending_submission_and_can_resume_after_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("paused.db");
