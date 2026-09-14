@@ -18,7 +18,7 @@ pub fn preflight_selected_share_download(
     let Some(transfer) = adapter.transfer_capability() else {
         return Ok(());
     };
-    let mut plan = store.resolve_entry(&selection.plan_source)?.plan;
+    let mut plan = store.preflight_snapshot(&selection.plan_source)?.plan;
     if plan.provider != selection.provider {
         return Err(QuarkError::InvalidResponse);
     }
@@ -139,7 +139,7 @@ fn ensure_capacity(
     };
     let available = total_bytes
         .checked_sub(used_bytes)
-        .ok_or(QuarkError::InvalidResponse)?;
+        .ok_or_else(|| capacity_query_error(provider, QuarkError::InvalidResponse))?;
     if required <= available {
         return Ok(());
     }
@@ -354,6 +354,7 @@ mod tests {
         store.upsert(&plan).unwrap();
         let selection = selected_share_download(&store, &plan_source, &selected_ids).unwrap();
         reads.reads.store(0, Ordering::SeqCst);
+        reads.writes.store(0, Ordering::SeqCst);
         PreflightFixture {
             store,
             reads,
@@ -463,6 +464,40 @@ mod tests {
     }
 
     #[test]
+    fn capacity_failure_does_not_persist_a_preflight_snapshot() {
+        let fixture = preflight_fixture(1, Some(7));
+        fixture.adapter.require_transfer();
+        fixture
+            .adapter
+            .capacity_error(QuarkError::Transport("offline".into()));
+
+        assert!(preflight_selected_share_download(
+            &fixture.store,
+            &fixture.adapter,
+            &fixture.selection,
+        )
+        .is_err());
+        assert_eq!(fixture.reads.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn invalid_capacity_is_reported_as_a_preflight_read_failure() {
+        let fixture = preflight_fixture(1, Some(7));
+        fixture.adapter.require_transfer();
+        fixture.adapter.capacity(CloudTransferCapacity::Limited {
+            total_bytes: 6,
+            used_bytes: 7,
+        });
+
+        assert_eq!(
+            preflight_selected_share_download(&fixture.store, &fixture.adapter, &fixture.selection)
+                .unwrap_err()
+                .to_string(),
+            "无法读取阿里云盘可用转存空间，未建立下载任务，请稍后重试。"
+        );
+    }
+
+    #[test]
     fn provider_without_transfer_capability_skips_preflight() {
         let fixture = preflight_fixture(1, Some(7));
         preflight_selected_share_download(&fixture.store, &ReadOnlyAdapter, &fixture.selection)
@@ -528,6 +563,7 @@ mod tests {
             preflight_selected_share_download(&fixture.store, &fixture.adapter, &fixture.selection),
             Err(QuarkError::AuthorizationExpired)
         ));
+        assert_eq!(fixture.reads.reads.load(Ordering::SeqCst), 2);
         assert_eq!(
             fixture
                 .store

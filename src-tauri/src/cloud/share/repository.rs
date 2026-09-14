@@ -461,6 +461,32 @@ impl CloudSharePlanStore {
         })
     }
 
+    /// Returns an immutable plan snapshot for capacity preflight. Unlike
+    /// `resolve_entry`, this deliberately does not refresh retention, prune,
+    /// or persist any metadata: a rejected submission must not mutate plans.
+    pub(super) fn preflight_snapshot(
+        &self,
+        source: &str,
+    ) -> Result<CloudShareResolvedEntry, QuarkError> {
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        let _guard = self.mutation.lock().map_err(|_| QuarkError::Storage)?;
+        let document = self.load()?;
+        let key = plan_key(provider, &share);
+        let stored = document.plans.get(&key).ok_or_else(missing_plan)?;
+        let entry = stored
+            .plan
+            .entries
+            .iter()
+            .find(|entry| entry.entry_fingerprint == fingerprint)
+            .cloned()
+            .ok_or_else(missing_plan)?;
+        Ok(CloudShareResolvedEntry {
+            provider,
+            plan: stored.plan.clone(),
+            entry,
+        })
+    }
+
     pub(super) fn update_provider_context(
         &self,
         source: &str,
