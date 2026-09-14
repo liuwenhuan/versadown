@@ -172,7 +172,7 @@ fn cloud_download_connection_policy_caps_xunlei_user_value_of_eight_to_one() {
 #[test]
 fn cloud_download_connection_policy_retains_user_value_below_provider_cap() {
     let options =
-        apply_cloud_download_policy(CloudProvider::Quark, 2, UriSubmissionOptions::default());
+        apply_cloud_download_policy(CloudProvider::Baidu, 2, UriSubmissionOptions::default());
 
     assert_eq!(options.max_connections_per_server, Some(2));
 }
