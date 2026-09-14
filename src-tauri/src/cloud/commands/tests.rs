@@ -104,6 +104,22 @@ fn failed_share_leaf_is_reused_only_by_its_original_directory_item() {
         )
         .unwrap();
     let second_item = store.cloud_directory_group_items(second_group.id).unwrap()[0].id;
+    let second_task = store
+        .prepare_cloud_share_directory_leaf_task(
+            second_group.id,
+            second_item,
+            crate::NewTask {
+                source: source.into(),
+                name: "file.bin".into(),
+                kind: "cloud".into(),
+                is_private: false,
+            },
+            None,
+        )
+        .unwrap();
+    store
+        .fail_with_code(second_task.id, Some("provider_error"), "temporary")
+        .unwrap();
 
     assert_eq!(
         super::share_commands::retryable_cloud_share_task_for_submission(
@@ -118,7 +134,7 @@ fn failed_share_leaf_is_reused_only_by_its_original_directory_item() {
         .map(|task| task.id),
         Some(task.id)
     );
-    assert!(
+    assert_eq!(
         super::share_commands::retryable_cloud_share_task_for_submission(
             &store,
             source,
@@ -128,7 +144,8 @@ fn failed_share_leaf_is_reused_only_by_its_original_directory_item() {
             }),
         )
         .unwrap()
-        .is_none()
+        .map(|task| task.id),
+        Some(second_task.id)
     );
 }
 

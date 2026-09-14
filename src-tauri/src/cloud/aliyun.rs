@@ -329,6 +329,161 @@ mod tests {
     }
 
     #[test]
+    fn aliyun_share_retries_transport_timeout_from_initial_token_request() {
+        struct ResultHttp {
+            replies:
+                std::sync::Mutex<std::collections::VecDeque<Result<CloudHttpResponse, QuarkError>>>,
+            requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
+        }
+        impl CloudHttpTransport for ResultHttp {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.requests.lock().unwrap().push(request);
+                self.replies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Err(QuarkError::InvalidResponse))
+            }
+        }
+
+        let credentials = MemoryCredentialStore::default();
+        let http = ResultHttp {
+            replies: std::sync::Mutex::new(
+                vec![
+                    Err(QuarkError::Transport("response read timed out".into())),
+                    Ok(CloudHttpResponse {
+                        status: 200,
+                        body: json!({"share_token":"share-token"}).to_string(),
+                        set_cookies: vec![],
+                    }),
+                    Ok(CloudHttpResponse {
+                        status: 200,
+                        body: listing().to_string(),
+                        set_cookies: vec![],
+                    }),
+                ]
+                .into(),
+            ),
+            requests: std::sync::Mutex::new(vec![]),
+        };
+
+        let ShareInspection::Plan(plan) =
+            provider_share_adapter(CloudProvider::Aliyun, &credentials, &http)
+                .unwrap()
+                .inspect(&candidate(CloudProvider::Aliyun))
+                .unwrap()
+        else {
+            panic!();
+        };
+        assert_eq!(plan.entries.len(), 1);
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].url, requests[1].url);
+        assert_eq!(requests[0].body, requests[1].body);
+    }
+
+    #[test]
+    fn aliyun_copy_does_not_retry_an_ambiguous_transport_timeout() {
+        struct TransportHttp(std::sync::atomic::AtomicUsize);
+        impl CloudHttpTransport for TransportHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(QuarkError::Transport("response read timed out".into()))
+            }
+        }
+
+        let credentials = MemoryCredentialStore::default();
+        let http = TransportHttp(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = AliyunShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+
+        assert!(matches!(
+            adapter.raw_with_account_bearer(
+                "/v2/file/copy",
+                Some("share-token"),
+                json!({"share_id":"share","file_id":"file"}),
+                true,
+            ),
+            Err(QuarkError::Transport(_))
+        ));
+        assert_eq!(http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn aliyun_personal_download_url_transport_timeout_has_one_retry_layer() {
+        struct TransportHttp(std::sync::atomic::AtomicUsize);
+        impl CloudHttpTransport for TransportHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(QuarkError::Transport("response read timed out".into()))
+            }
+        }
+
+        let credentials = MemoryCredentialStore::default();
+        let http = TransportHttp(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = AliyunShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        let session = AliyunSession {
+            refresh_token: "refresh".into(),
+            access_token: "access".into(),
+            drive_id: "drive".into(),
+            browser_access_ready: true,
+            expires_at: None,
+        };
+
+        assert!(matches!(
+            adapter.personal_download(&session, "file", "file.bin"),
+            Err(QuarkError::Transport(_))
+        ));
+        assert_eq!(
+            http.0.load(std::sync::atomic::Ordering::SeqCst),
+            ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() + 1
+        );
+    }
+
+    #[test]
+    fn aliyun_personal_download_url_block_exception_has_one_retry_layer() {
+        struct BlockHttp(std::sync::atomic::AtomicUsize);
+        impl CloudHttpTransport for BlockHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CloudHttpResponse {
+                    status: 429,
+                    body: json!({"code":"BlockException"}).to_string(),
+                    set_cookies: vec![],
+                })
+            }
+        }
+
+        let credentials = MemoryCredentialStore::default();
+        let http = BlockHttp(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = AliyunShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        let session = AliyunSession {
+            refresh_token: "refresh".into(),
+            access_token: "access".into(),
+            drive_id: "drive".into(),
+            browser_access_ready: true,
+            expires_at: None,
+        };
+
+        assert!(matches!(
+            adapter.personal_download(&session, "file", "file.bin"),
+            Err(QuarkError::Provider(_))
+        ));
+        assert_eq!(
+            http.0.load(std::sync::atomic::Ordering::SeqCst),
+            ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() + 1
+        );
+    }
+
+    #[test]
     fn aliyun_share_retries_consecutive_block_exceptions_while_listing() {
         let credentials = MemoryCredentialStore::default();
         let http = StatusHttp {
@@ -1102,7 +1257,7 @@ impl AliyunShareAdapter<'_> {
         path: &str,
         body: Value,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        self.send_with_rate_limit_retry(CloudHttpRequest {
+        self.http.send(CloudHttpRequest {
             method: "POST",
             url: format!("{API}{path}"),
             headers: BTreeMap::from([
@@ -1176,7 +1331,7 @@ impl AliyunShareAdapter<'_> {
         token: Option<&str>,
         body: Value,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        self.raw_with_account_bearer(path, token, body, false)
+        self.send_raw_with_account_bearer(path, token, body, false, true)
     }
     fn raw_with_account_bearer(
         &self,
@@ -1185,19 +1340,53 @@ impl AliyunShareAdapter<'_> {
         body: Value,
         include_account_bearer: bool,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        self.send_with_rate_limit_retry(CloudHttpRequest {
-            method: "POST",
-            url: format!("{API}{path}"),
-            headers: self.headers(token, include_account_bearer),
-            body: Some(body.to_string()),
-        })
+        self.send_raw_with_account_bearer(path, token, body, include_account_bearer, false)
+    }
+    fn read_raw_with_account_bearer(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        body: Value,
+        include_account_bearer: bool,
+    ) -> Result<CloudHttpResponse, QuarkError> {
+        self.send_raw_with_account_bearer(path, token, body, include_account_bearer, true)
+    }
+    fn send_raw_with_account_bearer(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        body: Value,
+        include_account_bearer: bool,
+        retry_transport: bool,
+    ) -> Result<CloudHttpResponse, QuarkError> {
+        self.send_with_rate_limit_retry(
+            CloudHttpRequest {
+                method: "POST",
+                url: format!("{API}{path}"),
+                headers: self.headers(token, include_account_bearer),
+                body: Some(body.to_string()),
+            },
+            retry_transport,
+        )
     }
     fn send_with_rate_limit_retry(
         &self,
         request: CloudHttpRequest,
+        retry_transport: bool,
     ) -> Result<CloudHttpResponse, QuarkError> {
         for attempt in 0..=ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() {
-            let response = self.http.send(request.clone())?;
+            let response = match self.http.send(request.clone()) {
+                Ok(response) => response,
+                Err(error)
+                    if retry_transport
+                        && attempt < ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len()
+                        && matches!(error, QuarkError::Transport(_)) =>
+                {
+                    aliyun_transient_retry_pause(attempt);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !aliyun_share_rate_limited(&response)
                 || attempt == ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len()
             {
@@ -1573,7 +1762,7 @@ fn resolve_aliyun_share_with_context(
     // A public share resolves through GetDownloadUrl with an account bearer
     // and short-lived x-share-token; drive_id stays absent.
     let body = json!({"share_id":entry.plan.canonical_share_id,"file_id":entry.entry.entry_id,"expire_sec":900});
-    let mut response = adapter.raw_with_account_bearer(
+    let mut response = adapter.read_raw_with_account_bearer(
         "/v2/file/get_download_url",
         Some(&token),
         body.clone(),
@@ -1584,7 +1773,7 @@ fn resolve_aliyun_share_with_context(
         token = required(&aliyun_share_json(&refreshed)?, "share_token")?;
         context = with_aliyun_share_token(context, &token);
         rotated_context = true;
-        response = adapter.raw_with_account_bearer(
+        response = adapter.read_raw_with_account_bearer(
             "/v2/file/get_download_url",
             Some(&token),
             body,

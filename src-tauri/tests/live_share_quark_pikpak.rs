@@ -11,7 +11,7 @@ use alldownloader_lib::cloud::{
     commands::{parse_stable_cloud_source, resolve_download, restore_account},
     share::{
         inspect_share_with_adapter, provider_share_adapter, resolve_current_share_download,
-        selected_share_sources, CloudSharePlanStore, ShareConfirmationOutcome,
+        selected_share_sources, CloudShareAdapter, CloudSharePlanStore, ShareConfirmationOutcome,
     },
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, DpapiCredentialStore,
     QuarkError, ReqwestTransport,
@@ -825,7 +825,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, an authorized Aliyun session, and two recorded transfers from the supplied share"]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, an authorized Aliyun session, and two reusable current-account transfers from the supplied share"]
 fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn std::error::Error>>
 {
     if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
@@ -863,15 +863,29 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                     .iter()
                     .map(|transfer| transfer.entry_fingerprint.as_str())
                     .collect::<BTreeSet<_>>();
-                let selected_ids = confirmation
+                let candidate_ids = confirmation
                     .resources
                     .iter()
                     .filter(|entry| transferred.contains(entry.id.as_str()))
                     .map(|entry| entry.id.clone())
-                    .take(2)
                     .collect::<Vec<_>>();
-                let sources =
-                    selected_share_sources(&plans, &confirmation.plan_source, &selected_ids)?;
+                let candidate_sources =
+                    selected_share_sources(&plans, &confirmation.plan_source, &candidate_ids)?;
+                let mut sources = Vec::new();
+                for source in candidate_sources {
+                    let entry = plans.resolve_entry(&source)?;
+                    let owner = adapter
+                        .transfer_capability()
+                        .ok_or("Aliyun transfer capability is unavailable")?
+                        .transfer_owner_fingerprint(&entry)?
+                        .ok_or("Aliyun transfer owner is unavailable")?;
+                    if plans.reusable_transfer(&source, &owner)?.is_some() {
+                        sources.push(source);
+                    }
+                    if sources.len() == 2 {
+                        break;
+                    }
+                }
                 (confirmation.resources.len(), sources)
             }
             ShareConfirmationOutcome::AccessCodeRequired => {
@@ -899,6 +913,11 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                 return Err(error.into());
             }
         };
+        let remote = transport.observations_since(before);
+        assert!(
+            !remote.contains("request-path:/v2/file/copy"),
+            "the live acceptance attempted a new Aliyun CopyFile instead of reusing its current-account journal"
+        );
         prepared_downloads.push((source, entry, resolved));
     }
     let runtime = tokio::runtime::Runtime::new()?;
