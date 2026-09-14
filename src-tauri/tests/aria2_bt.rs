@@ -5,6 +5,26 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+const VALID_MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+
+fn magnet_task() -> NewTask {
+    NewTask {
+        source: VALID_MAGNET.into(),
+        name: "fixture".into(),
+        kind: "magnet".into(),
+        is_private: false,
+    }
+}
+
+fn torrent_task(source: impl Into<String>) -> NewTask {
+    NewTask {
+        source: source.into(),
+        name: "fixture.torrent".into(),
+        kind: "torrent".into(),
+        is_private: false,
+    }
+}
+
 #[tokio::test]
 async fn reconcile_tracks_unique_peers_for_an_active_torrent() {
     let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
@@ -24,7 +44,7 @@ async fn reconcile_tracks_unique_peers_for_an_active_torrent() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
         .create(NewTask {
-            source: "magnet:?xt=urn:btih:test".into(),
+            source: VALID_MAGNET.into(),
             name: "test".into(),
             kind: "magnet".into(),
             is_private: false,
@@ -70,7 +90,7 @@ async fn reconcile_retains_observed_peers_across_paused_and_queued_same_gid() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
         .create(NewTask {
-            source: "magnet:?xt=urn:btih:test".into(),
+            source: VALID_MAGNET.into(),
             name: "test".into(),
             kind: "magnet".into(),
             is_private: false,
@@ -133,7 +153,7 @@ async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
         .create(NewTask {
-            source: "magnet:?xt=urn:btih:test".into(),
+            source: VALID_MAGNET.into(),
             name: "test".into(),
             kind: "magnet".into(),
             is_private: false,
@@ -151,7 +171,7 @@ async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
     service
         .resubmit_uri_with_options(
             task.id,
-            vec!["magnet:?xt=urn:btih:test".into()],
+            vec![VALID_MAGNET.into()],
             UriSubmissionOptions::default(),
         )
         .await
@@ -205,7 +225,7 @@ async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_star
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\game.torrent"))
+        .create(torrent_task("C:\\Downloads\\game.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -307,7 +327,7 @@ async fn confirmed_magnet_overwrite_restarts_selection_and_clears_observed_peers
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
         .create(NewTask {
-            source: "magnet:?xt=urn:btih:fixture".into(),
+            source: VALID_MAGNET.into(),
             name: "fixture".into(),
             kind: "magnet".into(),
             is_private: false,
@@ -374,7 +394,7 @@ async fn selected_torrent_uses_the_chosen_destination_before_unpausing() {
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(magnet_task())
         .unwrap();
     store.bind_gid(task.id, "torrent-gid").unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
@@ -413,7 +433,7 @@ async fn torrent_without_real_files_never_enters_empty_confirmation() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\empty.torrent"))
+        .create(torrent_task("C:\\Downloads\\empty.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -439,7 +459,7 @@ async fn malformed_torrent_status_is_removed_without_binding_the_task() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\malformed.torrent"))
+        .create(torrent_task("C:\\Downloads\\malformed.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -476,7 +496,7 @@ async fn failed_cleanup_binds_the_orphan_gid_and_recovery_does_not_import_a_dupl
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\broken.torrent"))
+        .create(torrent_task("C:\\Downloads\\broken.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -546,7 +566,7 @@ async fn terminal_torrent_states_are_persisted_and_never_offered_for_confirmatio
         }).await;
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
         let task = store
-            .create(NewTask::direct(format!(
+            .create(torrent_task(format!(
                 "C:\\Downloads\\{aria_status}.torrent"
             )))
             .unwrap();
@@ -598,7 +618,7 @@ async fn waiting_torrent_with_files_is_a_valid_confirmation_candidate() {
     }}).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\waiting.torrent"))
+        .create(torrent_task("C:\\Downloads\\waiting.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -636,7 +656,7 @@ async fn failed_waiting_pause_and_cleanup_persists_the_gid_as_failed() {
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\unpaused.torrent"))
+        .create(torrent_task("C:\\Downloads\\unpaused.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -674,7 +694,7 @@ async fn waiting_torrent_must_recheck_as_paused_even_if_it_reaches_a_terminal_st
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\raced.torrent"))
+        .create(torrent_task("C:\\Downloads\\raced.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -705,7 +725,7 @@ async fn active_torrent_is_rejected_instead_of_becoming_a_confirmation_candidate
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("C:\\Downloads\\active.torrent"))
+        .create(torrent_task("C:\\Downloads\\active.torrent"))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -754,7 +774,7 @@ async fn metadata_child_is_persisted_and_selection_precedes_unpause() {
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(magnet_task())
         .unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
@@ -794,7 +814,7 @@ async fn rejected_selection_does_not_unpause_or_change_persisted_files() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(magnet_task())
         .unwrap();
     store.bind_gid(task.id, "bt").unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
@@ -836,7 +856,7 @@ async fn metadata_wait_hides_metadata_file_and_returns_real_child_files_before_d
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(magnet_task())
         .unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
@@ -864,7 +884,7 @@ async fn metadata_timeout_leaves_pending_task_available_for_later_sync() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(magnet_task())
         .unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
@@ -900,7 +920,7 @@ async fn successful_confirmation_survives_status_failure_and_service_reopen() {
     let database = directory.path().join("tasks.sqlite");
     let store = Arc::new(TaskStore::open_path(&database).unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(magnet_task())
         .unwrap();
     store.bind_gid(task.id, "child").unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
@@ -945,7 +965,7 @@ async fn prepare_magnet_persists_pending_state_before_first_status_read_and_retr
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("magnet:?xt=urn:btih:fixture"))
+        .create(magnet_task())
         .unwrap();
     assert_eq!(task.status, TaskStatus::Parsing);
     let service = DownloadService::new(Arc::new(client), store.clone());
