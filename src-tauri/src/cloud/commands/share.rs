@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "share/atomic_membership_tests.rs"]
+mod atomic_membership_tests;
+
 struct CancelShareOnDrop(Arc<share::ShareWorkControl>);
 impl Drop for CancelShareOnDrop {
     fn drop(&mut self) {
@@ -255,32 +259,51 @@ where
         None
     };
 
-    let prepared = match tasks
+    let retry = tasks
         .find_by_source(&source)
         .map_err(|_| QuarkError::Storage)?
-        .filter(is_retryable_cloud_share_prepare)
-    {
-        Some(mut prepared) => {
-            prepared.status = TaskStatus::Parsing;
-            prepared.error = None;
-            prepared.failure_code = None;
-            tasks
-                .apply_transfer_snapshot(prepared)
-                .map_err(|_| QuarkError::Storage)?
-        }
-        None => tasks
-            .create(crate::NewTask {
-                source: source.clone(),
-                name: output_name,
-                kind: "cloud".into(),
-                is_private: private_download,
-            })
-            .map_err(|_| QuarkError::Storage)?,
+        .filter(is_retryable_cloud_share_prepare);
+    let retrying_directory_leaf = directory_context.is_some() && retry.is_some();
+    let new_task = crate::NewTask {
+        source: source.clone(),
+        name: output_name,
+        kind: "cloud".into(),
+        is_private: private_download,
     };
-    let prepared = tasks
-        .set_private(prepared.id, private_download)
-        .map_err(|_| QuarkError::Storage)?;
+    let prepared = if let Some(context) = directory_context.as_ref() {
+        tasks
+            .prepare_cloud_share_directory_leaf_task(
+                context.group_id,
+                context.item_id,
+                new_task,
+                retry.map(|task| task.id),
+            )
+            .map_err(|_| QuarkError::Storage)?
+    } else {
+        let prepared = match retry {
+            Some(mut prepared) => {
+                prepared.status = TaskStatus::Parsing;
+                prepared.error = None;
+                prepared.failure_code = None;
+                tasks
+                    .apply_transfer_snapshot(prepared)
+                    .map_err(|_| QuarkError::Storage)?
+            }
+            None => tasks.create(new_task).map_err(|_| QuarkError::Storage)?,
+        };
+        tasks
+            .set_private(prepared.id, private_download)
+            .map_err(|_| QuarkError::Storage)?
+    };
     if let Err(error) = plans.reserve_local_task(&source, prepared.id) {
+        if retrying_directory_leaf {
+            return Ok(cloud_share_failure_outcome(
+                &tasks,
+                prepared,
+                None,
+                CLOUD_SHARE_PREPARE_FAILURE,
+            ));
+        }
         return match tasks.remove_task_record(prepared.id) {
             Ok(()) | Err(crate::StoreError::NotFound(_)) => Err(error),
             // The task may still be durable, so report the conservative
@@ -293,12 +316,6 @@ where
             )),
         };
     }
-    if let Some(context) = directory_context {
-        tasks
-            .link_cloud_directory_group_item_task(context.group_id, context.item_id, prepared.id)
-            .map_err(|_| QuarkError::Storage)?;
-    }
-
     if let Some(on_created) = on_created {
         on_created(&prepared);
     }

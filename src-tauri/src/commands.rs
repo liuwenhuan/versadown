@@ -875,17 +875,43 @@ fn apply_queue_cleanup_projection(
     tasks: &mut [QueueTaskPayload],
     plans: &crate::cloud::share::CloudSharePlanStore,
 ) -> Result<(), String> {
-    for task in tasks {
-        if task.status == TaskStatus::Completed && task.source.starts_with("cloud-share://") {
-            task.cleanup_pending = plans
-                .cleanup_pending_for_task(
-                    &task.source,
+    fn collect(
+        tasks: &[QueueTaskPayload],
+        sources: &mut Vec<(String, Uuid)>,
+    ) -> Result<(), String> {
+        for task in tasks {
+            if task.status == TaskStatus::Completed && task.source.starts_with("cloud-share://") {
+                sources.push((
+                    task.source.clone(),
                     Uuid::parse_str(&task.id).map_err(|_| "任务 ID 无效".to_string())?,
-                )
-                .map_err(|_| "无法读取网盘转存清理状态".to_string())?;
+                ));
+            }
+            collect(&task.children, sources)?;
         }
-        apply_queue_cleanup_projection(&mut task.children, plans)?;
+        Ok(())
     }
+    fn apply(tasks: &mut [QueueTaskPayload], pending: &HashMap<(String, String), bool>) {
+        for task in tasks {
+            if task.status == TaskStatus::Completed && task.source.starts_with("cloud-share://") {
+                task.cleanup_pending = pending
+                    .get(&(task.source.clone(), task.id.clone()))
+                    .copied()
+                    .unwrap_or(false);
+            }
+            apply(&mut task.children, pending);
+        }
+    }
+    let mut sources = Vec::new();
+    collect(tasks, &mut sources)?;
+    let pending = plans
+        .cleanup_pending_for_tasks(&sources)
+        .map_err(|_| "无法读取网盘转存清理状态".to_string())?;
+    let pending = sources
+        .into_iter()
+        .zip(pending)
+        .map(|((source, id), pending)| ((source, id.to_string()), pending))
+        .collect();
+    apply(tasks, &pending);
     Ok(())
 }
 
@@ -2423,6 +2449,120 @@ fn remove_task_payload_files(store: &TaskStore, task_id: Uuid) -> Result<(), Str
     Ok(())
 }
 
+// Engine snapshots can be missing after an interrupted submission/recovery.
+// Use durable membership only when there is no authoritative engine filename;
+// never guess from the display name or recursively remove a shared directory.
+fn remove_directory_payload_fallbacks(
+    store: &TaskStore,
+    tasks: &[DownloadTask],
+) -> Result<(), String> {
+    let mut groups = HashMap::new();
+    let mut paths = Vec::new();
+    for task in tasks {
+        if store
+            .files(task.id)
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|file| !file.path.trim().is_empty())
+        {
+            continue;
+        }
+        let Some(group) = store
+            .cloud_directory_group_for_task(task.id)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if let std::collections::hash_map::Entry::Vacant(entry) = groups.entry(group.id) {
+            let members = store
+                .cloud_directory_group_items(group.id)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .filter_map(|item| item.task_id.map(|id| (id, item)))
+                .collect::<HashMap<_, _>>();
+            entry.insert(members);
+        }
+        let item = groups
+            .get(&group.id)
+            .and_then(|members| members.get(&task.id))
+            .ok_or_else(|| "目录下载任务缺少文件归属记录，未删除本地文件".to_string())?;
+        if let Some(path) = directory_payload_fallback_path(&group, item)? {
+            let mut sidecar = path.clone().into_os_string();
+            sidecar.push(".aria2");
+            let sidecar = PathBuf::from(sidecar);
+            // An unstarted task may share a planned name with a user's existing file.
+            if task.completed_length == 0
+                && (fs::symlink_metadata(&path).is_ok() || fs::symlink_metadata(&sidecar).is_ok())
+            {
+                return Err(
+                    "无法确认目录中的文件是否由该任务下载，已保留文件和任务记录".to_string()
+                );
+            }
+            paths.extend([path, sidecar]);
+        }
+    }
+    // Validate every fallback before deleting any of them. Errors retain task
+    // records, allowing the user to fix permissions/paths and retry the purge.
+    for path in paths {
+        remove_recorded_download_file(&path)?;
+    }
+    Ok(())
+}
+
+fn directory_payload_fallback_path(
+    group: &CloudDirectoryGroup,
+    item: &CloudDirectoryGroupItem,
+) -> Result<Option<PathBuf>, String> {
+    let unsafe_path = || "目录下载文件路径不安全，已保留文件和任务记录".to_string();
+    if !group.output_directory.is_absolute()
+        || group
+            .output_directory
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+        || item.relative_directory.first() != Some(&group.relative_directory)
+    {
+        return Err(unsafe_path());
+    }
+    for component in item
+        .relative_directory
+        .iter()
+        .chain(std::iter::once(&item.output_name))
+    {
+        if crate::cloud::commands::provider_directory_component(component)
+            .map_err(|_| unsafe_path())?
+            != *component
+        {
+            return Err(unsafe_path());
+        }
+    }
+    let mut parent = group.output_directory.clone();
+    for component in &item.relative_directory {
+        parent.push(component);
+    }
+    // Include the configured output root and its ancestors: a junction there
+    // redirects descendants just as a replaced member directory would.
+    for ancestor in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        let metadata = match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("无法读取下载目录 {}：{error}", ancestor.display())),
+        };
+        // Reject junctions as well as symbolic links; a replaced subdirectory
+        // must not redirect deletion outside the recorded download tree.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(unsafe_path());
+            }
+        }
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(unsafe_path());
+        }
+    }
+    Ok(Some(parent.join(&item.output_name)))
+}
+
 #[tauri::command]
 pub async fn purge_recycled_tasks(
     task_ids: Vec<String>,
@@ -2599,6 +2739,7 @@ fn purge_recycled_task_records(
         tasks.push(task);
     }
     if delete_files {
+        remove_directory_payload_fallbacks(store, &tasks)?;
         for id in ids {
             remove_task_payload_files(store, *id)?;
         }
@@ -2933,6 +3074,83 @@ mod tests {
     };
 
     #[test]
+    fn queue_cleanup_projection_reads_the_journal_once_for_nested_completed_files() {
+        use std::sync::atomic::Ordering;
+        let (plans, credentials) = crate::cloud::share::test_support::counted_plan_store();
+        let plan = CloudSharePlan::new(
+            CloudProvider::Baidu,
+            "startup-batch".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "startup-batch",
+                "entry".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            serde_json::json!({}),
+        );
+        let source = plan.source_for("entry");
+        plans.upsert(&plan).unwrap();
+        plans
+            .link_local_sources(std::slice::from_ref(&source))
+            .unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut children = Vec::new();
+        for _ in 0..32 {
+            let task = store.create(NewTask::direct(&source)).unwrap();
+            plans.link_local_task(&source, task.id).unwrap();
+            children.push(
+                queue_task_payload_from_task(
+                    &store,
+                    DownloadTask {
+                        status: TaskStatus::Completed,
+                        progress: 100,
+                        ..task
+                    },
+                )
+                .unwrap(),
+            );
+        }
+        plans.record_transfer(&source, "created-id").unwrap();
+        plans
+            .mark_local_completion(&source, false, |_, _| true)
+            .unwrap();
+        let root = store
+            .create(NewTask::direct("https://example.test/root"))
+            .unwrap();
+        let mut root = queue_task_payload_from_task(&store, root).unwrap();
+        root.children = children;
+        let mut queue = vec![root];
+        credentials.reads.store(0, Ordering::SeqCst);
+
+        apply_queue_cleanup_projection(&mut queue, &plans).unwrap();
+
+        assert!(!queue[0].cleanup_pending);
+        assert!(queue[0].children.iter().all(|task| task.cleanup_pending));
+        assert_eq!(
+            credentials.reads.load(Ordering::SeqCst),
+            1,
+            "initial task rendering must not decrypt the entire journal for every completed child"
+        );
+    }
+
+    #[test]
+    fn queue_cleanup_projection_skips_journal_for_empty_or_active_only_lists() {
+        use std::sync::atomic::Ordering;
+        let (plans, credentials) = crate::cloud::share::test_support::counted_plan_store();
+        apply_queue_cleanup_projection(&mut [], &plans).unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud-share://baidu/not-yet-resolved/file"))
+            .unwrap();
+        let mut queue = vec![queue_task_payload_from_task(&store, task).unwrap()];
+        apply_queue_cleanup_projection(&mut queue, &plans).unwrap();
+        assert!(!queue[0].cleanup_pending);
+        assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn engine_submission_mapper_only_labels_structured_link_rejections_as_invalid_links() {
         assert_eq!(
             download_engine_submission_message(&DownloadServiceError::InvalidUriOption("proxy")),
@@ -2940,7 +3158,10 @@ mod tests {
         );
         assert_eq!(
             download_engine_submission_message(&DownloadServiceError::Aria2(Aria2Error::Rpc(
-                RpcFault { code: -32602, message: "Invalid URI".into() }
+                RpcFault {
+                    code: -32602,
+                    message: "Invalid URI".into()
+                }
             ))),
             "下载引擎拒绝该链接：链接格式无效"
         );
@@ -4852,6 +5073,299 @@ mod tests {
         assert!(!sidecar.exists());
         assert!(neighbor.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_recycle_cleanup_directory_recovers_missing_file_records() {
+        for delete_files in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let plans = crate::cloud::share::CloudSharePlanStore::new(
+                DpapiCredentialStore::new(directory.path().join("credentials")).unwrap(),
+            );
+            let store = TaskStore::open_in_memory().unwrap();
+            let group = store
+                .create_cloud_directory_group(
+                    NewCloudDirectoryGroup::new(
+                        CloudProvider::Quark,
+                        "remote",
+                        "Series",
+                        directory.path(),
+                    ),
+                    &[
+                        NewCloudDirectoryGroupItem::new(
+                            "first",
+                            &["Series", "Season"],
+                            "first.mp4",
+                            Some(7),
+                        ),
+                        NewCloudDirectoryGroupItem::new(
+                            "pending",
+                            &["Series", "Season"],
+                            "pending.mp4",
+                            Some(4),
+                        ),
+                    ],
+                )
+                .unwrap();
+            let folder = directory.path().join("Series/Season");
+            fs::create_dir_all(&folder).unwrap();
+            let payload = folder.join("first.mp4");
+            let sidecar = folder.join("first.mp4.aria2");
+            let neighbor = folder.join("pending.mp4");
+            fs::write(&payload, b"payload").unwrap();
+            fs::write(&sidecar, b"control").unwrap();
+            fs::write(&neighbor, b"keep").unwrap();
+            let task = store
+                .create(NewTask::direct("https://example.test/first"))
+                .unwrap();
+            store
+                .apply_transfer_snapshot(DownloadTask {
+                    status: TaskStatus::Cancelled,
+                    completed_length: 7,
+                    ..task.clone()
+                })
+                .unwrap();
+            store
+                .link_cloud_directory_group_item_task(
+                    group.id,
+                    store.cloud_directory_group_items(group.id).unwrap()[0].id,
+                    task.id,
+                )
+                .unwrap();
+            // No engine file row survived, but the durable member still identifies its payload.
+            assert!(store.files(task.id).unwrap().is_empty());
+            store.recycle_cloud_directory_group(group.id).unwrap();
+
+            purge_cloud_directory_group(&store, &plans, group.id, delete_files).unwrap();
+
+            assert_eq!(
+                payload.exists(),
+                !delete_files,
+                "directory member payload must follow delete_files"
+            );
+            assert_eq!(sidecar.exists(), !delete_files);
+            assert_eq!(
+                fs::read(neighbor).unwrap(),
+                b"keep",
+                "unsubmitted members are not owned downloads"
+            );
+            assert!(store.cloud_directory_group(group.id).unwrap().is_none());
+            assert!(store.list().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_recycle_cleanup_directory_protects_files_and_keeps_failed_purges_retryable() {
+        for scenario in [
+            "renamed",
+            "unstarted",
+            "submitted_only",
+            "blocked",
+            "junction",
+            "missing",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let plans = crate::cloud::share::CloudSharePlanStore::new(
+                DpapiCredentialStore::new(directory.path().join("credentials")).unwrap(),
+            );
+            let store = TaskStore::open_in_memory().unwrap();
+            let group = store
+                .create_cloud_directory_group(
+                    NewCloudDirectoryGroup::new(
+                        CloudProvider::Pikpak,
+                        "remote",
+                        "Series",
+                        directory.path(),
+                    ),
+                    &[NewCloudDirectoryGroupItem::new(
+                        "first",
+                        &["Series"],
+                        "first.mp4",
+                        Some(7),
+                    )],
+                )
+                .unwrap();
+            let task = store
+                .create(NewTask::direct("https://example.test/first"))
+                .unwrap();
+            store
+                .apply_transfer_snapshot(DownloadTask {
+                    status: TaskStatus::Cancelled,
+                    completed_length: if matches!(scenario, "unstarted" | "submitted_only") {
+                        0
+                    } else {
+                        7
+                    },
+                    aria_gid: (scenario == "submitted_only")
+                        .then(|| "submitted-but-never-started".into()),
+                    ..task.clone()
+                })
+                .unwrap();
+            let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+            store
+                .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+                .unwrap();
+            store.recycle_cloud_directory_group(group.id).unwrap();
+            let folder = directory.path().join("Series");
+            let payload = folder.join("first.mp4");
+            let actual = directory.path().join("renamed.mp4");
+            let outside = tempfile::tempdir().unwrap();
+            if scenario == "junction" {
+                fs::write(outside.path().join("first.mp4"), b"outside").unwrap();
+                let result = std::process::Command::new("cmd.exe")
+                    .args(["/d", "/c", "mklink", "/J"])
+                    .arg(&folder)
+                    .arg(outside.path())
+                    .output()
+                    .unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            } else if scenario != "missing" {
+                fs::create_dir_all(&folder).unwrap();
+                if scenario == "blocked" {
+                    fs::create_dir(&payload).unwrap();
+                } else {
+                    fs::write(&payload, b"keep").unwrap();
+                }
+            }
+            if scenario == "renamed" {
+                fs::write(&actual, b"payload").unwrap();
+                store
+                    .upsert_files(
+                        task.id,
+                        &[(0, actual.to_string_lossy().into_owned(), 7, 7, true)],
+                    )
+                    .unwrap();
+            }
+            let result = purge_cloud_directory_group(&store, &plans, group.id, true);
+            match scenario {
+                "renamed" => {
+                    result.unwrap();
+                    assert!(!actual.exists());
+                    assert_eq!(fs::read(&payload).unwrap(), b"keep");
+                }
+                "missing" => {
+                    result.unwrap();
+                }
+                _ => {
+                    assert!(
+                        result.is_err(),
+                        "{scenario} must retain records instead of claiming success"
+                    );
+                    assert!(store.find(task.id).is_ok());
+                    assert!(store.cloud_directory_group(group.id).unwrap().is_some());
+                    if scenario == "junction" {
+                        assert_eq!(
+                            fs::read(outside.path().join("first.mp4")).unwrap(),
+                            b"outside"
+                        );
+                        // Remove only this test-created junction, never its target contents.
+                        fs::remove_dir(&folder).unwrap();
+                    } else if scenario == "blocked" {
+                        fs::remove_dir(&payload).unwrap();
+                        fs::write(&payload, b"payload").unwrap();
+                        purge_cloud_directory_group(&store, &plans, group.id, true).unwrap();
+                        assert!(!payload.exists());
+                    } else {
+                        assert_eq!(fs::read(&payload).unwrap(), b"keep");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn permanent_recycle_cleanup_directory_rejects_unsafe_member_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote",
+                    "Series",
+                    directory.path(),
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "first",
+                    &["Series"],
+                    "first.mp4",
+                    Some(7),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+        for name in [
+            "..",
+            "../outside.mp4",
+            "C:\\outside.mp4",
+            "file:stream",
+            "NUL",
+            "first.mp4.",
+        ] {
+            let mut unsafe_item = item.clone();
+            unsafe_item.output_name = name.to_string();
+            assert!(
+                directory_payload_fallback_path(&group, &unsafe_item).is_err(),
+                "{name}"
+            );
+        }
+        let mut wrong_root = item;
+        wrong_root.relative_directory = vec!["Other".into()];
+        assert!(directory_payload_fallback_path(&group, &wrong_root).is_err());
+        let mut relative_group = group;
+        relative_group.output_directory = PathBuf::from("Downloads");
+        assert!(directory_payload_fallback_path(&relative_group, &wrong_root).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_recycle_cleanup_directory_rejects_redirected_output_base() {
+        for nested in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let junction = directory.path().join("Downloads");
+            let base = if nested {
+                junction.join("Nested")
+            } else {
+                junction.clone()
+            };
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&junction)
+                .arg(outside.path())
+                .output()
+                .unwrap();
+            assert!(result.status.success());
+            fs::create_dir_all(base.join("Series")).unwrap();
+            let payload = base.join("Series/first.mp4");
+            fs::write(&payload, b"outside").unwrap();
+            let store = TaskStore::open_in_memory().unwrap();
+            let group = store
+                .create_cloud_directory_group(
+                    NewCloudDirectoryGroup::new(CloudProvider::Quark, "remote", "Series", &base),
+                    &[NewCloudDirectoryGroupItem::new(
+                        "first",
+                        &["Series"],
+                        "first.mp4",
+                        Some(7),
+                    )],
+                )
+                .unwrap();
+            let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+            let result = directory_payload_fallback_path(&group, &item);
+            assert_eq!(fs::read(&payload).unwrap(), b"outside");
+            fs::remove_dir(&junction).unwrap();
+            assert!(
+                result.is_err(),
+                "output root and its ancestors cannot redirect deletion"
+            );
+        }
     }
 
     #[cfg(windows)]

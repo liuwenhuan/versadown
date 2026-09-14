@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatCompactSpeed, formatEta, formatSpeed, upsertTask } from './downloadEvents';
+import { formatBytes, formatCompactSpeed, formatEta, formatSpeed, upsertTask, mergeInitialTasks, mergeTaskSnapshot } from './downloadEvents';
 import type { QueueTask } from './types';
 
 function task(overrides: Partial<QueueTask> = {}): QueueTask {
@@ -25,6 +25,55 @@ describe('upsertTask', () => {
     const result = upsertTask([folder], task({ id: 'task-2' }));
     expect(result.find((item) => item.id === 'folder')?.children).toEqual([task({ id: 'child' })]);
     expect(result).toHaveLength(2);
+  });
+
+  it('absorbs a transient standalone member when its authoritative directory arrives', () => {
+    const child = task({ id: 'member', progress: 60 });
+    const root = task({ id: 'root', kind: 'folder', children: [task({ id: 'subdir', kind: 'folder', children: [child] })] });
+    const unrelated = task({ id: 'unrelated' });
+    const result = upsertTask([task({ id: 'member', progress: 0 }), unrelated], root);
+    expect(result.map((item) => item.id)).toEqual(['root', 'unrelated']);
+    expect(result[0].children![0].children).toEqual([child]);
+    expect(upsertTask(result, { ...child, progress: 80 }).map((item) => item.id)).toEqual(['root', 'unrelated']);
+  });
+
+  it('removes stale top-level members when an existing directory switches from virtual to linked IDs', () => {
+    const before = task({ id: 'root', kind: 'folder', children: [task({ id: 'virtual-member' })] });
+    const after = { ...before, children: [task({ id: 'real-member' })] };
+    const result = upsertTask([task({ id: 'real-member' }), before], after);
+    expect(result).toEqual([after]);
+  });
+
+  it('preserves grouping for initial and refresh snapshots in either arrival order', () => {
+    const child = task({ id: 'member' });
+    const root = task({ id: 'root', kind: 'folder', children: [child] });
+    expect(mergeInitialTasks([child], [root])).toEqual([root]);
+    expect(mergeTaskSnapshot([child], [root])).toEqual([root]);
+    expect(mergeTaskSnapshot([], [child, root])).toEqual([root]);
+    expect(mergeTaskSnapshot([], [root, child])).toEqual([root]);
+  });
+
+  it.each(['downloading', 'paused', 'completed', 'failed', 'recycled'] as const)(
+    'keeps members grouped in the %s state without hiding independent same-name files', (status) => {
+      const child = task({ id: 'member', status });
+      const independent = { ...child, id: 'independent' };
+      const root = task({ id: 'root', kind: 'folder', status, children: [child] });
+      expect(upsertTask([child, independent], root)).toEqual([root, independent]);
+    }
+  );
+
+  it('does not overwrite a newer directory with the initial list', () => {
+    const root = task({ id: 'root', kind: 'folder', children: [task({ id: 'member', progress: 90 })] });
+    expect(mergeInitialTasks([root], [{ ...root, children: [task({ id: 'member', progress: 10 })] }]))
+      .toEqual([root]);
+  });
+
+  it('moves a protected live member into a stale directory without losing its newer progress', () => {
+    const child = task({ id: 'member', progress: 90 });
+    const root = task({ id: 'root', kind: 'folder', children: [task({ id: 'subdir', children: [{ ...child, progress: 10 }] })] });
+    const expected = { ...root, children: [{ ...root.children![0], children: [child] }] };
+    expect(mergeInitialTasks([child], [root])).toEqual([expected]);
+    expect(mergeTaskSnapshot([child], [root], new Set([child.id]))).toEqual([expected]);
   });
 });
 

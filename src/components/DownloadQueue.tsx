@@ -116,6 +116,14 @@ export function completedAt(completedAt: number | undefined): string | undefined
 }
 
 function childFileSize(task: QueueTask): string {
+  const selectedFiles = task.files?.filter((file) => file.selected !== false);
+  const completed = task.completed_length ?? (selectedFiles?.length
+    ? selectedFiles.reduce((total, file) => total + file.completed_length, 0) : undefined);
+  const knownTotal = task.total_length && task.total_length > 0 ? task.total_length
+    : selectedFiles?.reduce((total, file) => total + file.length, 0);
+  if (task.status !== 'completed' && completed !== undefined) {
+    return `${formatBytes(completed)} / ${knownTotal && knownTotal > 0 ? formatBytes(knownTotal) : '未知'}`;
+  }
   if (typeof task.total_length === 'number' && task.total_length > 0) return formatBytes(task.total_length);
   const fileSize = task.files
     ?.filter((file) => file.selected !== false)
@@ -329,6 +337,10 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const openableFileType = node.status === 'completed' ? taskAssociatedFileType(node) : undefined;
     const error = node.status === 'completed' ? undefined : node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
     const transferSize = childFileSize(node);
+    const childSpeed = node.status === 'downloading'
+      ? node.speed ?? (node.speedBytes !== undefined || node.download_speed !== undefined
+        ? formatSpeed(node.speedBytes ?? node.download_speed) : undefined)
+      : undefined;
     const isFileLeaf = !hasChildren && !isFolder;
     const completionTime = completedRoot && isFileLeaf && node.status === 'completed' ? completedAt(node.completed_at ?? node.completedAt) : undefined;
     const showsCompletionSummary = completedRoot && isFileLeaf && node.status === 'completed';
@@ -341,7 +353,7 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
         </span>
         {showsCompletionSummary
           ? <small className="child-completion-time" style={{ gridColumn: 'span 2' }}>{completionTime}</small>
-          : <><span className="child-progress" aria-hidden="true"><i><b style={{ width: `${node.progress}%` }} /></i></span><small className="child-progress-value">{node.progress}%</small></>}
+          : <><span className="child-progress"><i aria-hidden="true"><b style={{ width: `${node.progress}%` }} /></i>{childSpeed !== undefined && <span className="child-speed" aria-label={`${nodeName} 下载速度`}>{childSpeed}</span>}</span><small className="child-progress-value">{node.progress}%</small></>}
         <small className="child-transfer-size" title={transferSize}>{transferSize}</small>
         {(canUseFileSelection || canUseTaskCommand || canPlay || openableFileType) && <span className="child-actions">
           {canPlay ? <button aria-label={`播放 ${nodeName}`} title="播放" onClick={(event) => { event.stopPropagation(); onCommand(node.id, 'play_videos'); }}><ActionIcon action="play" /></button> : <>
@@ -379,6 +391,24 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
       return current.length ? [] : current;
     });
   }, [selectedTaskId, tasks]);
+  useEffect(() => {
+    const selectAllTasks = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey
+        || event.key.toLowerCase() !== 'a' || !tasks.length) return;
+      const target = event.target instanceof Element ? event.target : document.activeElement;
+      if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+      const modalOpen = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')]
+        .some(dialog => !dialog.closest('[hidden], [aria-hidden="true"]'));
+      if (modalOpen) return;
+      event.preventDefault();
+      setSelectedTaskIds(tasks.map(task => task.id));
+      selectionAnchor.current = tasks[0].id;
+      setContextMenu(null);
+      onSelect(tasks[0].id);
+    };
+    document.addEventListener('keydown', selectAllTasks);
+    return () => document.removeEventListener('keydown', selectAllTasks);
+  }, [tasks, onSelect]);
   function runCommand(command: TaskMenuCommand) {
     const targets = contextMenu?.tasks ?? [];
     closeContextMenu();

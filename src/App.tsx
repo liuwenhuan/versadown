@@ -302,8 +302,6 @@ export function App() {
   const visibleTasks = useMemo(() => sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]), [downloadTab, taskSorts, unsortedVisibleTasks]);
   const detailsTask = useMemo(() => filteredPrivacyTasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, filteredPrivacyTasks]);
   const downloadingTasks = filteredPrivacyTasks.filter((task) => task.status === 'downloading');
-  const pausedTasks = filteredPrivacyTasks.filter((task) => task.status === 'paused');
-  const bulkTaskAction = pausedTasks.length > 0 ? 'resume' : downloadingTasks.length > 0 ? 'pause' : undefined;
   const currentSpeed = formatSpeed(downloadingTasks.reduce((total, task) => total + (task.speedBytes ?? task.download_speed ?? 0), 0));
   const pendingPurgeTasks = (pendingPurgeTaskIds ?? []).flatMap((id) => {
     const task = privacyVisibleTasks.find((item) => item.id === id);
@@ -1251,6 +1249,7 @@ export function App() {
             <textarea
               style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
               rows={1}
+              wrap="off"
               aria-label="搜索任务或粘贴下载链接"
               placeholder="搜索本地任务，或粘贴下载链接"
               value={searchInput}
@@ -1321,10 +1320,7 @@ export function App() {
               <button role="tab" aria-selected={downloadTab === 'failed'} onClick={() => selectDownloadTab('failed')}>失败 <b>{failedTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'recycle'} onClick={() => selectDownloadTab('recycle')}>回收站 <b>{recycledTasks.length}</b></button>
             </div>
-            <div className="download-tab-actions">
-              {downloadTab === 'active' && bulkTaskAction && <button className="bulk-pause" onClick={() => void runLauncherBatchAction(bulkTaskAction)}>{bulkTaskAction === 'resume' ? '▷ 全部开始' : 'Ⅱ 全部暂停'}</button>}
-              {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" disabled={purgeInProgress} onClick={requestRecycleClear}>清空</button>}
-            </div>
+            {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" disabled={purgeInProgress} onClick={requestRecycleClear}>清空</button>}
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
             <div className="task-privacy-actions">
               {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}><PrivacyLockIcon unlocked={privacyVisibility.unlocked} /></button>}

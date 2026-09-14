@@ -5,6 +5,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import type { QueueTask } from './lib/types';
 import { getThemeMode, setThemeMode } from './lib/theme';
 import { cloudCatalog } from './test/cloudCatalog';
+import { scanDownloadInputs } from './lib/api';
 
 const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
@@ -20,6 +21,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
+  scanDownloadInputs: vi.fn().mockResolvedValue([]),
   confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   getPrivacyTaskVisibility: state.privacyVisibility,
@@ -407,6 +409,7 @@ it('refreshes a task after automatic password renewal without polling a closed a
 
 it('keeps task confirmation in the header panel after parsing a download link', async () => {
   const user = userEvent.setup();
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input: 'magnet:?xt=urn:btih:abc', valid: true, kind: 'magnet' }]);
   state.parse.mockResolvedValueOnce({
     confirmation: {
       taskId: 'torrent-batch', title: 'collection', requiresConfirmation: true,
@@ -419,6 +422,7 @@ it('keeps task confirmation in the header panel after parsing a download link', 
   await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), 'magnet:?xt=urn:btih:abc{Enter}');
   expect(screen.getByRole('dialog', { name: '新建下载' })).toHaveClass('header-download-dialog');
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  await user.click(await screen.findByRole('button', { name: '确认并完成' }));
 
   const confirmation = await screen.findByRole('dialog', { name: '确认下载内容' });
   expect(confirmation.closest('.header-input-panel')).not.toBeNull();
@@ -451,7 +455,7 @@ it('uses the dark launcher graphic and vector icons in the primary navigation', 
   }
 });
 
-it('shows the tab-scoped action before total speed only for its active download tab', async () => {
+it('places recycle clear immediately after the tabs without page-wide start or pause links', async () => {
   state.list.mockResolvedValueOnce([
     { id: 'active-task', name: 'active.zip', kind: 'file', status: 'downloading', progress: 25 },
     { id: 'recycled-task', name: 'removed.zip', kind: 'file', status: 'recycled', progress: 100 }
@@ -460,15 +464,14 @@ it('shows the tab-scoped action before total speed only for its active download 
   render(<App />);
 
   const speed = await screen.findByLabelText('当前总下载速度');
-  const activeAction = screen.getByRole('button', { name: /全部暂停/ });
-  expect(activeAction).toHaveClass('bulk-pause');
-  expect(activeAction.compareDocumentPosition(speed) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  await screen.findByText('active.zip');
+  expect(screen.queryByRole('button', { name: /全部开始|全部暂停/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '清空' })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole('tab', { name: /回收站/ }));
 
   const recycleAction = screen.getByRole('button', { name: '清空' });
-  expect(recycleAction).toHaveClass('bulk-pause');
+  expect(screen.getByRole('tablist', { name: '下载任务' }).nextElementSibling).toBe(recycleAction);
   expect(recycleAction.compareDocumentPosition(speed) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   expect(screen.queryByRole('button', { name: /全部暂停/ })).not.toBeInTheDocument();
 });
@@ -585,18 +588,33 @@ it('uses the shared line icon and input treatment when unlocking private tasks',
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
-it('shows all start for paused tasks and resumes every paused task from the active tab', async () => {
+it('does not expose a page-wide start action when paused tasks exist', async () => {
   const pausedTask: QueueTask = { ...oldTask, id: 'paused-task', status: 'paused' };
   const downloadingTask: QueueTask = { ...oldTask, id: 'downloading-task', status: 'downloading' };
   state.list.mockResolvedValueOnce([pausedTask, downloadingTask]);
-  state.taskAction.mockResolvedValueOnce({ task: { ...pausedTask, status: 'downloading' } });
+  render(<App />);
+  await waitFor(() => expect(document.querySelector('[data-task-id="paused-task"]')).toBeInTheDocument());
+  expect(screen.queryByRole('button', { name: /全部开始|全部暂停/ })).not.toBeInTheDocument();
+  expect(state.taskAction).not.toHaveBeenCalled();
+});
+
+it('selects only the current tab tasks with Ctrl+A across all four task tabs', async () => {
+  const groups = [
+    { tab: /下载中/, status: 'downloading' }, { tab: /已完成/, status: 'completed' },
+    { tab: /失败/, status: 'failed' }, { tab: /回收站/, status: 'recycled' },
+  ] as const;
+  state.list.mockResolvedValueOnce(groups.flatMap(({ status }) => [1, 2].map(index => ({
+    ...oldTask, id: `${status}-${index}`, name: `${status}-${index}.zip`, status,
+  }))));
   const user = userEvent.setup();
   render(<App />);
-
-  await user.click(await screen.findByRole('button', { name: /全部开始/ }));
-
-  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('paused-task', 'resume'));
-  expect(state.taskAction).not.toHaveBeenCalledWith('downloading-task', 'resume');
+  await screen.findByText('downloading-1.zip');
+  for (const { tab, status } of groups) {
+    await user.click(screen.getByRole('tab', { name: tab }));
+    fireEvent.keyDown(document, { key: 'a', ctrlKey: true });
+    const selected = [...document.querySelectorAll('.task-row[aria-selected="true"]')];
+    expect(selected.map(row => row.getAttribute('data-task-id')).sort()).toEqual([`${status}-1`, `${status}-2`]);
+  }
 });
 
 it('copies all selected task links to the clipboard on separate lines', async () => {
@@ -827,6 +845,7 @@ it('upserts a parsed task that already arrived through a live event', async () =
 it('keeps a protected share open for an access code before completing its normal parse result', async () => {
   const user = userEvent.setup();
   const shareLink = 'https://pan.baidu.com/s/protected-share';
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input: shareLink, valid: true, kind: 'cloud_share' }]);
   state.parse
     .mockResolvedValueOnce({ shareAccessCodeRequired: { provider: 'baidu', message: '请输入提取码' } })
     .mockResolvedValueOnce({ task: liveTask });
@@ -835,6 +854,7 @@ it('keeps a protected share open for an access code before completing its normal
   await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), `${shareLink}{Enter}`);
   const downloadInput = screen.getByLabelText('下载内容');
   await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  await user.click(await screen.findByRole('button', { name: '确认并完成' }));
 
   const accessCode = await screen.findByLabelText('访问码');
   expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
@@ -843,7 +863,7 @@ it('keeps a protected share open for an access code before completing its normal
   expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined, false);
 
   await user.type(accessCode, '1234');
-  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  await user.click(screen.getByRole('button', { name: '确认并完成' }));
 
   await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234', false));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());

@@ -1,6 +1,36 @@
 use super::*;
 use crate::cloud::{CloudHttpRequest, CloudHttpResponse, CloudHttpTransport};
 use serde_json::Value;
+pub struct CountingPlanCredentials {
+    inner: crate::cloud::MemoryCredentialStore,
+    pub reads: std::sync::atomic::AtomicUsize,
+}
+impl CredentialStore for CountingPlanCredentials {
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.load(key)
+    }
+    fn save(&self, key: &str, value: &[u8]) -> Result<(), QuarkError> {
+        self.inner.save(key, value)
+    }
+    fn remove(&self, key: &str) -> Result<(), QuarkError> {
+        self.inner.remove(key)
+    }
+}
+pub fn counted_plan_store() -> (CloudSharePlanStore, Arc<CountingPlanCredentials>) {
+    let credentials = Arc::new(CountingPlanCredentials {
+        inner: Default::default(),
+        reads: Default::default(),
+    });
+    let store = CloudSharePlanStore {
+        repository: None,
+        credentials: credentials.clone(),
+        mutation: Mutex::new(()),
+        now_ms: Arc::new(|| 1_000),
+    };
+    (store, credentials)
+}
+
 pub struct Http {
     pub requests: Mutex<Vec<CloudHttpRequest>>,
     replies: Mutex<std::collections::VecDeque<Value>>,

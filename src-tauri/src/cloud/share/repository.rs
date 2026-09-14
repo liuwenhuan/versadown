@@ -859,28 +859,33 @@ impl CloudSharePlanStore {
         source: &str,
         task_id: uuid::Uuid,
     ) -> Result<bool, QuarkError> {
-        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        self.cleanup_pending_for_tasks(&[(source.to_owned(), task_id)])
+            .map(|pending| pending[0])
+    }
+
+    /// One short-lived snapshot per queue read, never one full decrypt per leaf.
+    /// The snapshot is not cached across calls: cleanup retries remain immediately visible.
+    pub(crate) fn cleanup_pending_for_tasks(
+        &self,
+        tasks: &[(String, uuid::Uuid)],
+    ) -> Result<Vec<bool>, QuarkError> {
+        if tasks.is_empty() {
+            return Ok(Vec::new());
+        }
         let _guard = self.mutation.lock().map_err(|_| QuarkError::Storage)?;
         let document = self.load()?;
-        let plan = &document
-            .plans
-            .get(&plan_key(provider, &share))
-            .ok_or_else(missing_plan)?
-            .plan;
-        if !plan
-            .linked_local_tasks
-            .get(&fingerprint)
-            .is_some_and(|ids| ids.contains(&task_id))
-        {
-            return Ok(false);
-        }
-        Ok(plan.transfers.iter().any(|transfer| {
-            transfer.entry_fingerprint == fingerprint
-                && matches!(
-                    transfer.cleanup_state,
-                    CloudShareCleanupState::Attempted | CloudShareCleanupState::Failed
-                )
-        }))
+        let pending_entries: BTreeMap<_, BTreeSet<_>> = document.plans.iter().map(|(key, stored)| {
+            (key, stored.plan.transfers.iter().filter(|transfer| matches!(
+                transfer.cleanup_state, CloudShareCleanupState::Attempted | CloudShareCleanupState::Failed
+            )).map(|transfer| transfer.entry_fingerprint.as_str()).collect())
+        }).collect();
+        tasks.iter().map(|(source, task_id)| {
+            let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+            let key = plan_key(provider, &share);
+            let plan = &document.plans.get(&key).ok_or_else(missing_plan)?.plan;
+            Ok(plan.linked_local_tasks.get(&fingerprint).is_some_and(|ids| ids.contains(task_id))
+                && pending_entries[&key].contains(fingerprint.as_str()))
+        }).collect()
     }
 
     /// Rebuild safe task messages from the durable journal after a restart.

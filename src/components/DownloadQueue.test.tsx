@@ -4,6 +4,33 @@ import { vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { DownloadQueue, taskContextMenuPosition } from './DownloadQueue';
 
+it('selects all top-level tasks with Ctrl+A and reuses their batch menu', () => {
+  const onBatchCommand = vi.fn();
+  render(<DownloadQueue tasks={[
+    { id: 'one', name: 'one.zip', kind: 'file', status: 'paused', progress: 0 },
+    { id: 'two', name: 'two.zip', kind: 'file', status: 'paused', progress: 0 },
+  ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} onBatchCommand={onBatchCommand} />);
+  expect(fireEvent.keyDown(document, { key: 'a', ctrlKey: true })).toBe(false);
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+  fireEvent.contextMenu(screen.getByText('one.zip'));
+  fireEvent.click(screen.getByRole('menuitem', { name: /开始/ }));
+  expect(onBatchCommand).toHaveBeenCalledWith(['one', 'two'], 'resume');
+});
+
+it('does not hijack Ctrl+A while editing or when a dialog is open', () => {
+  const { rerender } = render(<><input aria-label="edit" /><div contentEditable data-testid="editable" />
+    <DownloadQueue tasks={[{ id: 'one', name: 'one.zip', kind: 'file', status: 'paused', progress: 0 }]}
+      selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} /></>);
+  expect(fireEvent.keyDown(screen.getByLabelText('edit'), { key: 'a', ctrlKey: true })).toBe(true);
+  expect(fireEvent.keyDown(screen.getByTestId('editable'), { key: 'a', ctrlKey: true })).toBe(true);
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(0);
+  rerender(<><div role="dialog" aria-modal="true">Confirm</div>
+    <DownloadQueue tasks={[{ id: 'one', name: 'one.zip', kind: 'file', status: 'paused', progress: 0 }]}
+      selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} /></>);
+  expect(fireEvent.keyDown(document, { key: 'a', ctrlKey: true })).toBe(true);
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(0);
+});
+
 it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
   render(<DownloadQueue tasks={[
     { id: 'magnet', name: 'movie.mkv', kind: 'magnet', status: 'downloading', progress: 25, connections: 3, discovered_nodes: 8 },
@@ -24,6 +51,49 @@ const folderTask = {
   id: 'folder-1', name: 'Season 1', kind: 'folder', status: 'downloading', progress: 42,
   children: [{ id: 'file-1', name: 'episode-01.mkv', kind: 'file', status: 'downloading', progress: 50, size: '8 MB / 161.2 MB' }]
 } as const;
+
+it('shows live speed and downloaded bytes for expanded directory and file rows', async () => {
+  const user = userEvent.setup();
+  const { container } = render(<DownloadQueue tasks={[{
+    id: 'metrics-root', name: '传输目录', kind: 'folder', status: 'downloading', progress: 25,
+    children: [{
+      id: 'metrics-folder', name: '子目录', kind: 'folder', status: 'downloading', progress: 25,
+      total_length: 2097152, completed_length: 524288, download_speed: 262144,
+      children: [{ id: 'metrics-file', name: 'clip.mp4', kind: 'cloud', status: 'downloading', progress: 25,
+        total_length: 2097152, completed_length: 524288, download_speed: 131072 }],
+    }],
+  }]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  await user.click(screen.getByRole('button', { name: '展开 传输目录' }));
+  await user.click(screen.getByRole('button', { name: '展开 子目录' }));
+  const rows = container.querySelectorAll('.child-row');
+  expect(rows[0].querySelector('.child-transfer-size')).toHaveTextContent('512 KB / 2 MB');
+  expect(rows[1].querySelector('.child-transfer-size')).toHaveTextContent('512 KB / 2 MB');
+  expect(rows[0].querySelector('.child-speed')).toHaveTextContent('256 KB/s');
+  expect(rows[1].querySelector('.child-speed')).toHaveTextContent('128 KB/s');
+});
+
+it('preserves completed file sizes and hides stale speed for paused children', async () => {
+  const user = userEvent.setup();
+  const { container } = render(<DownloadQueue tasks={[{
+    id: 'sizes-root', name: '大小目录', kind: 'folder', status: 'downloading', progress: 50,
+    children: [
+      { id: 'paused-size', name: 'paused.bin', kind: 'cloud', status: 'paused', progress: 25,
+        total_length: 2097152, completed_length: 524288, download_speed: 131072 },
+      { id: 'unknown-size', name: 'unknown.bin', kind: 'cloud', status: 'downloading', progress: 0,
+        completed_length: 131072, download_speed: 0 },
+      { id: 'complete-size', name: 'complete.bin', kind: 'cloud', status: 'completed', progress: 100,
+        total_length: 4194304, completed_length: 32768, download_speed: 131072 },
+    ],
+  }]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  await user.click(screen.getByRole('button', { name: '展开 大小目录' }));
+  const rows = container.querySelectorAll('.child-row');
+  expect(rows[0].querySelector('.child-transfer-size')).toHaveTextContent('512 KB / 2 MB');
+  expect(rows[0].querySelector('.child-speed')).toBeNull();
+  expect(rows[1].querySelector('.child-transfer-size')).toHaveTextContent('128 KB / 未知');
+  expect(rows[1].querySelector('.child-speed')).toHaveTextContent('0 B/s');
+  expect(rows[2].querySelector('.child-transfer-size')).toHaveTextContent('4 MB');
+  expect(rows[2].querySelector('.child-speed')).toBeNull();
+});
 
 it('places multi-file controls and child progress in stable aligned columns', async () => {
   const user = userEvent.setup();

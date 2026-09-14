@@ -2,13 +2,26 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadGlobalStat, QueueTask } from './types';
 
 export function upsertTask(tasks: readonly QueueTask[], snapshot: QueueTask): QueueTask[] {
-  const next = replaceExistingTask(tasks, snapshot);
-  return next === tasks ? [snapshot, ...tasks] : [...next];
+  // A directory snapshot owns its descendants. A list response may have observed
+  // a member before it was linked; do not retain that stale standalone row.
+  const memberIds = new Set<string>();
+  collectDescendantIds(snapshot, memberIds);
+  const roots = memberIds.size ? tasks.filter((task) => !memberIds.has(task.id)) : tasks;
+  const next = replaceExistingTask(roots, snapshot);
+  return next === roots ? [snapshot, ...roots] : [...next];
+}
+
+function collectDescendantIds(task: QueueTask, ids: Set<string>): void {
+  for (const child of task.children ?? []) {
+    ids.add(child.id);
+    collectDescendantIds(child, ids);
+  }
 }
 
 export function mergeInitialTasks(current: readonly QueueTask[], snapshots: readonly QueueTask[]): QueueTask[] {
+  const liveTasks = indexTasks(current);
   return snapshots.reduceRight<QueueTask[]>((merged, snapshot) => (
-    containsTask(merged, snapshot.id) ? merged : [snapshot, ...merged]
+    containsTask(merged, snapshot.id) ? merged : upsertTask(merged, preserveLiveTasks(snapshot, liveTasks))
   ), [...current]);
 }
 
@@ -17,9 +30,30 @@ export function mergeTaskSnapshot(
   snapshots: readonly QueueTask[],
   protectedIds: ReadonlySet<string> = new Set()
 ): QueueTask[] {
+  const liveTasks = protectedIds.size ? indexTasks(current, protectedIds) : new Map<string, QueueTask>();
   return snapshots.reduce<QueueTask[]>((merged, snapshot) => (
-    protectedIds.has(snapshot.id) ? merged : upsertTask(merged, snapshot)
+    protectedIds.has(snapshot.id) ? merged : upsertTask(merged, preserveLiveTasks(snapshot, liveTasks))
   ), [...current]);
+}
+
+function indexTasks(tasks: readonly QueueTask[], ids?: ReadonlySet<string>): Map<string, QueueTask> {
+  const indexed = new Map<string, QueueTask>();
+  const visit = (items: readonly QueueTask[]) => {
+    for (const task of items) {
+      if (!ids || ids.has(task.id)) indexed.set(task.id, task);
+      if (task.children) visit(task.children);
+    }
+  };
+  visit(tasks);
+  return indexed;
+}
+
+function preserveLiveTasks(snapshot: QueueTask, liveTasks: ReadonlyMap<string, QueueTask>): QueueTask {
+  const live = liveTasks.get(snapshot.id);
+  if (live) return live;
+  if (!liveTasks.size || !snapshot.children?.length) return snapshot;
+  const children = snapshot.children.map((child) => preserveLiveTasks(child, liveTasks));
+  return children.some((child, index) => child !== snapshot.children![index]) ? { ...snapshot, children } : snapshot;
 }
 
 function containsTask(tasks: readonly QueueTask[], id: string): boolean {

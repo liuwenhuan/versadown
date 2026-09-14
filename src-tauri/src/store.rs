@@ -9,6 +9,10 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Tra
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "store_share_membership_tests.rs"]
+mod share_membership_tests;
+
 use crate::{
     cloud::CloudProvider,
     models::{
@@ -52,6 +56,73 @@ pub struct TaskStore {
 }
 
 impl TaskStore {
+    /// Publish a share leaf only together with its durable directory membership.
+    /// Share resolution has not selected an account yet, so this does not bind one.
+    pub(crate) fn prepare_cloud_share_directory_leaf_task(
+        &self,
+        group: Uuid,
+        item: Uuid,
+        new_task: NewTask,
+        retry_task: Option<Uuid>,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        let eligible: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cloud_directory_groups g
+             JOIN cloud_directory_group_items i ON i.group_id = g.id
+             WHERE g.id = ?1 AND i.id = ?2
+             AND g.status NOT IN ('recycled', 'cancelled', 'completed')
+             AND (i.task_id IS NULL OR i.task_id = ?3))",
+            params![
+                group.to_string(),
+                item.to_string(),
+                retry_task.map(|id| id.to_string())
+            ],
+            |row| row.get(0),
+        )?;
+        if !eligible {
+            return Err(StoreError::NotFound(item));
+        }
+        let task = if let Some(id) = retry_task {
+            let current = find_with_connection(&transaction, id)?;
+            let linked_elsewhere: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cloud_directory_group_items
+                 WHERE task_id = ?1 AND (group_id != ?2 OR id != ?3))",
+                params![id.to_string(), group.to_string(), item.to_string()],
+                |row| row.get(0),
+            )?;
+            if linked_elsewhere
+                || current.source != new_task.source
+                || current.kind != "cloud"
+                || current.aria_gid.is_some()
+                || !matches!(current.status, TaskStatus::Parsing | TaskStatus::Failed)
+            {
+                return Err(StoreError::InvalidCloudDirectoryGroupData(
+                    "ineligible share retry task",
+                ));
+            }
+            transaction.execute(
+                "UPDATE tasks SET status = 'parsing', error = NULL, failure_code = NULL,
+                 is_private = ?1, updated_at = ?2 WHERE id = ?3",
+                params![new_task.is_private, current_timestamp(), id.to_string()],
+            )?;
+            find_with_connection(&transaction, id)?
+        } else {
+            Self::create_with_connection(&transaction, new_task)?
+        };
+        transaction.execute(
+            "UPDATE cloud_directory_group_items SET task_id = ?1, failure_code = NULL,
+             failure_message = NULL WHERE id = ?2 AND group_id = ?3",
+            params![task.id.to_string(), item.to_string(), group.to_string()],
+        )?;
+        transaction.execute(
+            "UPDATE cloud_directory_groups SET updated_at = ?1 WHERE id = ?2",
+            params![current_timestamp(), group.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(task)
+    }
+
     /// Run once at application startup, before any directory submission workers.
     /// Engine recovery only sees linked tasks: unsubmitted directory leaves have
     /// no GID and their submission loop does not survive a process exit.
