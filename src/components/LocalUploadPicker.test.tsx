@@ -12,6 +12,59 @@ const home: LocalUploadListing = {
 const photos: LocalUploadListing = { path: '/home/Photos', parentPath: '/home', roots: home.roots, entries: [{ path: '/home/Photos/p.jpg', name: 'p.jpg', kind: 'file' }] };
 const listing = () => vi.fn(async (path?: string) => path === '/home/Photos' ? photos : home);
 
+function visibleEntryNames(): string[] {
+  return Array.from(document.querySelectorAll('.local-upload-entry:not(.local-upload-parent) .local-upload-entry-name span'))
+    .map(element => element.textContent ?? '');
+}
+
+it('sorts upload entries by natural name in both directions while keeping directories first', async () => {
+  const user = userEvent.setup();
+  const entries = [
+    { path: '/home/file10.zip', name: 'file10.zip', kind: 'file' as const, size: 10, modifiedAt: 200 },
+    { path: '/home/Zeta', name: 'Zeta', kind: 'directory' as const, modifiedAt: 400 },
+    { path: '/home/file2.zip', name: 'file2.zip', kind: 'file' as const, size: 20, modifiedAt: 300 },
+    { path: '/home/Alpha', name: 'Alpha', kind: 'directory' as const, modifiedAt: 100 },
+  ];
+  render(<LocalUploadPicker listEntries={async () => ({ ...home, parentPath: '/', entries })} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+  await screen.findByRole('checkbox', { name: '选择 file10.zip' });
+
+  const nameSort = screen.getByRole('button', { name: '按名称排序' });
+  await user.click(nameSort);
+  expect(nameSort.closest('[role="columnheader"]')).toHaveAttribute('aria-sort', 'ascending');
+  expect(visibleEntryNames()).toEqual(['Alpha', 'Zeta', 'file2.zip', 'file10.zip']);
+  expect(screen.getByRole('button', { name: '..' }).closest('.local-upload-file-list')?.firstElementChild)
+    .toContainElement(screen.getByRole('button', { name: '..' }));
+
+  await user.click(nameSort);
+  expect(nameSort.closest('[role="columnheader"]')).toHaveAttribute('aria-sort', 'descending');
+  expect(visibleEntryNames()).toEqual(['Zeta', 'Alpha', 'file10.zip', 'file2.zip']);
+});
+
+it('sorts upload files by byte size and modification timestamp without losing selection', async () => {
+  const user = userEvent.setup();
+  const entries = [
+    { path: '/home/large.zip', name: 'large.zip', kind: 'file' as const, size: 9_000, modifiedAt: 100 },
+    { path: '/home/unknown.zip', name: 'unknown.zip', kind: 'file' as const, size: null, modifiedAt: null },
+    { path: '/home/small.zip', name: 'small.zip', kind: 'file' as const, size: 10, modifiedAt: 300 },
+    { path: '/home/medium.zip', name: 'medium.zip', kind: 'file' as const, size: 500, modifiedAt: 200 },
+  ];
+  render(<LocalUploadPicker listEntries={async () => ({ ...home, entries })} onConfirm={vi.fn()} onCancel={vi.fn()} />);
+  await user.click(await screen.findByRole('checkbox', { name: '选择 medium.zip' }));
+
+  const sizeSort = screen.getByRole('button', { name: '按大小排序' });
+  await user.click(sizeSort);
+  expect(visibleEntryNames()).toEqual(['small.zip', 'medium.zip', 'large.zip', 'unknown.zip']);
+  await user.click(sizeSort);
+  expect(visibleEntryNames()).toEqual(['large.zip', 'medium.zip', 'small.zip', 'unknown.zip']);
+
+  const modifiedSort = screen.getByRole('button', { name: '按修改时间排序' });
+  await user.click(modifiedSort);
+  expect(visibleEntryNames()).toEqual(['large.zip', 'medium.zip', 'small.zip', 'unknown.zip']);
+  await user.click(modifiedSort);
+  expect(visibleEntryNames()).toEqual(['small.zip', 'medium.zip', 'large.zip', 'unknown.zip']);
+  expect(screen.getByRole('checkbox', { name: '选择 medium.zip' })).toBeChecked();
+});
+
 it('keeps upload names and metadata readable in compact rows', async () => {
   const style = document.createElement('style');
   style.textContent = readFileSync('src/styles.css', 'utf8');

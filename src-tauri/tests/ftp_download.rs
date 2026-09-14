@@ -219,8 +219,7 @@ async fn spawn_ftp_server(
     payload: Vec<u8>,
     chunk_delay: Duration,
 ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
-    let server =
-        spawn_test_ftp_server(payload, chunk_delay, false, false, 8 * 1024, None).await;
+    let server = spawn_test_ftp_server(payload, chunk_delay, false, false, 8 * 1024, None).await;
     (server.source, server.resumed_at)
 }
 

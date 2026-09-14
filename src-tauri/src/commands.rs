@@ -436,7 +436,11 @@ pub async fn parse_download(
         {
             Ok(task) => task,
             Err(error) => {
-                return Err(fail_engine_submission_text(&state.store, &outcome.task, error))
+                return Err(fail_engine_submission_text(
+                    &state.store,
+                    &outcome.task,
+                    error,
+                ))
             }
         };
     } else if outcome.task.kind == "magnet" {
@@ -4650,11 +4654,7 @@ mod tests {
 
     #[test]
     fn cloud_share_resubmission_reserves_the_original_task_before_engine_or_provider_work() {
-        let production = include_str!("commands.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source precedes tests");
-        let body = production
+        let body = include_str!("commands.rs")
             .split_once("pub(crate) async fn resubmit_task(")
             .expect("resubmit task exists")
             .1

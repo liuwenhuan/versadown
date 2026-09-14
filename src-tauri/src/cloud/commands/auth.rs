@@ -697,7 +697,9 @@ pub async fn cloud_open_operation_verification(
     expected_account_id: String,
 ) -> Result<(), QuarkError> {
     if provider != CloudProvider::Pikpak {
-        return Err(QuarkError::InvalidInput("此网盘没有待处理的操作验证".into()));
+        return Err(QuarkError::InvalidInput(
+            "此网盘没有待处理的操作验证".into(),
+        ));
     }
     let window_app = app.clone();
     run(app, provider, move |state, http| {
@@ -709,14 +711,16 @@ pub async fn cloud_open_operation_verification(
         let label = "cloud-operation-pikpak";
         if let Some(window) = window_app.get_webview_window(label) {
             // Never leave a previous account's/challenge's page in this window.
-            window.navigate(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
+            window
+                .navigate(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
                 .map_err(|_| QuarkError::Storage)?;
             window.show().map_err(|_| QuarkError::Storage)?;
             let _ = window.set_focus();
             return Ok(());
         }
         WebviewWindowBuilder::new(
-            &window_app, label,
+            &window_app,
+            label,
             WebviewUrl::External(url.parse().map_err(|_| QuarkError::InvalidResponse)?),
         )
         .title("PikPak 操作验证：完成后请返回应用重试")
@@ -727,7 +731,8 @@ pub async fn cloud_open_operation_verification(
         .build()
         .map_err(|_| QuarkError::Storage)?;
         Ok(())
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]

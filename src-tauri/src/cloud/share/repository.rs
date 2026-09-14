@@ -874,18 +874,40 @@ impl CloudSharePlanStore {
         }
         let _guard = self.mutation.lock().map_err(|_| QuarkError::Storage)?;
         let document = self.load()?;
-        let pending_entries: BTreeMap<_, BTreeSet<_>> = document.plans.iter().map(|(key, stored)| {
-            (key, stored.plan.transfers.iter().filter(|transfer| matches!(
-                transfer.cleanup_state, CloudShareCleanupState::Attempted | CloudShareCleanupState::Failed
-            )).map(|transfer| transfer.entry_fingerprint.as_str()).collect())
-        }).collect();
-        tasks.iter().map(|(source, task_id)| {
-            let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
-            let key = plan_key(provider, &share);
-            let plan = &document.plans.get(&key).ok_or_else(missing_plan)?.plan;
-            Ok(plan.linked_local_tasks.get(&fingerprint).is_some_and(|ids| ids.contains(task_id))
-                && pending_entries[&key].contains(fingerprint.as_str()))
-        }).collect()
+        let pending_entries: BTreeMap<_, BTreeSet<_>> = document
+            .plans
+            .iter()
+            .map(|(key, stored)| {
+                (
+                    key,
+                    stored
+                        .plan
+                        .transfers
+                        .iter()
+                        .filter(|transfer| {
+                            matches!(
+                                transfer.cleanup_state,
+                                CloudShareCleanupState::Attempted | CloudShareCleanupState::Failed
+                            )
+                        })
+                        .map(|transfer| transfer.entry_fingerprint.as_str())
+                        .collect(),
+                )
+            })
+            .collect();
+        tasks
+            .iter()
+            .map(|(source, task_id)| {
+                let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+                let key = plan_key(provider, &share);
+                let plan = &document.plans.get(&key).ok_or_else(missing_plan)?.plan;
+                Ok(plan
+                    .linked_local_tasks
+                    .get(&fingerprint)
+                    .is_some_and(|ids| ids.contains(task_id))
+                    && pending_entries[&key].contains(fingerprint.as_str()))
+            })
+            .collect()
     }
 
     /// Rebuild safe task messages from the durable journal after a restart.

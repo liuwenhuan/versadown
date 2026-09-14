@@ -316,10 +316,13 @@ pub fn save_password_credential(
     credential: CloudPasswordCredential,
 ) -> Result<(), QuarkError> {
     let provider = credential.provider();
-    let previous = store.load(password_credential_key(provider)?).map_err(|error| {
-        let _ = store.remove(provider.key());
-        error
-    })?.map(Zeroizing::new);
+    let previous = store
+        .load(password_credential_key(provider)?)
+        .map_err(|error| {
+            let _ = store.remove(provider.key());
+            error
+        })?
+        .map(Zeroizing::new);
     let mut credentials = load_password_credentials(store, provider)
         .map_err(|error| {
             let _ = store.remove(provider.key());
@@ -825,7 +828,9 @@ mod tests {
         )
         .is_err());
 
-        let saved = load_saved_password_login(&store, CloudProvider::Tianyi).unwrap().unwrap();
+        let saved = load_saved_password_login(&store, CloudProvider::Tianyi)
+            .unwrap()
+            .unwrap();
         assert_eq!(saved.username(), "alice");
         assert_eq!(saved.password(), "secret-a");
     }
@@ -834,14 +839,22 @@ mod tests {
     fn failed_draft_cleanup_rolls_back_password_replacement() {
         let store = FailOnceCredentialStore::default();
         let provider = CloudProvider::Tianyi;
-        save_password_credential(&store,
-            CloudPasswordCredential::new(provider, "a", "alice", "secret-a")).unwrap();
+        save_password_credential(
+            &store,
+            CloudPasswordCredential::new(provider, "a", "alice", "secret-a"),
+        )
+        .unwrap();
         save_password_login_draft(&store, provider, "alice", "secret-a").unwrap();
         store.save(provider.key(), b"new-session").unwrap();
         store.fail_next_draft_remove.store(true, Ordering::SeqCst);
-        assert!(save_password_credential(&store,
-            CloudPasswordCredential::new(provider, "b", "bob", "secret-b")).is_err());
-        let saved = load_saved_password_login(&store, provider).unwrap().unwrap();
+        assert!(save_password_credential(
+            &store,
+            CloudPasswordCredential::new(provider, "b", "bob", "secret-b")
+        )
+        .is_err());
+        let saved = load_saved_password_login(&store, provider)
+            .unwrap()
+            .unwrap();
         assert_eq!(saved.username(), "alice");
         assert_eq!(saved.password(), "secret-a");
         assert!(store.load(provider.key()).unwrap().is_none());

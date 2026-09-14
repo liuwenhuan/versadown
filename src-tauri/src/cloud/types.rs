@@ -207,7 +207,9 @@ impl Serialize for CloudError {
             Self::SessionRenewedRetryOperation => "session_renewed_retry_operation",
             Self::WebAuthorizationRequired => "web_auth_required",
             Self::CaptchaRequired => "web_auth_required",
-            Self::PikpakOperationVerificationRequired(_) => "pikpak_operation_verification_required",
+            Self::PikpakOperationVerificationRequired(_) => {
+                "pikpak_operation_verification_required"
+            }
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
             Self::Storage => "credential_storage_error",

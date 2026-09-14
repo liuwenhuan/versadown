@@ -532,9 +532,9 @@ impl EngineRuntime {
         if state.available {
             let (max_active_tasks, max_connections_per_task) = {
                 let launch_config = self
-                .launch_config
-                .read()
-                .unwrap_or_else(|error| error.into_inner());
+                    .launch_config
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner());
                 (
                     launch_config.aria2.max_concurrent_downloads,
                     launch_config.aria2.max_connections_per_server,

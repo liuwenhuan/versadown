@@ -199,6 +199,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::WebAuthorizationRequired => "web-authorization-required",
         CloudError::CaptchaRequired => "captcha-required",
         CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
+        CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
         CloudError::AuthorizationPending => "authorization-pending",
         CloudError::InvalidResponse => "invalid-response",
         CloudError::Storage => "storage",

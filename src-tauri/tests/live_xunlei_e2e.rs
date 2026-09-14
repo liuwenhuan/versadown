@@ -59,6 +59,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::UploadUnavailable => "upload-unavailable",
         CloudError::ProviderUnsupported => "provider-unsupported",
         CloudError::PikpakRegionalMembershipRestricted => "provider-restricted",
+        CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
     }
 }
 

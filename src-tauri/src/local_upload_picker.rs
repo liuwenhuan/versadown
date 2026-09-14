@@ -84,7 +84,9 @@ fn list_local_entries(path: Option<String>) -> Result<LocalUploadListing, String
             }
             .into(),
             size: metadata.is_file().then(|| metadata.len()),
-            modified_at: metadata.modified().ok()
+            modified_at: metadata
+                .modified()
+                .ok()
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
                 .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
         });
@@ -112,7 +114,9 @@ fn list_local_entries(path: Option<String>) -> Result<LocalUploadListing, String
                 unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }
             }
             #[cfg(not(windows))]
-            { 500 }
+            {
+                500
+            }
         },
     })
 }
@@ -198,8 +202,14 @@ mod tests {
         fs::create_dir(temp.path().join("folder")).unwrap();
         fs::write(temp.path().join("file.txt"), b"hello").unwrap();
         fs::write(temp.path().join("empty.txt"), b"").unwrap();
-        let file = fs::File::options().write(true).open(temp.path().join("file.txt")).unwrap();
-        file.set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000))).unwrap();
+        let file = fs::File::options()
+            .write(true)
+            .open(temp.path().join("file.txt"))
+            .unwrap();
+        file.set_times(
+            fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+        )
+        .unwrap();
         let json = serde_json::to_value(listing(temp.path()).unwrap()).unwrap();
         let entries = json["entries"].as_array().unwrap();
         let named = |name: &str| entries.iter().find(|entry| entry["name"] == name).unwrap();

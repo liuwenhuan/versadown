@@ -222,8 +222,10 @@ function CloudFileIcon({ kind }: { kind: CloudFile['kind'] | 'recycle-bin' }) {
     : <><path d="M6 2.8h7l5 5v13.4H6z" /><path d="M13 2.8v5h5M9 13h6M9 16.5h6" /></>}</svg>;
 }
 
-function CloudActionIcon({ action }: { action: CloudMenuAction | 'back' | 'clear' }) {
-  const paths: Record<CloudMenuAction | 'back' | 'clear', React.ReactNode> = {
+type CloudActionIconType = CloudMenuAction | 'back' | 'clear' | 'pause' | 'resume' | 'cancel';
+
+function CloudActionIcon({ action }: { action: CloudActionIconType }) {
+  const paths: Record<CloudActionIconType, React.ReactNode> = {
     open: <><path d="M3.5 7.5h6l1.8 2h9.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="m12 13 2.5 2.5L18 12" /></>,
     restore: <><path d="M19 8a7.5 7.5 0 1 0 1 7" /><path d="m19 3 0 5-5 0" /></>,
     download: <><path d="M12 3v12m0 0 4-4m-4 4-4-4" /><path d="M5 20h14" /></>,
@@ -236,7 +238,10 @@ function CloudActionIcon({ action }: { action: CloudMenuAction | 'back' | 'clear
     upload: <><path d="M12 16V4m0 0-4 4m4-4 4 4" /><path d="M5 20h14" /></>,
     refresh: <><path d="M19 8a7.5 7.5 0 1 0 1 7" /><path d="M19 3v5h-5" /></>,
     back: <path d="m14.5 5-7 7 7 7" />,
-    clear: <><path d="m7 7 10 10" /><path d="m17 7-10 10" /></>
+    clear: <><path d="m7 7 10 10" /><path d="m17 7-10 10" /></>,
+    pause: <><path d="M8 5v14" /><path d="M16 5v14" /></>,
+    resume: <path d="m9 6 9 6-9 6z" />,
+    cancel: <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
@@ -1187,8 +1192,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           <div className="cloud-upload-track-row">
             <div className="progress-track" role="progressbar" aria-label="上传总进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}><i style={{ width: `${progress.progress}%` }} /></div>
             {controllable && <>
-              <button type="button" className="secondary" disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload(progress.phase === 'paused' ? 'resume' : 'pause')}>{progress.phase === 'paused' ? '继续上传' : '暂停上传'}</button>
-              <button type="button" className="secondary" disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload('cancel')}>{progress.phase === 'cancelling' ? '正在取消…' : '取消上传'}</button>
+              <button type="button" className="cloud-upload-control-button" aria-label={progress.phase === 'paused' ? '继续上传' : '暂停上传'} title={progress.phase === 'paused' ? '继续上传' : '暂停上传'} disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload(progress.phase === 'paused' ? 'resume' : 'pause')}><CloudActionIcon action={progress.phase === 'paused' ? 'resume' : 'pause'} /></button>
+              <button type="button" className="cloud-upload-control-button" aria-label={progress.phase === 'cancelling' ? '正在取消…' : '取消上传'} title={progress.phase === 'cancelling' ? '正在取消上传' : '取消上传'} disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload('cancel')}><CloudActionIcon action="cancel" /></button>
             </>}
           </div>
           {uploadControlError && <p className="cloud-error" role="alert">{uploadControlError}</p>}

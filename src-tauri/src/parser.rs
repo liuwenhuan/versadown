@@ -312,14 +312,19 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
         let target_kind = validate_download_input(&target)?.kind;
         if matches!(
             target_kind,
-            CandidateKind::Torrent | CandidateKind::Thunder | CandidateKind::CloudShare | CandidateKind::QuarkShare | CandidateKind::PikPakShare
+            CandidateKind::Torrent
+                | CandidateKind::Thunder
+                | CandidateKind::CloudShare
+                | CandidateKind::QuarkShare
+                | CandidateKind::PikPakShare
         ) {
             return Err(InputValidationError::InvalidThunder);
         }
         return Ok(validated(CandidateKind::Thunder, source.to_string()));
     }
     if lower.starts_with("ftp:") {
-        return validate_network_url(source, "ftp").map(|source| validated(CandidateKind::Ftp, source));
+        return validate_network_url(source, "ftp")
+            .map(|source| validated(CandidateKind::Ftp, source));
     }
     if lower.starts_with("http:") || lower.starts_with("https:") {
         let url = Url::parse(source).map_err(|_| InputValidationError::InvalidUrl)?;
@@ -327,7 +332,8 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
             return Err(InputValidationError::InvalidUrl);
         }
         if registered_share_provider(&url).is_some() {
-            let provider = cloud_provider_for_url(&url).ok_or(InputValidationError::InvalidCloudShare)?;
+            let provider =
+                cloud_provider_for_url(&url).ok_or(InputValidationError::InvalidCloudShare)?;
             valid_share_id(&url, provider).ok_or(InputValidationError::InvalidCloudShare)?;
             let kind = match provider {
                 CloudProvider::Quark => CandidateKind::QuarkShare,
@@ -363,7 +369,9 @@ pub fn validate_task_source(kind: &str, source: &str) -> Result<(), InputValidat
         } else {
             crate::cloud::parse_stable_cloud_source(source).is_ok()
         };
-        return valid.then_some(()).ok_or(InputValidationError::InvalidCloudShare);
+        return valid
+            .then_some(())
+            .ok_or(InputValidationError::InvalidCloudShare);
     }
     let candidate = validate_download_input(source)?;
     let valid_kind = match kind {
@@ -376,7 +384,9 @@ pub fn validate_task_source(kind: &str, source: &str) -> Result<(), InputValidat
         "torrent" => candidate.kind == CandidateKind::Torrent,
         _ => false,
     };
-    valid_kind.then_some(()).ok_or(InputValidationError::Unsupported)
+    valid_kind
+        .then_some(())
+        .ok_or(InputValidationError::Unsupported)
 }
 
 fn validated(kind: CandidateKind, source: String) -> ValidatedCandidate {
@@ -398,7 +408,7 @@ fn validated(kind: CandidateKind, source: String) -> ValidatedCandidate {
 
 fn extract_raw_candidates(text: &str) -> Vec<String> {
     let pattern = Regex::new(
-        r"(?i)(ed2k:[^\s<>]+|magnet:[^\s<>]*|thunder://[^\s<>]*|ftp:[^\s<>]+|https?://[^\s<>]+|file://[^\s<>]+|[a-z]:\\[^\r\n<>]*?\.torrent)",
+        r"(?i)(ed2k:[^\s<>；]*?\|/|magnet:[^\s<>；]*|thunder://[^\s<>；]*|ftp:[^\s<>；]+|https?://[^\s<>；]+|file://[^\s<>；]+|[a-z]:\\[^\r\n<>]*?\.torrent)",
     )
     .expect("static candidate pattern");
     pattern
@@ -443,7 +453,9 @@ fn validate_magnet(source: &str) -> Result<(), InputValidationError> {
                         }))
             })
     });
-    valid.then_some(()).ok_or(InputValidationError::InvalidMagnet)
+    valid
+        .then_some(())
+        .ok_or(InputValidationError::InvalidMagnet)
 }
 
 pub(crate) fn decode_thunder_target(source: &str) -> Result<String, InputValidationError> {
@@ -607,9 +619,8 @@ mod tests {
 
     #[test]
     fn scan_keeps_invalid_candidates_in_order_without_creating_a_fallback_link() {
-        let values = scan_download_inputs(
-            "magnet:?xt=urn:btih:short https://example.test/release.iso",
-        );
+        let values =
+            scan_download_inputs("magnet:?xt=urn:btih:short https://example.test/release.iso");
 
         assert_eq!(values.len(), 2);
         assert_eq!(values[0].message.as_deref(), Some("磁链格式无效"));
@@ -652,5 +663,4 @@ mod tests {
             "https://example.test/目录/file.iso?signature=未改写"
         );
     }
-
 }

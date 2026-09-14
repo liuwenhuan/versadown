@@ -1,6 +1,6 @@
 # Third-party protocol references
 
-- [Aria2 Next 2.7.5](https://github.com/AnInsomniacy/aria2-next), GPL-2.0: bundled Windows x86_64 transfer engine for HTTP/HTTPS, BitTorrent, ED2K, and application-orchestrated HLS/MPEG-DASH segments. The pinned executable SHA-256 is `7c1f49bf9f22f15f684ce1dcc76768f04b5dc3795281aef750d1e5ad78ff1459`; corresponding source is available from the linked upstream release/tag.
+- [Aria2 Next commit 2521bb0](https://github.com/AnInsomniacy/aria2-next/commit/2521bb0cebbe2feedd096879c54a73efd818fa43), GPL-2.0: bundled Windows x86_64 transfer engine for HTTP/HTTPS, BitTorrent, ED2K, and native HLS/MPEG-DASH segments. The pinned executable SHA-256 is `ad5159a68b3132d83444d4bb8285d750f5c3579fe581fc14211426b30bd39d35`; corresponding source is available from the linked upstream commit.
 - [suppaftp 11.0.0](https://github.com/veeso/suppaftp), MIT OR Apache-2.0: linked as the in-process asynchronous FTP client, including binary transfers and REST-based resume.
 
 - Quark CloudDrive official skill (`quark-clouddrive/quarkclouddrive_offical`), Apache-2.0: request shapes and file-operation protocol reference. No upstream source is copied verbatim.

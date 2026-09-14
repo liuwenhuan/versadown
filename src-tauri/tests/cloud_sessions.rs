@@ -312,7 +312,9 @@ fn pikpak_delete_uses_the_permanent_batch_delete_endpoint() {
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "GET");
     assert!(requests[0].url.contains("/drive/v1/files?"));
-    assert!(requests[0].url.contains("%22trashed%22%3A%7B%22eq%22%3Atrue%7D"));
+    assert!(requests[0]
+        .url
+        .contains("%22trashed%22%3A%7B%22eq%22%3Atrue%7D"));
     assert!(requests[1].url.contains("/v1/shield/captcha/init"));
     let request = &requests[2];
     assert!(request.url.ends_with("/drive/v1/files:batchDelete"));
@@ -617,11 +619,17 @@ fn pikpak_web_delete_renews_each_action_without_relogging_or_changing_client() {
         r#"{"captcha_token":"delete-cap","expires_in":300}"#,
         r#"{}"#,
     ]);
-    PikPakClient::new(&http, &store).delete(&["deleted-file".into()]).unwrap();
+    PikPakClient::new(&http, &store)
+        .delete(&["deleted-file".into()])
+        .unwrap();
     let requests = &http.0.lock().unwrap().1;
     assert_eq!(requests.len(), 5);
-    for (index, action) in [(1, "GET:/drive/v1/files"), (3, "POST:/drive/v1/files:batchDelete")] {
-        let body: serde_json::Value = serde_json::from_str(requests[index].body.as_deref().unwrap()).unwrap();
+    for (index, action) in [
+        (1, "GET:/drive/v1/files"),
+        (3, "POST:/drive/v1/files:batchDelete"),
+    ] {
+        let body: serde_json::Value =
+            serde_json::from_str(requests[index].body.as_deref().unwrap()).unwrap();
         assert_eq!(body["client_id"], "YUMx5nI8ZU8Ap8pm");
         assert_eq!(body["action"], action);
         assert_eq!(body["device_id"], "0123456789abcdef0123456789abcdef");
@@ -639,7 +647,11 @@ fn pikpak_web_delete_renews_each_action_without_relogging_or_changing_client() {
     assert_eq!(requests[4].headers["Authorization"], "Bearer access");
     assert!(requests[4].headers["User-Agent"].contains("Mozilla/"));
     assert_eq!(requests[4].headers["Origin"], "https://mypikpak.com");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(requests[4].body.as_deref().unwrap()).unwrap()["ids"], serde_json::json!(["deleted-file"]));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(requests[4].body.as_deref().unwrap()).unwrap()
+            ["ids"],
+        serde_json::json!(["deleted-file"])
+    );
 }
 
 #[test]
@@ -650,38 +662,66 @@ fn pikpak_web_delete_challenge_stops_before_deletion_and_preserves_verification_
         r#"{"error_code":9}"#,
         r#"{"captcha_token":"pending-cap","expires_in":300,"url":"https://user.mypikpak.com/verify?token=private-challenge"}"#,
     ]);
-    let error = PikPakClient::new(&http, &store).delete(&["deleted-file".into()]).unwrap_err();
+    let error = PikPakClient::new(&http, &store)
+        .delete(&["deleted-file".into()])
+        .unwrap_err();
     let public = serde_json::to_value(&error).unwrap();
     assert_eq!(public["code"], "pikpak_operation_verification_required");
     assert!(public["message"].as_str().unwrap().contains("读取文件列表"));
     assert!(!public.to_string().contains("private-challenge"));
     assert!(!format!("{error:?}").contains("private-challenge"));
     assert_eq!(http.0.lock().unwrap().1.len(), 2);
-    let saved: serde_json::Value = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
     assert_eq!(saved["captcha_token"], "pending-cap");
     assert_eq!(saved["access_token"], "access");
-    assert_eq!(saved["verification_url"], "https://user.mypikpak.com/verify?token=private-challenge");
+    assert_eq!(
+        saved["verification_url"],
+        "https://user.mypikpak.com/verify?token=private-challenge"
+    );
 }
 
 #[test]
 fn pikpak_operation_verification_rejects_other_accounts_and_unsafe_destinations() {
     use alldownloader_lib::cloud::allows_pikpak_operation_verification_url;
-    for url in ["http://user.mypikpak.com/check", "https://user.mypikpak.com.evil.test/check", "https://mypikpak.com@evil.test/", "https://user.mypikpak.com:444/check", "file:///C:/secret", "https://user:secret@user.mypikpak.com/check"] {
+    for url in [
+        "http://user.mypikpak.com/check",
+        "https://user.mypikpak.com.evil.test/check",
+        "https://mypikpak.com@evil.test/",
+        "https://user.mypikpak.com:444/check",
+        "file:///C:/secret",
+        "https://user:secret@user.mypikpak.com/check",
+    ] {
         assert!(!allows_pikpak_operation_verification_url(url), "{url}");
     }
     let store = MemoryCredentialStore::default();
     store.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"0123456789abcdef0123456789abcdef","captcha_token":"cap","captcha_expires_at":9999999999,"verification_url":"https://user.mypikpak.com/check","client_id":"YUMx5nI8ZU8Ap8pm","auth_method":"web"}"#).unwrap();
     let http = Sequence::new(&[r#"{"sub":"other-owner","name":"other"}"#]);
-    assert!(matches!(PikPakClient::new(&http, &store).operation_verification_url("original-owner"), Err(QuarkError::InvalidInput(_))));
+    assert!(matches!(
+        PikPakClient::new(&http, &store).operation_verification_url("original-owner"),
+        Err(QuarkError::InvalidInput(_))
+    ));
     assert_eq!(http.0.lock().unwrap().1.len(), 1);
 }
 
 #[test]
 fn pikpak_operation_verification_uses_only_current_unexpired_official_challenge() {
     for (challenge, expiry, expected) in [
-        ("https://user.mypikpak.com/check", 9999999999_u64, "https://user.mypikpak.com/check"),
-        ("https://user.mypikpak.com/check", 1, "https://mypikpak.com/drive"),
-        ("https://evil.test/check", 9999999999, "https://mypikpak.com/drive"),
+        (
+            "https://user.mypikpak.com/check",
+            9999999999_u64,
+            "https://user.mypikpak.com/check",
+        ),
+        (
+            "https://user.mypikpak.com/check",
+            1,
+            "https://mypikpak.com/drive",
+        ),
+        (
+            "https://evil.test/check",
+            9999999999,
+            "https://mypikpak.com/drive",
+        ),
     ] {
         let store = MemoryCredentialStore::default();
         store.save("pikpak", &serde_json::to_vec(&serde_json::json!({
@@ -690,7 +730,12 @@ fn pikpak_operation_verification_uses_only_current_unexpired_official_challenge(
             "verification_url":challenge, "client_id":"YUMx5nI8ZU8Ap8pm", "auth_method":"web"
         })).unwrap()).unwrap();
         let http = Sequence::new(&[r#"{"sub":"owner","name":"owner"}"#]);
-        assert_eq!(PikPakClient::new(&http, &store).operation_verification_url("owner").unwrap(), expected);
+        assert_eq!(
+            PikPakClient::new(&http, &store)
+                .operation_verification_url("owner")
+                .unwrap(),
+            expected
+        );
     }
 }
 
@@ -703,7 +748,9 @@ fn pikpak_verified_token_is_used_on_explicit_retry_without_creating_another_chal
         r#"{"files":[{"id":"original-file","name":"old","kind":"drive#file"}],"next_page_token":""}"#,
         r#"{}"#,
     ]);
-    PikPakClient::new(&http, &store).delete(&["original-file".into()]).unwrap();
+    PikPakClient::new(&http, &store)
+        .delete(&["original-file".into()])
+        .unwrap();
     let requests = &http.0.lock().unwrap().1;
     assert_eq!(requests.len(), 3);
     assert!(requests[2].url.ends_with("/drive/v1/files:batchDelete"));
@@ -719,10 +766,14 @@ fn pikpak_delete_challenge_survives_metadata_captcha_rotation_on_explicit_retry(
         r#"{"captcha_token":"verify-delete","expires_in":300,"url":"https://user.mypikpak.com/check"}"#,
         // The next explicit retry refreshes the recycle listing action first.
         r#"{"captcha_token":"read-only-cap","expires_in":300}"#,
-        r#"{"files":[{"id":"file","name":"old","kind":"drive#file"}],"next_page_token":""}"#, r#"{}"#,
+        r#"{"files":[{"id":"file","name":"old","kind":"drive#file"}],"next_page_token":""}"#,
+        r#"{}"#,
     ]);
     let client = PikPakClient::new(&http, &store);
-    assert_eq!(serde_json::to_value(client.delete(&["file".into()]).unwrap_err()).unwrap()["code"], "pikpak_operation_verification_required");
+    assert_eq!(
+        serde_json::to_value(client.delete(&["file".into()]).unwrap_err()).unwrap()["code"],
+        "pikpak_operation_verification_required"
+    );
     client.delete(&["file".into()]).unwrap();
     let requests = &http.0.lock().unwrap().1;
     assert_eq!(requests.len(), 5);

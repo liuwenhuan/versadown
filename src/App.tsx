@@ -154,6 +154,17 @@ function hasMultipleLines(value: string): boolean {
   return /[\r\n]/.test(value);
 }
 
+function droppedTorrentPaths(paths: readonly string[]): string[] {
+  return paths.filter((path) => path.trim().toLocaleLowerCase().endsWith('.torrent'));
+}
+
+function dropPositionHitsElement(position: { toLogical(scaleFactor: number): { x: number; y: number } }, scaleFactor: number, element: HTMLElement | null): boolean {
+  if (!element) return false;
+  const point = position.toLogical(scaleFactor);
+  const bounds = element.getBoundingClientRect();
+  return point.x >= bounds.left && point.x <= bounds.right && point.y >= bounds.top && point.y <= bounds.bottom;
+}
+
 function isDownloadInput(value: string): boolean {
   return /(?:https?|ftp):\/\/|magnet:\?|ed2k:\/\/|thunder:\/\/|flashget:\/\/|cloud-share:\/\//i.test(value.trim());
 }
@@ -274,6 +285,8 @@ export function App() {
   const [privacyUnlockError, setPrivacyUnlockError] = useState<string | null>(null);
   const [privacyUnlocking, setPrivacyUnlocking] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
+  const [droppedTorrentQueue, setDroppedTorrentQueue] = useState<string[]>([]);
+  const [droppedTorrentParsing, setDroppedTorrentParsing] = useState(false);
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
   const [purgeInProgress, setPurgeInProgress] = useState(false);
@@ -318,6 +331,7 @@ export function App() {
   const privacyUnlockPassword = useRef<HTMLInputElement>(null);
   const previousPrivacyUnlocked = useRef(false);
   const tasksRef = useRef<QueueTask[]>(tasks);
+  const searchDropTarget = useRef<HTMLLabelElement>(null);
   const confirmationGeneration = useRef(0);
   const headerConfirmationGeneration = useRef(0);
   const shareConfirmationsInFlight = useRef(new Set<string>());
@@ -344,6 +358,26 @@ export function App() {
       interaction.dispose();
       if (windowInteraction.current === interaction) windowInteraction.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const currentWindow = getCurrentWindow();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let scaleFactor = window.devicePixelRatio || 1;
+    void currentWindow.scaleFactor().then((value) => { if (!disposed && Number.isFinite(value) && value > 0) scaleFactor = value; }).catch(() => undefined);
+    currentWindow.onDragDropEvent((event) => {
+      if (disposed || event.payload.type !== 'drop') return;
+      const paths = droppedTorrentPaths(event.payload.paths);
+      if (!paths.length || !dropPositionHitsElement(event.payload.position, scaleFactor, searchDropTarget.current)) return;
+      setView('downloads');
+      setDownloadTab('active');
+      setHeaderPanel(null);
+      setSearchInput('');
+      setDroppedTorrentQueue((current) => [...current, ...paths]);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   function enqueueDuplicate(next: DuplicateDownload) {
@@ -810,6 +844,18 @@ export function App() {
     return result;
   }
 
+  useEffect(() => {
+    if (droppedTorrentParsing || confirmation || !droppedTorrentQueue.length) return;
+    const path = droppedTorrentQueue[0];
+    setDroppedTorrentParsing(true);
+    void parse(path).catch((error) => {
+      setNotice({ kind: 'error', message: `${path}：${error instanceof Error ? error.message : String(error)}` });
+    }).finally(() => {
+      setDroppedTorrentQueue((current) => current[0] === path ? current.slice(1) : current.filter((candidate) => candidate !== path));
+      setDroppedTorrentParsing(false);
+    });
+  }, [confirmation, droppedTorrentParsing, droppedTorrentQueue]);
+
   async function resolveDuplicate(action: 'resume' | 'restart_missing' | 'overwrite') {
     if (!duplicate || duplicateActionInFlight.current) return;
     duplicateActionInFlight.current = true;
@@ -1244,14 +1290,14 @@ export function App() {
           <h1>万能下载</h1>
         </div>
         <div className="header-input-shell" data-window-no-drag>
-          <label className="global-search">
+          <label ref={searchDropTarget} className="global-search">
             <span aria-hidden="true">⌕</span>
             <textarea
               style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
               rows={1}
               wrap="off"
               aria-label="搜索任务或粘贴下载链接"
-              placeholder="搜索本地任务，或粘贴下载链接"
+              placeholder="此处可搜索本地任务，粘贴下载链接，拖入bt种子文件"
               value={searchInput}
               onChange={(event) => {
                 const next = event.target.value;

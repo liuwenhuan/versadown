@@ -9,6 +9,32 @@ interface LocalUploadPickerProps {
   onCancel(): void;
 }
 
+type UploadSortColumn = 'name' | 'size' | 'modifiedAt';
+type UploadSort = { column: UploadSortColumn; direction: 'ascending' | 'descending' };
+
+const uploadNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function compareOptionalNumber(left: number | null | undefined, right: number | null | undefined): number {
+  const leftMissing = left == null || !Number.isFinite(left);
+  const rightMissing = right == null || !Number.isFinite(right);
+  if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+  return leftMissing ? 0 : left! - right!;
+}
+
+function sortUploadEntries(entries: readonly LocalUploadEntry[], sort: UploadSort | null): LocalUploadEntry[] {
+  if (!sort) return [...entries];
+  return entries.map((entry, index) => ({ entry, index })).sort((left, right) => {
+    if (left.entry.kind !== right.entry.kind) return left.entry.kind === 'directory' ? -1 : 1;
+    let compared = sort.column === 'name'
+      ? uploadNameCollator.compare(left.entry.name, right.entry.name)
+      : compareOptionalNumber(left.entry[sort.column], right.entry[sort.column]);
+    if (compared && sort.column !== 'name'
+      && (left.entry[sort.column] == null || right.entry[sort.column] == null)) return compared;
+    if (sort.direction === 'descending') compared *= -1;
+    return compared || uploadNameCollator.compare(left.entry.name, right.entry.name) || left.index - right.index;
+  }).map(({ entry }) => entry);
+}
+
 function EntryIcon({ directory }: { directory: boolean }) {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     {directory ? <path d="M3 7V5a2 2 0 0 1 2-2h5l3 3h6a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Zm0 2h18" /> : <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6" />}
@@ -23,6 +49,7 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [visibleCount, setVisibleCount] = useState(200);
+  const [sort, setSort] = useState<UploadSort | null>(null);
   const request = useRef(0);
   const submitted = useRef(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -32,7 +59,7 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
   const allRef = useRef<HTMLInputElement>(null);
   const selectionKeys = useMemo(() => new Set(selected.map(item => uploadPathKey(item.path))), [selected]);
   const normalized = useMemo(() => normalizeUploadSelection(selected), [selected]);
-  const entries = listing?.entries ?? [];
+  const entries = useMemo(() => sortUploadEntries(listing?.entries ?? [], sort), [listing?.entries, sort]);
   const selectedHere = entries.filter(item => selectionKeys.has(uploadPathKey(item.path))).length;
 
   const load = useCallback(async (path?: string) => {
@@ -82,6 +109,21 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
     setEditingPath(true);
   }
 
+  function changeSort(column: UploadSortColumn) {
+    setSort(current => current?.column === column
+      ? { column, direction: current.direction === 'ascending' ? 'descending' : 'ascending' }
+      : { column, direction: 'ascending' });
+  }
+
+  function sortHeader(column: UploadSortColumn, label: string) {
+    const direction = sort?.column === column ? sort.direction : 'none';
+    return <span role="columnheader" aria-sort={direction}>
+      <button type="button" className="local-upload-sort-button" aria-label={`按${label}排序`} onClick={() => changeSort(column)}>
+        {label}<span aria-hidden="true">{direction === 'none' ? '↕' : direction === 'ascending' ? '↑' : '↓'}</span>
+      </button>
+    </span>;
+  }
+
   return createPortal(<dialog ref={dialogRef} className="local-upload-picker" aria-label="选择上传内容" onCancel={event => { event.preventDefault(); onCancel(); }} onKeyDown={event => {
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); onCancel(); }
@@ -109,7 +151,7 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
           <div className="local-upload-select-all"><input ref={allRef} type="checkbox" aria-label="全选当前目录" disabled={!entries.length} checked={entries.length > 0 && selectedHere === entries.length} onChange={event => {
             const keys = new Set(entries.map(item => uploadPathKey(item.path)));
             setSelected(current => event.target.checked ? [...current, ...entries.filter(item => !selectionKeys.has(uploadPathKey(item.path)))] : current.filter(item => !keys.has(uploadPathKey(item.path))));
-          }} /><span>名称</span><span>大小</span><span>修改时间</span></div>
+          }} />{sortHeader('name', '名称')}{sortHeader('size', '大小')}{sortHeader('modifiedAt', '修改时间')}</div>
           <div className="local-upload-file-list">
             {listing?.parentPath && <div className="local-upload-entry local-upload-parent"><span /><button type="button" className="local-upload-entry-name" title="返回上级目录" onClick={() => { void load(listing.parentPath!); }}><EntryIcon directory /><span>..</span></button><span /><span /></div>}
             {entries.length === 0 && <p className="local-upload-empty">此目录为空</p>}

@@ -1114,8 +1114,15 @@ fn cleanup_pending_is_scoped_to_the_exact_source_and_linked_task() {
         .cleanup_pending_for_task(&other_source, linked_task)
         .unwrap());
 
-    let queries = vec![(source.clone(), linked_task), (source.clone(), unrelated_task), (other_source.clone(), linked_task)];
-    assert_eq!(store.cleanup_pending_for_tasks(&queries).unwrap(), vec![true, false, false]);
+    let queries = vec![
+        (source.clone(), linked_task),
+        (source.clone(), unrelated_task),
+        (other_source.clone(), linked_task),
+    ];
+    assert_eq!(
+        store.cleanup_pending_for_tasks(&queries).unwrap(),
+        vec![true, false, false]
+    );
 
     store.finish_cleanup(&source, &ids, false).unwrap();
     assert!(store
@@ -1128,14 +1135,19 @@ fn cleanup_pending_is_scoped_to_the_exact_source_and_linked_task() {
     assert!(!store
         .cleanup_pending_for_task(&source, linked_task)
         .unwrap());
-    assert_eq!(store.cleanup_pending_for_tasks(&queries).unwrap(), vec![false, false, false]);
+    assert_eq!(
+        store.cleanup_pending_for_tasks(&queries).unwrap(),
+        vec![false, false, false]
+    );
 }
 
 #[test]
 fn cleanup_pending_batch_rejects_invalid_sources_and_missing_plans() {
     let (store, _, _) = memory_store();
     let id = uuid::Uuid::new_v4();
-    assert!(store.cleanup_pending_for_tasks(&[("not-a-share-source".into(), id)]).is_err());
+    assert!(store
+        .cleanup_pending_for_tasks(&[("not-a-share-source".into(), id)])
+        .is_err());
     let source = fixture("missing-batch-plan").source_for("f1");
     assert!(store.cleanup_pending_for_tasks(&[(source, id)]).is_err());
 }

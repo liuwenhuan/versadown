@@ -37,7 +37,8 @@ pub fn is_manually_disconnected(
     let Some(bytes) = store.load(&format!("cloud-auth-maintenance-{}", provider.key()))? else {
         return Ok(false);
     };
-    let record: AuthMaintenanceRecord = serde_json::from_slice(&bytes).map_err(|_| CloudError::Storage)?;
+    let record: AuthMaintenanceRecord =
+        serde_json::from_slice(&bytes).map_err(|_| CloudError::Storage)?;
     if record.schema_version != 1 || record.provider != provider {
         return Err(CloudError::Storage);
     }

@@ -799,9 +799,7 @@ impl FtpDownloadEngine {
         }));
         let mut pending_segments: VecDeque<_> = segments
             .into_iter()
-            .filter(|segment| {
-                segment.completed_length < segment.end_offset - segment.start_offset
-            })
+            .filter(|segment| segment.completed_length < segment.end_offset - segment.start_offset)
             .collect();
         let mut max_parallel_connections = connections.max(1) as usize;
         let mut workers = FuturesUnordered::new();
@@ -846,8 +844,7 @@ impl FtpDownloadEngine {
                         return Err(error);
                     }
                     *retries += 1;
-                    max_parallel_connections =
-                        max_parallel_connections.min(workers.len().max(1));
+                    max_parallel_connections = max_parallel_connections.min(workers.len().max(1));
                     let retry_segment = self
                         .store
                         .ftp_segments(task_id)?

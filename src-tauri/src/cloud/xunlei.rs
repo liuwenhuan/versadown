@@ -182,7 +182,10 @@ mod tests {
         let resolved = adapter.resolve_with_context(&selected()).unwrap();
 
         assert!(matches!(resolved.result, Ok(ShareResolution::Direct(_))));
-        assert_eq!(resolved.updated_context.unwrap()["pass_code_token"], "fresh-pass");
+        assert_eq!(
+            resolved.updated_context.unwrap()["pass_code_token"],
+            "fresh-pass"
+        );
         assert_eq!(http.requests.lock().unwrap().len(), 4);
     }
     #[test]

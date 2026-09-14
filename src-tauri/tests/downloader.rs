@@ -220,7 +220,11 @@ async fn legacy_invalid_magnet_never_reaches_aria2() {
         .unwrap();
 
     let error = service
-        .prepare_magnet_with_options(task.id, task.source.clone(), UriSubmissionOptions::default())
+        .prepare_magnet_with_options(
+            task.id,
+            task.source.clone(),
+            UriSubmissionOptions::default(),
+        )
         .await
         .unwrap_err();
 
@@ -244,7 +248,11 @@ async fn legacy_invalid_direct_source_never_reaches_aria2() {
         .unwrap();
 
     let error = service
-        .submit_uri_with_options(task.id, vec![task.source.clone()], UriSubmissionOptions::default())
+        .submit_uri_with_options(
+            task.id,
+            vec![task.source.clone()],
+            UriSubmissionOptions::default(),
+        )
         .await
         .unwrap_err();
 
@@ -268,7 +276,11 @@ async fn legacy_cloud_share_page_never_reaches_aria2_as_a_direct_file() {
         .unwrap();
 
     let error = service
-        .submit_uri_with_options(task.id, vec![task.source.clone()], UriSubmissionOptions::default())
+        .submit_uri_with_options(
+            task.id,
+            vec![task.source.clone()],
+            UriSubmissionOptions::default(),
+        )
         .await
         .unwrap_err();
 
@@ -631,9 +643,14 @@ async fn cloud_share_manual_retry_can_restart_an_explicitly_cancelled_snapshot()
 #[tokio::test]
 async fn cloud_submission_forwards_transient_options_without_persisting_them() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = prepare_download("cloud://quark/file-1", &store)
-        .unwrap()
-        .task;
+    let task = store
+        .create(NewTask {
+            source: "cloud://quark/file-1".into(),
+            name: "file-1".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store.clone());
 
@@ -781,7 +798,11 @@ async fn failed_pause_does_not_optimistically_change_the_store() {
 #[test]
 fn magnet_waits_for_file_confirmation() {
     let store = TaskStore::open_in_memory().unwrap();
-    let outcome = prepare_download("magnet:?xt=urn:btih:abc", &store).unwrap();
+    let outcome = prepare_download(
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+        &store,
+    )
+    .unwrap();
     assert!(outcome.requires_confirmation);
     assert_eq!(outcome.task.status, TaskStatus::AwaitingUser);
 }

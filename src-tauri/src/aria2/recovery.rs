@@ -61,8 +61,7 @@ pub(super) fn recovery_file_name<'a>(paths: impl Iterator<Item = &'a str>) -> Op
             return Some(parts[common - 1].to_owned());
         }
     }
-    (!filename.ends_with(':') && filename != "." && filename != "..")
-        .then(|| filename.to_owned())
+    (!filename.ends_with(':') && filename != "." && filename != "..").then(|| filename.to_owned())
 }
 
 #[derive(Default, Debug, Serialize)]

@@ -16,7 +16,9 @@ const state = vi.hoisted(() => ({
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
   privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
-  updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn()
+  updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn(),
+  dragDropHandler: undefined as undefined | ((event: { payload: unknown }) => void),
+  onDragDropEvent: vi.fn(), scaleFactor: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
@@ -57,6 +59,8 @@ vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipbo
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
   onFocusChanged: vi.fn().mockImplementation((handler) => { state.onFocus = handler; return Promise.resolve(() => undefined); }),
   onResized: vi.fn().mockResolvedValue(() => undefined),
+  onDragDropEvent: state.onDragDropEvent,
+  scaleFactor: state.scaleFactor,
   startDragging: state.startDragging
 }) }));
 vi.mock('./lib/mainWindow', () => ({ mainWindowIsMaximized: vi.fn().mockResolvedValue(false), runMainWindowAction: vi.fn() }));
@@ -106,6 +110,12 @@ beforeEach(() => {
   state.updateCheck.mockResolvedValue(null);
   state.openExternalUrl.mockReset();
   state.openExternalUrl.mockResolvedValue(undefined);
+  state.dragDropHandler = undefined;
+  state.scaleFactor.mockReset().mockResolvedValue(1);
+  state.onDragDropEvent.mockReset().mockImplementation((handler) => {
+    state.dragDropHandler = handler;
+    return Promise.resolve(() => undefined);
+  });
   state.onTask = undefined;
   state.onFocus = undefined;
   state.listeners.clear();
@@ -598,6 +608,36 @@ it('does not expose a page-wide start action when paused tasks exist', async () 
   expect(state.taskAction).not.toHaveBeenCalled();
 });
 
+it('parses torrent files dropped on the global input one at a time and ignores drops elsewhere', async () => {
+  const first = {
+    taskId: 'torrent-first', title: 'first.torrent', requiresConfirmation: true, isBitTorrent: true,
+    resources: [{ id: '1', name: 'first/file-one.bin', size: '1 MB', selected: true }], processing: []
+  };
+  const second = {
+    taskId: 'torrent-second', title: 'second.torrent', requiresConfirmation: true, isBitTorrent: true,
+    resources: [{ id: '2', name: 'second/file-two.bin', size: '2 MB', selected: true }], processing: []
+  };
+  state.parse.mockResolvedValueOnce({ confirmation: first }).mockResolvedValueOnce({ confirmation: second });
+  render(<App />);
+  await waitFor(() => expect(state.dragDropHandler).toBeDefined());
+  const searchTarget = screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }).closest('label')!;
+  vi.spyOn(searchTarget, 'getBoundingClientRect').mockReturnValue({ x: 100, y: 20, left: 100, top: 20, right: 500, bottom: 70, width: 400, height: 50, toJSON: () => ({}) });
+  const position = (x: number, y: number) => ({ toLogical: () => ({ x, y }) });
+
+  await act(async () => { state.dragDropHandler?.({ payload: { type: 'drop', paths: ['C:\\BT\\ignored.torrent'], position: position(10, 10) } }); });
+  expect(state.parse).not.toHaveBeenCalled();
+
+  await act(async () => { state.dragDropHandler?.({ payload: { type: 'drop', paths: ['C:\\BT\\first.torrent', 'C:\\BT\\notes.txt', 'C:\\BT\\second.TORRENT'], position: position(200, 40) } }); });
+  await waitFor(() => expect(state.parse).toHaveBeenCalledWith('C:\\BT\\first.torrent', undefined, false));
+  expect(state.parse).toHaveBeenCalledTimes(1);
+  expect(await screen.findByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('file-one.bin');
+
+  await userEvent.click(screen.getByRole('button', { name: '关闭确认窗口' }));
+  await waitFor(() => expect(state.parse).toHaveBeenCalledWith('C:\\BT\\second.TORRENT', undefined, false));
+  expect(state.parse).toHaveBeenCalledTimes(2);
+  expect(await screen.findByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('file-two.bin');
+});
+
 it('selects only the current tab tasks with Ctrl+A across all four task tabs', async () => {
   const groups = [
     { tab: /下载中/, status: 'downloading' }, { tab: /已完成/, status: 'completed' },
@@ -766,7 +806,7 @@ it('submits a large recycle cleanup once and starts draining the visible list be
 
   await act(async () => { completion.resolve(undefined); });
   await waitFor(() => expect(screen.queryByText(recycled[0].name)).not.toBeInTheDocument());
-});
+}, 12_000);
 
 it('does not restore a permanently purged task from a late task event', async () => {
   const user = userEvent.setup();

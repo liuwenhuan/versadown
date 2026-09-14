@@ -92,7 +92,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             "root",
             OfficialWebView,
             true,
-            false,
+            true,
             "https://www.alipan.com/s/example",
         ),
         (
@@ -260,8 +260,12 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
         assert_eq!(session.unwrap(), b"new-session");
         logout_provider(provider, &store).unwrap();
         assert!(store.load(key).unwrap().is_none());
-        assert_eq!(saved_cloud_credential_info(&store, provider)
-            .unwrap().is_some(), direct);
+        assert_eq!(
+            saved_cloud_credential_info(&store, provider)
+                .unwrap()
+                .is_some(),
+            direct
+        );
     }
     assert_eq!(catalog.len(), 7);
 }
@@ -285,7 +289,7 @@ fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before
         (CloudProvider::Pikpak, false),
         (CloudProvider::Baidu, true),
         (CloudProvider::Tianyi, false),
-        (CloudProvider::Aliyun, false),
+        (CloudProvider::Aliyun, true),
         (CloudProvider::Xunlei, true),
         (CloudProvider::Uc, true),
     ] {
@@ -755,7 +759,7 @@ fn registry_only_advertises_implemented_share_transfer_capabilities() {
         (CloudProvider::Xunlei, true),
         (CloudProvider::Pikpak, false),
         (CloudProvider::Tianyi, false),
-        (CloudProvider::Aliyun, false),
+        (CloudProvider::Aliyun, true),
     ] {
         let capabilities = &ProviderRegistry::global().get(provider).capabilities;
         assert!(capabilities.share_inspect);
@@ -922,8 +926,13 @@ fn logout_keeps_the_password_for_explicit_login() {
     logout_provider(CloudProvider::Baidu, &store).unwrap();
 
     assert!(store.load("baidu").unwrap().is_none());
-    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap().unwrap().username(), "user");
+    assert_eq!(
+        load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .unwrap()
+            .username(),
+        "user"
+    );
 }
 
 #[test]
@@ -944,8 +953,13 @@ fn failed_logout_never_deletes_the_saved_password() {
     assert!(!store
         .removals()
         .contains(&"cloud-password-baidu".to_owned()));
-    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap().unwrap().username(), "user");
+    assert_eq!(
+        load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .unwrap()
+            .username(),
+        "user"
+    );
 }
 
 #[test]

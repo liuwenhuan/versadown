@@ -24,11 +24,14 @@ async fn authorization_recovery_discovers_only_durable_matching_account_failures
         (5, "not_authorized", CloudProvider::Uc, "alice"),
         (6, "not_authorized", CloudProvider::Quark, ""),
     ] {
+        let source = format!("cloud://{}/{index}", provider.key());
         let task = store
-            .create(NewTask::direct(format!(
-                "cloud://{}/{index}",
-                provider.key()
-            )))
+            .create(NewTask {
+                source,
+                name: format!("cloud-file-{index}"),
+                kind: "cloud".into(),
+                is_private: false,
+            })
             .unwrap();
         if !owner.is_empty() {
             store
@@ -66,7 +69,13 @@ async fn authorization_recovery_discovers_only_durable_matching_account_failures
                 Default::default(),
             )
             .await
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!(
+                    "task {} attempt {attempt} failed after {} engine submissions: {error:?}",
+                    task.id,
+                    engine.0.load(Ordering::SeqCst)
+                )
+            });
             assert_eq!(submitted.is_some(), attempt == 0);
         }
     }
@@ -403,8 +412,13 @@ fn replacement_removes_old_session_even_when_password_persistence_fails() {
     )
     .is_err());
     assert!(store.load("baidu").unwrap().is_none());
-    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap().unwrap().username(), "alice");
+    assert_eq!(
+        load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .unwrap()
+            .username(),
+        "alice"
+    );
 }
 
 #[test]
@@ -423,8 +437,13 @@ fn password_replacement_isolates_the_old_session_but_keeps_validated_login() {
     set_baidu_browser_profile_username(&store, Some("alice")).unwrap();
     assert!(prepare_password_account_login(&store, CloudProvider::Baidu, "bob").unwrap());
     assert!(store.load("baidu").unwrap().is_none());
-    assert_eq!(load_password_credential(&store, CloudProvider::Baidu)
-        .unwrap().unwrap().username(), "alice");
+    assert_eq!(
+        load_password_credential(&store, CloudProvider::Baidu)
+            .unwrap()
+            .unwrap()
+            .username(),
+        "alice"
+    );
     assert!(baidu_browser_profile_username(&store).unwrap().is_none());
     save_password_login_draft(&store, CloudProvider::Baidu, "bob", "secret-b").unwrap();
     assert_eq!(
@@ -481,8 +500,13 @@ fn replacing_pikpak_keeps_credentials_without_requesting_an_unsupported_browser_
         prepare_password_account_login(&store, CloudProvider::Pikpak, "bob").unwrap();
     assert!(!reset_password_profile);
     assert!(store.load("pikpak").unwrap().is_none());
-    assert_eq!(load_password_credential(&store, CloudProvider::Pikpak)
-        .unwrap().unwrap().username(), "alice");
+    assert_eq!(
+        load_password_credential(&store, CloudProvider::Pikpak)
+            .unwrap()
+            .unwrap()
+            .username(),
+        "alice"
+    );
 }
 
 #[derive(Default)]

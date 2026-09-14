@@ -23,21 +23,32 @@ fn cloud_share_classification_requires_a_registered_host_and_path() {
 }
 
 #[test]
-fn preserves_legacy_quark_and_pikpak_candidate_links_without_trusting_substrings() {
-    for value in ["https://pan.quark.cn", "https://quark.cn/s/legacy"] {
+fn accepts_registered_quark_and_pikpak_links_without_trusting_aliases_or_substrings() {
+    for value in ["https://pan.quark.cn/s/legacy"] {
         assert_eq!(
             classify_input(value).kind,
             CandidateKind::QuarkShare,
             "{value}"
         );
     }
-    for value in ["https://mypikpak.com", "https://pikpak.me/legacy"] {
+    for value in [
+        "https://mypikpak.com/s/legacy",
+        "https://www.mypikpak.com/s/legacy",
+    ] {
         assert_eq!(
             classify_input(value).kind,
             CandidateKind::PikPakShare,
             "{value}"
         );
     }
+    assert_eq!(
+        classify_input("https://quark.cn/s/legacy").kind,
+        CandidateKind::Direct
+    );
+    assert_eq!(
+        classify_input("https://pikpak.me/s/legacy").kind,
+        CandidateKind::Direct
+    );
     assert_eq!(
         classify_input("https://pikpak.me.evil.test/legacy").kind,
         CandidateKind::Direct
@@ -47,7 +58,7 @@ fn preserves_legacy_quark_and_pikpak_candidate_links_without_trusting_substrings
 #[test]
 fn recognizes_direct_http_magnet_and_thunder() {
     assert_eq!(
-        classify_input("magnet:?xt=urn:btih:abc").kind,
+        classify_input("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567").kind,
         CandidateKind::Magnet
     );
     assert!(classify_input("https://example.com/a.zip").auto_start);
@@ -114,7 +125,9 @@ fn recognizes_torrent_urls_with_query_and_fragment() {
 
 #[test]
 fn extracts_multiple_links_from_descriptive_text() {
-    let candidates = extract_candidates("地址 https://a.test/a.zip 以及 magnet:?xt=urn:btih:abc");
+    let candidates = extract_candidates(
+        "地址 https://a.test/a.zip 以及 magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    );
     assert_eq!(candidates.len(), 2);
 }
 

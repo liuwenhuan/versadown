@@ -90,7 +90,9 @@ fn version_ten_database_adds_discovered_nodes_when_the_column_is_missing() {
 
     let store = TaskStore::open_path(&path).expect("repair version ten database");
     let task = store
-        .create(alldownloader_lib::NewTask::direct("https://example.test/current.zip"))
+        .create(alldownloader_lib::NewTask::direct(
+            "https://example.test/current.zip",
+        ))
         .expect("create task after migration");
     assert_eq!(store.find(task.id).unwrap().discovered_nodes, 0);
 

@@ -514,10 +514,14 @@ fn cloud_authorization_window_repositions_each_loaded_page_to_the_top_right() {
     // All providers go through the same external WebView builder.  The
     // post-navigation hook must reset the document to its top-right login
     // area even when a provider performs an intermediate redirect.
-    let source = concat!(include_str!("auth.rs"), include_str!("browser.rs"))
+    let auth_source = include_str!("auth.rs")
         .split("#[cfg(test)]")
         .next()
-        .expect("production source precedes its tests");
+        .expect("authorization production source precedes its tests");
+    // This module has test-only helpers interleaved with production code, so
+    // truncating at its first cfg(test) would omit the viewport script below.
+    let browser_source = include_str!("browser.rs");
+    let source = format!("{auth_source}\n{browser_source}");
     assert!(source.contains("AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS"));
     assert!(source.contains(".on_page_load(move |window, payload|"));
     assert!(source.contains("PageLoadEvent::Finished"));
@@ -558,10 +562,14 @@ fn baidu_authorization_auto_opens_login_without_breaking_changed_pages() {
     // Baidu currently exposes its login dialog behind a landing-page
     // button.  The WebView hook should attempt that exact button only,
     // then quietly give up when the provider changes its page.
-    let source = concat!(include_str!("auth.rs"), include_str!("browser.rs"))
+    let auth_source = include_str!("auth.rs")
         .split("#[cfg(test)]")
         .next()
-        .expect("production source precedes its tests");
+        .expect("authorization production source precedes its tests");
+    // This module has test-only helpers interleaved with production code, so
+    // truncating at its first cfg(test) would omit the viewport script below.
+    let browser_source = include_str!("browser.rs");
+    let source = format!("{auth_source}\n{browser_source}");
     let script = BAIDU_AUTO_OPEN_LOGIN_JS;
     assert!(source.contains("BAIDU_AUTO_OPEN_LOGIN_JS"));
     assert!(script.contains("\"去登录\""));

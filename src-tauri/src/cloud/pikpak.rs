@@ -183,7 +183,10 @@ mod tests {
         let resolved = adapter.resolve_with_context(&entry(plan)).unwrap();
 
         assert!(matches!(resolved.result, Ok(ShareResolution::Direct(_))));
-        assert_eq!(resolved.updated_context.unwrap()["pass_code_token"], "pass-secret");
+        assert_eq!(
+            resolved.updated_context.unwrap()["pass_code_token"],
+            "pass-secret"
+        );
         assert_eq!(http.requests.lock().unwrap().len(), 3);
     }
     #[test]
@@ -293,16 +296,32 @@ mod tests {
             pass(),
             json!({"share_status":"OK","file_info":{"id":"f1"}}),
         ]);
-        let adapter = PikPakShareAdapter { credentials: &store, http: &http };
-        let file_url = format!("{SHARE_DRIVE}/drive/v1/share/file_info?share_id=fixture&file_id=f1");
-        assert!(matches!(adapter.session().unwrap().request("GET", file_url.clone(), None),
-            Err(QuarkError::PikpakOperationVerificationRequired(_))));
-        let mut saved: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
-        saved.operation_verifications.insert("POST:/drive/v1/files:batchDelete".into(), PikPakActionVerification {
-            token: "other-action".into(), expires_at: u64::MAX,
-            url: Some("https://captcha.mypikpak.com/other".into()),
-        });
-        store.save("pikpak", &serde_json::to_vec(&saved).unwrap()).unwrap();
+        let adapter = PikPakShareAdapter {
+            credentials: &store,
+            http: &http,
+        };
+        let file_url =
+            format!("{SHARE_DRIVE}/drive/v1/share/file_info?share_id=fixture&file_id=f1");
+        assert!(matches!(
+            adapter
+                .session()
+                .unwrap()
+                .request("GET", file_url.clone(), None),
+            Err(QuarkError::PikpakOperationVerificationRequired(_))
+        ));
+        let mut saved: PikPakSession =
+            serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+        saved.operation_verifications.insert(
+            "POST:/drive/v1/files:batchDelete".into(),
+            PikPakActionVerification {
+                token: "other-action".into(),
+                expires_at: u64::MAX,
+                url: Some("https://captcha.mypikpak.com/other".into()),
+            },
+        );
+        store
+            .save("pikpak", &serde_json::to_vec(&saved).unwrap())
+            .unwrap();
 
         // Explicit retry starts a fresh adapter session, then renews the pass ticket.
         let mut retry = adapter.session().unwrap();
@@ -312,10 +331,18 @@ mod tests {
         assert_eq!(requests.len(), 6);
         assert_eq!(requests[4].headers["X-Captcha-Token"], "pass-captcha");
         assert_eq!(requests[5].headers["X-Captcha-Token"], "verified-file");
-        let saved: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
-        assert!(!saved.operation_verifications.contains_key("GET:/drive/v1/share/file_info"));
-        assert!(saved.operation_verifications.contains_key("POST:/drive/v1/files:batchDelete"));
-        assert_eq!(saved.verification_url.as_deref(), Some("https://captcha.mypikpak.com/other"));
+        let saved: PikPakSession =
+            serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+        assert!(!saved
+            .operation_verifications
+            .contains_key("GET:/drive/v1/share/file_info"));
+        assert!(saved
+            .operation_verifications
+            .contains_key("POST:/drive/v1/files:batchDelete"));
+        assert_eq!(
+            saved.verification_url.as_deref(),
+            Some("https://captcha.mypikpak.com/other")
+        );
     }
     #[test]
     fn pikpak_share_preserves_not_found_and_deleted_failures_for_the_parse_ui() {
@@ -824,8 +851,8 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         // endpoint. Recycle operations validate each item with GET and then
         // mutate it with POST; reusing the GET ticket for batchDelete is
         // rejected as `code 3 / invalid_argument` instead of captcha_required.
-        has_action_token |= s.captcha_action.as_deref() == Some(action.as_str())
-            && s.captcha_expires_at > now();
+        has_action_token |=
+            s.captcha_action.as_deref() == Some(action.as_str()) && s.captcha_expires_at > now();
         let requires_explicit_action_token = matches!(
             action.as_str(),
             "POST:/drive/v1/files:batchDelete" | "POST:/drive/v1/files:batchUntrash"
@@ -1388,7 +1415,10 @@ impl PikPakShareSession<'_> {
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
         let action = pikpak_captcha_action(method, &url)?;
-        let token = self.session.operation_verifications.get(&action)
+        let token = self
+            .session
+            .operation_verifications
+            .get(&action)
             .filter(|verification| verification.expires_at > now())
             .map(|verification| verification.token.clone())
             .unwrap_or_else(|| self.session.captcha_token.clone());
@@ -1400,12 +1430,23 @@ impl PikPakShareSession<'_> {
             }
             result => result,
         };
-        if result.is_ok() && self.session.operation_verifications.remove(&action).is_some() {
-            self.session.verification_url = self.session.operation_verifications.values()
+        if result.is_ok()
+            && self
+                .session
+                .operation_verifications
+                .remove(&action)
+                .is_some()
+        {
+            self.session.verification_url = self
+                .session
+                .operation_verifications
+                .values()
                 .filter(|verification| verification.expires_at > now())
                 .find_map(|verification| verification.url.clone());
-            self.credentials.save("pikpak", &serde_json::to_vec(&self.session)
-                .map_err(|_| QuarkError::Storage)?)?;
+            self.credentials.save(
+                "pikpak",
+                &serde_json::to_vec(&self.session).map_err(|_| QuarkError::Storage)?,
+            )?;
         }
         result
     }

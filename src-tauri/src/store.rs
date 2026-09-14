@@ -1247,14 +1247,21 @@ impl TaskStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn replace_ftp_segments(&self, id: Uuid, segments: &[FtpSegment]) -> Result<(), StoreError> {
+    pub fn replace_ftp_segments(
+        &self,
+        id: Uuid,
+        segments: &[FtpSegment],
+    ) -> Result<(), StoreError> {
         validate_ftp_segments(segments)?;
         let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.transaction()?;
         if find_with_transaction(&transaction, id)?.is_none() {
             return Err(StoreError::NotFound(id));
         }
-        transaction.execute("DELETE FROM ftp_segments WHERE task_id = ?1", [id.to_string()])?;
+        transaction.execute(
+            "DELETE FROM ftp_segments WHERE task_id = ?1",
+            [id.to_string()],
+        )?;
         for segment in segments {
             transaction.execute(
                 "INSERT INTO ftp_segments (task_id, segment_index, start_offset, end_offset, completed_length)
@@ -1330,7 +1337,10 @@ impl TaskStore {
 
     pub fn clear_ftp_segments(&self, id: Uuid) -> Result<(), StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        connection.execute("DELETE FROM ftp_segments WHERE task_id = ?1", [id.to_string()])?;
+        connection.execute(
+            "DELETE FROM ftp_segments WHERE task_id = ?1",
+            [id.to_string()],
+        )?;
         Ok(())
     }
 }

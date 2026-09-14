@@ -115,9 +115,9 @@ async fn reconcile_retains_observed_peers_across_paused_and_queued_same_gid() {
 async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
     let retried = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let retry_state = retried.clone();
-    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
-        "system.multicall" => json!([[
-            fixture::status(
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "system.multicall" => json!([[fixture::status(
                 if retry_state.load(std::sync::atomic::Ordering::SeqCst) {
                     "new-gid"
                 } else {
@@ -125,31 +125,30 @@ async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
                 },
                 "active",
                 0,
-            )
-        ]]),
-        "aria2.getPeers" => {
-            if retry_state.load(std::sync::atomic::Ordering::SeqCst) {
-                json!([{"ip":"2001:db8::7","port":"51414"}])
-            } else {
-                json!([
-                    {"ip":"203.0.113.10","port":"51413"},
-                    {"ip":"203.0.113.11","port":"51413"}
-                ])
+            )]]),
+            "aria2.getPeers" => {
+                if retry_state.load(std::sync::atomic::Ordering::SeqCst) {
+                    json!([{"ip":"2001:db8::7","port":"51414"}])
+                } else {
+                    json!([
+                        {"ip":"203.0.113.10","port":"51413"},
+                        {"ip":"203.0.113.11","port":"51413"}
+                    ])
+                }
             }
-        }
-        "aria2.remove" => json!("old-gid"),
-        "aria2.addUri" => {
-            retry_state.store(true, std::sync::atomic::Ordering::SeqCst);
-            json!("new-gid")
-        }
-        "aria2.tellStatus" => fixture::status("new-gid", "active", 0),
-        "aria2.getGlobalStat" => json!({
-            "downloadSpeed":"10", "uploadSpeed":"0", "numActive":"1",
-            "numWaiting":"0", "numStopped":"0", "numStoppedTotal":"0"
-        }),
-        other => panic!("unexpected method {other}"),
-    })
-    .await;
+            "aria2.remove" => json!("old-gid"),
+            "aria2.addUri" => {
+                retry_state.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("new-gid")
+            }
+            "aria2.tellStatus" => fixture::status("new-gid", "active", 0),
+            "aria2.getGlobalStat" => json!({
+                "downloadSpeed":"10", "uploadSpeed":"0", "numActive":"1",
+                "numWaiting":"0", "numStopped":"0", "numStoppedTotal":"0"
+            }),
+            other => panic!("unexpected method {other}"),
+        })
+        .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
         .create(NewTask {
@@ -393,9 +392,7 @@ async fn selected_torrent_uses_the_chosen_destination_before_unpausing() {
         other => panic!("unexpected method {other}"),
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store
-        .create(magnet_task())
-        .unwrap();
+    let task = store.create(magnet_task()).unwrap();
     store.bind_gid(task.id, "torrent-gid").unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     store
@@ -773,9 +770,7 @@ async fn metadata_child_is_persisted_and_selection_precedes_unpause() {
         }
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store
-        .create(magnet_task())
-        .unwrap();
+    let task = store.create(magnet_task()).unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
     let metadata = service.prepare_magnet(task.id, task.source).await.unwrap();
@@ -813,9 +808,7 @@ async fn rejected_selection_does_not_unpause_or_change_persisted_files() {
     })
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store
-        .create(magnet_task())
-        .unwrap();
+    let task = store.create(magnet_task()).unwrap();
     store.bind_gid(task.id, "bt").unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     store
@@ -855,9 +848,7 @@ async fn metadata_wait_hides_metadata_file_and_returns_real_child_files_before_d
         other => panic!("{other}"),
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store
-        .create(magnet_task())
-        .unwrap();
+    let task = store.create(magnet_task()).unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
     service.prepare_magnet(task.id, task.source).await.unwrap();
@@ -883,9 +874,7 @@ async fn metadata_timeout_leaves_pending_task_available_for_later_sync() {
     })
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store
-        .create(magnet_task())
-        .unwrap();
+    let task = store.create(magnet_task()).unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
     service.prepare_magnet(task.id, task.source).await.unwrap();
@@ -919,9 +908,7 @@ async fn successful_confirmation_survives_status_failure_and_service_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("tasks.sqlite");
     let store = Arc::new(TaskStore::open_path(&database).unwrap());
-    let task = store
-        .create(magnet_task())
-        .unwrap();
+    let task = store.create(magnet_task()).unwrap();
     store.bind_gid(task.id, "child").unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     store
@@ -964,9 +951,7 @@ async fn prepare_magnet_persists_pending_state_before_first_status_read_and_retr
     })
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store
-        .create(magnet_task())
-        .unwrap();
+    let task = store.create(magnet_task()).unwrap();
     assert_eq!(task.status, TaskStatus::Parsing);
     let service = DownloadService::new(Arc::new(client), store.clone());
     assert!(service

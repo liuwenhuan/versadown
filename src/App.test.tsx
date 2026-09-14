@@ -101,7 +101,7 @@ it('adds a sidebar cloud submenu after authorization and removes it after logout
 it('renders the compact download-manager layout without browser navigation controls', async () => {
   render(<App />);
   expect(screen.getByRole('heading', { name: '万能下载' })).toBeVisible();
-  expect(screen.getByPlaceholderText('搜索本地任务，或粘贴下载链接')).toBeVisible();
+  expect(screen.getByPlaceholderText('此处可搜索本地任务，粘贴下载链接，拖入bt种子文件')).toBeVisible();
   expect(screen.queryByRole('button', { name: '新建下载' })).not.toBeInTheDocument();
   expect(screen.getByRole('tab', { name: /下载中/ })).toBeVisible();
   expect(screen.getByRole('tab', { name: /已完成/ })).toBeVisible();
