@@ -44,7 +44,7 @@ impl Default for Aria2Settings {
             rpc_port: 6800,
             rpc_token: String::new(),
             max_concurrent_downloads: 5,
-            max_connections_per_server: 8,
+            max_connections_per_server: 4,
             bt_seed_ratio: 1.5,
         }
     }
@@ -479,5 +479,24 @@ impl NewCloudDirectoryGroupItem {
             output_name: output_name.into(),
             size,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Aria2Settings;
+
+    #[test]
+    fn aria2_default_connections() {
+        let defaults: Aria2Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.max_connections_per_server, 4);
+
+        let persisted: Aria2Settings =
+            serde_json::from_str(r#"{"maxConnectionsPerServer":8}"#).unwrap();
+        assert_eq!(persisted.max_connections_per_server, 8);
+        assert_eq!(
+            serde_json::to_value(persisted).unwrap()["maxConnectionsPerServer"],
+            8
+        );
     }
 }

@@ -11,7 +11,7 @@ const initial = {
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 },
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
   deleteTransferredShareFilesAfterDownload: true
 };
 
@@ -98,6 +98,16 @@ it('enables cleanup for application-created transfer files by default', () => {
   expect(screen.getByText('仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。')).toBeVisible();
 });
 
+it('defaults new connections to four while preserving an explicit eight', async () => {
+  const user = userEvent.setup();
+  expect(defaultSettings.aria2.maxConnectionsPerServer).toBe(4);
+
+  render(<SettingsPanel initial={{ ...defaultSettings, aria2: { ...defaultSettings.aria2, maxConnectionsPerServer: 8 } }} onChange={() => {}} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  expect(screen.getByRole('spinbutton', { name: '单任务并发连接数' })).toHaveValue(8);
+});
+
 it('requires a confirmed password before saving enabled private downloads', async () => {
   const user = userEvent.setup();
   const configurePrivacyDownload = vi.fn().mockResolvedValue({ ...initial, privacyDownloadEnabled: true, privacyPasswordConfigured: true });
@@ -169,7 +179,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 8, btSeedRatio: 1.5 },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
     deleteTransferredShareFilesAfterDownload: true
   });
 });
