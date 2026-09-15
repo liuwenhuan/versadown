@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ParseDownloadResult, ScanDownloadResult } from '../lib/types';
+import { DownloadDraftItem, useDownloadDraftBatch } from './useDownloadDraftBatch';
 
 export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
 
@@ -11,6 +12,11 @@ export interface NewDownloadDialogProps {
   onClose(): void;
   onOpenTaskList?(): void | Promise<void>;
   initialInput?: string;
+  onDiscardPrepared?(reference: string): Promise<void>;
+  onSubmitBatch?(items: DownloadDraftItem[], destinationDirectory?: string, privateDownload?: boolean, postProcessingNote?: string): void | Promise<void>;
+  downloadDirectory?: string;
+  browseDirectory?(): Promise<string | undefined>;
+  privacyEnabled?: boolean;
 }
 
 // Parse errors currently cross IPC as text. All providers use the same action
@@ -32,7 +38,141 @@ function directAutoStarts(entry: ScanDownloadResult, text: string): boolean {
     && entry.kind === 'direct';
 }
 
-export function NewDownloadDialog({ open, placement = 'launcher', onParse, onScan, onClose, onOpenTaskList, initialInput }: NewDownloadDialogProps) {
+export function NewDownloadDialog(props: NewDownloadDialogProps) {
+  return props.onSubmitBatch ? <BatchNewDownloadDialog {...props} /> : <LegacyNewDownloadDialog {...props} />;
+}
+
+function batchItemTitle(item: DownloadDraftItem): string {
+  if (item.result?.confirmation?.title) return item.result.confirmation.title;
+  if (item.result?.task) return item.result.task.name;
+  if (item.result?.duplicate) return item.result.duplicate.task.name;
+  return item.input;
+}
+
+function BatchNewDownloadDialog({
+  open,
+  placement = 'modal',
+  initialInput = '',
+  onParse,
+  onScan,
+  onDiscardPrepared,
+  onSubmitBatch,
+  onClose,
+  downloadDirectory,
+  browseDirectory,
+  privacyEnabled = false,
+}: NewDownloadDialogProps) {
+  const batch = useDownloadDraftBatch({
+    scan: onScan ?? (async input => [{ input, valid: true, kind: 'direct' }]),
+    prepare: async (input, accessCode) => (await onParse(input, accessCode)) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
+    discard: onDiscardPrepared ?? (async () => {}),
+    concurrency: 4,
+  });
+  const [showPostProcessing, setShowPostProcessing] = useState(false);
+  const [postProcessingNote, setPostProcessingNote] = useState('');
+  const [destination, setDestination] = useState<string | undefined>();
+  const [submitting, setSubmitting] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open || placement !== 'modal') return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    return () => {
+      if (previousFocusRef.current?.isConnected) previousFocusRef.current.focus();
+    };
+  }, [open, placement]);
+
+  useEffect(() => {
+    if (!open) return;
+    setSubmitting(false);
+    setClosing(false);
+    setSubmitError(null);
+    setShowPostProcessing(false);
+    setPostProcessingNote('');
+    setDestination(undefined);
+    if (initialInput.trim()) void batch.start(initialInput);
+  }, [open, initialInput]);
+
+  async function requestClose() {
+    if (submitting || closing) return;
+    setClosing(true);
+    await batch.discardAll();
+    onClose();
+  }
+
+  async function submit(privateDownload = false) {
+    if (!batch.canSubmit || submitting || !onSubmitBatch) return;
+    const selected = batch.items.filter(item => item.selected);
+    batch.markSubmitted(selected.map(item => item.id));
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await onSubmitBatch(selected, destination, privateDownload, postProcessingNote);
+    } catch (reason) {
+      setSubmitError(reason instanceof Error ? reason.message : String(reason));
+      setSubmitting(false);
+    }
+  }
+
+  function trapFocus(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      void requestClose();
+      return;
+    }
+    if (placement !== 'modal' || event.key !== 'Tab') return;
+    const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? []);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
+  if (!open) return null;
+  const selectedCount = batch.items.filter(item => item.selected).length;
+  const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapFocus}>
+    <div className="launcher-title"><span>新建任务</span><button type="button" aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
+    <section className="batch-download-list" aria-label="待新建任务">
+      {batch.items.map(item => {
+        const title = batchItemTitle(item);
+        const resources = item.result?.confirmation?.resources ?? [];
+        return <article key={item.id} className={`batch-download-item ${item.status}`}>
+          <div className="batch-download-row">
+            <input type="checkbox" aria-label={`选择 ${item.input}`} checked={item.selected} onChange={() => batch.toggleItem(item.id)} />
+            {resources.length > 0 ? <button type="button" className="batch-expand" aria-label={`${item.expanded ? '收起' : '展开'}${title}`} aria-expanded={item.expanded} onClick={() => batch.toggleExpanded(item.id)}>{item.expanded ? '⌄' : '›'}</button> : <span className="batch-expand-placeholder" />}
+            <div className="batch-download-name"><strong title={title}>{title}</strong><small>{item.status === 'parsing' ? '任务解析中' : item.status === 'ready' ? `${resources.length || 1} 项可下载` : item.error}</small></div>
+            {item.status === 'failed' && <button type="button" onClick={() => batch.retry(item.id)}>重试</button>}
+            <button type="button" aria-label={`移除 ${title}`} onClick={() => batch.remove(item.id)}>×</button>
+          </div>
+          {item.status === 'access_code_required' && <div className="batch-access-code">
+            <span>{item.error}</span><input type="password" aria-label={`${title}访问码`} autoComplete="off" value={item.accessCode} onChange={event => batch.setAccessCode(item.id, event.target.value)} /><button type="button" disabled={!item.accessCode.trim()} onClick={() => batch.retry(item.id)}>重新解析</button>
+          </div>}
+          {item.expanded && resources.length > 0 && <div className="batch-resource-list">{resources.map(resource => <label key={resource.id}>
+            <input type="checkbox" checked={resource.selected} onChange={() => batch.toggleResource(item.id, resource.id)} />
+            <span title={resource.name}>{resource.name}</span><small>{resource.size}</small>
+          </label>)}</div>}
+        </article>;
+      })}
+      {!batch.items.length && <p className="batch-empty">任务解析中</p>}
+    </section>
+    <button type="button" className="disclosure batch-processing-disclosure" aria-label="解压密码和后处理" aria-expanded={showPostProcessing} onClick={() => setShowPostProcessing(value => !value)}>解压密码和后处理 {showPostProcessing ? '⌃' : '⌄'}</button>
+    {showPostProcessing && <textarea className="batch-processing-input" aria-label="解压密码和后处理" value={postProcessingNote} onChange={event => setPostProcessingNote(event.target.value)} placeholder="可粘贴解压密码，或填写文件改名、拼接、合并等后处理说明" />}
+    {submitError && <p className="parse-failure" role="alert">{submitError}</p>}
+    <footer className="batch-download-footer">
+      <button type="button" className="parse-destination" onClick={() => void browseDirectory?.().then(value => { if (value) setDestination(value); })}>下载到 <strong>{destination || downloadDirectory || '本机下载目录'}</strong> <i>更改</i></button>
+      <span>{selectedCount ? `已选 ${selectedCount} 个任务` : '请选择任务'}</span>
+      <div><button type="button" disabled={submitting || closing} onClick={() => void requestClose()}>取消</button>{privacyEnabled && <button type="button" disabled={!batch.canSubmit || submitting} onClick={() => void submit(true)}>隐私新建</button>}<button type="button" className="primary" disabled={!batch.canSubmit || submitting} onClick={() => void submit(false)}>{submitting ? '正在提交…' : '新建任务'}</button></div>
+    </footer>
+  </aside>;
+  if (placement !== 'modal') return dialog;
+  return <div className="modal-backdrop new-download-backdrop" data-testid="new-download-backdrop" onClick={event => { if (event.target === event.currentTarget) void requestClose(); }}>{dialog}</div>;
+}
+
+function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan, onClose, onOpenTaskList, initialInput }: NewDownloadDialogProps) {
   const [input, setInput] = useState('');
   const [accessCode, setAccessCode] = useState('');
   const [accessCodePrompt, setAccessCodePrompt] = useState<string | null>(null);

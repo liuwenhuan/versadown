@@ -294,3 +294,68 @@ it('traps modal Tab navigation and restores focus to its opener when closed', as
   await user.click(screen.getByRole('button', { name: '关闭新建下载' }));
   expect(opener).toHaveFocus();
 });
+
+it('shows all pasted tasks in one dialog and submits one shared post-processing note', async () => {
+  const user = userEvent.setup();
+  const onSubmitBatch = vi.fn().mockResolvedValue(undefined);
+  const onParse = vi.fn(async (input: string) => ({ confirmation: {
+    taskId: input.includes('one') ? 'task-one' : 'task-two',
+    title: input.includes('one') ? '目录一' : '目录二',
+    requiresConfirmation: true,
+    resources: [{ id: `${input}-file`, name: input.includes('one') ? 'one/a.zip' : 'two/b.zip', size: '10 MB', selected: true }],
+    processing: []
+  } }));
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput={'https://example.test/one\nhttps://example.test/two'}
+    onScan={async () => [
+      { input: 'https://example.test/one', valid: true, kind: 'direct' },
+      { input: 'https://example.test/two', valid: true, kind: 'direct' }
+    ]}
+    onParse={onParse}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={onSubmitBatch}
+    downloadDirectory="D:\\Downloads"
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('目录一')).toBeVisible();
+  expect(screen.getByText('目录二')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '展开目录一' }));
+  expect(screen.getByText('one/a.zip')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '解压密码和后处理' }));
+  await user.type(screen.getByRole('textbox', { name: '解压密码和后处理' }), '密码 88in\n完成后拼接');
+  await user.click(screen.getByRole('button', { name: '新建任务' }));
+
+  expect(onSubmitBatch).toHaveBeenCalledTimes(1);
+  expect(onSubmitBatch.mock.calls[0][0]).toHaveLength(2);
+  expect(onSubmitBatch.mock.calls[0][3]).toBe('密码 88in\n完成后拼接');
+});
+
+it('allows a pending task to be deselected so ready tasks can be submitted', async () => {
+  const user = userEvent.setup();
+  let resolveSecond!: (value: unknown) => void;
+  const onParse = vi.fn()
+    .mockResolvedValueOnce({ confirmation: { taskId: 'ready', title: '已就绪', requiresConfirmation: true, resources: [], processing: [] } })
+    .mockReturnValueOnce(new Promise(resolve => { resolveSecond = resolve; }));
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput={'https://example.test/ready\nhttps://example.test/pending'}
+    onScan={async () => [
+      { input: 'https://example.test/ready', valid: true, kind: 'direct' },
+      { input: 'https://example.test/pending', valid: true, kind: 'direct' }
+    ]}
+    onParse={onParse}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('已就绪')).toBeVisible();
+  expect(screen.getByRole('button', { name: '新建任务' })).toBeDisabled();
+  await user.click(screen.getByRole('checkbox', { name: '选择 https://example.test/pending' }));
+  expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
+  resolveSecond!({ confirmation: { taskId: 'pending', title: '稍后完成', requiresConfirmation: true, resources: [], processing: [] } });
+});
