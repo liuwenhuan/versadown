@@ -45,6 +45,7 @@ export interface CloudManagerClient {
 
 export interface CloudManagerProps {
   descriptor: ProviderDescriptor;
+  recoveryFailed?: boolean;
   provider: CloudProvider;
   client?: CloudManagerClient;
   initialAccount?: CloudAccount | null;
@@ -66,6 +67,8 @@ type PendingAuthorizationAction = { accountId: string; name: string; resume: () 
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'details' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
+const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
+const expiredAuthorizationStatus = '授权过期请重新登录';
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'details';
 
 const authorizationWatchdogMs = 10_000;
@@ -476,7 +479,7 @@ function CloudDestinationPicker({ action, provider, descriptor, client, excluded
   </div>, document.body);
 }
 
-export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryFailed = false, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const label = descriptor.displayName;
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
@@ -499,7 +502,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const passwordInputVersion = useRef(0);
   const effectiveAuthorizationCapabilities = descriptor.authorization;
   const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
-  const [authorizationStatus, setAuthorizationStatus] = useState('未授权。请登录或在网页授权窗口中完成验证。');
+  const [authorizationStatus, setAuthorizationStatus] = useState(recoveryFailed ? expiredAuthorizationStatus : initialAuthorizationStatus);
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
   const [openingOperationVerification, setOpeningOperationVerification] = useState(false);
   const [pendingAuthorizationName, setPendingAuthorizationName] = useState<string | null>(null);
@@ -632,6 +635,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     }).catch(() => undefined);
     return () => { active = false; };
   }, [client, provider, supportsDirectPasswordLogin, activeAccount?.id]);
+
+  useEffect(() => {
+    if (recoveryFailed && !activeAccount) setAuthorizationStatus(expiredAuthorizationStatus);
+  }, [activeAccount, recoveryFailed]);
 
   useEffect(() => {
     const account = activeAccount;
@@ -1167,8 +1174,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function authorizationView(expired = false) {
-    const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
     const showAuthorizationFeedback = authorizationStatus !== initialAuthorizationStatus;
+    const showAuthorizationError = expired || authorizationStatus === expiredAuthorizationStatus;
     return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
       <header className="cloud-heading"><h2>{label}网盘</h2><button type="button" className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <><form className="cloud-login-form" onSubmit={submitPasswordLogin}>
@@ -1180,7 +1187,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
       </form>
-      {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${expired ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}</>}
+      {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${showAuthorizationError ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}</>}
     </section>;
   }
 
@@ -1207,7 +1214,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setActiveAccount(null);
       setDirectory(null);
       setDirectoryState('idle');
-      setAuthorizationStatus('未授权。请登录或在网页授权窗口中完成验证。');
+      setAuthorizationStatus(initialAuthorizationStatus);
       onAccountLoggedOut?.(provider);
     }, false); }}>确认{logoutLabel}</button></section></div>;
   }

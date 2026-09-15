@@ -529,7 +529,9 @@ impl AuthSupervisor {
             Err(error)
                 if matches!(
                     error,
-                    CloudError::AuthorizationExpired | CloudError::NotAuthorized
+                    CloudError::AuthorizationExpired
+                        | CloudError::NotAuthorized
+                        | CloudError::WebAuthorizationRequired
                 ) =>
             {
                 if snapshot.initial.is_none() || store.load(provider.key())?.is_none() {

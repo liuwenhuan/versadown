@@ -119,13 +119,16 @@ it('adds the authorized workspace immediately from the completion event', async 
   expect(screen.queryByText(/旧会话错误/)).not.toBeInTheDocument();
 });
 
-it('keeps each failed recovery visible independently', async () => {
+it('shows each failed account recovery on its provider card instead of above the cards', async () => {
   const client = createClient();
   client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0], cloudCatalog[1]]);
   client.getCloudAccount.mockImplementation((provider) => Promise.reject(new Error(provider === 'quark' ? '连接错误甲' : '连接错误乙')));
   render(<CloudWorkspace client={client as never} />);
-  expect(await screen.findByText('夸克恢复账号失败：连接错误甲')).toBeVisible();
-  expect(await screen.findByText('PikPak恢复账号失败：连接错误乙')).toBeVisible();
+  const quarkCard = await screen.findByRole('region', { name: '夸克账号授权' });
+  const pikpakCard = await screen.findByRole('region', { name: 'PikPak账号授权' });
+  expect(within(quarkCard).getByText('授权过期请重新登录')).toBeVisible();
+  expect(within(pikpakCard).getByText('授权过期请重新登录')).toBeVisible();
+  expect(screen.queryByText(/恢复账号失败/)).not.toBeInTheDocument();
 });
 
 it('renders the backend catalog order and labels', async () => {

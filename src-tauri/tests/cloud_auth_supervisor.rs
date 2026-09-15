@@ -141,6 +141,77 @@ fn review_captcha_on_the_second_read_persists_risk_blocked_without_a_third_read(
 }
 
 #[test]
+fn web_authorization_required_uses_saved_password_before_requesting_user_login() {
+    use alldownloader_lib::cloud::driver::ProviderAuth;
+
+    struct SavedPassword<'a>(&'a AtomicUsize);
+    impl ProviderAuth for SavedPassword<'_> {
+        fn refresh_session(&mut self) -> Result<bool, CloudError> {
+            Ok(false)
+        }
+
+        fn recover_password(
+            &mut self,
+            credential: &CloudPasswordCredential,
+        ) -> Result<(CloudAccount, Vec<u8>), CloudError> {
+            assert_eq!(credential.username(), "alice");
+            assert_eq!(credential.password(), "secret");
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok((
+                CloudAccount {
+                    provider: CloudProvider::Pikpak,
+                    id: "account-a".into(),
+                    display_name: "Alice".into(),
+                    auth_method: CloudAuthMethod::Password,
+                },
+                b"renewed-session".to_vec(),
+            ))
+        }
+    }
+
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Pikpak;
+    store.save(provider.key(), b"expired-session").unwrap();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(provider, "account-a", "alice", "secret"),
+    )
+    .unwrap();
+    supervisor
+        .ready(&store, provider, Some("account-a".into()), None, None)
+        .unwrap();
+    let password_logins = AtomicUsize::new(0);
+    let reads = AtomicUsize::new(0);
+
+    let result = supervisor.run(
+        &store,
+        provider,
+        SessionWorkKind::Read,
+        |snapshot| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            if snapshot.load(provider.key())?.as_deref() == Some(b"renewed-session") {
+                Ok(())
+            } else {
+                Err(CloudError::WebAuthorizationRequired)
+            }
+        },
+        |phase| {
+            recover_in_order(
+                provider,
+                &store,
+                &mut SavedPassword(&password_logins),
+                phase,
+                || panic!("successful saved-password login must not require a browser profile"),
+            )
+        },
+    );
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(password_logins.load(Ordering::SeqCst), 1);
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn review_proactive_auth_failure_can_continue_to_profile_in_the_same_run() {
     use alldownloader_lib::cloud::driver::ProviderAuth;
     struct Rejected<'a>(&'a AtomicUsize);

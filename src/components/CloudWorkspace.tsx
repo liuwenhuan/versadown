@@ -101,7 +101,6 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
     {activePage === 'management' && <section className="cloud-management-panel" aria-label="网盘管理">
       {recoveringAccounts && <div className="cloud-account-recovery" role="status" aria-label="正在读取网盘账号状态"><i aria-hidden="true" /><span>正在读取网盘账号状态…</span></div>}
       {recoveryError && <p className="cloud-operation-status error" role="alert">恢复账号失败：{recoveryError}</p>}
-      {catalog.filter(d => accountErrors[d.provider]).map(d => <p key={d.provider} className="cloud-operation-status error" role="alert">{d.displayName}恢复账号失败：{accountErrors[d.provider]}</p>)}
       <div className="cloud-provider-auths">{catalog.map((descriptor) => {
         const { provider, displayName } = descriptor;
         if (pendingProviders.includes(provider)) return <section key={provider} className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${displayName}账号恢复`}><header className="cloud-heading"><h2>{displayName}网盘</h2></header><p role="status">正在读取账号状态…</p></section>;
@@ -112,6 +111,7 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
           provider={provider}
           client={client}
           initialAccount={account ?? null}
+          recoveryFailed={Boolean(accountErrors[provider])}
           privacyDownloadEnabled={privacyDownloadEnabled}
           authorizationOnly
           restoreOnMount={false}
