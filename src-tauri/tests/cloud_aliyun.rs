@@ -199,6 +199,56 @@ fn aliyun_recycle_permanent_delete_uses_file_delete_and_accepts_no_content() {
 }
 
 #[test]
+fn aliyun_trash_is_idempotent_only_when_the_file_is_already_absent() {
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "aliyun",
+            br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive-42","browser_access_ready":true}"#,
+        )
+        .unwrap();
+    let http = RecordingHttp::responses([
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"user_id":"u1","nick_name":"alice"}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"items":[],"next_marker":""}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 404,
+            body: r#"{"code":"NotFound.FileId","message":"The resource file_id cannot be found."}"#
+                .into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"user_id":"u1","nick_name":"alice"}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 200,
+            body: r#"{"items":[],"next_marker":""}"#.into(),
+            ..Default::default()
+        },
+        CloudHttpResponse {
+            status: 404,
+            body: r#"{"code":"NotFound.DriveId","message":"The drive cannot be found."}"#.into(),
+            ..Default::default()
+        },
+    ]);
+    let client = AliyunClient::new(&store, &http);
+
+    client
+        .trash(&["already-absent".into()])
+        .expect("an already absent file is already in the desired state");
+    assert!(client.trash(&["missing-drive".into()]).is_err());
+}
+
+#[test]
 fn aliyun_root_exposes_a_reserved_recycle_bin_folder() {
     let store = MemoryCredentialStore::default();
     store
