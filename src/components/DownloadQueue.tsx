@@ -382,6 +382,9 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
   const selectionAnchor = useRef<string | null>(selectedTaskId);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<{ movingIds: string[]; targetId?: string; placeAfter?: boolean } | null>(null);
+  const dragStateRef = useRef<typeof dragState>(null);
+  const pendingDrag = useRef<{ pointerId: number; originX: number; originY: number; movingIds: string[]; source: HTMLElement } | null>(null);
+  const suppressClickAfterDrag = useRef(false);
   const closeContextMenu = () => setContextMenu(null);
   useEffect(() => {
     const visibleIds = new Set(tasks.map((task) => task.id));
@@ -420,6 +423,10 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
     if (targets[0] && command !== 'delete') onCommand(targets[0].id, command);
   }
   function selectTask(event: React.MouseEvent<HTMLElement>, task: QueueTask) {
+    if (suppressClickAfterDrag.current) {
+      suppressClickAfterDrag.current = false;
+      return;
+    }
     const currentIndex = tasks.findIndex((item) => item.id === task.id);
     let next: string[];
     if (event.shiftKey && selectionAnchor.current) {
@@ -450,41 +457,50 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
     }
     setContextMenu({ tasks: targets, x, y });
   }
-  function beginTaskDrag(event: React.DragEvent<HTMLElement>, task: QueueTask) {
-    if (!onReorder || (event.target as Element).closest('button')) {
-      event.preventDefault();
-      return;
-    }
+  function beginTaskDrag(event: React.PointerEvent<HTMLElement>, task: QueueTask) {
+    if (!onReorder || event.button !== 0 || (event.target as Element).closest('button, input, textarea, select, a')) return;
     const movingIds = selectedTaskIds.includes(task.id)
       ? tasks.filter((item) => selectedTaskIds.includes(item.id)).map((item) => item.id)
       : [task.id];
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', task.id);
-    setDragState({ movingIds });
+    pendingDrag.current = { pointerId: event.pointerId, originX: event.clientX, originY: event.clientY, movingIds, source: event.currentTarget };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
   }
-  function updateTaskDrop(event: React.DragEvent<HTMLElement>, targetId: string) {
-    if (!dragState || dragState.movingIds.includes(targetId)) return;
+  function updateTaskDrop(event: React.PointerEvent<HTMLElement>) {
+    const pending = pendingDrag.current;
+    if (!pending || pending.pointerId !== event.pointerId) return;
+    const distance = Math.hypot(event.clientX - pending.originX, event.clientY - pending.originY);
+    if (!dragStateRef.current && distance < 5) return;
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('.task-row[data-task-id]');
+    const targetId = target?.dataset.taskId;
+    if (!targetId || pending.movingIds.includes(targetId)) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const placeAfter = event.clientY >= bounds.top + bounds.height / 2;
-    if (dragState.targetId !== targetId || dragState.placeAfter !== placeAfter) {
-      setDragState((current) => current ? { ...current, targetId, placeAfter } : current);
-    }
+    const bounds = target.getBoundingClientRect();
+    const next = { movingIds: pending.movingIds, targetId, placeAfter: event.clientY >= bounds.top + bounds.height / 2 };
+    dragStateRef.current = next;
+    setDragState(next);
   }
-  function finishTaskDrop(event: React.DragEvent<HTMLElement>, targetId: string) {
-    if (!dragState || dragState.movingIds.includes(targetId)) return;
-    event.preventDefault();
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const placeAfter = dragState.targetId === targetId
-      ? Boolean(dragState.placeAfter)
-      : event.clientY >= bounds.top + bounds.height / 2;
-    const reordered = reorderTaskIds(tasks.map((task) => task.id), dragState.movingIds, targetId, placeAfter);
+  function finishTaskDrop(event: React.PointerEvent<HTMLElement>) {
+    const pending = pendingDrag.current;
+    if (!pending || pending.pointerId !== event.pointerId) return;
+    const completedDrag = dragStateRef.current;
+    pending.source.releasePointerCapture?.(event.pointerId);
+    pendingDrag.current = null;
+    dragStateRef.current = null;
     setDragState(null);
+    if (!completedDrag?.targetId) return;
+    suppressClickAfterDrag.current = true;
+    const reordered = reorderTaskIds(tasks.map((task) => task.id), completedDrag.movingIds, completedDrag.targetId, Boolean(completedDrag.placeAfter));
     onReorder?.(reordered);
   }
+  function cancelTaskDrag(event: React.PointerEvent<HTMLElement>) {
+    const pending = pendingDrag.current;
+    if (!pending || pending.pointerId !== event.pointerId) return;
+    pendingDrag.current = null;
+    dragStateRef.current = null;
+    setDragState(null);
+  }
   return (
-    <section className="download-queue" aria-label="下载队列" onContextMenu={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
+    <section className="download-queue" aria-label="下载队列" onPointerMove={updateTaskDrop} onPointerUp={finishTaskDrop} onPointerCancel={cancelTaskDrag} onContextMenu={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
       <div className="queue-heading"><span>任务</span><span>进度</span><span>状态</span></div>
       {tasks.length === 0 ? <p className="queue-empty">还没有下载任务</p> : tasks.map((task) => {
         const isExpanded = expanded[task.id] ?? false;
@@ -524,7 +540,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const isDragged = dragState?.movingIds.includes(task.id) ?? false;
         const dropPosition = dragState?.targetId === task.id ? (dragState.placeAfter ? ' drop-after' : ' drop-before') : '';
         return <div className={`task-group${isCompleted ? ' completed-task-group' : ''}${isExpanded ? ' is-expanded' : ''}${isDragged ? ' is-dragging' : ''}${dropPosition}`} key={task.id}>
-          <article draggable={Boolean(onReorder)} data-task-id={task.id} className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onDragStart={(event) => beginTaskDrag(event, task)} onDragOver={(event) => updateTaskDrop(event, task.id)} onDrop={(event) => finishTaskDrop(event, task.id)} onDragEnd={() => setDragState(null)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
+          <article data-task-id={task.id} className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onPointerDown={(event) => beginTaskDrag(event, task)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>

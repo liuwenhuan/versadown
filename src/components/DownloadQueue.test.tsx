@@ -4,7 +4,16 @@ import { vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { DownloadQueue, taskContextMenuPosition } from './DownloadQueue';
 
-it('reorders all selected top-level tasks as one block with mouse dragging', () => {
+it('reorders all selected top-level tasks with pointer events when native HTML dragging is unavailable', () => {
+  class TestPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: MouseEventInit & { pointerId?: number } = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  const originalPointerEvent = window.PointerEvent;
+  Object.defineProperty(window, 'PointerEvent', { configurable: true, value: TestPointerEvent });
   const onReorder = vi.fn();
   render(<DownloadQueue tasks={[
     { id: 'three', name: 'three.zip', kind: 'file', status: 'paused', progress: 0 },
@@ -17,9 +26,15 @@ it('reorders all selected top-level tasks as one block with mouse dragging', () 
   const first = screen.getByText('one.zip').closest('.task-row')!;
   const third = screen.getByText('three.zip').closest('.task-row')!;
   vi.spyOn(third, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 40, height: 40, left: 0, right: 100, width: 100, x: 0, y: 0, toJSON: () => ({}) });
-  fireEvent.dragStart(first, { dataTransfer: { effectAllowed: '', setData: vi.fn() } });
-  fireEvent.dragOver(third, { clientY: 5, dataTransfer: { dropEffect: '' } });
-  fireEvent.drop(third, { clientY: 5 });
+  const originalElementFromPoint = document.elementFromPoint;
+  Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: vi.fn(() => third) });
+  fireEvent.pointerDown(first, { pointerId: 7, button: 0, clientX: 10, clientY: 50 });
+  fireEvent.pointerMove(first, { pointerId: 7, clientX: 10, clientY: 5 });
+  fireEvent.pointerUp(first, { pointerId: 7, clientX: 10, clientY: 5 });
+  if (originalElementFromPoint) Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: originalElementFromPoint });
+  else delete (document as Document & { elementFromPoint?: typeof document.elementFromPoint }).elementFromPoint;
+  if (originalPointerEvent) Object.defineProperty(window, 'PointerEvent', { configurable: true, value: originalPointerEvent });
+  else delete (window as Window & { PointerEvent?: typeof window.PointerEvent }).PointerEvent;
 
   expect(onReorder).toHaveBeenCalledWith(['one', 'two', 'three']);
 });
