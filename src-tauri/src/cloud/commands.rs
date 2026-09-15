@@ -20,7 +20,7 @@ use std::{
 };
 use tauri::{
     webview::{NewWindowResponse, PageLoadEvent},
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::DialogExt;
 

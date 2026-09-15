@@ -55,6 +55,61 @@ pub async fn cloud_account(
 }
 
 #[tauri::command]
+pub async fn cloud_account_capacity(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<CloudAccountCapacity, QuarkError> {
+    run_session_work(app, provider, SessionWorkKind::Read, move |s, h| {
+        let mut driver = ProviderRegistry::global().driver(provider, &s.store, h);
+        let account = driver.account()?;
+        let capacity = driver.storage_capacity()?;
+        Ok(CloudAccountCapacity {
+            provider,
+            account_id: account.id,
+            capacity,
+            updated_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        })
+    })
+    .await
+}
+
+async fn emit_cloud_capacity_invalidated(
+    app: AppHandle,
+    provider: CloudProvider,
+    reason: CloudCapacityChangeReason,
+) {
+    let account = run_session_work(app.clone(), provider, SessionWorkKind::Read, move |s, h| {
+        restore_account(provider, &s.store, h)
+    })
+    .await;
+    if let Ok(account) = account {
+        let _ = app.emit(
+            "cloud-capacity-invalidated",
+            CloudCapacityInvalidated {
+                provider,
+                account_id: account.id,
+                reason,
+            },
+        );
+    }
+}
+
+pub(crate) fn schedule_cloud_capacity_invalidation(
+    app: AppHandle,
+    provider: CloudProvider,
+    reason: CloudCapacityChangeReason,
+) {
+    tauri::async_runtime::spawn(async move {
+        emit_cloud_capacity_invalidated(app, provider, reason).await;
+    });
+}
+
+#[tauri::command]
 pub async fn cloud_list_directory(
     app: AppHandle,
     provider: CloudProvider,
@@ -120,12 +175,17 @@ pub async fn cloud_copy(
     file_ids: Vec<String>,
     target_parent_id: String,
 ) -> Result<(), QuarkError> {
-    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+    let changed = !file_ids.is_empty();
+    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
         ProviderRegistry::global()
             .driver(provider, &s.store, h)
             .copy_files(&file_ids, &target_parent_id)
     })
-    .await
+    .await?;
+    if changed {
+        schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Copy);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -134,10 +194,15 @@ pub async fn cloud_trash(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+    let changed = !file_ids.is_empty();
+    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
         trash_provider_files(provider, &s.store, h, &file_ids)
     })
-    .await
+    .await?;
+    if changed {
+        schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Trash);
+    }
+    Ok(())
 }
 
 pub(crate) fn trash_provider_files(
@@ -157,10 +222,15 @@ pub async fn cloud_delete(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+    let changed = !file_ids.is_empty();
+    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
         delete_provider_recycle_entries(provider, &s.store, h, &file_ids)
     })
-    .await
+    .await?;
+    if changed {
+        schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Delete);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -169,8 +239,13 @@ pub async fn cloud_restore(
     provider: CloudProvider,
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
-    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+    let changed = !file_ids.is_empty();
+    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
         restore_provider_recycle_entries(provider, &s.store, h, &file_ids)
     })
-    .await
+    .await?;
+    if changed {
+        schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Restore);
+    }
+    Ok(())
 }

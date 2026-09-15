@@ -626,7 +626,8 @@ pub async fn cloud_upload_files(
     on_progress: Channel<CloudUploadProgress>,
     upload_id: String,
 ) -> Result<CloudUploadOutcome, QuarkError> {
-    run_upload_session(
+    let capacity_event_app = app.clone();
+    let outcome = run_upload_session(
         provider,
         upload_id,
         on_progress,
@@ -671,7 +672,15 @@ pub async fn cloud_upload_files(
             .await
         },
     )
-    .await
+    .await?;
+    if !outcome.uploaded.is_empty() {
+        schedule_cloud_capacity_invalidation(
+            capacity_event_app,
+            provider,
+            CloudCapacityChangeReason::Upload,
+        );
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -683,7 +692,8 @@ pub async fn cloud_upload_directory(
     on_progress: Channel<CloudUploadProgress>,
     upload_id: String,
 ) -> Result<CloudUploadOutcome, QuarkError> {
-    run_upload_session(
+    let capacity_event_app = app.clone();
+    let outcome = run_upload_session(
         provider,
         upload_id,
         on_progress,
@@ -730,7 +740,15 @@ pub async fn cloud_upload_directory(
             .await
         },
     )
-    .await
+    .await?;
+    if !outcome.uploaded.is_empty() {
+        schedule_cloud_capacity_invalidation(
+            capacity_event_app,
+            provider,
+            CloudCapacityChangeReason::Upload,
+        );
+    }
+    Ok(outcome)
 }
 
 impl CloudState {

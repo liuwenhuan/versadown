@@ -102,6 +102,34 @@ pub enum CloudStorageCapacity {
     },
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudCapacityChangeReason {
+    Upload,
+    Copy,
+    Transfer,
+    Trash,
+    Restore,
+    Delete,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudCapacityInvalidated {
+    pub provider: CloudProvider,
+    pub account_id: String,
+    pub reason: CloudCapacityChangeReason,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudAccountCapacity {
+    pub provider: CloudProvider,
+    pub account_id: String,
+    pub capacity: CloudStorageCapacity,
+    pub updated_at: u64,
+}
+
 impl CloudStorageCapacity {
     pub(crate) fn from_json(
         total: &serde_json::Value,
@@ -391,6 +419,20 @@ mod capacity_tests {
         );
         assert!(
             CloudStorageCapacity::from_total_and_available_json(&json!(100), &json!(101)).is_err()
+        );
+    }
+
+    #[test]
+    fn cloud_capacity_invalidation_serializes_account_bound_payload() {
+        let value = serde_json::to_value(CloudCapacityInvalidated {
+            provider: CloudProvider::Quark,
+            account_id: "account-1".into(),
+            reason: CloudCapacityChangeReason::Upload,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"provider":"quark","accountId":"account-1","reason":"upload"})
         );
     }
 }
