@@ -517,6 +517,48 @@ pub async fn parse_download(
     Ok(ParseDownloadOutcome::Task(outcome))
 }
 
+fn prepared_task_can_be_discarded(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Draft | TaskStatus::Parsing | TaskStatus::AwaitingUser
+    )
+}
+
+#[tauri::command]
+pub async fn discard_prepared_download(
+    task_id: String,
+    state: State<'_, AppState>,
+    cloud: State<'_, Arc<crate::cloud::commands::CloudState>>,
+) -> Result<(), String> {
+    if task_id.starts_with("cloud-share://") {
+        return cloud
+            .share_plans
+            .discard_plan(&task_id)
+            .map_err(|error| error.to_string());
+    }
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let task = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &task)?;
+    if !prepared_task_can_be_discarded(task.status) {
+        return Err("只能清理尚未提交的下载任务".to_string());
+    }
+    if task.aria_gid.is_some() {
+        let service = state
+            .runtime
+            .service()
+            .await
+            .map_err(|error| error.to_string())?;
+        service
+            .control(id, DownloadAction::Cancel)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    state
+        .store
+        .remove_task_record(id)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn confirm_cloud_share_download(
     app: AppHandle,
@@ -3203,6 +3245,16 @@ mod tests {
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
         DuplicateDownloadState, NewTask,
     };
+
+    #[test]
+    fn discard_prepared_accepts_only_pre_submission_statuses() {
+        assert!(prepared_task_can_be_discarded(TaskStatus::Draft));
+        assert!(prepared_task_can_be_discarded(TaskStatus::Parsing));
+        assert!(prepared_task_can_be_discarded(TaskStatus::AwaitingUser));
+        assert!(!prepared_task_can_be_discarded(TaskStatus::Queued));
+        assert!(!prepared_task_can_be_discarded(TaskStatus::Downloading));
+        assert!(!prepared_task_can_be_discarded(TaskStatus::Completed));
+    }
 
     #[test]
     fn confirmed_share_preflight_precedes_directory_and_file_submission() {

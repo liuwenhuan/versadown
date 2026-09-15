@@ -117,6 +117,14 @@ export async function parseDownload(input: string, accessCode?: string, requireC
   };
 }
 
+export function prepareDownload(input: string, accessCode?: string): Promise<ParseDownloadResult> {
+  return parseDownload(input, accessCode, true);
+}
+
+export async function discardPreparedDownload(taskId: string): Promise<void> {
+  if (isTauriRuntime()) await invoke('discard_prepared_download', { taskId });
+}
+
 export async function scanDownloadInputs(input: string): Promise<ScanDownloadResult[]> {
   if (!isTauriRuntime()) {
     const source = input.trim();

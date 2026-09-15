@@ -1793,6 +1793,29 @@ fn memory_store() -> (
 }
 
 #[test]
+fn discard_plan_removes_only_an_unlinked_prepared_share() {
+    let (store, _, _) = memory_store();
+    let plan = fixture("discard-prepared");
+    let source = plan.source_for("f1");
+    store.upsert(&plan).unwrap();
+
+    store.discard_plan(&source).unwrap();
+    assert!(store.resolve_entry(&source).is_err());
+
+    let linked = fixture("discard-linked");
+    let linked_source = linked.source_for("f1");
+    store.upsert(&linked).unwrap();
+    store
+        .link_local_sources(std::slice::from_ref(&linked_source))
+        .unwrap();
+    store
+        .link_local_task(&linked_source, uuid::Uuid::new_v4())
+        .unwrap();
+    assert!(store.discard_plan(&linked_source).is_err());
+    assert!(store.resolve_entry(&linked_source).is_ok());
+}
+
+#[test]
 fn selected_directory_share_keeps_safe_paths_and_requests_one_group_root() {
     let (store, _, _) = memory_store();
     let mut plan = CloudSharePlan::new(

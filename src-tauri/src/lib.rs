@@ -354,6 +354,7 @@ pub fn run() {
             main_window_interaction_state,
             commands::scan_download_inputs,
             commands::parse_download,
+            commands::discard_prepared_download,
             commands::confirm_cloud_share_download,
             commands::confirm_download_command,
             commands::list_tasks,

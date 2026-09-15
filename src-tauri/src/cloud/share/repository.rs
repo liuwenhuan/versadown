@@ -436,6 +436,21 @@ impl CloudSharePlanStore {
         })
     }
 
+    pub fn discard_plan(&self, source: &str) -> Result<(), QuarkError> {
+        let (provider, share, _) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, _| {
+            let key = plan_key(provider, &share);
+            let stored = document.plans.get(&key).ok_or_else(missing_plan)?;
+            if stored.plan.is_pinned() {
+                return Err(QuarkError::InvalidInput(
+                    "已关联下载任务的网盘分享计划不能清理".into(),
+                ));
+            }
+            document.plans.remove(&key);
+            Ok(())
+        })
+    }
+
     pub fn resolve_entry(&self, source: &str) -> Result<CloudShareResolvedEntry, QuarkError> {
         let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
         self.update(|document, now| {

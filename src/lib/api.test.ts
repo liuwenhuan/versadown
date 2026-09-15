@@ -100,6 +100,25 @@ it('passes a transient access code only to the parse command', async () => {
   expect(native.invoke).toHaveBeenCalledWith('parse_download', { input: 'https://pan.baidu.com/s/id', accessCode: '1234' });
 });
 
+it('prepares every candidate without starting it and discards an abandoned native draft', async () => {
+  native.invoke.mockResolvedValueOnce({
+    kind: 'task',
+    task: { id: 'task-1', name: 'archive.zip', kind: 'file', status: 'awaiting_user', progress: 0 },
+    requires_confirmation: true,
+    resources: []
+  }).mockResolvedValueOnce(undefined);
+  const { discardPreparedDownload, prepareDownload } = await import('./api');
+
+  await prepareDownload('https://example.test/archive.zip');
+  await discardPreparedDownload('task-1');
+
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'parse_download', {
+    input: 'https://example.test/archive.zip',
+    requireConfirmation: true
+  });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'discard_prepared_download', { taskId: 'task-1' });
+});
+
 it('sends opaque share plans to the cloud-share confirmation command', async () => {
   native.invoke.mockResolvedValueOnce({ outcomes: [], failures: [] });
   const { confirmCloudShareDownload } = await import('./api');
