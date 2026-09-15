@@ -1,8 +1,10 @@
 use super::{
     format_confirmation_size, CloudShareAdapter, CloudShareCleanupState, CloudShareDownloadEntry,
-    CloudShareDownloadSelection, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, CloudShareTransferOwnerScheme, QuarkError, ShareResolution,
+    CloudShareDownloadSelection, CloudSharePlan, CloudSharePlanStore, CloudShareResolvedEntry,
+    CloudShareTransferOwnerScheme, QuarkError, ShareResolution,
 };
+#[cfg(test)]
+use super::CloudShareEntry;
 use crate::cloud::{CloudProvider, ProviderRegistry};
 use std::collections::BTreeSet;
 
