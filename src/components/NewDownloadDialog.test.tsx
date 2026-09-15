@@ -407,6 +407,57 @@ it('sorts expanded batch resources by name and size', async () => {
   ]);
 });
 
+it('derives a directory task name when a share parser returns a generic title', async () => {
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="https://share.example.test/generic-title"
+    onScan={async () => [{ input: 'https://share.example.test/generic-title', valid: true, kind: 'cloud' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'generic-title', title: '网盘分享文件', requiresConfirmation: true, processing: [],
+      resources: [
+        { id: 'photo', name: '旅行相册/photo.jpg', size: '219.9 KB', selected: true },
+        { id: 'video', name: '旅行相册/video.mp4', size: '924.2 MB', selected: true },
+      ],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('旅行相册')).toBeVisible();
+  expect(screen.queryByText('网盘分享文件')).not.toBeInTheDocument();
+});
+
+it('renders a batch resource without an extension badge and pins its size to the right', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const user = userEvent.setup();
+    render(<NewDownloadDialog
+      open
+      placement="modal"
+      initialInput="https://share.example.test/photo"
+      onScan={async () => [{ input: 'https://share.example.test/photo', valid: true, kind: 'cloud' }]}
+      onParse={async () => ({ confirmation: {
+        taskId: 'photo', title: '相册', requiresConfirmation: true, processing: [],
+        resources: [{ id: 'photo', name: '相册/photo.jpg', size: '219.9 KB', selected: true }],
+      } })}
+      onDiscardPrepared={vi.fn()}
+      onSubmitBatch={vi.fn()}
+      onClose={vi.fn()}
+    />);
+
+    await user.click(await screen.findByRole('button', { name: '展开相册' }));
+    expect(screen.queryByText('JPG')).not.toBeInTheDocument();
+    const size = screen.getByText('219.9 KB');
+    expect(getComputedStyle(size).justifySelf).toBe('end');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
 it('shows files from an existing multi-file magnet instead of a fallback single item', async () => {
   const user = userEvent.setup();
   render(<NewDownloadDialog

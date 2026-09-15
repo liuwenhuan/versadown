@@ -26,6 +26,86 @@ fn torrent_task(source: impl Into<String>) -> NewTask {
 }
 
 #[tokio::test]
+async fn byte_complete_p2p_tasks_are_completed_while_aria2_continues_sharing() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "system.multicall" => json!([[fixture::status("sharing-gid", "active", 100)]]),
+        "aria2.getPeers" => json!([]),
+        "aria2.getGlobalStat" => fixture::global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+
+    for kind in ["magnet", "torrent", "ed2k"] {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let task = store
+            .create(NewTask {
+                source: format!("{kind}://example"),
+                name: format!("{kind}-fixture"),
+                kind: kind.into(),
+                is_private: false,
+            })
+            .unwrap();
+        store.bind_gid(task.id, "sharing-gid").unwrap();
+        let service = DownloadService::new(Arc::new(client.clone()), store.clone());
+
+        service.reconcile_now().await.unwrap();
+
+        let updated = store.find(task.id).unwrap();
+        assert_eq!(updated.status, TaskStatus::Completed, "{kind}");
+        assert!(updated.p2p_sharing, "{kind}");
+        assert!(updated.completed_at.is_some(), "{kind}");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn terminal_p2p_completion_stops_the_sharing_marker() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "system.multicall" => json!([[fixture::status("sharing-gid", "complete", 100)]]),
+        "aria2.getPeers" => json!([]),
+        "aria2.getGlobalStat" => fixture::global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(magnet_task()).unwrap();
+    store.bind_gid(task.id, "sharing-gid").unwrap();
+    let mut sharing = store.find(task.id).unwrap();
+    sharing.status = TaskStatus::Completed;
+    sharing.p2p_sharing = true;
+    store.apply_transfer_snapshot(sharing).unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    service.reconcile_now().await.unwrap();
+
+    let updated = store.find(task.id).unwrap();
+    assert_eq!(updated.status, TaskStatus::Completed);
+    assert!(!updated.p2p_sharing);
+    server.abort();
+}
+
+#[tokio::test]
+async fn byte_complete_paused_p2p_task_stays_completed_without_a_sharing_marker() {
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "system.multicall" => json!([[fixture::status("paused-sharing-gid", "paused", 100)]]),
+        "aria2.getGlobalStat" => fixture::global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(magnet_task()).unwrap();
+    store.bind_gid(task.id, "paused-sharing-gid").unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    service.reconcile_now().await.unwrap();
+
+    let updated = store.find(task.id).unwrap();
+    assert_eq!(updated.status, TaskStatus::Completed);
+    assert!(!updated.p2p_sharing);
+    server.abort();
+}
+
+#[tokio::test]
 async fn torrent_metadata_name_replaces_the_local_torrent_filename() {
     for (source, content_name, files) in [
         (

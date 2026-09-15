@@ -316,6 +316,9 @@ pub struct DownloadTask {
     pub updated_at: i64,
     #[serde(default)]
     pub completed_at: Option<i64>,
+    /// True only while a byte-complete P2P task is still actively uploading.
+    #[serde(default)]
+    pub p2p_sharing: bool,
     #[serde(default)]
     pub is_private: bool,
     #[serde(default)]
@@ -405,6 +408,8 @@ pub struct QueueTaskPayload {
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub p2p_sharing: bool,
     #[serde(default)]
     pub is_private: bool,
     #[serde(default)]

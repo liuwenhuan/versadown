@@ -74,6 +74,17 @@ fn legacy_database_defaults_discovered_nodes_to_zero() {
 }
 
 #[test]
+fn legacy_database_defaults_p2p_sharing_to_false() {
+    let (path, id) = legacy_database_with_one_task();
+    let store = TaskStore::open_path(&path).expect("migrate legacy database");
+
+    assert!(!store.find(id).unwrap().p2p_sharing);
+
+    drop(store);
+    std::fs::remove_file(path).expect("remove test database");
+}
+
+#[test]
 fn version_ten_database_adds_discovered_nodes_when_the_column_is_missing() {
     let path = temporary_database_path();
     let store = TaskStore::open_path(&path).expect("create current database");
@@ -146,7 +157,7 @@ fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        12
+        13
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -230,7 +241,7 @@ fn version_three_database_backfills_creation_time_from_the_existing_timestamp() 
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        12
+        13
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -294,6 +305,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             created_at: task.created_at,
             updated_at: 1_725_000_000,
             completed_at: None,
+            p2p_sharing: false,
             is_private: false,
             post_processing_note: None,
         })

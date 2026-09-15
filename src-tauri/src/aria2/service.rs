@@ -1143,6 +1143,7 @@ impl DownloadService {
         mut task: DownloadTask,
     ) -> Result<DownloadTask, DownloadServiceError> {
         task.status = TaskStatus::Cancelled;
+        task.p2p_sharing = false;
         task.download_speed = 0;
         task.upload_speed = 0;
         let task = self.store.apply_transfer_snapshot(task)?;
@@ -1167,12 +1168,22 @@ impl DownloadService {
             task.followed_by_gid = Some(snapshot.gid.clone());
         }
         task.aria_gid = Some(snapshot.gid.clone());
-        // No post-processing worker is configured: an aria2-complete transfer is final.
-        task.status = if snapshot.status == TaskStatus::Processing {
+        let p2p_download_complete = matches!(task.kind.as_str(), "magnet" | "torrent" | "ed2k")
+            && matches!(
+                snapshot.status,
+                TaskStatus::Downloading | TaskStatus::Paused | TaskStatus::Processing
+            )
+            && snapshot
+                .total_length
+                .is_some_and(|total| total > 0 && snapshot.completed_length >= total);
+        // A P2P task can be byte-complete while aria2 remains active to upload.
+        // Keep the user-facing download status complete and carry sharing separately.
+        task.status = if snapshot.status == TaskStatus::Processing || p2p_download_complete {
             TaskStatus::Completed
         } else {
             snapshot.status
         };
+        task.p2p_sharing = p2p_download_complete && snapshot.status == TaskStatus::Downloading;
         if !preserve_paused_progress {
             task.progress = snapshot.progress_percent.unwrap_or(0);
             task.total_length = snapshot.total_length;

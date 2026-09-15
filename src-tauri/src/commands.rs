@@ -1036,6 +1036,7 @@ pub(crate) fn queue_task_payload_from_task(
         created_at: task.created_at,
         updated_at: task.updated_at,
         completed_at: task.completed_at,
+        p2p_sharing: task.p2p_sharing,
         is_private: task.is_private,
         post_processing_note: task.post_processing_note,
         files,
@@ -1106,6 +1107,7 @@ fn virtual_cloud_directory_item_payload(
         created_at: group.created_at,
         updated_at: group.updated_at,
         completed_at: None,
+        p2p_sharing: false,
         is_private: group.is_private,
         post_processing_note: None,
         files: Vec::new(),
@@ -1147,6 +1149,7 @@ fn cloud_directory_folder_payload(
         created_at: group.created_at,
         updated_at: group.updated_at,
         completed_at: None,
+        p2p_sharing: false,
         is_private: group.is_private,
         post_processing_note: None,
         files: Vec::new(),
@@ -1407,6 +1410,7 @@ fn aggregate_cloud_directory_folder(
                 .max()
                 .unwrap_or(updated_at)
         }),
+        p2p_sharing: false,
         is_private: group.is_private,
         post_processing_note: folder.post_processing_note,
         files: Vec::new(),

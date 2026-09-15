@@ -43,10 +43,11 @@ impl TransferSynchronizer {
     }
     pub fn poll_interval(&self) -> Result<Duration, DownloadServiceError> {
         let active = self.service.store().list()?.iter().any(|task| {
-            matches!(
-                task.status,
-                crate::TaskStatus::Downloading | crate::TaskStatus::AwaitingUser
-            ) && task.aria_gid.is_some()
+            task.aria_gid.is_some()
+                && (matches!(
+                    task.status,
+                    crate::TaskStatus::Downloading | crate::TaskStatus::AwaitingUser
+                ) || task.p2p_sharing)
         });
         Ok(if active {
             Duration::from_millis(500)

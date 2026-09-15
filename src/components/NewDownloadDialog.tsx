@@ -44,10 +44,9 @@ export function NewDownloadDialog(props: NewDownloadDialogProps) {
 }
 
 function batchItemTitle(item: DownloadDraftItem): string {
-  if (item.result?.confirmation?.title) return item.result.confirmation.title;
-  if (item.result?.task) return item.result.task.name;
-  if (item.result?.duplicate) return item.result.duplicate.task.name;
-  return item.input;
+  const title = item.result?.confirmation?.title ?? item.result?.task?.name ?? item.result?.duplicate?.task.name;
+  if (title && !isGenericBatchTitle(title)) return title;
+  return batchResourceTitle(batchItemResources(item)) ?? title ?? item.input;
 }
 
 function batchItemResources(item: DownloadDraftItem): readonly ConfirmResource[] {
@@ -60,6 +59,18 @@ function batchItemResources(item: DownloadDraftItem): readonly ConfirmResource[]
     size: `${file.length} B`,
     selected: file.selected,
   })) ?? [];
+}
+
+function isGenericBatchTitle(title: string): boolean {
+  return /^(?:网盘分享(?:文件|内容)|下载(?:文件|内容)|未命名(?:任务|文件)|任务名称)$/.test(title.trim());
+}
+
+function batchResourceTitle(resources: readonly ConfirmResource[]): string | undefined {
+  const paths = resources.map(resource => resource.name.split(/[\\/]/).filter(Boolean)).filter(path => path.length > 0);
+  if (paths.length !== resources.length || paths.length === 0) return undefined;
+  if (paths.length === 1) return paths[0].at(-1);
+  const commonDirectory = paths[0].slice(0, -1).filter((part, index) => paths.every(path => path[index] === part));
+  return commonDirectory.length > 0 ? commonDirectory.join('/') : undefined;
 }
 
 type BatchResourceFilter = 'all' | 'video' | 'archive' | 'other';
@@ -77,12 +88,6 @@ function batchResourceBytes(value: string): number {
   if (!match) return 0;
   const units = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4 };
   return Number(match[1]) * units[match[2].toUpperCase() as keyof typeof units];
-}
-
-function BatchFileKindIcon({ resource }: { resource: ConfirmResource }) {
-  const category = batchResourceCategory(resource);
-  const extension = resource.name.split('.').pop()?.slice(0, 4).toUpperCase();
-  return <span className={`parse-file-icon ${category}`} aria-hidden="true">{category === 'video' ? '▶' : category === 'archive' ? '▣' : extension || '文'}</span>;
 }
 
 function BatchVisibleSelectionCheckbox({ checked, indeterminate, disabled, onChange }: { checked: boolean; indeterminate: boolean; disabled: boolean; onChange(): void }) {
@@ -130,7 +135,6 @@ function BatchResourceList({ resources, disabled, onToggle }: { resources: reado
     </div>
     <div className="resource-list batch-resource-list">{visibleResources.map(resource => <label className={`resource${resource.selected ? ' selected' : ''}`} key={resource.id}>
       <input type="checkbox" aria-label={`选择 ${resource.name}`} checked={resource.selected} disabled={disabled} onChange={() => onToggle(resource.id)} />
-      <BatchFileKindIcon resource={resource} />
       <span title={resource.name}>{resource.name}</span><small>{resource.size}</small>
     </label>)}</div>
   </div>;

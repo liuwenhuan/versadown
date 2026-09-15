@@ -47,6 +47,17 @@ it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
   expect(screen.queryByText('已连接 99')).not.toBeInTheDocument();
 });
 
+it('shows a sharing marker only for completed peer-to-peer tasks that are still uploading', () => {
+  render(<DownloadQueue tasks={[
+    { id: 'sharing', name: 'sharing.mkv', kind: 'magnet', status: 'completed', progress: 100, completed_at: 1_789_095_720, p2p_sharing: true },
+    { id: 'finished', name: 'finished.zip', kind: 'ed2k', status: 'completed', progress: 100, completed_at: 1_789_095_720, p2p_sharing: false },
+  ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+
+  expect(screen.getByText('P2P 分享中')).toBeVisible();
+  expect(screen.getAllByText(/完成于 2026-09-11 11:02/)).toHaveLength(2);
+  expect(screen.getAllByText('P2P 分享中')).toHaveLength(1);
+});
+
 const folderTask = {
   id: 'folder-1', name: 'Season 1', kind: 'folder', status: 'downloading', progress: 42,
   children: [{ id: 'file-1', name: 'episode-01.mkv', kind: 'file', status: 'downloading', progress: 50, size: '8 MB / 161.2 MB' }]

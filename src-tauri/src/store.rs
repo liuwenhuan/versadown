@@ -321,6 +321,7 @@ impl TaskStore {
             created_at,
             updated_at: created_at,
             completed_at: None,
+            p2p_sharing: false,
             is_private: new_task.is_private,
             post_processing_note: None,
         };
@@ -1251,14 +1252,14 @@ impl TaskStore {
         let changed = transaction.execute(
             "UPDATE tasks SET name = ?1, status = ?2, progress = ?3, error = ?4, failure_code = ?5, aria_gid = ?6, followed_by_gid = ?7,
              total_length = ?8, completed_length = ?9, download_speed = ?10, upload_speed = ?11,
-             connections = ?12, discovered_nodes = ?13, eta_seconds = ?14, aria_error_code = ?15, updated_at = ?16, completed_at = ?17 WHERE id = ?18",
+             connections = ?12, discovered_nodes = ?13, eta_seconds = ?14, aria_error_code = ?15, updated_at = ?16, completed_at = ?17, p2p_sharing = ?18 WHERE id = ?19",
             params![
                 snapshot.name, snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.failure_code, snapshot.aria_gid,
                 snapshot.followed_by_gid, snapshot.total_length.map(|value| sqlite_i64("total_length", value)).transpose()?,
                 sqlite_i64("completed_length", snapshot.completed_length)?, sqlite_i64("download_speed", snapshot.download_speed)?,
                 sqlite_i64("upload_speed", snapshot.upload_speed)?, snapshot.connections, snapshot.discovered_nodes,
                 snapshot.eta_seconds.map(|value| sqlite_i64("eta_seconds", value)).transpose()?,
-                snapshot.aria_error_code, current_timestamp(), completed_at, snapshot.id.to_string(),
+                snapshot.aria_error_code, current_timestamp(), completed_at, snapshot.p2p_sharing, snapshot.id.to_string(),
             ],
         )?;
         if changed == 0 {
@@ -1468,7 +1469,7 @@ fn remove_managed_payload_file(
     Ok(ManagedFileRemoval::Removed)
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note, p2p_sharing FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1558,6 +1559,11 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     if !column_exists(&transaction, "tasks", "post_processing_note")? {
         transaction.execute_batch("ALTER TABLE tasks ADD COLUMN post_processing_note TEXT;")?;
     }
+    if !column_exists(&transaction, "tasks", "p2p_sharing")? {
+        transaction.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN p2p_sharing INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     if !column_exists(&transaction, "cloud_directory_groups", "is_private")? {
         transaction.execute_batch(
             "ALTER TABLE cloud_directory_groups ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;",
@@ -1585,7 +1591,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             );",
         )?;
     }
-    transaction.execute_batch("PRAGMA user_version = 12;")?;
+    transaction.execute_batch("PRAGMA user_version = 13;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -1717,6 +1723,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         created_at: row.get(21)?,
         is_private: row.get(22)?,
         post_processing_note: row.get(23)?,
+        p2p_sharing: row.get(24)?,
     })
 }
 

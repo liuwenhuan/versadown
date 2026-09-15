@@ -496,8 +496,13 @@ async fn synchronizer_polls_active_at_half_second_and_idle_at_two_seconds() {
     )));
     assert_eq!(sync.poll_interval().unwrap(), Duration::from_millis(500));
     task.status = alldownloader_lib::TaskStatus::Paused;
-    store.apply_transfer_snapshot(task).unwrap();
+    store.apply_transfer_snapshot(task.clone()).unwrap();
     assert_eq!(sync.poll_interval().unwrap(), Duration::from_secs(2));
+    let mut sharing = store.find(task.id).unwrap();
+    sharing.status = alldownloader_lib::TaskStatus::Completed;
+    sharing.p2p_sharing = true;
+    store.apply_transfer_snapshot(sharing).unwrap();
+    assert_eq!(sync.poll_interval().unwrap(), Duration::from_millis(500));
     let (cancel, receiver) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(async move {
         sync.run(receiver).await;

@@ -34,6 +34,7 @@ export interface QueueTask {
   updated_at?: number;
   completed_at?: number;
   completedAt?: number;
+  p2p_sharing?: boolean;
   is_private?: boolean;
   isPrivate?: boolean;
   post_processing_note?: string;
