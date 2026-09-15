@@ -5,6 +5,8 @@ use crate::{downloader::load_torrent_base64, DownloadError, MagnetMetadataSettin
 
 const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const METADATA_USER_AGENT: &str = "AllDownloader/0.1";
+const METADATA_REQUEST_ATTEMPTS: usize = 3;
+const METADATA_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Debug, Error)]
 pub enum MagnetMetadataError {
@@ -60,17 +62,7 @@ pub async fn resolve_magnet_torrent(
         .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .map_err(|error| MagnetMetadataError::Client(error.to_string()))?;
-    let response = client
-        .post(endpoint)
-        .json(&serde_json::json!({ "magnet_uri": magnet }))
-        .send()
-        .await
-        .map_err(|error| MagnetMetadataError::Request(error.to_string()))?;
-    if !response.status().is_success() {
-        return Err(MagnetMetadataError::ResponseStatus(
-            response.status().as_u16(),
-        ));
-    }
+    let response = send_metadata_request(&client, endpoint, magnet).await?;
     let metadata = response
         .json::<MetadataResponse>()
         .await
@@ -83,6 +75,42 @@ pub async fn resolve_magnet_torrent(
         torrent: load_torrent_base64(torrent_url.as_str()).await?,
         title: (!metadata.name.trim().is_empty()).then(|| metadata.name.trim().to_string()),
     }))
+}
+
+async fn send_metadata_request(
+    client: &reqwest::Client,
+    endpoint: url::Url,
+    magnet: &str,
+) -> Result<reqwest::Response, MagnetMetadataError> {
+    for attempt in 0..METADATA_REQUEST_ATTEMPTS {
+        match client
+            .post(endpoint.clone())
+            .json(&serde_json::json!({ "magnet_uri": magnet }))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                if !is_transient_metadata_status(status) || attempt + 1 == METADATA_REQUEST_ATTEMPTS
+                {
+                    return Err(MagnetMetadataError::ResponseStatus(status.as_u16()));
+                }
+            }
+            Err(error) if attempt + 1 == METADATA_REQUEST_ATTEMPTS => {
+                return Err(MagnetMetadataError::Request(error.to_string()));
+            }
+            Err(_) => {}
+        }
+
+        tokio::time::sleep(METADATA_RETRY_DELAY * (attempt as u32 + 1)).await;
+    }
+
+    unreachable!("metadata request attempts always return or fail")
+}
+
+fn is_transient_metadata_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
 
 fn normalized_base_url(value: &str) -> Result<url::Url, MagnetMetadataError> {

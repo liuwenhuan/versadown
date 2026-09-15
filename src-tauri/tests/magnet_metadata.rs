@@ -2,11 +2,15 @@ use alldownloader_lib::{resolve_magnet_torrent, MagnetMetadataSettings};
 use axum::{
     extract::Json,
     http::{header::USER_AGENT, HeaderMap, StatusCode},
+    response::IntoResponse,
     routing::{get, post},
     Router,
 };
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
 
@@ -158,4 +162,74 @@ async fn rewrites_a_service_default_localhost_download_url_to_the_configured_ser
     let resolved = result.expect("rewritten download URL should return its torrent");
     assert_eq!(resolved.torrent, "dG9ycmVudC1ieXRlcw==");
     assert_eq!(resolved.title.as_deref(), Some("fixture"));
+}
+
+#[tokio::test]
+async fn retries_service_unavailable_until_metadata_is_available() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed_attempts = Arc::clone(&attempts);
+    let app = Router::new()
+        .route(
+            "/api/v1/metadata",
+            post(move || {
+                let attempts = Arc::clone(&observed_attempts);
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                        (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response()
+                    } else {
+                        Json(json!({
+                            "download_url": "/download/0123456789abcdef0123456789abcdef01234567"
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        )
+        .route(
+            "/download/0123456789abcdef0123456789abcdef01234567",
+            get(|| async { (StatusCode::OK, b"torrent-bytes".to_vec()) }),
+        );
+    let base_url = serve(app).await;
+
+    let result = resolve_magnet_torrent(
+        &MagnetMetadataSettings {
+            enabled: true,
+            base_url,
+        },
+        MAGNET,
+    )
+    .await;
+
+    assert!(result.unwrap().is_some());
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn does_not_retry_invalid_metadata_request() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed_attempts = Arc::clone(&attempts);
+    let app = Router::new().route(
+        "/api/v1/metadata",
+        post(move || {
+            let attempts = Arc::clone(&observed_attempts);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                (StatusCode::BAD_REQUEST, "invalid magnet")
+            }
+        }),
+    );
+    let base_url = serve(app).await;
+
+    let error = resolve_magnet_torrent(
+        &MagnetMetadataSettings {
+            enabled: true,
+            base_url,
+        },
+        MAGNET,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "磁链解析服务返回 HTTP 400");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }
