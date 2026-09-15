@@ -1,5 +1,5 @@
 (async () => {
-  // Checked against the official 2026-09-10 pan.xunlei.com bundles; see
+  // Checked against the official 2026-09-10 and 2026-09-15 pan.xunlei.com bundles; see
   // docs/xunlei-protocol-analysis-2026-09-10.md. A candidate is NOT proof
   // of authorization: Rust must successfully read the account's root first.
   if (location.protocol !== 'https:' || location.hostname !== 'pan.xunlei.com') return null;
@@ -29,6 +29,9 @@
   let oauth;
   let requireModule;
   let profile;
+  let sso;
+  let ssoModule;
+  let get;
   try {
     // Webpack 4's documented-by-runtime JSONP entry shape. This single private
     // module only obtains its require function; no application module is patched.
@@ -43,11 +46,24 @@
         if (chunks[chunks.length - 1] === entry) chunks.pop();
       }
     }
-    const get = id => requireModule?.m?.[id] ? requireModule(id) : undefined;
-    profile = get(32)?.default;
-    if (profile?.clientId === clientId && profile?.packageName === packageName) {
-      let sso = get(600)?.sso;
-      if (!sso && typeof get(21)?.getSso === 'function') sso = await get(21).getSso();
+    get = id => requireModule?.m?.[id] ? requireModule(id) : undefined;
+    for (const id of [25, 32]) {
+      const candidate = get(id)?.default;
+      if (candidate?.clientId === clientId && candidate?.packageName === packageName) {
+        profile = candidate;
+        break;
+      }
+    }
+    if (profile) {
+      sso = get(600)?.sso;
+      for (const id of [35, 21]) {
+        if (sso) break;
+        const candidate = get(id);
+        if (typeof candidate?.getSso === 'function') {
+          ssoModule = candidate;
+          sso = await candidate.getSso();
+        }
+      }
       oauth = sso?.oAuth2Client;
       if (typeof oauth?.getCredentials === 'function' && typeof oauth?.getCurrentSub === 'function') {
         // The official SDK alone selects its current_sub/credentials_<client>@<sub>.
@@ -63,13 +79,26 @@
   } catch (_) {
     // A discovered SDK which cannot establish its current identity cannot be
     // replaced with a potentially stale Vuex credential. Retry on the next poll.
-    if (oauth) return null;
+    if (profile) return null;
   }
+  if (!profile || !oauth) return null;
   const accessToken = field(current, ['access_token', 'accessToken']);
   const id = userId(current);
   if (!accessToken || !id || id === '0' || id.startsWith('AMS=')) return null;
+  let deviceId;
+  let version;
+  try {
+    const deviceModule = [146, 142].map(id => get(id)).find(candidate => candidate?.a);
+    const device = deviceModule?.a && await deviceModule.a;
+    deviceId = device && text(await device.deviceID);
+    version = text(window.PAN_VERSION) || text(get(178)?.version);
+  } catch (_) { return null; }
+  // client_id/package_name mark a modern web session in Rust. Never attach
+  // those markers until every field required by the drive client is present.
+  if (!deviceId || !version) return null;
   const out = {
     user_id: id, access_token: accessToken, client_id: clientId,
+    device_id: deviceId, client_version: version,
     package_name: packageName, user_agent: text(navigator.userAgent),
   };
   const refreshToken = field(current, ['refresh_token', 'refreshToken']);
@@ -85,15 +114,15 @@
     if (value) out[name] = value;
   }
   try {
-    if (requireModule && profile?.clientId === clientId && profile?.packageName === packageName) {
-      const deviceModule = requireModule.m?.[142] && requireModule(142);
-      const device = deviceModule?.a && await deviceModule.a;
-      const deviceId = device && text(await device.deviceID);
-      if (deviceId) out.device_id = deviceId;
-      const version = requireModule.m?.[178] && text(requireModule(178)?.version);
-      if (version) out.client_version = version;
+    if (requireModule && profile) {
+      let signer;
+      if (profile.funFile === 'sso' && text(profile.funName)) {
+        signer = ssoModule?.[profile.funName]
+          ?? ssoModule?.default?.[profile.funName]
+          ?? sso?.[profile.funName];
+      }
       let signModule = requireModule.m?.[1618] && requireModule(1618);
-      if (typeof signModule?.a !== 'function') {
+      if (profile.funFile === 'filters' && typeof signModule?.a !== 'function') {
         // Module 16 is the official lazy loader for utils-async + captcha.
         // Loading through its named export avoids hard-coded chunk URLs/IDs.
         const loader = requireModule.m?.[16] && requireModule(16);
@@ -102,11 +131,12 @@
           signModule = requireModule.m?.[1618] && requireModule(1618);
         }
       }
-      if (deviceId && version && typeof signModule?.a === 'function') {
+      if (profile.funFile === 'filters') signer = signModule?.a;
+      if (typeof signer === 'function') {
         // Call the official signing implementation with its actual millisecond
         // timestamp. No local reconstruction of the obfuscated signature algorithm.
         const timestamp = String(Date.now());
-        const signature = text(await signModule.a(timestamp));
+        const signature = text(await signer(timestamp));
         if (signature) out.web_security = {
           action: 'GET:/drive/v1/files', captcha_sign: signature, timestamp,
           client_version: version, package_name: packageName,
@@ -114,7 +144,7 @@
       }
     }
   } catch (_) {
-    // Credentials remain a candidate when optional SDK/device modules change.
+    // Credentials remain a candidate when optional signing modules change.
     // No guessed identity/signature or stale client-scoped captcha is substituted.
   }
   let captchaFailed = false;

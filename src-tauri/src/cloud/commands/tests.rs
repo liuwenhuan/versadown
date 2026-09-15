@@ -2157,6 +2157,39 @@ fn xunlei_modern_authorization_saves_the_account_after_a_successful_root_probe()
 }
 
 #[test]
+fn xunlei_incomplete_modern_authorization_keeps_waiting_without_replacing_the_account() {
+    // Webpack module ids can change before the bridge is updated. A current
+    // bearer carrying only the public web identity is not an expired login;
+    // keep polling until the device/version profile can be captured.
+    let credentials = MemoryCredentialStore::default();
+    let previous = b"previous-verified-xunlei-session".to_vec();
+    credentials.save("xunlei", &previous).unwrap();
+    let session = super::parse_xunlei_web_session(serde_json::json!({
+        "access_token": "browser-access",
+        "refresh_token": "browser-refresh",
+        "user_id": "browser-user",
+        "client_id": "Xqp0kJBXWhwaTpB6",
+        "package_name": "pan.xunlei.com",
+        "user_agent": "Mozilla/5.0 fixture-browser"
+    }))
+    .unwrap();
+    let transport = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
+
+    let error = super::finalize_xunlei_web_authorization(
+        crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
+        session,
+        XunleiWebContext::default(),
+        &credentials,
+        &transport,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, QuarkError::AuthorizationPending));
+    assert!(transport.0.lock().unwrap().is_empty());
+    assert_eq!(credentials.load("xunlei").unwrap(), Some(previous));
+}
+
+#[test]
 fn xunlei_web_authorization_uses_the_selected_context_from_official_web_storage() {
     // Break caught: Xunlei's current browser login keeps the credentials
     // and drive challenge context in separate Web Storage records. If the

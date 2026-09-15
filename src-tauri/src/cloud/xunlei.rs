@@ -1295,7 +1295,7 @@ impl XunleiClientProfile {
     /// Headers accepted by the drive APIs.  The official browser does not
     /// expose a client secret, but it does supply these identity fields with a
     /// current bearer token.
-    fn is_drive_complete(&self) -> bool {
+    pub(crate) fn is_drive_complete(&self) -> bool {
         !self.client_id.is_empty()
             && !self.device_id.is_empty()
             && !self.client_version.is_empty()

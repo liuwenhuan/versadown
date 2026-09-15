@@ -13,6 +13,8 @@ const source = fs.existsSync(scriptPath)
   : fs.readFileSync(path.join(root, 'src-tauri/src/cloud/commands.rs'), 'utf8')
     .match(/const XUNLEI_WEB_TOKENS_JS: &str = r#"([\s\S]*?)"#;/)[1];
 const clientId = 'Xqp0kJBXWhwaTpB6';
+const legacySignerName = 'pub1iwjKbiXrwP9i86t19Ao0HtnZnkjCjZk';
+const currentSignerName = 'pubdg37cXNMeBnM3rzp5ST3ayHeK9Z8gupD';
 const current = { userId: 'current-user', accessToken: 'current-access' };
 function storage(data = {}) {
   return { length: Object.keys(data).length, key: i => Object.keys(data)[i],
@@ -20,7 +22,9 @@ function storage(data = {}) {
 }
 function sdkModules({ credentials, sub = 'current-user', signature, device = 'official-device' } = {}) {
   return {
-    32: { default: { clientId, packageName: 'pan.xunlei.com' } },
+    32: { default: {
+      clientId, packageName: 'pan.xunlei.com', funFile: 'filters', funName: legacySignerName,
+    } },
     178: { version: '1.92.98' },
     600: { sso: { oAuth2Client: {
       getCredentials: async () => credentials,
@@ -30,9 +34,27 @@ function sdkModules({ credentials, sub = 'current-user', signature, device = 'of
     1618: { a: signature || (async () => '1.official-sdk-signature') },
   };
 }
-async function extract({ user = current, hydrated, local = {}, modules, hostname = 'pan.xunlei.com', protocol = 'https:' } = {}) {
+function currentSdkModules({ credentials, sub = 'current-user', signature, device = 'current-device' } = {}) {
+  const ssoModule = {
+    getSso: async () => ({ oAuth2Client: {
+      getCredentials: async () => credentials,
+      getCurrentSub: async () => sub,
+    } }),
+    [currentSignerName]: signature || (async () => '1.current-official-signature'),
+  };
+  return {
+    25: { default: {
+      clientId, packageName: 'pan.xunlei.com', funFile: 'sso', funName: currentSignerName,
+    } },
+    35: ssoModule,
+    146: { a: Promise.resolve({ deviceID: Promise.resolve(device) }) },
+  };
+}
+async function extract({ user = current, hydrated, local = {}, modules, panVersion,
+  hostname = 'pan.xunlei.com', protocol = 'https:' } = {}) {
   const window = { $nuxt: { $store: { state: { users: { curUser: user } } } },
     __NUXT__: { state: { users: { curUser: hydrated } } } };
+  if (panVersion !== undefined) window.PAN_VERSION = panVersion;
   if (modules) {
     const require = id => {
       if (!require.c[id]) {
@@ -57,9 +79,7 @@ async function extract({ user = current, hydrated, local = {}, modules, hostname
 }
 test('old storage cannot replace the live current account', async () => {
   const value = await extract({ local: { old: { id: 'old-user', access_token: 'old-access', refresh_token: 'old-refresh' } } });
-  assert.equal(value.user_id, 'current-user');
-  assert.equal(value.access_token, 'current-access');
-  assert.equal(value.refresh_token, undefined);
+  assert.equal(value, null);
 });
 test('generic ids and nested secrets are never credentials', async () => {
   assert.equal(await extract({ user: { id: 'photo-id', access_token: 'unrelated', password: { userId: 'secret', accessToken: 'secret' } } }), null);
@@ -88,6 +108,27 @@ test('SDK returns renewable credentials as one account with normalized expiry an
   assert.equal(value.web_security.action, 'GET:/drive/v1/files');
   assert.equal(value.password, undefined);
 });
+test('current 1.92.100 bundle uses its published version and profile-selected SSO signer', async () => {
+  let signedAt;
+  const modules = currentSdkModules({ credentials: {
+    sub: 'current-user', access_token: 'current-sdk-access', refresh_token: 'current-sdk-refresh',
+  }, signature: async timestamp => {
+    signedAt = timestamp;
+    return '1.current-official-signature';
+  } });
+  const value = await extract({ modules, panVersion: '1.92.100' });
+  assert.equal(value.user_id, 'current-user');
+  assert.equal(value.access_token, 'current-sdk-access');
+  assert.equal(value.device_id, 'current-device');
+  assert.equal(value.client_version, '1.92.100');
+  assert.equal(value.web_security.captcha_sign, '1.current-official-signature');
+  assert.equal(value.web_security.timestamp, signedAt);
+});
+test('current bundle remains pending until both device and client version are available', async () => {
+  const credentials = { sub: 'current-user', access_token: 'current-sdk-access' };
+  assert.equal(await extract({ modules: currentSdkModules({ credentials, device: '' }), panVersion: '1.92.100' }), null);
+  assert.equal(await extract({ modules: currentSdkModules({ credentials }) }), null);
+});
 test('SDK logout and account switch never reuse a different current credential', async () => {
   assert.equal(await extract({ modules: sdkModules({ credentials: null }) }), null);
   assert.equal(await extract({ modules: sdkModules({ credentials: { sub: 'old-user', access_token: 'old-access' } }) }), null);
@@ -111,8 +152,7 @@ test('unknown webpack/profile fails safely without calling foreign signing code'
     signature: () => { signed = true; return 'foreign-signature'; } });
   modules[32].default.clientId = 'other-product';
   const value = await extract({ modules });
-  assert.equal(value.web_security, undefined);
-  assert.equal(value.client_id, clientId);
+  assert.equal(value, null);
   assert.equal(signed, false);
 });
 test('in-place account switch during signing discards the entire candidate', async () => {

@@ -208,6 +208,14 @@ pub(crate) fn finalize_xunlei_web_authorization(
 ) -> Result<CloudAccount, QuarkError> {
     session.web_context = context;
     let modern = session.profile.is_modern_web();
+    // The public client id/package identify the webpage, but they do not make
+    // a usable drive profile by themselves. Webpack chunks can still be
+    // loading (or may have changed) while the current account bearer is
+    // already visible, so keep polling instead of reporting a valid login as
+    // expired before any request is sent.
+    if modern && !session.profile.is_drive_complete() {
+        return Err(QuarkError::AuthorizationPending);
+    }
     // Modern web SSO proves access with the drive API, not legacy cookie keys.
     let client = xunlei::XunleiClient::new(session, http);
     // Do not make the UI create a tab or close the official browser window
