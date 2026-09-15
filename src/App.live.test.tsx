@@ -11,7 +11,7 @@ const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
-  confirm: vi.fn(), confirmCloud: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
+  confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
@@ -24,7 +24,7 @@ const state = vi.hoisted(() => ({
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   scanDownloadInputs: vi.fn().mockResolvedValue([]),
-  confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
+  confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, discardPreparedDownload: state.discardPrepared, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   getPrivacyTaskVisibility: state.privacyVisibility,
   checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
@@ -86,6 +86,7 @@ beforeEach(() => {
   state.parse.mockReset();
   state.confirm.mockReset();
   state.confirmCloud.mockReset();
+  state.discardPrepared.mockReset().mockResolvedValue(undefined);
   state.resolveDuplicate.mockReset();
   state.openDirectory.mockReset();
   state.selectFiles.mockReset();
@@ -417,7 +418,7 @@ it('refreshes a task after automatic password renewal without polling a closed a
   expect(state.completeCloudAuthorization).not.toHaveBeenCalled();
 });
 
-it('keeps task confirmation in the header panel after parsing a download link', async () => {
+it('opens a unified task window and parses a typed download link immediately', async () => {
   const user = userEvent.setup();
   vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input: 'magnet:?xt=urn:btih:abc', valid: true, kind: 'magnet' }]);
   state.parse.mockResolvedValueOnce({
@@ -430,15 +431,13 @@ it('keeps task confirmation in the header panel after parsing a download link', 
 
   render(<App />);
   await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), 'magnet:?xt=urn:btih:abc{Enter}');
-  expect(screen.getByRole('dialog', { name: '新建下载' })).toHaveClass('header-download-dialog');
-  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
-  await user.click(await screen.findByRole('button', { name: '确认并完成' }));
-
-  const confirmation = await screen.findByRole('dialog', { name: '确认下载内容' });
-  expect(confirmation.closest('.header-input-panel')).not.toBeNull();
-  await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
+  const dialog = screen.getByRole('dialog', { name: '新建下载' });
+  expect(dialog).toHaveClass('batch-download-dialog', 'modal');
+  expect(await within(dialog).findByText('collection')).toBeVisible();
+  await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
 
   await waitFor(() => expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true'));
+  expect(state.parse).toHaveBeenCalledWith('magnet:?xt=urn:btih:abc', undefined, true);
 });
 
 it('uses the dark launcher graphic and vector icons in the primary navigation', async () => {
@@ -624,7 +623,7 @@ it('does not expose a page-wide start action when paused tasks exist', async () 
   expect(state.taskAction).not.toHaveBeenCalled();
 });
 
-it('parses torrent files dropped on the global input one at a time and ignores drops elsewhere', async () => {
+it('opens one batch window and parses every torrent dropped on the global input', async () => {
   const first = {
     taskId: 'torrent-first', title: 'first.torrent', requiresConfirmation: true, isBitTorrent: true,
     resources: [{ id: '1', name: 'first/file-one.bin', size: '1 MB', selected: true }], processing: []
@@ -633,6 +632,10 @@ it('parses torrent files dropped on the global input one at a time and ignores d
     taskId: 'torrent-second', title: 'second.torrent', requiresConfirmation: true, isBitTorrent: true,
     resources: [{ id: '2', name: 'second/file-two.bin', size: '2 MB', selected: true }], processing: []
   };
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([
+    { input: 'C:\\BT\\first.torrent', valid: true, kind: 'torrent' },
+    { input: 'C:\\BT\\second.TORRENT', valid: true, kind: 'torrent' },
+  ]);
   state.parse.mockResolvedValueOnce({ confirmation: first }).mockResolvedValueOnce({ confirmation: second });
   render(<App />);
   await waitFor(() => expect(state.dragDropHandler).toBeDefined());
@@ -644,14 +647,12 @@ it('parses torrent files dropped on the global input one at a time and ignores d
   expect(state.parse).not.toHaveBeenCalled();
 
   await act(async () => { state.dragDropHandler?.({ payload: { type: 'drop', paths: ['C:\\BT\\first.torrent', 'C:\\BT\\notes.txt', 'C:\\BT\\second.TORRENT'], position: position(200, 40) } }); });
-  await waitFor(() => expect(state.parse).toHaveBeenCalledWith('C:\\BT\\first.torrent', undefined, false));
-  expect(state.parse).toHaveBeenCalledTimes(1);
-  expect(await screen.findByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('file-one.bin');
-
-  await userEvent.click(screen.getByRole('button', { name: '关闭确认窗口' }));
-  await waitFor(() => expect(state.parse).toHaveBeenCalledWith('C:\\BT\\second.TORRENT', undefined, false));
+  await waitFor(() => expect(state.parse).toHaveBeenCalledWith('C:\\BT\\first.torrent', undefined, true));
+  await waitFor(() => expect(state.parse).toHaveBeenCalledWith('C:\\BT\\second.TORRENT', undefined, true));
   expect(state.parse).toHaveBeenCalledTimes(2);
-  expect(await screen.findByRole('dialog', { name: '确认下载内容' })).toHaveTextContent('file-two.bin');
+  const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+  expect(dialog).toHaveTextContent('first.torrent');
+  expect(dialog).toHaveTextContent('second.torrent');
 });
 
 it('selects only the current tab tasks with Ctrl+A across all four task tabs', async () => {
@@ -908,20 +909,15 @@ it('keeps a protected share open for an access code before completing its normal
   render(<App />);
 
   await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), `${shareLink}{Enter}`);
-  const downloadInput = screen.getByLabelText('下载内容');
-  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
-  await user.click(await screen.findByRole('button', { name: '确认并完成' }));
-
-  const accessCode = await screen.findByLabelText('访问码');
+  const accessCode = await screen.findByLabelText(`${shareLink}访问码`);
   expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
-  expect(downloadInput).toHaveValue(shareLink);
-  expect(accessCode).toHaveFocus();
-  expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined, false);
+  expect(state.parse).toHaveBeenLastCalledWith(shareLink, undefined, true);
 
   await user.type(accessCode, '1234');
-  await user.click(screen.getByRole('button', { name: '确认并完成' }));
+  await user.click(screen.getByRole('button', { name: '重新解析' }));
 
-  await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234', false));
+  await waitFor(() => expect(state.parse).toHaveBeenLastCalledWith(shareLink, '1234', true));
+  await user.click(await screen.findByRole('button', { name: '新建任务' }));
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
   expect(screen.getByText('archive.iso')).toBeVisible();
 });
@@ -946,17 +942,68 @@ it('uses a non-link query to find local active, completed, and failed tasks', as
   expect(screen.getByTitle('已完成文档.pdf')).toBeVisible();
 });
 
-it('opens the header download panel immediately when pasted content spans multiple lines', async () => {
+it('opens the unified batch window immediately when pasted content spans multiple lines', async () => {
   render(<App />);
   const content = 'https://example.test/first.zip\nhttps://example.test/second.zip';
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([
+    { input: 'https://example.test/first.zip', valid: true, kind: 'direct' },
+    { input: 'https://example.test/second.zip', valid: true, kind: 'direct' },
+  ]);
+  state.parse.mockImplementation(async (input: string) => ({ confirmation: {
+    taskId: input, title: input.split('/').pop(), requiresConfirmation: true, resources: [], processing: [],
+  } }));
 
   fireEvent.paste(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), {
     clipboardData: { getData: () => content }
   });
 
   const dialog = await screen.findByRole('dialog', { name: '新建下载' });
-  expect(dialog).toHaveClass('header-download-dialog');
-  expect(screen.getByRole('textbox', { name: '下载内容' })).toHaveValue(content);
+  expect(dialog).toHaveClass('batch-download-dialog', 'modal');
+  expect(await within(dialog).findByText('first.zip')).toBeVisible();
+  expect(within(dialog).getByText('second.zip')).toBeVisible();
+});
+
+it('opens one batch dialog for pasted links and closes after the first selected task is created', async () => {
+  const user = userEvent.setup();
+  const firstLink = 'https://example.test/first.zip';
+  const secondLink = 'https://example.test/second.zip';
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([
+    { input: firstLink, valid: true, kind: 'direct' },
+    { input: secondLink, valid: true, kind: 'direct' },
+  ]);
+  state.parse.mockImplementation(async (input: string) => ({
+    confirmation: {
+      taskId: input === firstLink ? 'first-draft' : 'second-draft',
+      title: input === firstLink ? 'first.zip' : 'second.zip',
+      requiresConfirmation: true,
+      resources: [],
+      processing: [],
+    },
+  }));
+  const first = deferred<QueueTask | undefined>();
+  const second = deferred<QueueTask | undefined>();
+  state.confirm.mockImplementation((taskId: string) => taskId === 'first-draft' ? first.promise : second.promise);
+  render(<App />);
+
+  fireEvent.paste(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), {
+    clipboardData: { getData: () => `${firstLink}\n${secondLink}` },
+  });
+
+  const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+  expect(within(dialog).getByText('first.zip')).toBeVisible();
+  expect(within(dialog).getByText('second.zip')).toBeVisible();
+  await user.click(within(dialog).getByRole('button', { name: '解压密码和后处理' }));
+  await user.type(within(dialog).getByRole('textbox', { name: '解压密码和后处理' }), '密码 88in');
+  await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
+
+  await waitFor(() => expect(state.confirm).toHaveBeenCalledTimes(2));
+  expect(state.confirm).toHaveBeenCalledWith('first-draft', [], undefined, false, '密码 88in');
+  expect(state.confirm).toHaveBeenCalledWith('second-draft', [], undefined, false, '密码 88in');
+  await act(async () => { first.resolve({ id: 'first-task', name: 'first.zip', kind: 'file', status: 'downloading', progress: 0 }); });
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
+  expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByTitle('first.zip')).toBeVisible();
+  await act(async () => { second.resolve({ id: 'second-task', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 }); });
 });
 
 it('queues normal share results and presents duplicate results in FIFO order', async () => {

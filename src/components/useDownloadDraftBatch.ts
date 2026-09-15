@@ -32,6 +32,12 @@ function preparedReference(item: DownloadDraftItem): string | undefined {
   return undefined;
 }
 
+function resultReference(result: ParseDownloadResult): string | undefined {
+  if (result.confirmation) return result.confirmation.taskId;
+  if (result.task) return result.task.id;
+  return undefined;
+}
+
 export function selectedResourceIds(item: DownloadDraftItem): string[] {
   return item.result?.confirmation?.resources
     .filter(resource => resource.selected)
@@ -44,6 +50,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
   const queueRef = useRef<WorkItem[]>([]);
   const activeRef = useRef(0);
   const sessionRef = useRef(0);
+  const abandonedRef = useRef(new Set<string>());
 
   const replaceItems = useCallback((update: (current: DownloadDraftItem[]) => DownloadDraftItem[]) => {
     const next = update(itemsRef.current);
@@ -60,6 +67,12 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
       activeRef.current += 1;
       void prepare(item.input, item.accessCode.trim() || undefined)
         .then(result => {
+          const current = itemsRef.current.find(candidate => candidate.id === work.id && candidate.generation === work.generation);
+          if (!current || abandonedRef.current.has(work.id)) {
+            const reference = resultReference(result);
+            if (reference) void discard(reference).catch(() => undefined);
+            return;
+          }
           replaceItems(current => current.map(candidate => {
             if (candidate.id !== work.id || candidate.generation !== work.generation) return candidate;
             if (result.shareAccessCodeRequired) {
@@ -178,8 +191,10 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
   }, [replaceItems]);
 
   const discardAll = useCallback(async () => {
-    const references = itemsRef.current
-      .filter(item => !item.submitted)
+    const abandoned = itemsRef.current.filter(item => !item.submitted);
+    abandoned.forEach(item => abandonedRef.current.add(item.id));
+    queueRef.current = queueRef.current.filter(work => !abandonedRef.current.has(work.id));
+    const references = abandoned
       .map(preparedReference)
       .filter((reference): reference is string => Boolean(reference));
     await Promise.allSettled(Array.from(new Set(references)).map(reference => discard(reference)));

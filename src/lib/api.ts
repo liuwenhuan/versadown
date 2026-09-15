@@ -148,9 +148,9 @@ export async function scanDownloadInputs(input: string): Promise<ScanDownloadRes
   return invoke<ScanDownloadResult[]>('scan_download_inputs', { input });
 }
 
-export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false): Promise<QueueTask | undefined> {
+export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false, postProcessingNote?: string): Promise<QueueTask | undefined> {
   if (!isTauriRuntime()) return undefined;
-  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}) });
+  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), ...(postProcessingNote?.trim() ? { postProcessingNote } : {}) });
 }
 
 export type PersistedTaskScope = 'active' | 'terminal';
@@ -172,11 +172,11 @@ export async function openTaskFile(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('open_task_file', { taskId });
 }
 
-export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false, onCreated?: (task: QueueTask) => void): Promise<CloudShareBatchResult> {
+export async function confirmCloudShareDownload(planSource: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false, onCreated?: (task: QueueTask) => void, postProcessingNote?: string): Promise<CloudShareBatchResult> {
   if (!isTauriRuntime()) return { outcomes: [], failures: [] };
   const onCreatedChannel = new Channel<QueueTask>();
   onCreatedChannel.onmessage = (task) => onCreated?.(task);
-  const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), onCreated: onCreatedChannel });
+  const result = await invoke<NativeCloudShareBatchResult>('confirm_cloud_share_download', { planSource, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), ...(postProcessingNote?.trim() ? { postProcessingNote } : {}), onCreated: onCreatedChannel });
   return { outcomes: result.outcomes.map(duplicateResult), failures: result.failures };
 }
 

@@ -205,3 +205,21 @@ it('sends the privacy confirmation and private selection flags only when request
     planSource: 'cloud-share://quark/plan', selectedIds: ['f1'], privateDownload: true, onCreated: expect.any(Object)
   });
 });
+
+it('passes one shared post-processing note to native and cloud confirmations', async () => {
+  native.invoke.mockResolvedValueOnce({ id: 'native' });
+  native.invoke.mockResolvedValueOnce({ outcomes: [], failures: [] });
+  const { confirmCloudShareDownload, confirmDownload } = await import('./api');
+
+  await confirmDownload('native', ['1'], 'D:\\Downloads', false, '密码 88in\n完成后拼接');
+  await confirmCloudShareDownload('cloud-share://baidu/plan', ['f1'], undefined, false, undefined, '密码 88in\n完成后拼接');
+
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'confirm_download_command', {
+    taskId: 'native', selectedIds: ['1'], destinationDirectory: 'D:\\Downloads',
+    postProcessingNote: '密码 88in\n完成后拼接'
+  });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'confirm_cloud_share_download', {
+    planSource: 'cloud-share://baidu/plan', selectedIds: ['f1'],
+    postProcessingNote: '密码 88in\n完成后拼接', onCreated: expect.any(Object)
+  });
+});

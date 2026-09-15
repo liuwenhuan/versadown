@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { afterEach, vi } from 'vitest';
@@ -345,6 +345,68 @@ it('shows all pasted tasks in one dialog and submits one shared post-processing 
   expect(onSubmitBatch.mock.calls[0][3]).toBe('密码 88in\n完成后拼接');
 });
 
+it('filters batch resources by category and toggles the visible category selection', async () => {
+  const user = userEvent.setup();
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:categorized"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:categorized', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'categorized', title: '分类目录', requiresConfirmation: true, isBitTorrent: true, processing: [],
+      resources: [
+        { id: 'video', name: '分类目录/movie.mkv', size: '1 GB', selected: true },
+        { id: 'archive', name: '分类目录/source.zip', size: '2 GB', selected: true },
+        { id: 'other', name: '分类目录/readme.txt', size: '3 KB', selected: true },
+      ],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  await user.click(await screen.findByRole('button', { name: '展开分类目录' }));
+  await user.click(screen.getByRole('button', { name: '压缩包' }));
+
+  expect(screen.getByText('分类目录/source.zip')).toBeVisible();
+  expect(screen.queryByText('分类目录/movie.mkv')).not.toBeInTheDocument();
+  expect(screen.queryByText('分类目录/readme.txt')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('checkbox', { name: '全选当前筛选结果' }));
+  expect(screen.getByRole('checkbox', { name: '选择 分类目录/source.zip' })).not.toBeChecked();
+});
+
+it('sorts expanded batch resources by name and size', async () => {
+  const user = userEvent.setup();
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:sorted"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:sorted', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'sorted', title: '排序目录', requiresConfirmation: true, isBitTorrent: true, processing: [],
+      resources: [
+        { id: 'zeta', name: '排序目录/zeta.txt', size: '20 MB', selected: true },
+        { id: 'alpha', name: '排序目录/alpha.mp4', size: '3 GB', selected: true },
+        { id: 'middle', name: '排序目录/middle.zip', size: '1 KB', selected: true },
+      ],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  await user.click(await screen.findByRole('button', { name: '展开排序目录' }));
+  await user.click(screen.getByRole('button', { name: '按文件名升序排序' }));
+  expect(screen.getAllByRole('checkbox', { name: /选择 排序目录\// }).map(input => input.getAttribute('aria-label'))).toEqual([
+    '选择 排序目录/alpha.mp4', '选择 排序目录/middle.zip', '选择 排序目录/zeta.txt',
+  ]);
+
+  await user.click(screen.getByRole('button', { name: '按文件大小升序排序' }));
+  expect(screen.getAllByRole('checkbox', { name: /选择 排序目录\// }).map(input => input.getAttribute('aria-label'))).toEqual([
+    '选择 排序目录/middle.zip', '选择 排序目录/zeta.txt', '选择 排序目录/alpha.mp4',
+  ]);
+});
+
 it('shows files from an existing multi-file magnet instead of a fallback single item', async () => {
   const user = userEvent.setup();
   render(<NewDownloadDialog
@@ -449,5 +511,27 @@ it('allows a pending task to be deselected so ready tasks can be submitted', asy
   expect(screen.getByRole('button', { name: '新建任务' })).toBeDisabled();
   await user.click(screen.getByRole('checkbox', { name: '选择 https://example.test/pending' }));
   expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
-  resolveSecond!({ confirmation: { taskId: 'pending', title: '稍后完成', requiresConfirmation: true, resources: [], processing: [] } });
+  await act(async () => {
+    resolveSecond!({ confirmation: { taskId: 'pending', title: '稍后完成', requiresConfirmation: true, resources: [], processing: [] } });
+  });
+});
+
+it('keeps the explicit empty new-task command usable inside the unified dialog', async () => {
+  const user = userEvent.setup();
+  const onScan = vi.fn(async (input: string) => [{ input, valid: true as const, kind: 'direct' as const }]);
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    onScan={onScan}
+    onParse={async input => ({ confirmation: { taskId: 'manual', title: 'manual.zip', requiresConfirmation: true, resources: [], processing: [] } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  await user.type(screen.getByRole('textbox', { name: '下载内容' }), 'https://example.test/manual.zip');
+  await user.click(screen.getByRole('button', { name: '解析任务' }));
+
+  expect(await screen.findByText('manual.zip')).toBeVisible();
+  expect(onScan).toHaveBeenCalledWith('https://example.test/manual.zip');
 });

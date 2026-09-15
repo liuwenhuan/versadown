@@ -350,6 +350,7 @@ impl TaskStore {
             created_at: timestamp,
             updated_at: timestamp,
             is_private: new_group.is_private,
+            post_processing_note: None,
         };
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
@@ -398,7 +399,7 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
                  FROM cloud_directory_groups WHERE id = ?1",
                 [id.to_string()],
                 cloud_directory_group_from_row,
@@ -410,7 +411,7 @@ impl TaskStore {
     pub fn cloud_directory_groups(&self) -> Result<Vec<CloudDirectoryGroup>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let mut statement = connection.prepare(
-            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
+            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
              FROM cloud_directory_groups ORDER BY created_at, id",
         )?;
         let groups = statement
@@ -438,7 +439,7 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         let group = transaction.query_row(
-            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
+            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
              FROM cloud_directory_groups WHERE id = ?1", [id.to_string()], cloud_directory_group_from_row,
         ).optional()?;
         let Some(group) = group else {
@@ -480,7 +481,32 @@ impl TaskStore {
         }
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
+                 FROM cloud_directory_groups WHERE id = ?1",
+                [id.to_string()],
+                cloud_directory_group_from_row,
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_cloud_directory_group_post_processing_note(
+        &self,
+        id: Uuid,
+        note: Option<&str>,
+    ) -> Result<CloudDirectoryGroup, StoreError> {
+        validate_uuid(id)?;
+        let note = note.map(str::trim).filter(|value| !value.is_empty());
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE cloud_directory_groups SET post_processing_note = ?1, updated_at = ?2 WHERE id = ?3",
+            params![note, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        connection
+            .query_row(
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
                  FROM cloud_directory_groups WHERE id = ?1",
                 [id.to_string()],
                 cloud_directory_group_from_row,
@@ -572,7 +598,7 @@ impl TaskStore {
         }
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private
+                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
                  FROM cloud_directory_groups WHERE id = ?1",
                 [group_id.to_string()],
                 cloud_directory_group_from_row,
@@ -1492,7 +1518,8 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             output_directory TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'queued',
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            post_processing_note TEXT
          );
          CREATE TABLE IF NOT EXISTS cloud_directory_group_items (
             id TEXT PRIMARY KEY NOT NULL,
@@ -1536,6 +1563,15 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             "ALTER TABLE cloud_directory_groups ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
+    if !column_exists(
+        &transaction,
+        "cloud_directory_groups",
+        "post_processing_note",
+    )? {
+        transaction.execute_batch(
+            "ALTER TABLE cloud_directory_groups ADD COLUMN post_processing_note TEXT;",
+        )?;
+    }
     if version < 10 {
         transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS ftp_segments (
@@ -1549,7 +1585,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             );",
         )?;
     }
-    transaction.execute_batch("PRAGMA user_version = 11;")?;
+    transaction.execute_batch("PRAGMA user_version = 12;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -1708,6 +1744,7 @@ fn cloud_directory_group_from_row(row: &Row<'_>) -> rusqlite::Result<CloudDirect
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         is_private: row.get(8)?,
+        post_processing_note: row.get(9)?,
     })
 }
 
@@ -1844,6 +1881,53 @@ mod tests {
             .unwrap()
             .post_processing_note
             .is_none());
+    }
+
+    #[test]
+    fn cloud_directory_post_processing_note_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let group_id = {
+            let store = TaskStore::open_path(&database).unwrap();
+            let group = store
+                .create_cloud_directory_group(
+                    NewCloudDirectoryGroup::new(
+                        CloudProvider::Quark,
+                        "remote-root",
+                        "合集",
+                        directory.path(),
+                    ),
+                    &[NewCloudDirectoryGroupItem::new(
+                        "remote-file",
+                        &[] as &[&str],
+                        "视频.mp4",
+                        Some(42),
+                    )],
+                )
+                .unwrap();
+            let updated = store
+                .set_cloud_directory_group_post_processing_note(
+                    group.id,
+                    Some("解压密码：88in\n完成后合并"),
+                )
+                .unwrap();
+            assert_eq!(
+                updated.post_processing_note.as_deref(),
+                Some("解压密码：88in\n完成后合并")
+            );
+            group.id
+        };
+
+        let store = TaskStore::open_path(&database).unwrap();
+        assert_eq!(
+            store
+                .cloud_directory_group(group_id)
+                .unwrap()
+                .unwrap()
+                .post_processing_note
+                .as_deref(),
+            Some("解压密码：88in\n完成后合并")
+        );
     }
 
     #[test]

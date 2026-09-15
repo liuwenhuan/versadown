@@ -87,3 +87,22 @@ it('keeps access-code state on one item, retries it, and discards only unsubmitt
   await act(async () => { await result.current.discardAll(); });
   expect(discard).toHaveBeenCalledTimes(1);
 });
+
+it('discards a draft that finishes parsing after the batch window was closed', async () => {
+  const work = deferred<ParseDownloadResult>();
+  const discard = vi.fn().mockResolvedValue(undefined);
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: 'https://example.test/slow.zip', valid: true, kind: 'direct' }],
+    prepare: () => work.promise,
+    discard,
+  }));
+
+  await act(async () => { await result.current.start('slow'); });
+  await act(async () => { await result.current.discardAll(); });
+  await act(async () => {
+    work.resolve(ready('slow-draft'));
+    await work.promise;
+  });
+
+  await waitFor(() => expect(discard).toHaveBeenCalledWith('slow-draft'));
+});

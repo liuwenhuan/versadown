@@ -566,6 +566,7 @@ pub async fn confirm_cloud_share_download(
     selected_ids: Vec<String>,
     destination_directory: Option<String>,
     private_download: Option<bool>,
+    post_processing_note: Option<String>,
     on_created: tauri::ipc::Channel<QueueTaskPayload>,
     state: State<'_, AppState>,
 ) -> Result<CloudShareBatchOutcome, crate::cloud::QuarkError> {
@@ -587,6 +588,8 @@ pub async fn confirm_cloud_share_download(
     if selection.directory_name.is_some() {
         let plan = crate::cloud::commands::plan_cloud_share_directory_download(&selection)?;
         let store = Arc::clone(&state.store);
+        let note_store = Arc::clone(&state.store);
+        let root_note = post_processing_note.clone();
         let provider = selection.provider;
         let group_source = selection.plan_source.clone();
         let submit_app = app.clone();
@@ -602,7 +605,13 @@ pub async fn confirm_cloud_share_download(
             plan,
             configured,
             private_download,
-            move |root| {
+            move |mut root| {
+                let root_id =
+                    Uuid::parse_str(&root.id).map_err(|_| crate::cloud::QuarkError::Storage)?;
+                let group = note_store
+                    .set_cloud_directory_group_post_processing_note(root_id, root_note.as_deref())
+                    .map_err(|_| crate::cloud::QuarkError::Storage)?;
+                root.post_processing_note = group.post_processing_note;
                 let _ = on_created.send(root.clone());
                 if emit_root {
                     use tauri::Emitter;
@@ -646,6 +655,7 @@ pub async fn confirm_cloud_share_download(
         let app = app.clone();
         let configured = configured.clone();
         let on_created = on_created.clone();
+        let post_processing_note = post_processing_note.clone();
         async move {
             let outcome = crate::cloud::commands::submit_cloud_share_file(
                 app,
@@ -653,15 +663,23 @@ pub async fn confirm_cloud_share_download(
                 source,
                 configured,
                 private_download,
-                Some(on_created.clone()),
+                None,
             )
             .await?;
-            if let Ok(task) =
-                queue_task_payload_from_task(&state.store, outcome.payload.task.clone())
-            {
-                let _ = on_created.send(task);
-            }
-            Ok(outcome)
+            let duplicate = outcome.duplicate;
+            let task = state
+                .store
+                .set_post_processing_note(outcome.payload.task.id, post_processing_note.as_deref())
+                .map_err(|_| crate::cloud::QuarkError::Storage)?;
+            let updated = task_action_outcome(&state.store, task, duplicate)
+                .map_err(crate::cloud::QuarkError::Transport)?;
+            let task = match updated.queue_task.clone() {
+                Some(task) => task,
+                None => queue_task_payload_from_task(&state.store, updated.payload.task.clone())
+                    .map_err(crate::cloud::QuarkError::Transport)?,
+            };
+            let _ = on_created.send(task);
+            Ok(updated)
         }
     })
     .await;
@@ -777,6 +795,7 @@ pub async fn confirm_download_command(
     selected_ids: Vec<String>,
     destination_directory: Option<String>,
     private_download: Option<bool>,
+    post_processing_note: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
     let private_download = private_download.unwrap_or(false);
@@ -790,9 +809,13 @@ pub async fn confirm_download_command(
     let current = state.store.find(id).map_err(|error| error.to_string())?;
     ensure_private_task_access(&state, &current)?;
     fail_invalid_task_submission(&state.store, &current)?;
-    let current = state
+    state
         .store
         .set_private(id, private_download)
+        .map_err(|error| error.to_string())?;
+    let current = state
+        .store
+        .set_post_processing_note(id, post_processing_note.as_deref())
         .map_err(|error| error.to_string())?;
     let options =
         download_submission_options_for_directory(&state, destination_directory.as_deref())?;
@@ -1014,6 +1037,7 @@ pub(crate) fn queue_task_payload_from_task(
         updated_at: task.updated_at,
         completed_at: task.completed_at,
         is_private: task.is_private,
+        post_processing_note: task.post_processing_note,
         files,
         cleanup_pending: false,
         children: Vec::new(),
@@ -1083,6 +1107,7 @@ fn virtual_cloud_directory_item_payload(
         updated_at: group.updated_at,
         completed_at: None,
         is_private: group.is_private,
+        post_processing_note: None,
         files: Vec::new(),
         cleanup_pending: false,
         children: Vec::new(),
@@ -1123,6 +1148,7 @@ fn cloud_directory_folder_payload(
         updated_at: group.updated_at,
         completed_at: None,
         is_private: group.is_private,
+        post_processing_note: None,
         files: Vec::new(),
         cleanup_pending: false,
         children: Vec::new(),
@@ -1226,6 +1252,7 @@ fn aggregate_cloud_directory_root(
 ) -> QueueTaskPayload {
     let mut root = cloud_directory_folder_payload(group, &[]);
     root.id = group.id.to_string();
+    root.post_processing_note = group.post_processing_note.clone();
     root.children = children;
     aggregate_cloud_directory_folder(group, root)
 }
@@ -1381,6 +1408,7 @@ fn aggregate_cloud_directory_folder(
                 .unwrap_or(updated_at)
         }),
         is_private: group.is_private,
+        post_processing_note: folder.post_processing_note,
         files: Vec::new(),
         cleanup_pending: false,
         children,
@@ -3254,6 +3282,52 @@ mod tests {
         assert!(!prepared_task_can_be_discarded(TaskStatus::Queued));
         assert!(!prepared_task_can_be_discarded(TaskStatus::Downloading));
         assert!(!prepared_task_can_be_discarded(TaskStatus::Completed));
+    }
+
+    #[test]
+    fn queue_projection_keeps_post_processing_notes_on_native_and_cloud_roots() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let native = store
+            .create(NewTask::direct("https://example.test/archive.zip"))
+            .unwrap();
+        let native = store
+            .set_post_processing_note(native.id, Some("密码：88in"))
+            .unwrap();
+        assert_eq!(
+            queue_task_payload_from_task(&store, native)
+                .unwrap()
+                .post_processing_note
+                .as_deref(),
+            Some("密码：88in")
+        );
+
+        let output = tempfile::tempdir().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote-root",
+                    "合集",
+                    output.path(),
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "remote-file",
+                    &[] as &[&str],
+                    "视频.mp4",
+                    Some(42),
+                )],
+            )
+            .unwrap();
+        store
+            .set_cloud_directory_group_post_processing_note(group.id, Some("完成后合并"))
+            .unwrap();
+        assert_eq!(
+            cloud_directory_group_queue_task(&store, group.id)
+                .unwrap()
+                .post_processing_note
+                .as_deref(),
+            Some("完成后合并")
+        );
     }
 
     #[test]

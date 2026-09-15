@@ -369,6 +369,8 @@ pub struct CloudDirectoryGroup {
     pub updated_at: i64,
     #[serde(default)]
     pub is_private: bool,
+    #[serde(default)]
+    pub post_processing_note: Option<String>,
 }
 
 /// A task as rendered in the queue. Cloud-directory roots and intermediate
@@ -405,6 +407,8 @@ pub struct QueueTaskPayload {
     pub completed_at: Option<i64>,
     #[serde(default)]
     pub is_private: bool,
+    #[serde(default)]
+    pub post_processing_note: Option<String>,
     pub files: Vec<TransferFile>,
     pub cleanup_pending: bool,
     #[serde(default)]

@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BatchTaskCommand, displayTaskName, DownloadQueue } from './components/DownloadQueue';
 import { NewDownloadDialog } from './components/NewDownloadDialog';
+import { selectedResourceIds, type DownloadDraftItem } from './components/useDownloadDraftBatch';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
 import { RemoveTaskDialog } from './components/RemoveTaskDialog';
@@ -14,7 +15,7 @@ import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
@@ -285,8 +286,7 @@ export function App() {
   const [privacyUnlockError, setPrivacyUnlockError] = useState<string | null>(null);
   const [privacyUnlocking, setPrivacyUnlocking] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
-  const [droppedTorrentQueue, setDroppedTorrentQueue] = useState<string[]>([]);
-  const [droppedTorrentParsing, setDroppedTorrentParsing] = useState(false);
+  const [newDownloadInput, setNewDownloadInput] = useState('');
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
   const [purgeInProgress, setPurgeInProgress] = useState(false);
@@ -375,7 +375,8 @@ export function App() {
       setDownloadTab('active');
       setHeaderPanel(null);
       setSearchInput('');
-      setDroppedTorrentQueue((current) => [...current, ...paths]);
+      setNewDownloadInput(paths.join('\n'));
+      setNewDownloadOpen(true);
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
     return () => { disposed = true; unlisten?.(); };
   }, []);
@@ -808,6 +809,7 @@ export function App() {
       if (event.payload === 'new-download') {
         setView('downloads');
         setDownloadTab('active');
+        setNewDownloadInput('');
         setNewDownloadOpen(true);
       }
       if (event.payload === 'resume-all') void runLauncherBatchAction('resume');
@@ -843,18 +845,6 @@ export function App() {
     }
     return result;
   }
-
-  useEffect(() => {
-    if (droppedTorrentParsing || confirmation || !droppedTorrentQueue.length) return;
-    const path = droppedTorrentQueue[0];
-    setDroppedTorrentParsing(true);
-    void parse(path).catch((error) => {
-      setNotice({ kind: 'error', message: `${path}：${error instanceof Error ? error.message : String(error)}` });
-    }).finally(() => {
-      setDroppedTorrentQueue((current) => current[0] === path ? current.slice(1) : current.filter((candidate) => candidate !== path));
-      setDroppedTorrentParsing(false);
-    });
-  }, [confirmation, droppedTorrentParsing, droppedTorrentQueue]);
 
   async function resolveDuplicate(action: 'resume' | 'restart_missing' | 'overwrite') {
     if (!duplicate || duplicateActionInFlight.current) return;
@@ -1232,7 +1222,14 @@ export function App() {
   function submitHeaderInput() {
     const input = searchInput.trim();
     if (!input) { setHeaderPanel(null); return; }
-    setHeaderPanel(hasMultipleLines(searchInput) || isDownloadInput(input) ? 'download' : 'search');
+    if (hasMultipleLines(searchInput) || isDownloadInput(input)) {
+      setHeaderPanel(null);
+      setSearchInput('');
+      setNewDownloadInput(input);
+      setNewDownloadOpen(true);
+      return;
+    }
+    setHeaderPanel('search');
   }
 
   function selectSearchResult(task: QueueTask) {
@@ -1281,6 +1278,87 @@ export function App() {
     setNotice({ kind: 'success', message: `已将「${task.name}」加入下载队列` });
   }
 
+  async function submitPreparedBatch(
+    items: DownloadDraftItem[],
+    destinationDirectory?: string,
+    privateDownload = false,
+    postProcessingNote?: string,
+  ) {
+    let firstCreated = false;
+    const accepted = new Set<string>();
+    const acceptCreated = (task: QueueTask) => {
+      recordTaskEvent(task);
+      setTasks((current) => upsertTask(current, task));
+      if (accepted.has(task.id)) return;
+      accepted.add(task.id);
+      if (firstCreated) return;
+      firstCreated = true;
+      setNewDownloadOpen(false);
+      setNewDownloadInput('');
+      setHeaderPanel(null);
+      setSearchInput('');
+      setView('downloads');
+      setDownloadTab('active');
+      setSelectedTaskId(task.id);
+      window.setTimeout(() => {
+        Array.from(document.querySelectorAll<HTMLElement>('[data-task-id]'))
+          .find((element) => element.dataset.taskId === task.id)
+          ?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      }, 0);
+    };
+
+    const outcomes = await Promise.allSettled(items.map(async (item) => {
+      if (item.result?.duplicate) {
+        acceptCreated(item.result.duplicate.task);
+        enqueueDuplicate(item.result.duplicate);
+        return;
+      }
+      if (item.result?.task) {
+        acceptCreated(item.result.task);
+        return;
+      }
+      const prepared = item.result?.confirmation;
+      if (!prepared) throw new Error(`${item.input}：任务尚未解析完成`);
+      const ids = selectedResourceIds(item);
+      if (prepared.taskId.startsWith('cloud-share://')) {
+        const result = await confirmCloudShareDownload(
+          prepared.taskId,
+          ids,
+          destinationDirectory,
+          privateDownload,
+          acceptCreated,
+          postProcessingNote,
+        );
+        for (const outcome of result.outcomes) {
+          const task = outcome.queueTask ?? outcome.task ?? outcome.duplicate?.task;
+          if (task) acceptCreated(task);
+          if (outcome.duplicate) enqueueDuplicate(outcome.duplicate);
+        }
+        if (result.failures.length) throw new Error(result.failures.map(failure => failure.message).join('；'));
+        return;
+      }
+      const task = await confirmDownload(
+        prepared.taskId,
+        ids,
+        destinationDirectory,
+        privateDownload,
+        postProcessingNote,
+      );
+      if (!task) throw new Error(`${prepared.title || item.input}：提交失败`);
+      acceptCreated(task);
+    }));
+
+    const failures = outcomes.flatMap((outcome) => outcome.status === 'rejected'
+      ? [outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)]
+      : []);
+    if (failures.length) {
+      const message = `${failures.length} 个任务提交失败：${failures[0]}`;
+      setNotice({ kind: 'error', message });
+      if (!firstCreated) throw new Error(message);
+    }
+    if (!firstCreated) throw new Error('没有任务成功加入下载队列');
+  }
+
   return (
     <main className="app-shell" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
       <header className="app-header" data-native-window-drag={nativeWindowDrag || undefined}>
@@ -1303,15 +1381,16 @@ export function App() {
               onChange={(event) => {
                 const next = event.target.value;
                 setSearchInput(next);
-                if (hasMultipleLines(next)) setHeaderPanel('download');
-                else if (!next.trim()) setHeaderPanel(null);
+                if (!next.trim()) setHeaderPanel(null);
               }}
               onPaste={(event) => {
                 const pasted = event.clipboardData.getData('text');
-                if (!hasMultipleLines(pasted)) return;
+                if (!pasted.trim()) return;
                 event.preventDefault();
-                setSearchInput(pasted);
-                setHeaderPanel('download');
+                setSearchInput('');
+                setHeaderPanel(null);
+                setNewDownloadInput(pasted);
+                setNewDownloadOpen(true);
               }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey) {
@@ -1394,12 +1473,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" onScan={scanDownloadInputs} onParse={async (input, accessCode) => {
-        const result = await parse(input, accessCode);
-        setView('downloads');
-        setDownloadTab('active');
-        return result;
-      }} onClose={() => setNewDownloadOpen(false)} />
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode) => parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}
