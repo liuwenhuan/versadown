@@ -16,6 +16,13 @@ const cloudApiMocks = vi.hoisted(() => ({
   loginCloudWithPassword: vi.fn(),
   getSavedCloudCredentials: vi.fn().mockResolvedValue(null),
   getCloudAccount: vi.fn().mockRejectedValue({ code: 'not_authorized', message: '未授权' }),
+  getCloudAccountCapacity: vi.fn().mockImplementation((provider: string) => Promise.resolve({
+    provider,
+    accountId: `${provider}-account`,
+    capacity: { kind: 'limited', totalBytes: 100, usedBytes: 25 },
+    updatedAt: 1
+  })),
+  subscribeCloudCapacityInvalidated: vi.fn().mockResolvedValue(() => {}),
   listCloudDirectory: vi.fn(),
   createCloudDirectory: vi.fn(),
   renameCloudFile: vi.fn(),
