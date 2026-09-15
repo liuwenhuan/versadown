@@ -16,35 +16,30 @@ fn test_runtime() -> tokio::runtime::Runtime {
 // A command arriving before setup registers CloudState must eventually run
 // its real provider restore, rather than panicking inside the blocking task.
 #[test]
-fn delayed_registration_allows_all_provider_startup_restores() {
+fn delayed_registration_allows_all_enabled_provider_startup_restores() {
     let root = tempfile::tempdir().unwrap();
     // Construct the real HTTP client outside any async runtime; no requests
     // occur because all seven isolated credential-store entries are absent.
     let state = Arc::new(CloudState::new(root.path().join("sessions")).unwrap());
     let registry = Arc::new(OnceLock::new());
     let initial_lookups = Arc::new(AtomicUsize::new(0));
+    let providers = CloudProvider::ALL
+        .into_iter()
+        .filter(|provider| provider.is_enabled())
+        .collect::<Vec<_>>();
+    let provider_count = providers.len();
     test_runtime().block_on(async {
         let published = Arc::clone(&registry);
         let ready_state = Arc::clone(&state);
         let arrived = Arc::clone(&initial_lookups);
         let registration = tokio::spawn(async move {
-            while arrived.load(Ordering::SeqCst) < 7 {
+            while arrived.load(Ordering::SeqCst) < provider_count {
                 tokio::task::yield_now().await;
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
             assert!(published.set(ready_state).is_ok());
         });
-        let restores = [
-            CloudProvider::Quark,
-            CloudProvider::Pikpak,
-            CloudProvider::Baidu,
-            CloudProvider::Tianyi,
-            CloudProvider::Aliyun,
-            CloudProvider::Xunlei,
-            CloudProvider::Uc,
-        ]
-        .into_iter()
-        .map(|provider| {
+        let restores = providers.into_iter().map(|provider| {
             let registry = Arc::clone(&registry);
             let initial_lookups = Arc::clone(&initial_lookups);
             run_when_initialized(
