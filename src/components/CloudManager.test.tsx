@@ -383,6 +383,20 @@ it('shows loading then limited capacity on an authorized account card', async ()
   expect(await screen.findByText('已使用 12.0 GB / 100.0 GB')).toBeVisible();
 });
 
+it('hides account capacity while the provider information view is open', async () => {
+  const client = createCloudFake();
+  const user = userEvent.setup();
+  render(<CloudManager provider="quark" client={client} authorizationOnly initialAccount={{ id: 'quark-account', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByText('已使用 12.0 GB / 100.0 GB')).toBeVisible();
+
+  await user.click(screen.getByRole('button', { name: '查看夸克网盘信息' }));
+
+  expect(screen.getByRole('region', { name: '夸克网盘信息' })).toBeVisible();
+  expect(screen.queryByText('已使用 12.0 GB / 100.0 GB')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '关闭夸克网盘信息' }));
+  expect(screen.getByText('已使用 12.0 GB / 100.0 GB')).toBeVisible();
+});
+
 it('keeps the account authorized when the first capacity request fails', async () => {
   const client = createCloudFake({ getCloudAccountCapacity: vi.fn().mockRejectedValue(new Error('offline')) });
   render(<CloudManager provider="quark" client={client} authorizationOnly initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
