@@ -140,7 +140,7 @@ mod tests {
         };
         assert_eq!(
             adapter.transfer_capacity(&aliyun_capacity_entry()).unwrap(),
-            CloudTransferCapacity::Unlimited
+            CloudTransferCapacity::Unlimited { used_bytes: 1024 }
         );
     }
 

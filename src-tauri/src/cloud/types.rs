@@ -86,6 +86,73 @@ pub struct CloudAccount {
     pub display_name: String,
     pub auth_method: CloudAuthMethod,
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum CloudStorageCapacity {
+    Limited {
+        #[serde(rename = "totalBytes")]
+        total_bytes: u64,
+        #[serde(rename = "usedBytes")]
+        used_bytes: u64,
+    },
+    Unlimited {
+        #[serde(rename = "usedBytes")]
+        used_bytes: u64,
+    },
+}
+
+impl CloudStorageCapacity {
+    pub(crate) fn from_json(
+        total: &serde_json::Value,
+        used: &serde_json::Value,
+        minus_one_is_unlimited: bool,
+    ) -> Result<Self, QuarkError> {
+        let used_bytes = parse_capacity_u64(used)?;
+        let unlimited = minus_one_is_unlimited
+            && (total.as_i64() == Some(-1) || total.as_str() == Some("-1"));
+        if unlimited {
+            return Ok(Self::Unlimited { used_bytes });
+        }
+        let total_bytes = parse_capacity_u64(total)?;
+        if used_bytes > total_bytes {
+            return Err(QuarkError::InvalidResponse);
+        }
+        Ok(Self::Limited {
+            total_bytes,
+            used_bytes,
+        })
+    }
+
+    pub fn available_bytes(&self) -> Option<u64> {
+        match *self {
+            Self::Limited {
+                total_bytes,
+                used_bytes,
+            } => total_bytes.checked_sub(used_bytes),
+            Self::Unlimited { .. } => None,
+        }
+    }
+
+    pub fn used_bytes(&self) -> u64 {
+        match *self {
+            Self::Limited { used_bytes, .. } | Self::Unlimited { used_bytes } => used_bytes,
+        }
+    }
+}
+
+fn parse_capacity_u64(value: &serde_json::Value) -> Result<u64, QuarkError> {
+    value
+        .as_u64()
+        .or_else(|| {
+            value
+                .as_str()
+                .filter(|raw| !raw.is_empty() && raw.bytes().all(|byte| byte.is_ascii_digit()))
+                .and_then(|raw| raw.parse().ok())
+        })
+        .ok_or(QuarkError::InvalidResponse)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudFile {
@@ -253,4 +320,52 @@ pub struct ResolvedCloudDownload {
     pub url: String,
     pub name: String,
     pub headers: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cloud_storage_capacity_parses_limited_numeric_and_string_values() {
+        assert_eq!(
+            CloudStorageCapacity::from_json(&json!(100), &json!(40), false).unwrap(),
+            CloudStorageCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 40,
+            }
+        );
+        assert_eq!(
+            CloudStorageCapacity::from_json(&json!("100"), &json!("40"), false).unwrap(),
+            CloudStorageCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 40,
+            }
+        );
+    }
+
+    #[test]
+    fn cloud_storage_capacity_preserves_used_bytes_for_unlimited_storage() {
+        let capacity =
+            CloudStorageCapacity::from_json(&json!(-1), &json!(40), true).unwrap();
+        assert_eq!(
+            capacity,
+            CloudStorageCapacity::Unlimited { used_bytes: 40 }
+        );
+        assert_eq!(capacity.available_bytes(), None);
+    }
+
+    #[test]
+    fn cloud_storage_capacity_rejects_invalid_values() {
+        for (total, used, allow_unlimited) in [
+            (json!(-1), json!(40), false),
+            (json!(100), json!(-1), false),
+            (json!(100), json!(101), false),
+            (json!("1.5"), json!(1), false),
+            (json!(null), json!(1), false),
+        ] {
+            assert!(CloudStorageCapacity::from_json(&total, &used, allow_unlimited).is_err());
+        }
+    }
 }

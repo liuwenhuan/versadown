@@ -1,54 +1,11 @@
 use super::*;
+use crate::cloud::CloudStorageCapacity;
 pub const SHARE_PLAN_SECRET: &str = "cloud-share-plans-v1";
 pub(super) const VERSION: u8 = 1;
 pub(super) const MAX_PLANS: usize = 256;
 pub(super) const RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloudTransferCapacity {
-    Limited { total_bytes: u64, used_bytes: u64 },
-    Unlimited,
-}
-
-impl CloudTransferCapacity {
-    pub(crate) fn from_json(
-        total: &serde_json::Value,
-        used: &serde_json::Value,
-        minus_one_is_unlimited: bool,
-    ) -> Result<Self, QuarkError> {
-        let unlimited = minus_one_is_unlimited
-            && (total.as_i64() == Some(-1) || total.as_str() == Some("-1"));
-        if unlimited {
-            parse_capacity_u64(used)?;
-            return Ok(Self::Unlimited);
-        }
-        let total_bytes = parse_capacity_u64(total)?;
-        let used_bytes = parse_capacity_u64(used)?;
-        if used_bytes > total_bytes {
-            return Err(QuarkError::InvalidResponse);
-        }
-        Ok(Self::Limited { total_bytes, used_bytes })
-    }
-
-    pub fn available_bytes(&self) -> Option<u64> {
-        match *self {
-            Self::Limited { total_bytes, used_bytes } => total_bytes.checked_sub(used_bytes),
-            Self::Unlimited => None,
-        }
-    }
-}
-
-fn parse_capacity_u64(value: &serde_json::Value) -> Result<u64, QuarkError> {
-    value
-        .as_u64()
-        .or_else(|| {
-            value
-                .as_str()
-                .filter(|raw| !raw.is_empty() && raw.bytes().all(|byte| byte.is_ascii_digit()))
-                .and_then(|raw| raw.parse().ok())
-        })
-        .ok_or(QuarkError::InvalidResponse)
-}
+pub type CloudTransferCapacity = CloudStorageCapacity;
 
 pub(super) fn sha256_hex(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))

@@ -183,7 +183,9 @@ mod tests {
             Self {
                 owner: Some("a".repeat(64)),
                 probe: Mutex::new(None),
-                capacity: Mutex::new(Some(Ok(CloudTransferCapacity::Unlimited))),
+                capacity: Mutex::new(Some(Ok(CloudTransferCapacity::Unlimited {
+                    used_bytes: 0,
+                }))),
                 resolve_calls: AtomicUsize::new(0),
                 capacity_calls: AtomicUsize::new(0),
             }
@@ -383,9 +385,12 @@ mod tests {
     fn capacity_accepts_only_the_explicit_unlimited_sentinel() {
         assert_eq!(
             CloudTransferCapacity::from_json(&json!(-1), &json!(40), true).unwrap(),
-            CloudTransferCapacity::Unlimited
+            CloudTransferCapacity::Unlimited { used_bytes: 40 }
         );
-        assert_eq!(CloudTransferCapacity::Unlimited.available_bytes(), None);
+        assert_eq!(
+            CloudTransferCapacity::Unlimited { used_bytes: 40 }.available_bytes(),
+            None
+        );
         assert!(CloudTransferCapacity::from_json(&json!(-1), &json!(40), false).is_err());
     }
 
