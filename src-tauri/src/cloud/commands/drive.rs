@@ -176,11 +176,16 @@ pub async fn cloud_copy(
     target_parent_id: String,
 ) -> Result<(), QuarkError> {
     let changed = !file_ids.is_empty();
-    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
-        ProviderRegistry::global()
-            .driver(provider, &s.store, h)
-            .copy_files(&file_ids, &target_parent_id)
-    })
+    run_session_work(
+        app.clone(),
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| {
+            ProviderRegistry::global()
+                .driver(provider, &s.store, h)
+                .copy_files(&file_ids, &target_parent_id)
+        },
+    )
     .await?;
     if changed {
         schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Copy);
@@ -195,9 +200,12 @@ pub async fn cloud_trash(
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
     let changed = !file_ids.is_empty();
-    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
-        trash_provider_files(provider, &s.store, h, &file_ids)
-    })
+    run_session_work(
+        app.clone(),
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| trash_provider_files(provider, &s.store, h, &file_ids),
+    )
     .await?;
     if changed {
         schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Trash);
@@ -223,9 +231,12 @@ pub async fn cloud_delete(
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
     let changed = !file_ids.is_empty();
-    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
-        delete_provider_recycle_entries(provider, &s.store, h, &file_ids)
-    })
+    run_session_work(
+        app.clone(),
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| delete_provider_recycle_entries(provider, &s.store, h, &file_ids),
+    )
     .await?;
     if changed {
         schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Delete);
@@ -240,9 +251,12 @@ pub async fn cloud_restore(
     file_ids: Vec<String>,
 ) -> Result<(), QuarkError> {
     let changed = !file_ids.is_empty();
-    run_session_work(app.clone(), provider, SessionWorkKind::Mutation, move |s, h| {
-        restore_provider_recycle_entries(provider, &s.store, h, &file_ids)
-    })
+    run_session_work(
+        app.clone(),
+        provider,
+        SessionWorkKind::Mutation,
+        move |s, h| restore_provider_recycle_entries(provider, &s.store, h, &file_ids),
+    )
     .await?;
     if changed {
         schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Restore);

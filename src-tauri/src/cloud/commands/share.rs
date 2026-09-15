@@ -68,7 +68,12 @@ pub async fn resolve_stable_cloud_share_download(
         // mutation after session recovery; the caller can safely retry.
         SessionWorkKind::Mutation,
         move |state, http| {
-            let before = state.share_plans.resolve_entry(&source)?.plan.transfers.len();
+            let before = state
+                .share_plans
+                .resolve_entry(&source)?
+                .plan
+                .transfers
+                .len();
             let download = share::resolve_current_share_download_cancellable(
                 &state.share_plans,
                 &state.store,
@@ -76,18 +81,19 @@ pub async fn resolve_stable_cloud_share_download(
                 &source,
                 &control,
             )?;
-            let after = state.share_plans.resolve_entry(&source)?.plan.transfers.len();
+            let after = state
+                .share_plans
+                .resolve_entry(&source)?
+                .plan
+                .transfers
+                .len();
             Ok((download, after > before))
         },
         move || completion_control.check(),
     )
     .await?;
     if transferred {
-        schedule_cloud_capacity_invalidation(
-            app,
-            provider,
-            CloudCapacityChangeReason::Transfer,
-        );
+        schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Transfer);
     }
     Ok(download)
 }

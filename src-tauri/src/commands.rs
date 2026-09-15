@@ -3214,7 +3214,12 @@ mod tests {
             .unwrap()
             .0;
         let preflight = body.find("preflight_cloud_share_download").unwrap();
-        assert!(preflight < body.find("submit_cloud_directory_plan_with_group_event").unwrap());
+        assert!(
+            preflight
+                < body
+                    .find("submit_cloud_directory_plan_with_group_event")
+                    .unwrap()
+        );
         assert!(preflight < body.find("submit_cloud_share_batch_with").unwrap());
     }
 

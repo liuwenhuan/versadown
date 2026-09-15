@@ -92,12 +92,8 @@ impl CloudDownloadDispatch {
         allow_overwrite: bool,
         continue_download: bool,
     ) -> Result<(DownloadTask, u64), QuarkError> {
-        self.prepare_expected_inner(
-            store,
-            expected,
-            Some((allow_overwrite, continue_download)),
-        )
-        .await
+        self.prepare_expected_inner(store, expected, Some((allow_overwrite, continue_download)))
+            .await
     }
 
     async fn prepare_expected_inner(
@@ -190,7 +186,13 @@ impl CloudDownloadDispatch {
         self.invalidate(id);
         task.status = status;
         if action == DownloadAction::Cancel {
-            task.aria_gid = self.task(id).retry_intent.lock().unwrap().original_gid.clone();
+            task.aria_gid = self
+                .task(id)
+                .retry_intent
+                .lock()
+                .unwrap()
+                .original_gid
+                .clone();
         }
         task.download_speed = 0;
         task.upload_speed = 0;

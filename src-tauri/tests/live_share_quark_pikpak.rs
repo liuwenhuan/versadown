@@ -902,11 +902,8 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                     sources.len()
                 );
                 let before = transport.observation_count();
-                let preflight = preflight_selected_share_download(
-                    &plans,
-                    adapter.as_ref(),
-                    &full_selection,
-                );
+                let preflight =
+                    preflight_selected_share_download(&plans, adapter.as_ref(), &full_selection);
                 let remote = transport.observations_since(before);
                 assert!(
                     remote.contains("request-path:/v2/drive/get"),
@@ -932,24 +929,12 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                 }
                 let reusable_ids = sources
                     .iter()
-                    .map(|source| {
-                        Ok(plans
-                            .resolve_entry(source)?
-                            .entry
-                            .entry_fingerprint)
-                    })
+                    .map(|source| Ok(plans.resolve_entry(source)?.entry.entry_fingerprint))
                     .collect::<Result<Vec<_>, QuarkError>>()?;
-                let reusable_selection = selected_share_download(
-                    &plans,
-                    &confirmation.plan_source,
-                    &reusable_ids,
-                )?;
+                let reusable_selection =
+                    selected_share_download(&plans, &confirmation.plan_source, &reusable_ids)?;
                 let before = transport.observation_count();
-                preflight_selected_share_download(
-                    &plans,
-                    adapter.as_ref(),
-                    &reusable_selection,
-                )?;
+                preflight_selected_share_download(&plans, adapter.as_ref(), &reusable_selection)?;
                 let remote = transport.observations_since(before);
                 assert!(
                     remote.is_empty(),

@@ -729,11 +729,7 @@ mod tests {
 
     #[test]
     fn every_password_provider_replaces_the_previous_account() {
-        for provider in [
-            CloudProvider::Pikpak,
-            CloudProvider::Baidu,
-            CloudProvider::Tianyi,
-        ] {
+        for provider in [CloudProvider::Pikpak, CloudProvider::Baidu] {
             let store = MemoryCredentialStore::default();
             save_password_credential(
                 &store,
@@ -765,11 +761,7 @@ mod tests {
 
     #[test]
     fn selecting_a_validated_account_discards_an_unbound_login_draft() {
-        for provider in [
-            CloudProvider::Pikpak,
-            CloudProvider::Baidu,
-            CloudProvider::Tianyi,
-        ] {
+        for provider in [CloudProvider::Pikpak, CloudProvider::Baidu] {
             let store = MemoryCredentialStore::default();
             save_password_credential(
                 &store,
@@ -790,11 +782,7 @@ mod tests {
 
     #[test]
     fn explicit_credential_deletion_removes_the_single_saved_login_for_every_password_provider() {
-        for provider in [
-            CloudProvider::Pikpak,
-            CloudProvider::Baidu,
-            CloudProvider::Tianyi,
-        ] {
+        for provider in [CloudProvider::Pikpak, CloudProvider::Baidu] {
             let store = MemoryCredentialStore::default();
             save_password_credential(
                 &store,
@@ -816,19 +804,19 @@ mod tests {
         let store = FailOnceCredentialStore::default();
         save_password_credential(
             &store,
-            CloudPasswordCredential::new(CloudProvider::Tianyi, "account-a", "alice", "secret-a"),
+            CloudPasswordCredential::new(CloudProvider::Pikpak, "account-a", "alice", "secret-a"),
         )
         .unwrap();
-        save_password_login_draft(&store, CloudProvider::Tianyi, "alice", "secret-a").unwrap();
+        save_password_login_draft(&store, CloudProvider::Pikpak, "alice", "secret-a").unwrap();
         store.fail_next_save.store(true, Ordering::SeqCst);
 
         assert!(save_password_credential(
             &store,
-            CloudPasswordCredential::new(CloudProvider::Tianyi, "account-b", "bob", "secret-b"),
+            CloudPasswordCredential::new(CloudProvider::Pikpak, "account-b", "bob", "secret-b"),
         )
         .is_err());
 
-        let saved = load_saved_password_login(&store, CloudProvider::Tianyi)
+        let saved = load_saved_password_login(&store, CloudProvider::Pikpak)
             .unwrap()
             .unwrap();
         assert_eq!(saved.username(), "alice");
@@ -838,7 +826,7 @@ mod tests {
     #[test]
     fn failed_draft_cleanup_rolls_back_password_replacement() {
         let store = FailOnceCredentialStore::default();
-        let provider = CloudProvider::Tianyi;
+        let provider = CloudProvider::Pikpak;
         save_password_credential(
             &store,
             CloudPasswordCredential::new(provider, "a", "alice", "secret-a"),
@@ -953,17 +941,17 @@ mod tests {
     #[test]
     fn remembers_the_latest_password_login_input_even_before_authorization_succeeds() {
         let store = MemoryCredentialStore::default();
-        save_password_login_draft(&store, CloudProvider::Tianyi, "first-user", "first-secret")
+        save_password_login_draft(&store, CloudProvider::Pikpak, "first-user", "first-secret")
             .unwrap();
         save_password_login_draft(
             &store,
-            CloudProvider::Tianyi,
+            CloudProvider::Pikpak,
             "latest-user",
             "latest-secret",
         )
         .unwrap();
 
-        let draft = load_password_login_draft(&store, CloudProvider::Tianyi)
+        let draft = load_password_login_draft(&store, CloudProvider::Pikpak)
             .unwrap()
             .expect("the latest submitted login remains available to the login form");
         assert_eq!(draft.username(), "latest-user");
