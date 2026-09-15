@@ -26,13 +26,15 @@ import { getResolvedTheme, subscribeTheme } from './lib/theme';
 import type { CloudAuthorization, ProviderDescriptor } from './lib/cloudTypes';
 import { installWindowResizePerformanceMode } from './lib/windowResizePerformance';
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
+import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
 
 type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
-type TaskSortMode = 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
+type TaskSortMode = 'manual' | 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
 type HeaderPanelMode = 'search' | 'download' | null;
 type PrivacyTaskFilter = 'all' | 'private' | 'ordinary';
 
 const defaultTaskSort: TaskSortMode = 'created-desc';
+const taskOrderStorageKey = 'task-list-order-v1';
 const backgroundPurgeFrameSize = 24;
 const backgroundPurgeFrameDelayMs = 16;
 const initialTaskSorts: Record<TaskListTab, TaskSortMode> = {
@@ -41,6 +43,26 @@ const initialTaskSorts: Record<TaskListTab, TaskSortMode> = {
   failed: defaultTaskSort,
   recycle: defaultTaskSort,
 };
+const initialTaskOrders: Record<TaskListTab, string[]> = { active: [], completed: [], failed: [], recycle: [] };
+const taskListTabs: readonly TaskListTab[] = ['active', 'completed', 'failed', 'recycle'];
+const taskSortModes = new Set<TaskSortMode>(['manual', 'created-desc', 'created-asc', 'progress-asc', 'progress-desc', 'name-asc', 'name-desc', 'size-asc', 'size-desc']);
+
+interface TaskOrderPreferences {
+  sorts: Record<TaskListTab, TaskSortMode>;
+  orders: Record<TaskListTab, string[]>;
+}
+
+function loadTaskOrderPreferences(): TaskOrderPreferences {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(taskOrderStorageKey) ?? 'null') as { sorts?: Record<string, unknown>; orders?: Record<string, unknown> } | null;
+    return {
+      sorts: Object.fromEntries(taskListTabs.map((tab) => [tab, taskSortModes.has(saved?.sorts?.[tab] as TaskSortMode) ? saved!.sorts![tab] : initialTaskSorts[tab]])) as Record<TaskListTab, TaskSortMode>,
+      orders: Object.fromEntries(taskListTabs.map((tab) => [tab, Array.isArray(saved?.orders?.[tab]) ? saved!.orders![tab].filter((id): id is string => typeof id === 'string') : []])) as Record<TaskListTab, string[]>,
+    };
+  } catch {
+    return { sorts: { ...initialTaskSorts }, orders: { ...initialTaskOrders } };
+  }
+}
 
 function taskSizeBytes(task: QueueTask): number | undefined {
   if (Number.isFinite(task.total_length)) return task.total_length;
@@ -52,6 +74,7 @@ function taskSizeBytes(task: QueueTask): number | undefined {
 }
 
 function sortTasks(tasks: readonly QueueTask[], mode: TaskSortMode): QueueTask[] {
+  if (mode === 'manual') return [...tasks];
   const [field, direction] = mode.split('-') as ['created' | 'progress' | 'name' | 'size', 'asc' | 'desc'];
   return tasks.map((task, index) => ({ task, index })).sort((left, right) => {
     let comparison = 0;
@@ -81,6 +104,9 @@ function isPrivateTask(task: QueueTask): boolean {
 }
 
 const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mode: TaskSortMode; label: string; ariaLabel: string }> }> = [
+  { label: '自定义顺序', options: [
+    { mode: 'manual', label: '手动拖动', ariaLabel: '按手动拖动顺序' },
+  ] },
   { label: '按创建时间', options: [
     { mode: 'created-desc', label: '从新到旧', ariaLabel: '按创建时间从新到旧' },
     { mode: 'created-asc', label: '从旧到新', ariaLabel: '按创建时间从旧到新' },
@@ -274,7 +300,9 @@ export function App() {
   const [cloudPage, setCloudPage] = useState<CloudWorkspacePage>('management');
   const [authorizedCloudProviders, setAuthorizedCloudProviders] = useState<readonly ProviderDescriptor[]>([]);
   const [downloadTab, setDownloadTab] = useState<TaskListTab>('active');
-  const [taskSorts, setTaskSorts] = useState<Record<TaskListTab, TaskSortMode>>(initialTaskSorts);
+  const [taskOrderPreferences, setTaskOrderPreferences] = useState<TaskOrderPreferences>(loadTaskOrderPreferences);
+  const taskSorts = taskOrderPreferences.sorts;
+  const taskOrders = taskOrderPreferences.orders;
   const [searchInput, setSearchInput] = useState('');
   const [headerPanel, setHeaderPanel] = useState<HeaderPanelMode>(null);
   const [headerConfirmation, setHeaderConfirmation] = useState<ParseResult | null>(null);
@@ -312,7 +340,9 @@ export function App() {
   const unsortedVisibleTasks = downloadTab === 'active' ? activeTasks
     : downloadTab === 'completed' ? completedTasks
       : downloadTab === 'failed' ? failedTasks : recycledTasks;
-  const visibleTasks = useMemo(() => sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]), [downloadTab, taskSorts, unsortedVisibleTasks]);
+  const visibleTasks = useMemo(() => taskSorts[downloadTab] === 'manual'
+    ? applyStoredTaskOrder(unsortedVisibleTasks, taskOrders[downloadTab])
+    : sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]), [downloadTab, taskOrders, taskSorts, unsortedVisibleTasks]);
   const detailsTask = useMemo(() => filteredPrivacyTasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, filteredPrivacyTasks]);
   const downloadingTasks = filteredPrivacyTasks.filter((task) => task.status === 'downloading');
   const currentSpeed = formatSpeed(downloadingTasks.reduce((total, task) => total + (task.speedBytes ?? task.download_speed ?? 0), 0));
@@ -333,6 +363,9 @@ export function App() {
   const tasksRef = useRef<QueueTask[]>(tasks);
   const searchDropTarget = useRef<HTMLLabelElement>(null);
   const confirmationGeneration = useRef(0);
+  useEffect(() => {
+    window.localStorage.setItem(taskOrderStorageKey, JSON.stringify(taskOrderPreferences));
+  }, [taskOrderPreferences]);
   const headerConfirmationGeneration = useRef(0);
   const shareConfirmationsInFlight = useRef(new Set<string>());
   const duplicateActionInFlight = useRef(false);
@@ -1449,11 +1482,26 @@ export function App() {
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
             <div className="task-privacy-actions">
               {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}><PrivacyLockIcon unlocked={privacyVisibility.unlocked} /></button>}
-              <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskSorts((current) => ({ ...current, [downloadTab]: mode }))} privacyFilter={privacyTaskFilter} onPrivacyFilterChange={setPrivacyTaskFilter} showPrivacyFilter={privacyVisibility.unlocked} />
+              <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskOrderPreferences((current) => ({
+                sorts: { ...current.sorts, [downloadTab]: mode },
+                orders: mode === 'manual' && !current.orders[downloadTab].length
+                  ? { ...current.orders, [downloadTab]: visibleTasks.map((task) => task.id) }
+                  : current.orders,
+              }))} privacyFilter={privacyTaskFilter} onPrivacyFilterChange={setPrivacyTaskFilter} showPrivacyFilter={privacyVisibility.unlocked} />
             </div>
           </header>
           <section className="queue-area">
-            <DownloadQueue tasks={visibleTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onFileSelection={selectTaskFile} onFileCancel={cancelTaskFile} onConfirm={reopenTaskConfirmation} />
+            <DownloadQueue tasks={visibleTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onReorder={(orderedTaskIds) => setTaskOrderPreferences((current) => ({
+              sorts: { ...current.sorts, [downloadTab]: 'manual' },
+              orders: {
+                ...current.orders,
+                [downloadTab]: mergeVisibleTaskOrder(
+                  current.orders[downloadTab].length ? current.orders[downloadTab] : visibleTasks.map((task) => task.id),
+                  visibleTasks.map((task) => task.id),
+                  orderedTaskIds,
+                ),
+              },
+            }))} onFileSelection={selectTaskFile} onFileCancel={cancelTaskFile} onConfirm={reopenTaskConfirmation} />
           </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>

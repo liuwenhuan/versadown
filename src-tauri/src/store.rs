@@ -400,8 +400,7 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
-                 FROM cloud_directory_groups WHERE id = ?1",
+                &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
                 [id.to_string()],
                 cloud_directory_group_from_row,
             )
@@ -411,10 +410,9 @@ impl TaskStore {
 
     pub fn cloud_directory_groups(&self) -> Result<Vec<CloudDirectoryGroup>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let mut statement = connection.prepare(
-            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
-             FROM cloud_directory_groups ORDER BY created_at, id",
-        )?;
+        let mut statement = connection.prepare(&format!(
+            "{CLOUD_DIRECTORY_GROUP_SELECT} ORDER BY created_at, id"
+        ))?;
         let groups = statement
             .query_map([], cloud_directory_group_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -439,10 +437,13 @@ impl TaskStore {
         validate_uuid(id)?;
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
-        let group = transaction.query_row(
-            "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
-             FROM cloud_directory_groups WHERE id = ?1", [id.to_string()], cloud_directory_group_from_row,
-        ).optional()?;
+        let group = transaction
+            .query_row(
+                &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
+                [id.to_string()],
+                cloud_directory_group_from_row,
+            )
+            .optional()?;
         let Some(group) = group else {
             return Ok(None);
         };
@@ -482,8 +483,7 @@ impl TaskStore {
         }
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
-                 FROM cloud_directory_groups WHERE id = ?1",
+                &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
                 [id.to_string()],
                 cloud_directory_group_from_row,
             )
@@ -507,8 +507,7 @@ impl TaskStore {
         }
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
-                 FROM cloud_directory_groups WHERE id = ?1",
+                &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
                 [id.to_string()],
                 cloud_directory_group_from_row,
             )
@@ -599,8 +598,7 @@ impl TaskStore {
         }
         connection
             .query_row(
-                "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note
-                 FROM cloud_directory_groups WHERE id = ?1",
+                &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
                 [group_id.to_string()],
                 cloud_directory_group_from_row,
             )
@@ -733,11 +731,12 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection
             .query_row(
-                "SELECT groups.id, groups.provider, groups.remote_directory_id, groups.relative_directory,
-                        groups.output_directory, groups.status, groups.created_at, groups.updated_at, groups.is_private
-                 FROM cloud_directory_groups AS groups
-                 INNER JOIN cloud_directory_group_items AS items ON items.group_id = groups.id
-                 WHERE items.task_id = ?1",
+                &format!(
+                    "{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = (
+                        SELECT group_id FROM cloud_directory_group_items
+                        WHERE task_id = ?1 LIMIT 1
+                    )"
+                ),
                 [task_id.to_string()],
                 cloud_directory_group_from_row,
             )
@@ -1470,6 +1469,7 @@ fn remove_managed_payload_file(
 }
 
 const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note, p2p_sharing FROM tasks";
+const CLOUD_DIRECTORY_GROUP_SELECT: &str = "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note FROM cloud_directory_groups";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;

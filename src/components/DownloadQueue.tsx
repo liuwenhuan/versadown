@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { QueueTask, TaskCommand } from '../lib/types';
 import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
+import { reorderTaskIds } from '../lib/taskOrder';
 
 interface DownloadQueueProps {
   tasks: readonly QueueTask[];
@@ -9,6 +10,7 @@ interface DownloadQueueProps {
   onSelect(id: string): void;
   onCommand(id: string, command: TaskCommand): void;
   onBatchCommand?(ids: readonly string[], command: BatchTaskCommand): void;
+  onReorder?(orderedTaskIds: readonly string[]): void;
   onFileSelection?(taskId: string, fileIndex: number, selected: boolean): void;
   onFileCancel?(taskId: string, fileIndex: number): void;
   onConfirm?(task: QueueTask): void;
@@ -374,11 +376,12 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
   })}</>;
 }
 
-export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBatchCommand, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
+export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
   const selectionAnchor = useRef<string | null>(selectedTaskId);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [dragState, setDragState] = useState<{ movingIds: string[]; targetId?: string; placeAfter?: boolean } | null>(null);
   const closeContextMenu = () => setContextMenu(null);
   useEffect(() => {
     const visibleIds = new Set(tasks.map((task) => task.id));
@@ -447,6 +450,39 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
     }
     setContextMenu({ tasks: targets, x, y });
   }
+  function beginTaskDrag(event: React.DragEvent<HTMLElement>, task: QueueTask) {
+    if (!onReorder || (event.target as Element).closest('button')) {
+      event.preventDefault();
+      return;
+    }
+    const movingIds = selectedTaskIds.includes(task.id)
+      ? tasks.filter((item) => selectedTaskIds.includes(item.id)).map((item) => item.id)
+      : [task.id];
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', task.id);
+    setDragState({ movingIds });
+  }
+  function updateTaskDrop(event: React.DragEvent<HTMLElement>, targetId: string) {
+    if (!dragState || dragState.movingIds.includes(targetId)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const placeAfter = event.clientY >= bounds.top + bounds.height / 2;
+    if (dragState.targetId !== targetId || dragState.placeAfter !== placeAfter) {
+      setDragState((current) => current ? { ...current, targetId, placeAfter } : current);
+    }
+  }
+  function finishTaskDrop(event: React.DragEvent<HTMLElement>, targetId: string) {
+    if (!dragState || dragState.movingIds.includes(targetId)) return;
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const placeAfter = dragState.targetId === targetId
+      ? Boolean(dragState.placeAfter)
+      : event.clientY >= bounds.top + bounds.height / 2;
+    const reordered = reorderTaskIds(tasks.map((task) => task.id), dragState.movingIds, targetId, placeAfter);
+    setDragState(null);
+    onReorder?.(reordered);
+  }
   return (
     <section className="download-queue" aria-label="下载队列" onContextMenu={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
       <div className="queue-heading"><span>任务</span><span>进度</span><span>状态</span></div>
@@ -485,8 +521,10 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const completionTime = isCompleted ? completedAt(task.completed_at ?? task.completedAt) : undefined;
         const completedHasPlayableMedia = isCompleted && taskHasPlayableMedia(task);
         const completedFileType = isCompleted ? taskAssociatedFileType(task) : undefined;
-        return <div className={`task-group${isCompleted ? ' completed-task-group' : ''}${isExpanded ? ' is-expanded' : ''}`} key={task.id}>
-          <article data-task-id={task.id} className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
+        const isDragged = dragState?.movingIds.includes(task.id) ?? false;
+        const dropPosition = dragState?.targetId === task.id ? (dragState.placeAfter ? ' drop-after' : ' drop-before') : '';
+        return <div className={`task-group${isCompleted ? ' completed-task-group' : ''}${isExpanded ? ' is-expanded' : ''}${isDragged ? ' is-dragging' : ''}${dropPosition}`} key={task.id}>
+          <article draggable={Boolean(onReorder)} data-task-id={task.id} className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onDragStart={(event) => beginTaskDrag(event, task)} onDragOver={(event) => updateTaskDrop(event, task.id)} onDrop={(event) => finishTaskDrop(event, task.id)} onDragEnd={() => setDragState(null)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>

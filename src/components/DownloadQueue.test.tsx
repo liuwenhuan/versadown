@@ -4,6 +4,26 @@ import { vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { DownloadQueue, taskContextMenuPosition } from './DownloadQueue';
 
+it('reorders all selected top-level tasks as one block with mouse dragging', () => {
+  const onReorder = vi.fn();
+  render(<DownloadQueue tasks={[
+    { id: 'three', name: 'three.zip', kind: 'file', status: 'paused', progress: 0 },
+    { id: 'one', name: 'one.zip', kind: 'file', status: 'paused', progress: 0 },
+    { id: 'two', name: 'two.zip', kind: 'file', status: 'paused', progress: 0 },
+  ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} onReorder={onReorder} />);
+
+  fireEvent.click(screen.getByText('one.zip'));
+  fireEvent.click(screen.getByText('two.zip'), { ctrlKey: true });
+  const first = screen.getByText('one.zip').closest('.task-row')!;
+  const third = screen.getByText('three.zip').closest('.task-row')!;
+  vi.spyOn(third, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 40, height: 40, left: 0, right: 100, width: 100, x: 0, y: 0, toJSON: () => ({}) });
+  fireEvent.dragStart(first, { dataTransfer: { effectAllowed: '', setData: vi.fn() } });
+  fireEvent.dragOver(third, { clientY: 5, dataTransfer: { dropEffect: '' } });
+  fireEvent.drop(third, { clientY: 5 });
+
+  expect(onReorder).toHaveBeenCalledWith(['one', 'two', 'three']);
+});
+
 it('selects all top-level tasks with Ctrl+A and reuses their batch menu', () => {
   const onBatchCommand = vi.fn();
   render(<DownloadQueue tasks={[
