@@ -1288,6 +1288,7 @@ export function App() {
         <div className="brand" data-tauri-drag-region={nativeWindowDrag ? undefined : 'deep'}>
           <div className="brand-mark" data-icon-variant={resolvedTheme} aria-hidden="true"><img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" draggable={false} /></div>
           <h1>万能下载</h1>
+          <button type="button" className="sidebar-toggle" data-window-no-drag aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
         </div>
         <div className="header-input-shell" data-window-no-drag>
           <label ref={searchDropTarget} className="global-search">
@@ -1359,7 +1360,6 @@ export function App() {
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
-            <button type="button" className="sidebar-toggle" aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
             <div className="download-tab-list workspace-tab-list" role="tablist" aria-label="下载任务">
               <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>

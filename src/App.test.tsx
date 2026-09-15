@@ -139,21 +139,22 @@ it('labels the primary download workspace as tasks', async () => {
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
-it('uses the former new-download tab position to collapse and restore primary navigation', async () => {
+it('places the sidebar toggle after the app title and keeps it out of the download tabs', async () => {
   const user = userEvent.setup();
   render(<App />);
   const navigation = screen.getByRole('navigation', { name: '主导航' });
   const taskTabs = screen.getByRole('tablist', { name: '下载任务' });
-  const taskHeader = taskTabs.closest('.download-tabs');
+  const appHeader = screen.getByRole('heading', { name: '万能下载' }).closest('.app-header');
 
   expect(within(taskTabs).queryByRole('tab', { name: '新建下载' })).not.toBeInTheDocument();
-  expect(taskHeader).not.toBeNull();
-  await user.click(within(taskHeader!).getByRole('button', { name: '收起侧边栏' }));
-  expect(within(taskHeader!).getByRole('button', { name: '展开侧边栏' })).toHaveAttribute('aria-expanded', 'false');
+  expect(appHeader).not.toBeNull();
+  expect(within(taskTabs).queryByRole('button', { name: '收起侧边栏' })).not.toBeInTheDocument();
+  await user.click(within(appHeader!).getByRole('button', { name: '收起侧边栏' }));
+  expect(within(appHeader!).getByRole('button', { name: '展开侧边栏' })).toHaveAttribute('aria-expanded', 'false');
   expect(navigation).toHaveAttribute('aria-hidden', 'true');
 
-  await user.click(within(taskHeader!).getByRole('button', { name: '展开侧边栏' }));
-  expect(within(taskHeader!).getByRole('button', { name: '收起侧边栏' })).toHaveAttribute('aria-expanded', 'true');
+  await user.click(within(appHeader!).getByRole('button', { name: '展开侧边栏' }));
+  expect(within(appHeader!).getByRole('button', { name: '收起侧边栏' })).toHaveAttribute('aria-expanded', 'true');
   expect(navigation).toHaveAttribute('aria-hidden', 'false');
 });
 

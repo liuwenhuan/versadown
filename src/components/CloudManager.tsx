@@ -398,26 +398,20 @@ async function openCloudInformationLink(url: string) {
   window.open(destination, '_blank', 'noopener,noreferrer');
 }
 
-function CloudProviderInfo({ provider, label, officialUrl, onClose }: { provider: CloudProvider; label: string; officialUrl: string; onClose(): void }) {
-  const dialogRef = useRef<HTMLElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-  useModalFocusTrap(dialogRef, closeRef, onClose);
+function CloudProviderInfo({ provider, label, officialUrl }: { provider: CloudProvider; label: string; officialUrl: string }) {
   const externalLink = (url: string) => (event: ReactMouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     void openCloudInformationLink(url);
   };
 
-  return createPortal(<div className="cloud-confirm-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section ref={dialogRef} className="cloud-provider-info" role="dialog" aria-modal="true" aria-label={`${label}网盘信息`}>
-      <header><div className="cloud-provider-info-symbol" aria-hidden="true"><CloudActionIcon action="details" /></div><h3>{label}网盘</h3><button ref={closeRef} className="cloud-details-close" aria-label={`关闭${label}网盘信息`} onClick={onClose}>×</button></header>
+  return <section className="cloud-provider-info" role="region" aria-label={`${label}网盘信息`}>
       <dl>
         <div><dt>官方网站</dt><dd><a href={officialUrl} target="_blank" rel="noreferrer" aria-label={`${label}网盘官方网站`} onClick={externalLink(officialUrl)}>{officialUrl}</a></dd></div>
         <div><dt>插件制作者</dt><dd><a href="https://versadown.aigutta.com" target="_blank" rel="noreferrer" aria-label="插件制作者 aigutta" onClick={externalLink('https://versadown.aigutta.com')}>aigutta</a></dd></div>
       </dl>
       {provider === 'pikpak' && <p className="cloud-provider-info-notice">本网盘中国大陆无法直接访问。</p>}
       {provider === 'tianyi' && <p className="cloud-provider-info-notice">如果通过账号和密码登录，推荐登录门户网址<a href="https://e.dlife.cn" target="_blank" rel="noreferrer" aria-label="天翼账号登录门户" onClick={externalLink('https://e.dlife.cn')}>e.dlife.cn</a>，点击“账号安全”，关闭“设备锁”，这样无需每次登录做短信认证。</p>}
-    </section>
-  </div>, document.body);
+    </section>;
 }
 
 function CloudDestinationPicker({ action, provider, descriptor, client, excludedIds, onChoose, onOfficialWebAuthorizationRequired, onClose }: { action: DestinationAction; provider: CloudProvider; descriptor: ProviderDescriptor; client: CloudManagerClient; excludedIds: readonly string[]; onChoose(parentId: string): void; onOfficialWebAuthorizationRequired(error: unknown): void; onClose(): void }) {
@@ -1136,9 +1130,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   function authorizationView(expired = false) {
     const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
     const showAuthorizationFeedback = authorizationStatus !== initialAuthorizationStatus;
-    return <><section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading"><h2>{label}网盘</h2><button type="button" className="cloud-provider-info-button" aria-label={`查看${label}网盘信息`} onClick={() => setProviderInfoOpen(true)}><CloudActionIcon action="details" /></button></header>
-      <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
+    return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
+      <header className="cloud-heading"><h2>{label}网盘</h2><button type="button" className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+      {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <><form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsDirectPasswordLogin && <>
           <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
           <input aria-label="密码" placeholder={useSavedPassword ? "***" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
@@ -1147,8 +1141,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
       </form>
-      {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${expired ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}
-    </section>{providerInfoOpen && <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} onClose={() => setProviderInfoOpen(false)} />}</>;
+      {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${expired ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}</>}
+    </section>;
   }
 
   function authorizationContinuationButton() {
@@ -1180,12 +1174,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function accountManagementView() {
-    return <><section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading"><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" className="cloud-provider-info-button" aria-label={`查看${label}网盘信息`} onClick={() => setProviderInfoOpen(true)}><CloudActionIcon action="details" /></button></header>
-      {sessionActions()}
-      {logoutConfirmation()}
-      {operationStatus()}
-    </section>{providerInfoOpen && <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} onClose={() => setProviderInfoOpen(false)} />}</>;
+    return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
+      <header className="cloud-heading"><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+      {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{sessionActions()}{logoutConfirmation()}{operationStatus()}</>}
+    </section>;
   }
 
   async function controlUpload(action: CloudUploadAction) {
