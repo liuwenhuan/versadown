@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { ParseDownloadResult, ScanDownloadResult } from '../lib/types';
+import { ConfirmResource, ParseDownloadResult, ScanDownloadResult } from '../lib/types';
 
 export type DownloadDraftStatus = 'parsing' | 'ready' | 'access_code_required' | 'failed';
 
@@ -154,6 +154,24 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     }));
   }, [replaceItems]);
 
+  const updateResources = useCallback((id: string, resources: readonly ConfirmResource[]) => {
+    replaceItems(current => current.map(item => {
+      if (item.id !== id || !item.result?.confirmation) return item;
+      return {
+        ...item,
+        result: {
+          confirmation: {
+            ...item.result.confirmation,
+            resources: resources.map(resource => ({
+              ...resource,
+              selected: item.result?.confirmation?.resources.find(existing => existing.index === resource.index || existing.id === resource.id)?.selected ?? resource.selected,
+            })),
+          },
+        },
+      };
+    }));
+  }, [replaceItems]);
+
   const markSubmitted = useCallback((ids: string[]) => {
     const submitted = new Set(ids);
     replaceItems(current => current.map(item => submitted.has(item.id) ? { ...item, submitted: true } : item));
@@ -172,5 +190,5 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     return selected.length > 0 && selected.every(item => item.status === 'ready');
   }, [items]);
 
-  return { items, canSubmit, start, retry, remove, toggleItem, setAccessCode, toggleExpanded, toggleResource, markSubmitted, discardAll };
+  return { items, canSubmit, start, retry, remove, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, discardAll };
 }

@@ -2,8 +2,20 @@ import { useState } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
-import { vi } from 'vitest';
+import { afterEach, vi } from 'vitest';
+import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { NewDownloadDialog } from './NewDownloadDialog';
+
+vi.mock('../lib/api', async () => {
+  const actual = await vi.importActual<typeof import('../lib/api')>('../lib/api');
+  return { ...actual, isTauriRuntime: vi.fn(() => false), listPersistedTasks: vi.fn(async () => []) };
+});
+
+afterEach(() => {
+  vi.mocked(isTauriRuntime).mockReturnValue(false);
+  vi.mocked(listPersistedTasks).mockReset();
+  vi.mocked(listPersistedTasks).mockResolvedValue([]);
+});
 
 it('keeps the launcher placement and its compact-window close label by default', () => {
   render(<NewDownloadDialog open onParse={vi.fn()} onClose={vi.fn()} />);
@@ -331,6 +343,86 @@ it('shows all pasted tasks in one dialog and submits one shared post-processing 
   expect(onSubmitBatch).toHaveBeenCalledTimes(1);
   expect(onSubmitBatch.mock.calls[0][0]).toHaveLength(2);
   expect(onSubmitBatch.mock.calls[0][3]).toBe('密码 88in\n完成后拼接');
+});
+
+it('shows files from an existing multi-file magnet instead of a fallback single item', async () => {
+  const user = userEvent.setup();
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:existing"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:existing', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ duplicate: {
+      task: {
+        id: 'existing-magnet', name: '合集', kind: 'magnet', status: 'downloading', progress: 35,
+        files: [
+          { index: 1, path: '合集/episode-01.mp4', length: 100, completed_length: 35, selected: true },
+          { index: 2, path: '合集/episode-02.mp4', length: 200, completed_length: 0, selected: true },
+        ],
+      },
+      state: 'existing_active',
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('已存在任务 · 2 个文件')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '展开合集' }));
+  expect(screen.getByText('合集/episode-01.mp4')).toBeVisible();
+  expect(screen.getByText('合集/episode-02.mp4')).toBeVisible();
+  expect(screen.queryByText('1 项可下载')).not.toBeInTheDocument();
+});
+
+it('keeps a magnet with pending metadata out of the single-item fallback', async () => {
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:pending"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:pending', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'pending-magnet', title: '待获取的合集', requiresConfirmation: true,
+      resources: [], processing: [], isBitTorrent: true,
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('正在获取文件信息')).toBeVisible();
+  expect(screen.queryByText('1 项可下载')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '新建任务' })).toBeDisabled();
+});
+
+it('refreshes a pending magnet into its actual file list', async () => {
+  vi.mocked(isTauriRuntime).mockReturnValue(true);
+  vi.mocked(listPersistedTasks).mockResolvedValue([{
+    id: 'pending-magnet', name: '待获取的合集', kind: 'magnet', status: 'waiting', progress: 0,
+    files: [
+      { index: 1, path: '待获取的合集/episode-01.mp4', length: 100, completed_length: 0, selected: true },
+      { index: 2, path: '待获取的合集/episode-02.mp4', length: 200, completed_length: 0, selected: true },
+    ],
+  }]);
+  const user = userEvent.setup();
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:pending"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:pending', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'pending-magnet', title: '待获取的合集', requiresConfirmation: true,
+      resources: [], processing: [], isBitTorrent: true,
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('2 项可下载')).toBeVisible();
+  expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
+  await user.click(screen.getByRole('button', { name: '展开待获取的合集' }));
+  expect(screen.getByText('待获取的合集/episode-01.mp4')).toBeVisible();
+  expect(screen.getByText('待获取的合集/episode-02.mp4')).toBeVisible();
 });
 
 it('allows a pending task to be deselected so ready tasks can be submitted', async () => {
