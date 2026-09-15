@@ -2,8 +2,8 @@ use super::{
     tianyi_app::{self, TianyiAppSession},
     types::{encoded, required},
     CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CloudProvider, CloudUploadTransport, QuarkError, UploadHttpRequest,
-    UploadHttpResponse,
+    CloudHttpTransport, CloudProvider, CloudStorageCapacity, CloudUploadTransport, QuarkError,
+    UploadHttpRequest, UploadHttpResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -57,7 +57,7 @@ mod tests {
     use super::*;
     use crate::cloud::{
         share::{test_support::*, *},
-        CredentialStore, MemoryCredentialStore,
+        CredentialStore, MemoryCredentialStore, ProviderRegistry,
     };
     fn credentials() -> MemoryCredentialStore {
         let store = MemoryCredentialStore::default();
@@ -115,6 +115,30 @@ mod tests {
         let headers = TianyiClient::new(session, &http).headers();
         assert!(!headers.contains_key("Browser-Id"));
         assert_eq!(headers["User-Agent"], TIANYI_WEB_USER_AGENT);
+    }
+
+    #[test]
+    fn tianyi_storage_capacity_converts_available_space() {
+        let store = credentials();
+        let http = Http::new(vec![json!({
+            "res_code": 0,
+            "data": {"capacity": "1000", "available": "350"}
+        })]);
+        let capacity = ProviderRegistry::global()
+            .driver(CloudProvider::Tianyi, &store, &http)
+            .storage_capacity()
+            .unwrap();
+        assert_eq!(
+            capacity,
+            CloudStorageCapacity::Limited {
+                total_bytes: 1000,
+                used_bytes: 650,
+            }
+        );
+        let requests = http.requests.lock().unwrap();
+        assert!(requests[0]
+            .url
+            .contains("/api/open/user/getUserInfoForPortal.action"));
     }
 
     #[test]
@@ -796,6 +820,35 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                 .into(),
             auth_method: self.session.auth_method,
         })
+    }
+    pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
+        let value = if self.session.app.is_some() {
+            self.app_request("GET", "/getUserInfo.action", &[])?
+        } else {
+            self.request(
+                "GET",
+                "/api/open/user/getUserInfoForPortal.action",
+                "",
+                None,
+            )?
+        };
+        let quota = value
+            .get("data")
+            .or_else(|| value.get("userInfo"))
+            .unwrap_or(&value);
+        let total = quota
+            .get("capacity")
+            .or_else(|| quota.get("totalSize"))
+            .or_else(|| quota.get("total"))
+            .ok_or(QuarkError::InvalidResponse)?;
+        if let Some(used) = quota.get("usedSize").or_else(|| quota.get("used")) {
+            return CloudStorageCapacity::from_json(total, used, false);
+        }
+        let available = quota
+            .get("available")
+            .or_else(|| quota.get("availableSize"))
+            .ok_or(QuarkError::InvalidResponse)?;
+        CloudStorageCapacity::from_total_and_available_json(total, available)
     }
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
         let mut items = Vec::new();

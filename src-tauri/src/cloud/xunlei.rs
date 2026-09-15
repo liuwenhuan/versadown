@@ -974,7 +974,7 @@ impl ShareTransfer for XunleiShareAdapter<'_> {
         } else {
             client.supervised()
         };
-        let result = client.drive_capacity();
+        let result = client.storage_capacity();
         self.credentials.save(
             "xunlei",
             &serde_json::to_vec(&client.session()).map_err(|_| QuarkError::Storage)?,
@@ -1622,9 +1622,9 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         url.into()
     }
 
-    fn drive_capacity(&self) -> Result<CloudTransferCapacity, QuarkError> {
+    pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
         let value = self.request("GET", self.drive_url("/drive/v1/about"), None)?;
-        CloudTransferCapacity::from_json(&value["quota"]["limit"], &value["quota"]["usage"], false)
+        CloudStorageCapacity::from_json(&value["quota"]["limit"], &value["quota"]["usage"], false)
     }
 
     fn challenge(value: &Value, _status: u16) -> bool {

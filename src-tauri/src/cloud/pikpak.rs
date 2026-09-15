@@ -123,20 +123,30 @@ mod tests {
             "0123456789abcdef0123456789abcdef",
         ] {
             let store = credentials();
-            let mut session: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+            let mut session: PikPakSession =
+                serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
             session.client_id = Some("YNxT9w7GMdWvEOKa".into());
             session.device_id = device.into();
             session.auth_method = CloudAuthMethod::Password;
-            store.save("pikpak", &serde_json::to_vec(&session).unwrap()).unwrap();
+            store
+                .save("pikpak", &serde_json::to_vec(&session).unwrap())
+                .unwrap();
             let http = Http::new(vec![cap(), json!({"task_id":"deleted"})]);
-            PikPakClient::new(&http, &store).request("POST", format!("{DRIVE}/drive/v1/files:batchDelete"), Some(json!({"ids":["fixture"]}))).unwrap();
+            PikPakClient::new(&http, &store)
+                .request(
+                    "POST",
+                    format!("{DRIVE}/drive/v1/files:batchDelete"),
+                    Some(json!({"ids":["fixture"]})),
+                )
+                .unwrap();
             let requests = http.requests.lock().unwrap();
             let body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
             assert_eq!(body["device_id"], "0123456789abcdef0123456789abcdef");
             assert_eq!(body["client_id"], "YNxT9w7GMdWvEOKa");
             assert_eq!(requests[0].headers["X-Device-Id"], device);
             assert_eq!(requests[1].headers["X-Device-Id"], device);
-            let saved: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+            let saved: PikPakSession =
+                serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
             assert_eq!(saved.device_id, device);
             assert_eq!(saved.access_token, session.access_token);
         }
@@ -144,14 +154,43 @@ mod tests {
     #[test]
     fn pikpak_account_restore_does_not_request_drive_captcha_for_auth_endpoint() {
         let store = credentials();
-        let mut session: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+        let mut session: PikPakSession =
+            serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
         session.captcha_action = Some("GET:/drive/v1/files".into());
-        store.save("pikpak", &serde_json::to_vec(&session).unwrap()).unwrap();
+        store
+            .save("pikpak", &serde_json::to_vec(&session).unwrap())
+            .unwrap();
         let http = Http::new(vec![json!({"sub":"u1","name":"fixture"})]);
-        let account = ProviderRegistry::global().driver(CloudProvider::Pikpak, &store, &http).account().unwrap();
+        let account = ProviderRegistry::global()
+            .driver(CloudProvider::Pikpak, &store, &http)
+            .account()
+            .unwrap();
         assert_eq!(account.id, "u1");
         assert_eq!(http.requests.lock().unwrap().len(), 1);
-        assert!(http.requests.lock().unwrap()[0].url.ends_with("/v1/user/me"));
+        assert!(http.requests.lock().unwrap()[0]
+            .url
+            .ends_with("/v1/user/me"));
+    }
+    #[test]
+    fn pikpak_storage_capacity_uses_drive_about_quota() {
+        let store = credentials();
+        let http = Http::new(vec![json!({
+            "quota": {"limit": "1099511627776", "usage": "274877906944"}
+        })]);
+        let capacity = ProviderRegistry::global()
+            .driver(CloudProvider::Pikpak, &store, &http)
+            .storage_capacity()
+            .unwrap();
+        assert_eq!(
+            capacity,
+            CloudStorageCapacity::Limited {
+                total_bytes: 1_099_511_627_776,
+                used_bytes: 274_877_906_944,
+            }
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/drive/v1/about"));
     }
     #[test]
     fn pikpak_share_rotation_does_not_relabel_share_ticket_as_recycle_permission() {
@@ -159,7 +198,11 @@ mod tests {
         impl CloudHttpTransport for ScopedTickets {
             fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
                 let url = url::Url::parse(&request.url).unwrap();
-                let body: Value = request.body.as_deref().map(|body| serde_json::from_str(body).unwrap()).unwrap_or(Value::Null);
+                let body: Value = request
+                    .body
+                    .as_deref()
+                    .map(|body| serde_json::from_str(body).unwrap())
+                    .unwrap_or(Value::Null);
                 let token = request.headers.get("X-Captcha-Token").map(String::as_str);
                 let response = match (request.method, url.path()) {
                     ("POST", "/v1/shield/captcha/init") => {
@@ -171,30 +214,49 @@ mod tests {
                         };
                         json!({"captcha_token":ticket,"expires_in":300})
                     }
-                    ("GET", "/drive/v1/files") if token == Some("list-only") =>
-                        json!({"files":[{"id":"fixture","name":"test","kind":"drive#folder"}],"next_page_token":""}),
+                    ("GET", "/drive/v1/files") if token == Some("list-only") => {
+                        json!({"files":[{"id":"fixture","name":"test","kind":"drive#folder"}],"next_page_token":""})
+                    }
                     ("POST", "/drive/v1/files:batchDelete") if token == Some("delete-only") => {
                         assert_eq!(body["ids"], json!(["fixture"]));
                         json!({"task_id":"deletion"})
                     }
-                    _ => return Ok(CloudHttpResponse {
-                        status: 400,
-                        body: json!({"error_code":3,"error":"invalid_argument"}).to_string(),
-                        set_cookies: vec![],
-                    }),
+                    _ => {
+                        return Ok(CloudHttpResponse {
+                            status: 400,
+                            body: json!({"error_code":3,"error":"invalid_argument"}).to_string(),
+                            set_cookies: vec![],
+                        })
+                    }
                 };
-                Ok(CloudHttpResponse { status: 200, body: response.to_string(), set_cookies: vec![] })
+                Ok(CloudHttpResponse {
+                    status: 200,
+                    body: response.to_string(),
+                    set_cookies: vec![],
+                })
             }
         }
         let store = credentials();
-        let mut saved: PikPakSession = serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
+        let mut saved: PikPakSession =
+            serde_json::from_slice(&store.load("pikpak").unwrap().unwrap()).unwrap();
         saved.captcha_action = Some("GET:/drive/v1/files".into());
-        store.save("pikpak", &serde_json::to_vec(&saved).unwrap()).unwrap();
+        store
+            .save("pikpak", &serde_json::to_vec(&saved).unwrap())
+            .unwrap();
         let http = ScopedTickets;
-        let adapter = PikPakShareAdapter { credentials: &store, http: &http };
-        adapter.session().unwrap().refresh_action_captcha("GET", &format!("{SHARE_DRIVE}/drive/v1/share")).unwrap();
-        ProviderRegistry::global().driver(CloudProvider::Pikpak, &store, &http)
-            .delete(&["fixture".into()]).unwrap();
+        let adapter = PikPakShareAdapter {
+            credentials: &store,
+            http: &http,
+        };
+        adapter
+            .session()
+            .unwrap()
+            .refresh_action_captcha("GET", &format!("{SHARE_DRIVE}/drive/v1/share"))
+            .unwrap();
+        ProviderRegistry::global()
+            .driver(CloudProvider::Pikpak, &store, &http)
+            .delete(&["fixture".into()])
+            .unwrap();
     }
     fn pass() -> Value {
         json!({"share_status":"OK","pass_code_token":"pass-secret"})
@@ -1134,6 +1196,10 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
             auth_method,
         })
     }
+    pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
+        let value = self.request("GET", format!("{DRIVE}/drive/v1/about"), None)?;
+        CloudStorageCapacity::from_json(&value["quota"]["limit"], &value["quota"]["usage"], false)
+    }
     pub fn list(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
         let trashed = parent == PIKPAK_RECYCLE_BIN_ID;
         let p = if trashed { "" } else { root(parent) };
@@ -1498,10 +1564,19 @@ fn pikpak_web_origin_device_id(raw: &str) -> Result<String, QuarkError> {
 // ID. Keep that session/header identity intact, but sign captcha requests with
 // the original ID, as the provider does. Do not truncate arbitrary opaque IDs.
 fn pikpak_android_origin_device_id(raw: &str) -> &str {
-    match raw.strip_prefix("wdi10.").or_else(|| raw.strip_prefix("div101.")) {
-        Some(signed) if signed.len() == 64
-            && signed.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-            && signed[..32].bytes().all(|b| b.is_ascii_hexdigit()) => &signed[..32],
+    match raw
+        .strip_prefix("wdi10.")
+        .or_else(|| raw.strip_prefix("div101."))
+    {
+        Some(signed)
+            if signed.len() == 64
+                && signed
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                && signed[..32].bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            &signed[..32]
+        }
         _ => raw,
     }
 }

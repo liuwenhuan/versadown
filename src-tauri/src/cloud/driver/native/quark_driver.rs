@@ -14,6 +14,9 @@ impl DriveOps for QuarkDriver<'_> {
         }
         QuarkClient::new(cookie(store)?, http).account()
     }
+    fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+        QuarkClient::new(cookie(&self.store)?, &self.http).storage_capacity()
+    }
     fn list_directory(&mut self, parent_id: &str) -> Result<CloudDirectory, CloudError> {
         let provider = CloudProvider::Quark;
         let store = &self.store;

@@ -4,8 +4,8 @@
 //! Signed download URLs are requested immediately before use and never written here.
 use super::{
     http::response_json, types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile,
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudUploadTransport,
-    CredentialStore, QuarkError, UploadHttpRequest,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudStorageCapacity,
+    CloudUploadTransport, CredentialStore, QuarkError, UploadHttpRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -667,12 +667,12 @@ pub struct AliyunSession {
     pub expires_at: Option<u64>,
 }
 
-pub struct AliyunClient<'a, S: CredentialStore, T: CloudHttpTransport> {
+pub struct AliyunClient<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> {
     store: &'a S,
     http: &'a T,
 }
 
-impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
+impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClient<'a, S, T> {
     pub fn new(store: &'a S, http: &'a T) -> Self {
         Self { store, http }
     }
@@ -964,6 +964,16 @@ impl<'a, S: CredentialStore, T: CloudHttpTransport> AliyunClient<'a, S, T> {
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
         let (_, account, _) = self.refreshed_validated_session()?;
         Ok(account)
+    }
+
+    pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
+        let session = self.stored()?;
+        let value = self.api(
+            &session,
+            "/v2/drive/get",
+            json!({"drive_id": session.drive_id}),
+        )?;
+        CloudStorageCapacity::from_json(&value["total_size"], &value["used_size"], true)
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
@@ -1736,13 +1746,7 @@ impl ShareTransfer for AliyunShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<CloudTransferCapacity, QuarkError> {
-        let session = self.personal_session()?;
-        let value = self.personal_request(
-            &session,
-            "/v2/drive/get",
-            json!({"drive_id": session.drive_id}),
-        )?;
-        CloudTransferCapacity::from_json(&value["total_size"], &value["used_size"], true)
+        AliyunClient::new(self.credentials, self.http).storage_capacity()
     }
 
     fn transfer_owner_fingerprint(

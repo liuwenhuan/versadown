@@ -664,6 +664,18 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
             auth_method: CloudAuthMethod::Web,
         })
     }
+    pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
+        let value = response_json(&self.request(
+            "GET",
+            "member?fetch_subscribe=true&_ch=home&fetch_identity=true",
+            None,
+        )?)?;
+        CloudStorageCapacity::from_json(
+            &value["data"]["total_capacity"],
+            &value["data"]["use_capacity"],
+            false,
+        )
+    }
     pub fn list(&self, parent: &str) -> Result<CloudHttpResponse, QuarkError> {
         self.list_page(parent, 1)
     }
@@ -1132,18 +1144,7 @@ impl ShareTransfer for QuarkShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<CloudTransferCapacity, QuarkError> {
-        let client = self.client()?;
-        let response = client.request(
-            "GET",
-            "member?fetch_subscribe=true&_ch=home&fetch_identity=true",
-            None,
-        )?;
-        let value = response_json(&response)?;
-        CloudTransferCapacity::from_json(
-            &value["data"]["total_capacity"],
-            &value["data"]["use_capacity"],
-            false,
-        )
+        self.client()?.storage_capacity()
     }
 
     fn transfer_owner_fingerprint(

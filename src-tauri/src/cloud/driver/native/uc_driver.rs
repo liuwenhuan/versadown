@@ -21,6 +21,13 @@ impl DriveOps for UcDriver<'_> {
             uc::UcClient::new(session, http).web_account()
         }
     }
+    fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+        uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &self.store)?,
+            &self.http,
+        )
+        .storage_capacity()
+    }
     fn list_directory(&mut self, parent_id: &str) -> Result<CloudDirectory, CloudError> {
         let provider = CloudProvider::Uc;
         let store = &self.store;

@@ -14,6 +14,9 @@ impl DriveOps for PikpakDriver<'_> {
         }
         PikPakClient::new(http, store).account()
     }
+    fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+        PikPakClient::new(&self.http, &self.store).storage_capacity()
+    }
     fn list_directory(&mut self, parent_id: &str) -> Result<CloudDirectory, CloudError> {
         let provider = CloudProvider::Pikpak;
         let store = &self.store;

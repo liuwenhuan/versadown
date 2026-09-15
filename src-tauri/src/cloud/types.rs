@@ -109,8 +109,8 @@ impl CloudStorageCapacity {
         minus_one_is_unlimited: bool,
     ) -> Result<Self, QuarkError> {
         let used_bytes = parse_capacity_u64(used)?;
-        let unlimited = minus_one_is_unlimited
-            && (total.as_i64() == Some(-1) || total.as_str() == Some("-1"));
+        let unlimited =
+            minus_one_is_unlimited && (total.as_i64() == Some(-1) || total.as_str() == Some("-1"));
         if unlimited {
             return Ok(Self::Unlimited { used_bytes });
         }
@@ -118,6 +118,21 @@ impl CloudStorageCapacity {
         if used_bytes > total_bytes {
             return Err(QuarkError::InvalidResponse);
         }
+        Ok(Self::Limited {
+            total_bytes,
+            used_bytes,
+        })
+    }
+
+    pub(crate) fn from_total_and_available_json(
+        total: &serde_json::Value,
+        available: &serde_json::Value,
+    ) -> Result<Self, QuarkError> {
+        let total_bytes = parse_capacity_u64(total)?;
+        let available_bytes = parse_capacity_u64(available)?;
+        let used_bytes = total_bytes
+            .checked_sub(available_bytes)
+            .ok_or(QuarkError::InvalidResponse)?;
         Ok(Self::Limited {
             total_bytes,
             used_bytes,
@@ -347,12 +362,8 @@ mod capacity_tests {
 
     #[test]
     fn cloud_storage_capacity_preserves_used_bytes_for_unlimited_storage() {
-        let capacity =
-            CloudStorageCapacity::from_json(&json!(-1), &json!(40), true).unwrap();
-        assert_eq!(
-            capacity,
-            CloudStorageCapacity::Unlimited { used_bytes: 40 }
-        );
+        let capacity = CloudStorageCapacity::from_json(&json!(-1), &json!(40), true).unwrap();
+        assert_eq!(capacity, CloudStorageCapacity::Unlimited { used_bytes: 40 });
         assert_eq!(capacity.available_bytes(), None);
     }
 
@@ -367,5 +378,19 @@ mod capacity_tests {
         ] {
             assert!(CloudStorageCapacity::from_json(&total, &used, allow_unlimited).is_err());
         }
+    }
+
+    #[test]
+    fn cloud_storage_capacity_converts_total_and_available_bytes() {
+        assert_eq!(
+            CloudStorageCapacity::from_total_and_available_json(&json!(100), &json!(35)).unwrap(),
+            CloudStorageCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 65,
+            }
+        );
+        assert!(
+            CloudStorageCapacity::from_total_and_available_json(&json!(100), &json!(101)).is_err()
+        );
     }
 }
