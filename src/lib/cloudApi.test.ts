@@ -26,6 +26,37 @@ it('shares one authorization listener and releases it after the last subscriber'
   expect(stopNative).toHaveBeenCalledTimes(1);
 });
 
+it('queries account-bound cloud capacity and routes capacity invalidations by provider', async () => {
+  native.invoke.mockClear();
+  events.listen.mockClear();
+  const capacity = {
+    provider: 'quark',
+    accountId: 'account-1',
+    capacity: { kind: 'limited', totalBytes: 100, usedBytes: 25 },
+    updatedAt: 123
+  };
+  native.invoke.mockResolvedValueOnce(capacity);
+  let receive: ((event: { payload: unknown }) => void) | undefined;
+  const stopNative = vi.fn();
+  events.listen.mockImplementation(async (_name, callback) => { receive = callback; return stopNative; });
+  const api = await import('./cloudApi');
+
+  expect(await api.getCloudAccountCapacity('quark')).toEqual(capacity);
+  expect(native.invoke).toHaveBeenCalledWith('cloud_account_capacity', { provider: 'quark' });
+
+  const quark = vi.fn(), baidu = vi.fn();
+  const stopQuark = await api.subscribeCloudCapacityInvalidated('quark', quark);
+  const stopBaidu = await api.subscribeCloudCapacityInvalidated('baidu', baidu);
+  const payload = { provider: 'quark', accountId: 'account-1', reason: 'upload' };
+  receive?.({ payload });
+  expect(quark).toHaveBeenCalledWith(payload);
+  expect(baidu).not.toHaveBeenCalled();
+  stopQuark();
+  expect(stopNative).not.toHaveBeenCalled();
+  stopBaidu();
+  expect(stopNative).toHaveBeenCalledTimes(1);
+});
+
 it('keeps saved-password metadata separate from explicit and saved-handle login payloads', async () => {
   const api = await import('./cloudApi');
   native.invoke.mockResolvedValueOnce({ username: 'alice', hasSavedPassword: true });

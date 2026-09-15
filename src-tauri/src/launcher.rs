@@ -277,9 +277,7 @@ pub fn launcher_hexagon_points(region: LauncherRegion) -> [LauncherPoint; 6] {
     });
     // Match the SVG shell exactly so removing the native clip for click menus
     // does not make the launcher appear to grow.
-    let scale = |coordinate: f64, size: i32| {
-        (coordinate * f64::from(size) / 100.0).round() as i32
-    };
+    let scale = |coordinate: f64, size: i32| (coordinate * f64::from(size) / 100.0).round() as i32;
     HEXAGON.map(|[x, y]| LauncherPoint {
         x: region.x + scale(x, region.width),
         y: region.y + scale(y, region.height),

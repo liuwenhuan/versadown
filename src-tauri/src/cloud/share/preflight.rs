@@ -1,7 +1,9 @@
+#[cfg(test)]
+use super::CloudShareEntry;
 use super::{
     format_confirmation_size, CloudShareAdapter, CloudShareCleanupState, CloudShareDownloadEntry,
-    CloudShareDownloadSelection, CloudShareEntry, CloudSharePlan, CloudSharePlanStore,
-    CloudShareResolvedEntry, CloudShareTransferOwnerScheme, QuarkError, ShareResolution,
+    CloudShareDownloadSelection, CloudSharePlan, CloudSharePlanStore, CloudShareResolvedEntry,
+    CloudShareTransferOwnerScheme, QuarkError, ShareResolution,
 };
 use crate::cloud::{CloudProvider, ProviderRegistry};
 use std::collections::BTreeSet;
@@ -93,9 +95,7 @@ fn reusable_entry_fingerprints(plan: &CloudSharePlan, owner: Option<&str>) -> BT
         .collect()
 }
 
-fn required_transfer_bytes(
-    pending: &[&CloudShareDownloadEntry],
-) -> Result<u64, QuarkError> {
+fn required_transfer_bytes(pending: &[&CloudShareDownloadEntry]) -> Result<u64, QuarkError> {
     pending.iter().try_fold(0_u64, |total, selected| {
         let size = selected.size.ok_or_else(|| {
             QuarkError::InvalidInput(
@@ -183,7 +183,7 @@ mod tests {
             Self {
                 owner: Some("a".repeat(64)),
                 probe: Mutex::new(None),
-                capacity: Mutex::new(Some(Ok(CloudTransferCapacity::Unlimited))),
+                capacity: Mutex::new(Some(Ok(CloudTransferCapacity::Unlimited { used_bytes: 0 }))),
                 resolve_calls: AtomicUsize::new(0),
                 capacity_calls: AtomicUsize::new(0),
             }
@@ -367,14 +367,24 @@ mod tests {
     fn capacity_accepts_integer_and_decimal_string_fields() {
         assert_eq!(
             CloudTransferCapacity::from_json(&json!(100), &json!(40), false).unwrap(),
-            CloudTransferCapacity::Limited { total_bytes: 100, used_bytes: 40 }
+            CloudTransferCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 40
+            }
         );
         assert_eq!(
             CloudTransferCapacity::from_json(&json!("100"), &json!("40"), false).unwrap(),
-            CloudTransferCapacity::Limited { total_bytes: 100, used_bytes: 40 }
+            CloudTransferCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 40
+            }
         );
         assert_eq!(
-            CloudTransferCapacity::Limited { total_bytes: 100, used_bytes: 40 }.available_bytes(),
+            CloudTransferCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 40
+            }
+            .available_bytes(),
             Some(60)
         );
     }
@@ -383,9 +393,12 @@ mod tests {
     fn capacity_accepts_only_the_explicit_unlimited_sentinel() {
         assert_eq!(
             CloudTransferCapacity::from_json(&json!(-1), &json!(40), true).unwrap(),
-            CloudTransferCapacity::Unlimited
+            CloudTransferCapacity::Unlimited { used_bytes: 40 }
         );
-        assert_eq!(CloudTransferCapacity::Unlimited.available_bytes(), None);
+        assert_eq!(
+            CloudTransferCapacity::Unlimited { used_bytes: 40 }.available_bytes(),
+            None
+        );
         assert!(CloudTransferCapacity::from_json(&json!(-1), &json!(40), false).is_err());
     }
 
@@ -423,12 +436,9 @@ mod tests {
             total_bytes: 100,
             used_bytes: 10,
         });
-        let error = preflight_selected_share_download(
-            &fixture.store,
-            &fixture.adapter,
-            &fixture.selection,
-        )
-        .unwrap_err();
+        let error =
+            preflight_selected_share_download(&fixture.store, &fixture.adapter, &fixture.selection)
+                .unwrap_err();
         assert_eq!(
             error.to_string(),
             "阿里云盘转存空间不足：本次需要 120 B，当前可用 90 B，未建立下载任务。"
@@ -441,12 +451,9 @@ mod tests {
     fn unknown_size_and_capacity_failure_fail_closed() {
         let unknown = preflight_fixture(1, None);
         unknown.adapter.require_transfer();
-        let error = preflight_selected_share_download(
-            &unknown.store,
-            &unknown.adapter,
-            &unknown.selection,
-        )
-        .unwrap_err();
+        let error =
+            preflight_selected_share_download(&unknown.store, &unknown.adapter, &unknown.selection)
+                .unwrap_err();
         assert!(error.to_string().contains("无法确定本次转存所需空间"));
         assert_eq!(unknown.adapter.capacity_calls(), 0);
 
@@ -594,8 +601,12 @@ mod tests {
     fn capacity_overflow_fails_before_capacity_query() {
         let fixture = preflight_fixture(2, Some(u64::MAX));
         fixture.adapter.require_transfer();
-        assert!(preflight_selected_share_download(&fixture.store, &fixture.adapter, &fixture.selection)
-            .is_err());
+        assert!(preflight_selected_share_download(
+            &fixture.store,
+            &fixture.adapter,
+            &fixture.selection
+        )
+        .is_err());
         assert_eq!(fixture.adapter.capacity_calls(), 0);
     }
 }

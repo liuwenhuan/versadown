@@ -6,11 +6,7 @@ use alldownloader_lib::cloud::{
 };
 use std::cell::Cell;
 
-const PROVIDERS: [CloudProvider; 3] = [
-    CloudProvider::Baidu,
-    CloudProvider::Tianyi,
-    CloudProvider::Pikpak,
-];
+const PROVIDERS: [CloudProvider; 2] = [CloudProvider::Baidu, CloudProvider::Pikpak];
 
 #[test]
 fn logout_keeps_saved_login_for_each_password_provider() {
@@ -129,7 +125,7 @@ fn manual_logout_survives_reopening_encrypted_credentials() {
         auth_supervisor::is_manually_disconnected, DpapiCredentialStore,
     };
     let root = tempfile::tempdir().unwrap();
-    let provider = CloudProvider::Tianyi;
+    let provider = CloudProvider::Pikpak;
     {
         let store = DpapiCredentialStore::new(root.path().to_owned()).unwrap();
         save_password_credential(

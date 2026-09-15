@@ -10,6 +10,9 @@ pub trait DriveOps {
     fn account(&mut self) -> Result<CloudAccount, CloudError> {
         Err(CloudError::ProviderUnsupported)
     }
+    fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+        Err(CloudError::ProviderUnsupported)
+    }
     fn list_directory(&mut self, _parent: &str) -> Result<CloudDirectory, CloudError> {
         Err(CloudError::ProviderUnsupported)
     }
@@ -168,6 +171,9 @@ impl<'a> ProviderDriver<'a> {
     pub fn account(&mut self) -> Result<CloudAccount, CloudError> {
         self.backend.account()
     }
+    pub fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+        self.backend.storage_capacity()
+    }
     pub fn list_directory(&mut self, parent: &str) -> Result<CloudDirectory, CloudError> {
         require(self.capabilities.list)?;
         self.backend.list_directory(parent)
@@ -281,5 +287,40 @@ impl CloudHttpTransport for UploadHttpRef<'_> {
 impl CloudUploadTransport for UploadHttpRef<'_> {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, CloudError> {
         self.0.send_upload(request)
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    struct CapacityBackend;
+
+    impl DriveOps for CapacityBackend {
+        fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+            Ok(CloudStorageCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 25,
+            })
+        }
+    }
+    impl DownloadOps for CapacityBackend {}
+    impl ProviderAuth for CapacityBackend {}
+    impl UploadOps for CapacityBackend {}
+    impl ProviderBackend for CapacityBackend {}
+
+    #[test]
+    fn provider_driver_storage_capacity_delegates_without_share_context() {
+        let capabilities = ProviderRegistry::global()
+            .get(CloudProvider::Quark)
+            .capabilities;
+        let mut driver = ProviderDriver::new(capabilities, Box::new(CapacityBackend));
+        assert_eq!(
+            driver.storage_capacity().unwrap(),
+            CloudStorageCapacity::Limited {
+                total_bytes: 100,
+                used_bytes: 25,
+            }
+        );
     }
 }

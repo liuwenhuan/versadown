@@ -3214,7 +3214,12 @@ mod tests {
             .unwrap()
             .0;
         let preflight = body.find("preflight_cloud_share_download").unwrap();
-        assert!(preflight < body.find("submit_cloud_directory_plan_with_group_event").unwrap());
+        assert!(
+            preflight
+                < body
+                    .find("submit_cloud_directory_plan_with_group_event")
+                    .unwrap()
+        );
         assert!(preflight < body.find("submit_cloud_share_batch_with").unwrap());
     }
 
@@ -4981,13 +4986,20 @@ mod tests {
         let engine = body
             .find(".service()")
             .expect("resubmit obtains the engine");
-        let provider = body
-            .find("resolve_stable_cloud_share_download")
-            .expect("resubmit resolves the provider URL");
+        let dispatch = body
+            .find("queue_cloud_dispatch")
+            .expect("resubmit reaches the shared cloud dispatch");
         assert!(reserve < engine);
-        assert!(reserve < provider);
-        assert!(body.contains("share_resolution_failure_message"));
-        assert!(!body.contains("无法重新获取网盘下载地址：{error}"));
+        assert!(reserve < dispatch);
+
+        let dispatch_body = include_str!("cloud/commands/download.rs")
+            .split_once("pub async fn queue_cloud_dispatch(")
+            .expect("queue cloud dispatch exists")
+            .1
+            .split_once("fn check_dispatch_owner")
+            .expect("queue cloud dispatch has a stable end")
+            .0;
+        assert!(dispatch_body.contains("resolve_stable_cloud_share_download"));
     }
 
     #[test]

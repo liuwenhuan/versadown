@@ -1,8 +1,8 @@
 use super::{
     types::{encoded, required},
     CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CloudProvider, CloudUploadTransport, QuarkError, UploadHttpRequest,
-    UploadHttpResponse,
+    CloudHttpTransport, CloudProvider, CloudStorageCapacity, CloudUploadTransport, QuarkError,
+    UploadHttpRequest, UploadHttpResponse,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -1219,6 +1219,17 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 .into(),
             auth_method: self.session.auth_method,
         })
+    }
+
+    pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
+        let value = self.request(
+            "GET",
+            format!(
+                "{PAN}/api/quota?checkexpire=1&checkfree=1&channel=chunlei&web=1&app_id=250528&clienttype=0"
+            ),
+            None,
+        )?;
+        CloudStorageCapacity::from_json(&value["total"], &value["used"], false)
     }
 
     fn stable_account_id(&self) -> Result<Option<String>, QuarkError> {
@@ -2620,14 +2631,7 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<CloudTransferCapacity, QuarkError> {
-        let value = self.client()?.request(
-            "GET",
-            format!(
-                "{PAN}/api/quota?checkexpire=1&checkfree=1&channel=chunlei&web=1&app_id=250528&clienttype=0"
-            ),
-            None,
-        )?;
-        CloudTransferCapacity::from_json(&value["total"], &value["used"], false)
+        self.client()?.storage_capacity()
     }
 
     fn transfer_owner_fingerprint(

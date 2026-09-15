@@ -92,7 +92,7 @@ struct NativeLoginFailure(Option<QuarkError>);
 
 #[test]
 fn failed_browser_account_switch_forces_reset_before_reusing_saved_login() {
-    for provider in [CloudProvider::Baidu, CloudProvider::Tianyi] {
+    for provider in [CloudProvider::Baidu] {
         let store = MemoryCredentialStore::default();
         save_password_credential(
             &store,

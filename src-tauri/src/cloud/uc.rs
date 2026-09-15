@@ -7,7 +7,7 @@
 use super::{
     types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudDriveUploadProfile,
     CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
-    CloudUploadTransport, QuarkError,
+    CloudStorageCapacity, CloudUploadTransport, QuarkError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -216,6 +216,20 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             display_name,
             auth_method: self.session.auth_method,
         })
+    }
+
+    pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
+        let value = self.request_json(
+            "GET",
+            "member",
+            "fetch_subscribe=true&_ch=home&fetch_identity=true",
+            None,
+        )?;
+        CloudStorageCapacity::from_json(
+            &value["data"]["total_capacity"],
+            &value["data"]["use_capacity"],
+            false,
+        )
     }
 
     fn stable_account_id(&self) -> Result<Option<String>, QuarkError> {
@@ -996,18 +1010,7 @@ impl ShareTransfer for UcShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<CloudTransferCapacity, QuarkError> {
-        let client = UcClient::new(self.stored_session()?, self.http);
-        let value = client.request_json(
-            "GET",
-            "member",
-            "fetch_subscribe=true&_ch=home&fetch_identity=true",
-            None,
-        )?;
-        CloudTransferCapacity::from_json(
-            &value["data"]["total_capacity"],
-            &value["data"]["use_capacity"],
-            false,
-        )
+        UcClient::new(self.stored_session()?, self.http).storage_capacity()
     }
 
     fn transfer_owner_fingerprint(

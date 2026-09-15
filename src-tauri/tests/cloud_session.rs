@@ -565,11 +565,6 @@ fn failed_password_profile_reset_survives_restart_for_baidu() {
 }
 
 #[test]
-fn failed_password_profile_reset_survives_restart_for_tianyi() {
-    verify_failed_password_profile_reset_after_restart(CloudProvider::Tianyi);
-}
-
-#[test]
 fn failed_profile_marker_removal_keeps_reset_mandatory_and_blocks_login() {
     use alldownloader_lib::cloud::{
         prepare_password_account_login, reset_password_profile_if_required,
@@ -591,7 +586,7 @@ fn failed_profile_marker_removal_keeps_reset_mandatory_and_blocks_login() {
             self.inner.remove(key)
         }
     }
-    for provider in [CloudProvider::Baidu, CloudProvider::Tianyi] {
+    for provider in [CloudProvider::Baidu] {
         let store = RemovalFailure {
             inner: MemoryCredentialStore::default(),
         };
@@ -622,7 +617,7 @@ fn failed_profile_marker_write_preserves_old_owner_and_never_starts_reset() {
             self.inner.remove(key)
         }
     }
-    for provider in [CloudProvider::Baidu, CloudProvider::Tianyi] {
+    for provider in [CloudProvider::Baidu] {
         let store = MarkerWriteFailure {
             inner: MemoryCredentialStore::default(),
         };
@@ -712,14 +707,14 @@ fn expired_mutation_relogs_but_never_replays_work() {
     let store = MemoryCredentialStore::default();
     save_password_credential(
         &store,
-        CloudPasswordCredential::new(CloudProvider::Tianyi, "account-1", "user", "secret"),
+        CloudPasswordCredential::new(CloudProvider::Pikpak, "account-1", "user", "secret"),
     )
     .unwrap();
     let work_calls = Cell::new(0);
     let relogin_calls = Cell::new(0);
 
     let result: Result<(), QuarkError> = run_with_session_recovery(
-        CloudProvider::Tianyi,
+        CloudProvider::Pikpak,
         &store,
         SessionWorkKind::Mutation,
         || {

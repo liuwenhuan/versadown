@@ -2,8 +2,9 @@ import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMous
 import { createPortal } from 'react-dom';
 import { LocalUploadPicker } from './LocalUploadPicker';
 import type { LocalUploadListing } from '../lib/localUpload';
+import { CloudCapacityController, formatCloudCapacity, type CloudCapacityViewState } from '../lib/cloudCapacity';
 import type { CloudUploadAction, CloudUploadProgress } from '../lib/cloudTypes';
-import type { CloudAuthorizationStateEvent } from '../lib/cloudTypes';
+import type { CloudAuthorizationStateEvent, CloudCapacityInvalidated } from '../lib/cloudTypes';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudUploadOutcome } from '../lib/cloudTypes';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
@@ -19,6 +20,8 @@ export interface CloudManagerClient {
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
   getSavedCloudCredentials?(provider: CloudProvider): Promise<import('../lib/cloudTypes').SavedCloudCredentialInfo | null>;
   getCloudAccount(provider: CloudProvider): Promise<CloudAccount>;
+  getCloudAccountCapacity?(provider: CloudProvider): Promise<import('../lib/cloudTypes').CloudAccountCapacity>;
+  subscribeCloudCapacityInvalidated?(provider: CloudProvider, receive: (event: CloudCapacityInvalidated) => void): Promise<() => void>;
   listCloudDirectory(provider: CloudProvider, parentId?: string): Promise<CloudDirectory>;
   createCloudDirectory(provider: CloudProvider, parentId: string, name: string): Promise<CloudFile | void>;
   renameCloudFile(provider: CloudProvider, fileId: string, name: string): Promise<void>;
@@ -477,6 +480,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const label = descriptor.displayName;
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
+  const [accountCapacity, setAccountCapacity] = useState<CloudCapacityViewState>();
+  const capacityControllerRef = useRef<CloudCapacityController | null>(null);
+  if (!capacityControllerRef.current) capacityControllerRef.current = new CloudCapacityController();
+  const capacityController = capacityControllerRef.current;
   const [directory, setDirectory] = useState<CloudDirectory | null>(null);
   const [directoryState, setDirectoryState] = useState<DirectoryState>('idle');
   const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
@@ -625,6 +632,38 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     }).catch(() => undefined);
     return () => { active = false; };
   }, [client, provider, supportsDirectPasswordLogin, activeAccount?.id]);
+
+  useEffect(() => {
+    const account = activeAccount;
+    if (!authorizationOnly || !account) {
+      setAccountCapacity(undefined);
+      return;
+    }
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    const publish = (state: CloudCapacityViewState) => { if (active) setAccountCapacity(state); };
+    const load = () => client.getCloudAccountCapacity!(provider);
+    const cached = capacityController.read(provider, account.id);
+    setAccountCapacity(cached ?? { loading: true, refreshFailed: false });
+    if (client.getCloudAccountCapacity) {
+      void capacityController.refresh(provider, account.id, load, publish);
+      void client.subscribeCloudCapacityInvalidated?.(provider, event => {
+        capacityController.invalidate(event, provider, account.id, load, publish);
+      }).then(stop => {
+        if (active) unlisten = stop;
+        else stop();
+      }).catch(() => undefined);
+    } else {
+      publish({ loading: false, refreshFailed: true });
+    }
+    return () => {
+      active = false;
+      unlisten?.();
+      capacityController.clear(provider, account.id);
+    };
+  }, [activeAccount?.id, authorizationOnly, capacityController, client, provider]);
+
+  useEffect(() => () => capacityController.dispose(), [capacityController]);
 
   async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
     setDirectoryState('loading');
@@ -1174,8 +1213,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function accountManagementView() {
+    const capacityText = accountCapacity?.value
+      ? formatCloudCapacity(accountCapacity.value.capacity)
+      : accountCapacity?.loading || !accountCapacity ? '容量获取中…' : '容量暂不可用';
     return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
       <header className="cloud-heading"><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+      {!providerInfoOpen && <p className="cloud-account-capacity" aria-live="polite">{capacityText}{accountCapacity?.value && accountCapacity.refreshFailed && <span> · 更新失败</span>}</p>}
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{sessionActions()}{logoutConfirmation()}{operationStatus()}</>}
     </section>;
   }

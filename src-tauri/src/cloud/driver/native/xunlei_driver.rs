@@ -24,6 +24,9 @@ impl DriveOps for XunleiDriver<'_> {
             client.account()
         })
     }
+    fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+        with_xunlei_client(&self.store, &self.http, |client| client.storage_capacity())
+    }
     fn list_directory(&mut self, parent_id: &str) -> Result<CloudDirectory, CloudError> {
         let provider = CloudProvider::Xunlei;
         let store = &self.store;

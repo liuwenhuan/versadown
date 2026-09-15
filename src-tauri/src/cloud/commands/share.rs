@@ -60,25 +60,42 @@ pub async fn resolve_stable_cloud_share_download(
     ));
     let _cancel_on_drop = CancelShareOnDrop(Arc::clone(&control));
     let completion_control = Arc::clone(&control);
-    run_session_work_checked(
-        app,
+    let (download, transferred) = run_session_work_checked(
+        app.clone(),
         provider,
         // Any provider, including Aliyun, can fall back to a personal-drive
         // transfer when the share service denies a direct URL. Never replay a
         // mutation after session recovery; the caller can safely retry.
         SessionWorkKind::Mutation,
         move |state, http| {
-            share::resolve_current_share_download_cancellable(
+            let before = state
+                .share_plans
+                .resolve_entry(&source)?
+                .plan
+                .transfers
+                .len();
+            let download = share::resolve_current_share_download_cancellable(
                 &state.share_plans,
                 &state.store,
                 http,
                 &source,
                 &control,
-            )
+            )?;
+            let after = state
+                .share_plans
+                .resolve_entry(&source)?
+                .plan
+                .transfers
+                .len();
+            Ok((download, after > before))
         },
         move || completion_control.check(),
     )
-    .await
+    .await?;
+    if transferred {
+        schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Transfer);
+    }
+    Ok(download)
 }
 
 pub async fn submit_cloud_share_file(

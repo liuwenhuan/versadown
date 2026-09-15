@@ -392,6 +392,7 @@ pub fn run() {
             cloud::commands::cloud_tianyi_session_shape_for_test,
             cloud::commands::cloud_tianyi_resolve_download_for_test,
             cloud::commands::cloud_account,
+            cloud::commands::cloud_account_capacity,
             cloud::commands::cloud_list_directory,
             cloud::commands::cloud_create_directory,
             cloud::commands::cloud_rename,

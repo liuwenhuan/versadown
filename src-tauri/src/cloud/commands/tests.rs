@@ -1862,7 +1862,7 @@ fn tianyi_driver_rejects_a_web_snapshot_without_the_native_browser_identity() {
 }
 
 #[test]
-fn tianyi_driver_combines_verified_web_cookie_with_existing_app_credentials() {
+fn disabled_tianyi_driver_does_not_reactivate_legacy_password_credentials() {
     let credentials = MemoryCredentialStore::default();
     credentials
         .save(
@@ -1880,19 +1880,16 @@ fn tianyi_driver_combines_verified_web_cookie_with_existing_app_credentials() {
         })),
     };
 
-    let account = crate::cloud::ProviderRegistry::global()
+    let result = crate::cloud::ProviderRegistry::global()
         .driver(CloudProvider::Tianyi, &credentials, &transport)
         .auth()
-        .complete_web(&input)
-        .expect("the browser candidate should retain the independent App transport");
+        .complete_web(&input);
 
-    assert_eq!(account.id, "alice@189.cn");
+    assert!(matches!(result, Err(QuarkError::InvalidInput(_))));
     let saved: serde_json::Value =
         serde_json::from_slice(&credentials.load("tianyi").unwrap().unwrap()).unwrap();
-    assert_eq!(saved["cookie"], "SSON=official-browser-session");
-    assert_eq!(saved["browser_id"], "1234567890abcdef1234567890abcdef");
+    assert_eq!(saved["cookie"], "");
     assert_eq!(saved["app"]["sessionKey"], "app-key");
-    assert_eq!(saved["auth_method"], "password");
 }
 
 #[test]

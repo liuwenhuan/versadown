@@ -23,6 +23,13 @@ impl DriveOps for TianyiDriver<'_> {
             }
         }
     }
+    fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
+        tianyi::TianyiClient::new(
+            load_provider_session(CloudProvider::Tianyi, &self.store)?,
+            &self.http,
+        )
+        .storage_capacity()
+    }
     fn list_directory(&mut self, parent_id: &str) -> Result<CloudDirectory, CloudError> {
         let provider = CloudProvider::Tianyi;
         let store = &self.store;
