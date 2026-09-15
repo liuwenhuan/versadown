@@ -31,6 +31,21 @@ export interface ProviderDescriptor {
 }
 
 export interface CloudAccount { provider: CloudProvider; id: string; displayName: string; authMethod: CloudAuthMethod; expiresAt?: string; }
+export type CloudStorageCapacity =
+  | { kind: 'limited'; totalBytes: number; usedBytes: number }
+  | { kind: 'unlimited'; usedBytes: number };
+export interface CloudAccountCapacity {
+  provider: CloudProvider;
+  accountId: string;
+  capacity: CloudStorageCapacity;
+  updatedAt: number;
+}
+export type CloudCapacityChangeReason = 'upload' | 'copy' | 'transfer' | 'trash' | 'restore' | 'delete';
+export interface CloudCapacityInvalidated {
+  provider: CloudProvider;
+  accountId: string;
+  reason: CloudCapacityChangeReason;
+}
 export interface CloudAuthorizationStateEvent { provider: CloudProvider; state: 'Disconnected' | 'Restoring' | 'Ready' | 'Refreshing' | 'NeedsSilentRelogin' | 'NeedsInteractiveAuth' | 'RiskBlocked'; account: CloudAccount | null; }
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; }
 export interface CloudDirectory { id: string; items: CloudFile[]; }

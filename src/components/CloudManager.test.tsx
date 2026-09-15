@@ -320,17 +320,23 @@ it('uses catalog authorization and directory identifiers instead of provider def
 
 function createCloudFake(overrides: Record<string, unknown> = {}) {
   const listeners = new Set<(event: any) => void>();
+  const capacityListeners = new Set<(event: any) => void>();
   let completedAccount: any = null;
   return {
     getCompletedCloudAuthorization: vi.fn(async () => completedAccount),
     subscribeCloudAuthorization: vi.fn(async (_provider: CloudProvider, receive: (event: any) => void) => { listeners.add(receive); return () => { listeners.delete(receive); }; }),
     emitAuthorization: (account: any) => { completedAccount = account; listeners.forEach(receive => receive({ provider: account.provider, state: 'Ready', account })); },
+    emitCapacityInvalidated: (event: any) => { capacityListeners.forEach(receive => receive(event)); },
     getCloudProviderCatalog: vi.fn().mockResolvedValue(cloudCatalog),
     beginCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ provider, windowLabel: '网盘登录', instructions: '请在安全窗口中完成登录。' })),
     completeCloudAuthorization: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' as const })),
     loginCloudWithPassword: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({ id: 'account-1', displayName: 'alice', provider, authMethod: 'password' as const })),
     getSavedCloudCredentials: vi.fn().mockResolvedValue(null),
     getCloudAccount: vi.fn().mockRejectedValue(Object.assign(new Error('未授权'), { code: 'unauthorized' })),
+    getCloudAccountCapacity: vi.fn().mockImplementation((provider: CloudProvider) => Promise.resolve({
+      provider, accountId: `${provider}-account`, capacity: { kind: 'limited', totalBytes: 100 * 1024 ** 3, usedBytes: 12 * 1024 ** 3 }, updatedAt: 1
+    })),
+    subscribeCloudCapacityInvalidated: vi.fn(async (_provider: CloudProvider, receive: (event: any) => void) => { capacityListeners.add(receive); return () => { capacityListeners.delete(receive); }; }),
     listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === 'folder-1'
       ? { id: 'folder-1', items: [{ id: 'child-1', parentId: 'folder-1', name: '说明.txt', kind: 'file', size: 1024, modifiedAt: '2025-06-07 08:09:10' }] }
       : parentId === 'folder-2'
@@ -365,6 +371,44 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     ...overrides
   };
 }
+
+it('shows loading then limited capacity on an authorized account card', async () => {
+  let resolveCapacity!: (value: any) => void;
+  const client = createCloudFake({
+    getCloudAccountCapacity: vi.fn(() => new Promise(resolve => { resolveCapacity = resolve; }))
+  });
+  render(<CloudManager provider="quark" client={client} authorizationOnly initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(screen.getByText('容量获取中…')).toBeVisible();
+  await act(async () => { resolveCapacity({ provider: 'quark', accountId: 'q-1', capacity: { kind: 'limited', totalBytes: 100 * 1024 ** 3, usedBytes: 12 * 1024 ** 3 }, updatedAt: 1 }); });
+  expect(await screen.findByText('已使用 12.0 GB / 100.0 GB')).toBeVisible();
+});
+
+it('keeps the account authorized when the first capacity request fails', async () => {
+  const client = createCloudFake({ getCloudAccountCapacity: vi.fn().mockRejectedValue(new Error('offline')) });
+  render(<CloudManager provider="quark" client={client} authorizationOnly initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByText('容量暂不可用')).toBeVisible();
+  expect(screen.getByRole('button', { name: '已经完成授权' })).toBeVisible();
+});
+
+it('retains capacity and marks an event-driven refresh failure', async () => {
+  vi.useFakeTimers();
+  try {
+    const client = createCloudFake({ getCloudAccountCapacity: vi.fn()
+      .mockResolvedValueOnce({ provider: 'quark', accountId: 'q-1', capacity: { kind: 'unlimited', usedBytes: 3 * 1024 ** 3 }, updatedAt: 1 })
+      .mockRejectedValueOnce(new Error('offline')) });
+    render(<CloudManager provider="quark" client={client} authorizationOnly initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+    await act(async () => {});
+    expect(screen.getByText('已使用 3.0 GB / 不限容量')).toBeVisible();
+    await act(async () => {
+      client.emitCapacityInvalidated({ provider: 'quark', accountId: 'q-1', reason: 'delete' });
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(screen.getByText(/已使用 3.0 GB \/ 不限容量/)).toHaveTextContent('更新失败');
+    expect(client.getCloudAccountCapacity).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
 it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as const)(
   'keeps %s file controls compact and the refresh icon centered', async (provider) => {
