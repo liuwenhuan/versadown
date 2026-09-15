@@ -295,6 +295,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             updated_at: 1_725_000_000,
             completed_at: None,
             is_private: false,
+            post_processing_note: None,
         })
         .expect("persist snapshot");
     store

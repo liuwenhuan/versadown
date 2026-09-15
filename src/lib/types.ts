@@ -36,6 +36,7 @@ export interface QueueTask {
   completedAt?: number;
   is_private?: boolean;
   isPrivate?: boolean;
+  post_processing_note?: string;
   files?: readonly DownloadFile[];
   file_index?: number;
   selected?: boolean;

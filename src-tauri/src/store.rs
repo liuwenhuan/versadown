@@ -322,6 +322,7 @@ impl TaskStore {
             updated_at: created_at,
             completed_at: None,
             is_private: new_task.is_private,
+            post_processing_note: None,
         };
         connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at, is_private) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.created_at, task.updated_at, task.is_private])?;
@@ -789,6 +790,23 @@ impl TaskStore {
         let changed = connection.execute(
             "UPDATE tasks SET is_private = ?1, updated_at = ?2 WHERE id = ?3",
             params![is_private, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
+    }
+
+    pub fn set_post_processing_note(
+        &self,
+        id: Uuid,
+        note: Option<&str>,
+    ) -> Result<DownloadTask, StoreError> {
+        let note = note.map(str::trim).filter(|value| !value.is_empty());
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET post_processing_note = ?1, updated_at = ?2 WHERE id = ?3",
+            params![note, current_timestamp(), id.to_string()],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
@@ -1424,7 +1442,7 @@ fn remove_managed_payload_file(
     Ok(ManagedFileRemoval::Removed)
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note FROM tasks";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1510,6 +1528,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             "ALTER TABLE tasks ADD COLUMN discovered_nodes INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
+    if !column_exists(&transaction, "tasks", "post_processing_note")? {
+        transaction.execute_batch("ALTER TABLE tasks ADD COLUMN post_processing_note TEXT;")?;
+    }
     if !column_exists(&transaction, "cloud_directory_groups", "is_private")? {
         transaction.execute_batch(
             "ALTER TABLE cloud_directory_groups ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;",
@@ -1528,7 +1549,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             );",
         )?;
     }
-    transaction.execute_batch("PRAGMA user_version = 10;")?;
+    transaction.execute_batch("PRAGMA user_version = 11;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -1659,6 +1680,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         metadata_gid: row.get(20)?,
         created_at: row.get(21)?,
         is_private: row.get(22)?,
+        post_processing_note: row.get(23)?,
     })
 }
 
@@ -1792,6 +1814,37 @@ mod tests {
         cloud::CloudProvider,
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
     };
+
+    #[test]
+    fn post_processing_note_survives_reopen_and_blank_input_clears_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let task_id = {
+            let store = TaskStore::open_path(&database).unwrap();
+            let task = store
+                .create(NewTask::direct("https://example.test/archive.zip"))
+                .unwrap();
+            let updated = store
+                .set_post_processing_note(task.id, Some("解压密码：88in\n完成后拼接分卷"))
+                .unwrap();
+            assert_eq!(
+                updated.post_processing_note.as_deref(),
+                Some("解压密码：88in\n完成后拼接分卷")
+            );
+            task.id
+        };
+
+        let store = TaskStore::open_path(&database).unwrap();
+        assert_eq!(
+            store.find(task_id).unwrap().post_processing_note.as_deref(),
+            Some("解压密码：88in\n完成后拼接分卷")
+        );
+        assert!(store
+            .set_post_processing_note(task_id, Some(" \n "))
+            .unwrap()
+            .post_processing_note
+            .is_none());
+    }
 
     #[test]
     fn removing_many_task_records_keeps_every_record_when_one_requested_id_is_missing() {

@@ -318,6 +318,8 @@ pub struct DownloadTask {
     pub completed_at: Option<i64>,
     #[serde(default)]
     pub is_private: bool,
+    #[serde(default)]
+    pub post_processing_note: Option<String>,
 }
 
 #[derive(Clone, Debug)]

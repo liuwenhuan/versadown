@@ -13,5 +13,5 @@ export function TaskDetails({ task }: { task: QueueTask | undefined }) {
     {task.aria_error_code && <div><dt>aria2 错误码</dt><dd>{task.aria_error_code}</dd></div>}
     {task.error && <div><dt>错误</dt><dd>{task.error}</dd></div>}
     <div><dt>来源</dt><dd title={task.source}>{task.source ?? '本地任务'}</dd></div>
-  </dl>{task.files?.length ? <section className="detail-files"><b>文件</b>{task.files.map((file) => <div key={file.index}><span>{file.path}</span><small>{formatBytes(file.completed_length)} / {formatBytes(file.length)} · {file.selected ? '已选择' : '已跳过'}</small></div>)}</section> : null}<section className="safety-note"><b>安全处理</b><span>仅执行已确认的解压、合并、改名和校验步骤。</span></section></aside>;
+  </dl>{task.files?.length ? <section className="detail-files"><b>文件</b>{task.files.map((file) => <div key={file.index}><span>{file.path}</span><small>{formatBytes(file.completed_length)} / {formatBytes(file.length)} · {file.selected ? '已选择' : '已跳过'}</small></div>)}</section> : null}{task.post_processing_note?.trim() ? <section className="task-post-processing-note"><b>解压密码和后处理</b><p>{task.post_processing_note}</p></section> : null}<section className="safety-note"><b>安全处理</b><span>仅执行已确认的解压、合并、改名和校验步骤。</span></section></aside>;
 }

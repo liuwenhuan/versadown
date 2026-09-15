@@ -904,6 +904,7 @@ pub(crate) fn cloud_directory_group_task_outcome(
                 updated_at: queue_task.updated_at,
                 completed_at: queue_task.completed_at,
                 is_private: group.is_private,
+                post_processing_note: None,
             },
             files: Vec::new(),
             cleanup_pending: false,

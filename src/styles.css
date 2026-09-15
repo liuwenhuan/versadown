@@ -120,6 +120,7 @@ button,input,textarea{font:inherit}button{color:inherit}
 .task-details h2{margin:3px 0 16px;overflow-wrap:anywhere;font-size:16px}.task-details dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px;margin:0}
 .task-details dl div{display:grid;gap:4px}.task-details dt{color:var(--muted);font-size:11px}.task-details dd{overflow:hidden;margin:0;color:var(--text);font-size:12px;overflow-wrap:anywhere}
 .task-details.muted{display:none}.eyebrow{margin:0 0 3px;color:var(--accent-text);font-size:10px;font-weight:700;letter-spacing:.12em}
+.task-post-processing-note{display:grid;gap:6px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}.task-post-processing-note p{margin:0;color:var(--text);font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
 .safety-note{display:flex;gap:8px;margin-top:16px;padding-top:13px;border-top:1px solid var(--border);color:var(--muted);font-size:11px}
 .view-panel{min-width:0;min-height:0;overflow:auto;padding:20px 24px;background:var(--surface)}
 .about-panel{width:100%;max-width:800px;margin:0 auto;padding:12px 0 20px;color:var(--text)}

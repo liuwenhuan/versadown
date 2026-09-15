@@ -27,3 +27,13 @@ it('shows downloaded bytes instead of a synthetic percent for an unknown total',
   expect(screen.getByText('2 KB')).toBeVisible();
   expect(screen.queryByText('0%')).not.toBeInTheDocument();
 });
+
+it('shows a persisted extraction password and post-processing note with its line breaks', () => {
+  render(<TaskDetails task={{
+    id: 'task-note', name: 'archive.zip', kind: 'file', status: 'completed', progress: 100,
+    post_processing_note: '解压密码：88in\n完成后拼接分卷并改名'
+  }} />);
+
+  expect(screen.getByText('解压密码和后处理')).toBeVisible();
+  expect(screen.getByText(/解压密码：88in\s+完成后拼接分卷并改名/)).toBeVisible();
+});
