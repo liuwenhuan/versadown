@@ -77,6 +77,41 @@ it('keeps proxy, traffic caps, and aria2 configuration in separate network setti
   expect(aria2Form).not.toContainElement(cloudUploadLimit);
 });
 
+it('keeps rate limits and their save control inline while accepting one decimal place', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<SettingsPanel initial={initial} onChange={onChange} />);
+    await user.click(screen.getByRole('tab', { name: '网络' }));
+
+    const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速' });
+    const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速' });
+    const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速' });
+    const rateLimitFieldset = overallDownloadLimit.closest('fieldset')!;
+    expect(screen.getByRole('button', { name: '保存限速设置' }).parentElement).toBe(rateLimitFieldset);
+    expect(getComputedStyle(rateLimitFieldset).gridTemplateColumns).toBe('repeat(3, minmax(0, 1fr)) auto');
+    expect(overallDownloadLimit).toHaveAttribute('step', '0.1');
+    expect(p2pUploadLimit.value).toBe('1.0');
+    expect(cloudUploadLimit.value).toBe('0.0');
+
+    await user.clear(overallDownloadLimit);
+    await user.type(overallDownloadLimit, '2.56');
+    expect(overallDownloadLimit.value).toBe('2.5');
+    await user.click(screen.getByRole('button', { name: '保存限速设置' }));
+
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...initial,
+      aria2: { ...initial.aria2, overallDownloadLimit: 2_621_440 },
+      cloudUploadLimit: 0
+    });
+  } finally {
+    stylesheet.remove();
+  }
+});
+
 it('removes helper descriptions except for the privacy download explanation', async () => {
   const user = userEvent.setup();
   const { container } = render(<SettingsPanel initial={initial} onChange={() => {}} />);
