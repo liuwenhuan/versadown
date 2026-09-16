@@ -45,7 +45,10 @@ pub use launcher::{
     should_apply_launcher_window_visibility, tray_menu_entries, LauncherInteractionState,
     LauncherLiveRegions, LauncherNativeChromePolicy, LauncherPoint, LauncherRegion,
 };
-pub use magnet_metadata::{resolve_magnet_torrent, MagnetMetadataError, ResolvedMagnetTorrent};
+pub use magnet_metadata::{
+    resolve_magnet_metadata, resolve_magnet_torrent, MagnetMetadataError, ResolvedMagnetFile,
+    ResolvedMagnetMetadata, ResolvedMagnetTorrent,
+};
 pub use models::{
     may_transition, AiSettings, AiSettingsInput, AppSettings, Aria2Settings, DownloadTask,
     DuplicateDownloadState, FtpSegment, LauncherVisibility, MagnetMetadataSettings, NewTask,

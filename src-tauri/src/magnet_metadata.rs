@@ -32,6 +32,32 @@ struct MetadataResponse {
     download_url: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    files: Vec<MetadataFile>,
+}
+
+#[derive(Deserialize)]
+struct MetadataFile {
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMagnetFile {
+    pub index: u32,
+    pub path: String,
+    pub length: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedMagnetMetadata {
+    pub torrent: Option<String>,
+    pub title: Option<String>,
+    pub files: Vec<ResolvedMagnetFile>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,13 +66,13 @@ pub struct ResolvedMagnetTorrent {
     pub title: Option<String>,
 }
 
-/// Resolve a magnet through the configured metadata service. A successful metadata
-/// lookup without a cached torrent is represented by `Ok(None)` so the caller can
-/// transparently continue with local aria2 DHT discovery.
-pub async fn resolve_magnet_torrent(
+/// Resolve a magnet through the configured metadata service. The service can return
+/// a file listing before it has a locally cached torrent; callers use that listing
+/// for the confirmation preview while aria2 continues P2P metadata discovery.
+pub async fn resolve_magnet_metadata(
     settings: &MagnetMetadataSettings,
     magnet: &str,
-) -> Result<Option<ResolvedMagnetTorrent>, MagnetMetadataError> {
+) -> Result<Option<ResolvedMagnetMetadata>, MagnetMetadataError> {
     if !settings.enabled {
         return Ok(None);
     }
@@ -67,13 +93,57 @@ pub async fn resolve_magnet_torrent(
         .json::<MetadataResponse>()
         .await
         .map_err(|error| MagnetMetadataError::InvalidResponse(error.to_string()))?;
-    if metadata.download_url.trim().is_empty() {
+    let title = (!metadata.name.trim().is_empty()).then(|| metadata.name.trim().to_string());
+    let files = metadata
+        .files
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, file)| {
+            let path = file.path.trim();
+            (!path.is_empty()).then(|| ResolvedMagnetFile {
+                // aria2's file indexes start at one. The peer service supplies that
+                // index explicitly; fall back to its response order for older peers.
+                index: if file.index == 0 {
+                    (position as u32).saturating_add(1)
+                } else {
+                    file.index
+                },
+                path: path.to_string(),
+                length: file.size,
+            })
+        })
+        .collect::<Vec<_>>();
+    let torrent = if metadata.download_url.trim().is_empty() {
+        None
+    } else {
+        let torrent_url = resolve_download_url(&base_url, metadata.download_url.trim())?;
+        // A stale cache entry must not hide an otherwise useful file listing or
+        // force the user to wait for a second DHT lookup before seeing the task.
+        load_torrent_base64(torrent_url.as_str()).await.ok()
+    };
+    if torrent.is_none() && title.is_none() && files.is_empty() {
         return Ok(None);
     }
-    let torrent_url = resolve_download_url(&base_url, metadata.download_url.trim())?;
-    Ok(Some(ResolvedMagnetTorrent {
-        torrent: load_torrent_base64(torrent_url.as_str()).await?,
-        title: (!metadata.name.trim().is_empty()).then(|| metadata.name.trim().to_string()),
+    Ok(Some(ResolvedMagnetMetadata {
+        torrent,
+        title,
+        files,
+    }))
+}
+
+/// Returns a raw torrent only when the metadata service has one that can actually
+/// be fetched. Retry/overwrite flows use this stricter form because they cannot
+/// safely replace an existing task from an indexed file listing alone.
+pub async fn resolve_magnet_torrent(
+    settings: &MagnetMetadataSettings,
+    magnet: &str,
+) -> Result<Option<ResolvedMagnetTorrent>, MagnetMetadataError> {
+    let Some(metadata) = resolve_magnet_metadata(settings, magnet).await? else {
+        return Ok(None);
+    };
+    Ok(metadata.torrent.map(|torrent| ResolvedMagnetTorrent {
+        torrent,
+        title: metadata.title,
     }))
 }
 

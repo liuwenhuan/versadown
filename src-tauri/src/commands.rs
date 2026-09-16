@@ -14,10 +14,11 @@ use crate::downloader::load_torrent_base64;
 use crate::models::{CloudDirectoryGroup, CloudDirectoryGroupItem, QueueTaskPayload};
 use crate::{
     cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, DpapiCredentialStore},
-    confirm_download, duplicate_state, prepare_download, resolve_magnet_torrent,
-    retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings, DownloadAction,
-    DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility, ParseOutcome,
-    ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
+    confirm_download, duplicate_state, prepare_download, resolve_magnet_metadata,
+    resolve_magnet_torrent, retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings,
+    DownloadAction, DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility,
+    ParseOutcome, ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile,
+    UriSubmissionOptions,
 };
 
 #[derive(Serialize)]
@@ -475,7 +476,7 @@ pub async fn parse_download(
             .magnet_metadata
             .clone();
         if let Ok(Some(resolved)) =
-            resolve_magnet_torrent(&metadata_settings, &outcome.task.source).await
+            resolve_magnet_metadata(&metadata_settings, &outcome.task.source).await
         {
             if let Some(title) = resolved.title {
                 outcome.task.name = title;
@@ -484,17 +485,49 @@ pub async fn parse_download(
                     .apply_transfer_snapshot(outcome.task)
                     .map_err(|error| error.to_string())?;
             }
-            outcome.task = service
-                .submit_torrent(
-                    outcome.task.id,
-                    resolved.torrent,
-                    vec![],
-                    options
-                        .into_aria2_options()
-                        .map_err(|error| error.to_string())?,
-                )
-                .await
-                .map_err(|error| fail_engine_submission(&state.store, &outcome.task, error))?;
+            if let Some(torrent) = resolved.torrent {
+                outcome.task = service
+                    .submit_torrent(
+                        outcome.task.id,
+                        torrent,
+                        vec![],
+                        options
+                            .into_aria2_options()
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .await
+                    .map_err(|error| fail_engine_submission(&state.store, &outcome.task, error))?;
+            } else {
+                let preview_files = resolved
+                    .files
+                    .iter()
+                    .map(|file| (file.index, file.path.clone(), file.length, 0, true))
+                    .collect::<Vec<_>>();
+                state
+                    .store
+                    .upsert_files(outcome.task.id, &preview_files)
+                    .map_err(|error| error.to_string())?;
+                outcome.task = service
+                    .prepare_magnet_with_options(
+                        outcome.task.id,
+                        outcome.task.source.clone(),
+                        options,
+                    )
+                    .await
+                    .map_err(|error| fail_engine_submission(&state.store, &outcome.task, error))?;
+                if preview_files.is_empty() {
+                    match service
+                        .wait_for_metadata(outcome.task.id, std::time::Duration::from_secs(12))
+                        .await
+                    {
+                        Ok(task) => outcome.task = task,
+                        Err(DownloadServiceError::MetadataTimeout) => {}
+                        Err(error) => {
+                            return Err(fail_engine_submission(&state.store, &outcome.task, error))
+                        }
+                    }
+                }
+            }
         } else {
             outcome.task = service
                 .prepare_magnet_with_options(outcome.task.id, outcome.task.source.clone(), options)

@@ -1,4 +1,4 @@
-use alldownloader_lib::{resolve_magnet_torrent, MagnetMetadataSettings};
+use alldownloader_lib::{resolve_magnet_metadata, resolve_magnet_torrent, MagnetMetadataSettings};
 use axum::{
     extract::Json,
     http::{header::USER_AGENT, HeaderMap, StatusCode},
@@ -126,6 +126,50 @@ async fn returns_no_torrent_when_the_metadata_service_has_no_cached_download() {
     .unwrap();
 
     assert_eq!(result, None);
+}
+
+#[tokio::test]
+async fn keeps_a_metadata_only_result_for_the_confirmation_preview() {
+    let app = Router::new().route(
+        "/api/v1/metadata",
+        post(|| async {
+            Json(json!({
+                "info_hash": "0123456789abcdef0123456789abcdef01234567",
+                "name": "fixture-directory",
+                "size": 21,
+                "files": [
+                    { "index": 1, "path": "fixture-directory/first.bin", "size": 13 },
+                    { "index": 2, "path": "fixture-directory/second.bin", "size": 8 }
+                ]
+            }))
+        }),
+    );
+    let base_url = serve(app).await;
+
+    let result = resolve_magnet_metadata(
+        &MagnetMetadataSettings {
+            enabled: true,
+            base_url,
+        },
+        MAGNET,
+    )
+    .await
+    .unwrap()
+    .expect("a metadata-only response should remain available to the UI");
+
+    assert_eq!(result.torrent, None);
+    assert_eq!(result.title.as_deref(), Some("fixture-directory"));
+    assert_eq!(
+        result
+            .files
+            .into_iter()
+            .map(|file| (file.index, file.path, file.length))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, "fixture-directory/first.bin".to_string(), 13),
+            (2, "fixture-directory/second.bin".to_string(), 8),
+        ]
+    );
 }
 
 #[tokio::test]
