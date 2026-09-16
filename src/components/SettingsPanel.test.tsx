@@ -53,6 +53,30 @@ it('separates settings into common, network, and advanced workspaces', async () 
   expect(screen.queryByRole('checkbox', { name: '启用磁链元数据服务' })).not.toBeInTheDocument();
 });
 
+it('keeps proxy, traffic caps, and aria2 configuration in separate network settings groups', async () => {
+  const user = userEvent.setup();
+  render(<SettingsPanel initial={initial} onChange={() => {}} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  expect(screen.getByText('启用下载代理服务器')).toBeVisible();
+  const rateLimitForm = screen.getByText('限速设置').closest('form');
+  const aria2Form = screen.getByText('aria2 下载引擎').closest('form');
+  const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速' });
+  const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速' });
+  const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速' });
+  const rateLimitFieldset = overallDownloadLimit.closest('fieldset');
+
+  expect(rateLimitForm).toContainElement(overallDownloadLimit);
+  expect(rateLimitForm).toContainElement(p2pUploadLimit);
+  expect(rateLimitForm).toContainElement(cloudUploadLimit);
+  expect(p2pUploadLimit.closest('fieldset')).toBe(rateLimitFieldset);
+  expect(cloudUploadLimit.closest('fieldset')).toBe(rateLimitFieldset);
+  expect(screen.getByRole('button', { name: '保存限速设置' }).parentElement).toBe(rateLimitFieldset);
+  expect(aria2Form).not.toContainElement(overallDownloadLimit);
+  expect(aria2Form).not.toContainElement(p2pUploadLimit);
+  expect(aria2Form).not.toContainElement(cloudUploadLimit);
+});
+
 it('removes helper descriptions except for the privacy download explanation', async () => {
   const user = userEvent.setup();
   const { container } = render(<SettingsPanel initial={initial} onChange={() => {}} />);
@@ -265,7 +289,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   });
 });
 
-it('saves aria2 RPC and transfer limits from the network settings', async () => {
+it('saves aria2 RPC and engine settings from the network settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} />);
@@ -296,26 +320,24 @@ it('saves aria2 RPC and transfer limits from the network settings', async () => 
   });
 });
 
-it('saves overall download, P2P upload, and cloud upload caps in bytes per second', async () => {
+it('saves the standalone rate limits in bytes per second', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} />);
   await user.click(screen.getByRole('tab', { name: '网络' }));
 
-  await user.type(screen.getByLabelText('aria2 RPC Token'), 'local-token');
   await user.clear(screen.getByRole('spinbutton', { name: '整体下载限速' }));
   await user.type(screen.getByRole('spinbutton', { name: '整体下载限速' }), '2.5');
   await user.clear(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }));
   await user.type(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }), '1.5');
   await user.clear(screen.getByRole('spinbutton', { name: '网盘上传限速' }));
   await user.type(screen.getByRole('spinbutton', { name: '网盘上传限速' }), '3');
-  await user.click(screen.getByRole('button', { name: '保存 aria2 设置' }));
+  await user.click(screen.getByRole('button', { name: '保存限速设置' }));
 
   expect(onChange).toHaveBeenLastCalledWith({
     ...initial,
     aria2: {
       ...initial.aria2,
-      rpcToken: 'local-token',
       overallDownloadLimit: 2_621_440,
       p2pUploadLimit: 1_572_864
     },

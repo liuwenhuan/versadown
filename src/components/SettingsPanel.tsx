@@ -39,6 +39,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [privacyPasswordConfirmation, setPrivacyPasswordConfirmation] = useState('');
   const [privacyStatus, setPrivacyStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aria2Status, setAria2Status] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [rateLimitStatus, setRateLimitStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
@@ -185,6 +186,29 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     }
   }
 
+  function updateRateLimit<Key extends 'overallDownloadLimit' | 'p2pUploadLimit'>(key: Key, value: Aria2Settings[Key]) {
+    setRateLimitStatus(null);
+    setAria2((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateCloudUploadLimit(value: number) {
+    setRateLimitStatus(null);
+    setCloudUploadLimit(value);
+  }
+
+  async function saveRateLimits(event: FormEvent) {
+    event.preventDefault();
+    const savedAria2 = { ...aria2, rpcToken: aria2.rpcToken.trim() };
+    setAria2(savedAria2);
+    setRateLimitStatus(null);
+    try {
+      await onChange(currentSettings({ aria2: savedAria2 }));
+      setRateLimitStatus({ kind: 'success', message: '已保存并立即应用' });
+    } catch (error) {
+      setRateLimitStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function browseForDownloadDirectory() {
     const selected = await browseDirectory?.(downloadDirectory);
     if (selected) commitDownloadDirectory(selected);
@@ -220,7 +244,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
       </>}
       {activeTab === 'network' && <>
       <form className="proxy-settings" onSubmit={saveProxy}>
-        <div className="setting-row"><span><b>下载代理服务器</b></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
+        <div className="setting-row"><span><b>启用下载代理服务器</b></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
         <fieldset aria-disabled={!proxy.enabled}>
           <label><span>协议</span><select aria-label="代理协议" disabled={!proxy.enabled} value={proxy.protocol} onChange={(event) => updateProxy('protocol', event.target.value as ProxyProtocol)}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
           <label className="proxy-host"><span>服务器</span><input aria-label="代理服务器" disabled={!proxy.enabled} required value={proxy.host} placeholder="127.0.0.1" onChange={(event) => updateProxy('host', event.target.value)} /></label>
@@ -231,6 +255,16 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         </fieldset>
         {saved && <div className="settings-actions"><span role="status">已保存，后续新任务生效</span></div>}
       </form>
+      <form className="proxy-settings rate-limit-settings" onSubmit={saveRateLimits}>
+        <div className="setting-row"><span><b>限速设置</b></span></div>
+        <fieldset>
+          <label><span>整体下载限速（MiB/s）</span><input aria-label="整体下载限速" type="number" min="0" step="0.1" value={aria2.overallDownloadLimit / 1048576} onChange={(event) => updateRateLimit('overallDownloadLimit', Math.max(0, Math.round(Number(event.target.value) * 1048576)))} /></label>
+          <label><span>P2P 上传限速（MiB/s）</span><input aria-label="P2P 上传限速" type="number" min="0" step="0.1" value={aria2.p2pUploadLimit / 1048576} onChange={(event) => updateRateLimit('p2pUploadLimit', Math.max(0, Math.round(Number(event.target.value) * 1048576)))} /></label>
+          <label><span>网盘上传限速（MiB/s）</span><input aria-label="网盘上传限速" type="number" min="0" step="0.1" value={cloudUploadLimit / 1048576} onChange={(event) => updateCloudUploadLimit(Math.max(0, Math.round(Number(event.target.value) * 1048576)))} /></label>
+          <button className="primary settings-inline-save" type="submit">保存限速设置</button>
+        </fieldset>
+        {rateLimitStatus && <div className="settings-actions"><span role="status" className={rateLimitStatus.kind}>{rateLimitStatus.message}</span></div>}
+      </form>
       <form className="proxy-settings aria2-settings" onSubmit={saveAria2}>
         <div className="setting-row"><span><b>aria2 下载引擎</b></span></div>
         <fieldset>
@@ -238,9 +272,6 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           <label className="aria2-token"><span>RPC Token</span><input aria-label="aria2 RPC Token" required type="password" autoComplete="new-password" value={aria2.rpcToken} onChange={(event) => updateAria2('rpcToken', event.target.value)} /></label>
           <label><span>最大并行任务数</span><input aria-label="最大并行任务数" required type="number" min="1" max="64" value={aria2.maxConcurrentDownloads} onChange={(event) => updateAria2('maxConcurrentDownloads', Number(event.target.value))} /></label>
           <label><span>单任务并发连接数</span><input aria-label="单任务并发连接数" required type="number" min="1" max="16" value={aria2.maxConnectionsPerServer} onChange={(event) => updateAria2('maxConnectionsPerServer', Number(event.target.value))} /></label>
-          <label><span>整体下载限速（MiB/s）</span><input aria-label="整体下载限速" type="number" min="0" step="0.1" value={aria2.overallDownloadLimit / 1048576} onChange={(event) => updateAria2('overallDownloadLimit', Math.max(0, Math.round(Number(event.target.value) * 1048576)))} /></label>
-          <label><span>P2P 上传限速（MiB/s）</span><input aria-label="P2P 上传限速" type="number" min="0" step="0.1" value={aria2.p2pUploadLimit / 1048576} onChange={(event) => updateAria2('p2pUploadLimit', Math.max(0, Math.round(Number(event.target.value) * 1048576)))} /></label>
-          <label><span>网盘上传限速（MiB/s）</span><input aria-label="网盘上传限速" type="number" min="0" step="0.1" value={cloudUploadLimit / 1048576} onChange={(event) => setCloudUploadLimit(Math.max(0, Math.round(Number(event.target.value) * 1048576)))} /></label>
           <label className="aria2-seed-ratio"><span>BT 分享率</span><input aria-label="BT 分享率" required type="number" min="0.1" max="1000" step="0.1" value={aria2.btSeedRatio} onChange={(event) => updateAria2('btSeedRatio', Number(event.target.value))} /></label>
           <button className="primary settings-inline-save" type="submit">保存 aria2 设置</button>
         </fieldset>
