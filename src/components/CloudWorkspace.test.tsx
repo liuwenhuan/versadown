@@ -379,3 +379,58 @@ it('returns to management if the removed provider is selected while logout is pe
   expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
   expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
 });
+
+it('follows the pointer with a provider card preview and saves its calculated insertion order on release', async () => {
+  class TestPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: MouseEventInit & { pointerId?: number } = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  const originalPointerEvent = window.PointerEvent;
+  Object.defineProperty(window, 'PointerEvent', { configurable: true, value: TestPointerEvent });
+  const originalElementFromPoint = document.elementFromPoint;
+  const storageKey = 'alldownloader.cloud-provider-card-order';
+  window.localStorage.removeItem(storageKey);
+  const client = createClient();
+  client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0], cloudCatalog[1], cloudCatalog[2]]);
+  const view = render(<CloudWorkspace client={client} />);
+
+  const quarkCard = await screen.findByRole('region', { name: '夸克账号授权' });
+  const pikpakCard = screen.getByRole('region', { name: 'PikPak账号授权' });
+  const baiduCard = screen.getByRole('region', { name: '百度账号授权' });
+  const grid = screen.getByRole('region', { name: '网盘管理' }).querySelector('.cloud-provider-auths')!;
+  const quarkHeader = within(quarkCard).getByRole('heading', { name: '夸克网盘' }).closest('header')!;
+  const infoButton = within(quarkCard).getByRole('button', { name: '查看夸克网盘信息' });
+  const rect = (left: number, top: number) => ({ top, bottom: top + 120, height: 120, left, right: left + 240, width: 240, x: left, y: top, toJSON: () => ({}) });
+  vi.spyOn(quarkCard, 'getBoundingClientRect').mockReturnValue(rect(0, 0));
+  vi.spyOn(baiduCard, 'getBoundingClientRect').mockReturnValue(rect(0, 160));
+  vi.spyOn(grid, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 320, height: 320, left: 0, right: 500, width: 500, x: 0, y: 0, toJSON: () => ({}) });
+  Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: vi.fn(() => baiduCard) });
+
+  fireEvent.pointerDown(quarkHeader, { pointerId: 7, button: 0, clientX: 20, clientY: 20 });
+  fireEvent.pointerMove(quarkHeader, { pointerId: 7, clientX: 210, clientY: 270 });
+
+  const preview = document.querySelector<HTMLElement>('.cloud-provider-drag-preview');
+  expect(preview).toHaveStyle({ left: '190px', top: '250px' });
+  expect(screen.getAllByRole('region').filter(region => region.getAttribute('aria-label')?.endsWith('账号授权')).map(region => region.getAttribute('aria-label'))).toEqual(['PikPak账号授权', '百度账号授权', '夸克账号授权']);
+  expect(baiduCard).toHaveClass('cloud-provider-drop-target');
+  expect(pikpakCard).not.toHaveClass('cloud-provider-drop-target');
+
+  fireEvent.pointerUp(quarkHeader, { pointerId: 7, clientX: 210, clientY: 270 });
+  expect(document.querySelector('.cloud-provider-drag-preview')).not.toBeInTheDocument();
+  expect(JSON.parse(window.localStorage.getItem(storageKey) ?? '[]')).toEqual(['pikpak', 'baidu', 'quark']);
+  expect(pikpakCard).toBeVisible();
+  fireEvent.click(infoButton);
+  expect(within(quarkCard).getByText('官方网站')).toBeVisible();
+  view.unmount();
+  render(<CloudWorkspace client={client} />);
+  await screen.findByRole('region', { name: '夸克账号授权' });
+  expect(screen.getAllByRole('region').filter(region => region.getAttribute('aria-label')?.endsWith('账号授权')).map(region => region.getAttribute('aria-label'))).toEqual(['PikPak账号授权', '百度账号授权', '夸克账号授权']);
+  window.localStorage.removeItem(storageKey);
+  if (originalElementFromPoint) Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: originalElementFromPoint });
+  else delete (document as Document & { elementFromPoint?: typeof document.elementFromPoint }).elementFromPoint;
+  if (originalPointerEvent) Object.defineProperty(window, 'PointerEvent', { configurable: true, value: originalPointerEvent });
+  else delete (window as Window & { PointerEvent?: typeof window.PointerEvent }).PointerEvent;
+});

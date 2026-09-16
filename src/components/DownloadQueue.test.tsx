@@ -25,12 +25,18 @@ it('reorders all selected top-level tasks with pointer events when native HTML d
   fireEvent.click(screen.getByText('two.zip'), { ctrlKey: true });
   const first = screen.getByText('one.zip').closest('.task-row')!;
   const third = screen.getByText('three.zip').closest('.task-row')!;
+  const firstGroup = first.closest('.task-group')!;
+  vi.spyOn(firstGroup, 'getBoundingClientRect').mockReturnValue({ top: 20, bottom: 92, height: 72, left: 10, right: 370, width: 360, x: 10, y: 20, toJSON: () => ({}) });
   vi.spyOn(third, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 40, height: 40, left: 0, right: 100, width: 100, x: 0, y: 0, toJSON: () => ({}) });
   const originalElementFromPoint = document.elementFromPoint;
   Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: vi.fn(() => third) });
   fireEvent.pointerDown(first, { pointerId: 7, button: 0, clientX: 10, clientY: 50 });
-  fireEvent.pointerMove(first, { pointerId: 7, clientX: 10, clientY: 5 });
-  fireEvent.pointerUp(first, { pointerId: 7, clientX: 10, clientY: 5 });
+  fireEvent.pointerMove(first, { pointerId: 7, clientX: 80, clientY: 5 });
+
+  expect(document.querySelector('.task-drag-preview')).toHaveStyle({ left: '80px', top: '-25px' });
+  expect([...document.querySelectorAll<HTMLElement>('.download-queue > .task-group .task-row')].map((row) => row.dataset.taskId)).toEqual(['one', 'two', 'three']);
+
+  fireEvent.pointerUp(first, { pointerId: 7, clientX: 80, clientY: 5 });
   if (originalElementFromPoint) Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: originalElementFromPoint });
   else delete (document as Document & { elementFromPoint?: typeof document.elementFromPoint }).elementFromPoint;
   if (originalPointerEvent) Object.defineProperty(window, 'PointerEvent', { configurable: true, value: originalPointerEvent });
@@ -563,6 +569,7 @@ it('keeps magnet metadata on the compact transfer-metrics row', () => {
   expect(metadata).toBeVisible();
   expect(metadata.closest('.transfer-metrics')).not.toBeNull();
   expect(metadata.closest('.task-copy')).toBeNull();
+  expect(metadata.querySelector('.task-metadata-indicator')).toBeVisible();
 });
 
 it('does not show file-information loading after a magnet transfer has started', () => {

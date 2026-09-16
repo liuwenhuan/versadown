@@ -3,7 +3,7 @@ import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { formatBytes } from '../lib/downloadEvents';
 import { ConfirmResource, ParseDownloadResult, ScanDownloadResult } from '../lib/types';
 import { ResourceFileRow } from './ResourceFileRow';
-import { DownloadDraftItem, useDownloadDraftBatch } from './useDownloadDraftBatch';
+import { canExpandDownloadDraft, DownloadDraftItem, useDownloadDraftBatch } from './useDownloadDraftBatch';
 
 export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
 
@@ -264,6 +264,10 @@ function BatchResourceList({ resources, disabled, rootName, rootRow, onToggle }:
   </div>;
 }
 
+function BatchLoadingStatus({ children }: { children: ReactNode }) {
+  return <span className="batch-loading-status"><span>{children}</span><i className="task-metadata-indicator" aria-hidden="true" /></span>;
+}
+
 function BatchNewDownloadDialog({
   open,
   placement = 'modal',
@@ -385,13 +389,14 @@ function BatchNewDownloadDialog({
 
   if (!open) return null;
   const selectedCount = batch.items.filter(item => item.selected).length;
-  const hasPendingBitTorrentMetadata = batch.items.some(item => item.selected
+  const hasUnresolvedBitTorrentFileList = batch.items.some(item => item.selected
     && item.status === 'ready'
     && item.result?.confirmation?.isBitTorrent
-    && (item.result.confirmation.metadataPending ?? batchItemResources(item).length === 0));
-  const canSubmit = batch.canSubmit && !hasPendingBitTorrentMetadata;
+    && (item.result.confirmation.metadataPending ?? batchItemResources(item).length === 0)
+    && batchItemResources(item).length === 0);
+  const canSubmit = batch.canSubmit && !hasUnresolvedBitTorrentFileList;
   const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapFocus}>
-    <div className="launcher-title"><span>新建任务</span><button type="button" aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
+    <div className="launcher-title"><span>新建任务</span>{batch.items.length > 0 && <small>{selectedCount ? `已选 ${selectedCount} 个任务` : '请选择任务'}</small>}<button type="button" aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
     {!batch.items.length && !scanning ? <form className="batch-manual-input" onSubmit={scanManualInput}><label htmlFor="batch-download-input">下载内容</label><textarea id="batch-download-input" aria-label="下载内容" value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder="粘贴链接、分享地址、文本或网页地址" /><div className="new-download-actions"><button type="submit" className="primary" disabled={!manualInput.trim()}>解析任务</button></div></form> : <section className="batch-download-list" aria-label="待新建任务">
       {batch.items.map(item => {
         const title = batchItemTitle(item);
@@ -399,24 +404,34 @@ function BatchNewDownloadDialog({
         const existingTask = Boolean(item.result?.duplicate);
         const pendingBitTorrentMetadata = Boolean(item.result?.confirmation?.isBitTorrent
           && (item.result.confirmation.metadataPending ?? resources.length === 0));
+        const waitingForBitTorrentFileList = pendingBitTorrentMetadata && resources.length === 0;
+        const loadingStatus = item.status === 'parsing'
+          ? '任务解析中'
+          : !existingTask && waitingForBitTorrentFileList
+            ? '正在获取文件信息'
+            : undefined;
+        const itemStatus = item.status === 'ready'
+          ? existingTask ? `已存在任务 · ${resources.length} 个文件` : loadingStatus ?? `${resources.length || 1} 项可下载`
+          : item.error;
+        const canExpand = item.result ? canExpandDownloadDraft(item.result) : false;
         const resourceBytes = resources.reduce((total, resource) => total + batchResourceBytes(resource.size), 0);
         const rootRow = <div className="batch-download-row batch-tree-root">
             <input type="checkbox" aria-label={`选择 ${item.input}`} checked={item.selected} disabled={existingTask} onChange={() => batch.toggleItem(item.id)} />
-            {resources.length > 0 ? <button type="button" className="batch-expand" aria-label={`${item.expanded ? '收起' : '展开'}${title}`} aria-expanded={item.expanded} onClick={() => batch.toggleExpanded(item.id)}><svg className={item.expanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg></button> : <span className="batch-expand-placeholder" />}
+            {canExpand ? <button type="button" className="batch-expand" aria-label={`${item.expanded ? '收起' : '展开'}${title}`} aria-expanded={item.expanded} onClick={() => batch.toggleExpanded(item.id)}><svg className={item.expanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg></button> : <span className="batch-expand-placeholder" />}
             <span className={`batch-root-icon${item.result?.confirmation?.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{item.result?.confirmation?.isBitTorrent ? 'BT' : resources.length > 1 ? '▱' : '↓'}</span>
-            <div className="batch-download-name"><strong title={title}>{title}</strong><small>{item.status === 'parsing' ? '任务解析中' : item.status === 'ready' ? existingTask ? `已存在任务 · ${resources.length} 个文件` : pendingBitTorrentMetadata ? resources.length ? '正在获取完整文件信息' : '正在获取文件信息' : `${resources.length || 1} 项可下载` : item.error}</small></div>
+            <div className="batch-download-name"><strong title={title}>{title}</strong><small>{loadingStatus ? <BatchLoadingStatus>{loadingStatus}</BatchLoadingStatus> : itemStatus}</small></div>
             {resources.length > 0 && <small className="batch-root-size">{formatBytes(resourceBytes)}</small>}
             {item.status === 'failed' && <button type="button" className="batch-retry-button" onClick={() => batch.retry(item.id)}>重试</button>}
             <button type="button" aria-label={`移除 ${title}`} onClick={() => batch.remove(item.id)}>×</button>
           </div>;
-        return <article key={item.id} className={`batch-download-item ${item.status}${item.expanded && resources.length > 0 ? ' expanded' : ''}`}>
-          {item.expanded && resources.length > 0 ? <BatchResourceList resources={resources} disabled={existingTask} rootName={title} rootRow={rootRow} onToggle={resourceId => batch.toggleResource(item.id, resourceId)} /> : rootRow}
+        return <article key={item.id} className={`batch-download-item ${item.status}${item.expanded && canExpand ? ' expanded' : ''}`}>
+          {item.expanded && canExpand ? <BatchResourceList resources={resources} disabled={existingTask} rootName={title} rootRow={rootRow} onToggle={resourceId => batch.toggleResource(item.id, resourceId)} /> : rootRow}
           {item.status === 'access_code_required' && <div className="batch-access-code">
             <span>{item.error}</span><input type="password" aria-label={`${title}访问码`} autoComplete="off" value={item.accessCode} onChange={event => batch.setAccessCode(item.id, event.target.value)} /><button type="button" className="batch-retry-button" disabled={!item.accessCode.trim()} onClick={() => batch.retry(item.id)}>重新解析</button>
           </div>}
         </article>;
       })}
-      {!batch.items.length && scanning && <p className="batch-empty">任务解析中</p>}
+      {!batch.items.length && scanning && <p className="batch-empty"><BatchLoadingStatus>任务解析中</BatchLoadingStatus></p>}
     </section>}
     <button type="button" className="disclosure batch-processing-disclosure" aria-label="解压密码和后处理" aria-expanded={showPostProcessing} onClick={() => setShowPostProcessing(value => !value)}>
       <span>解压密码和后处理</span>
@@ -425,9 +440,8 @@ function BatchNewDownloadDialog({
     {showPostProcessing && <textarea className="batch-processing-input" aria-label="解压密码和后处理" value={postProcessingNote} onChange={event => setPostProcessingNote(event.target.value)} placeholder="可粘贴解压密码，或填写文件改名、拼接、合并等后处理说明" />}
     {submitError && <p className="parse-failure" role="alert">{submitError}</p>}
     <footer className="batch-download-footer">
-      <button type="button" className="parse-destination" onClick={() => void browseDirectory?.(destination || downloadDirectory || '').then(value => { if (value) setDestination(value); })}>下载到 <strong>{destination || downloadDirectory || '本机下载目录'}</strong> <i>更改</i></button>
-      <span>{selectedCount ? `已选 ${selectedCount} 个任务` : '请选择任务'}</span>
-      <div><button type="button" disabled={submitting || closing} onClick={() => void requestClose()}>取消</button>{privacyEnabled && <button type="button" disabled={!canSubmit || submitting} onClick={() => void submit(true)}>隐私新建</button>}<button type="button" className="primary" disabled={!canSubmit || submitting} onClick={() => void submit(false)}>{submitting ? '正在提交…' : '新建任务'}</button></div>
+      <div className="batch-download-destination"><span>下载到 <strong>{destination || downloadDirectory || '本机下载目录'}</strong></span><button type="button" className="parse-destination" onClick={() => void browseDirectory?.(destination || downloadDirectory || '').then(value => { if (value) setDestination(value); })}>更改</button></div>
+      <div><button type="button" disabled={submitting || closing} onClick={() => void requestClose()}>取消</button>{privacyEnabled && <button type="button" disabled={!canSubmit || submitting} onClick={() => void submit(true)}>新建隐私任务</button>}<button type="button" className="primary" disabled={!canSubmit || submitting} onClick={() => void submit(false)}>{submitting ? '正在提交…' : '新建任务'}</button></div>
     </footer>
   </aside>;
   if (placement !== 'modal') return dialog;

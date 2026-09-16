@@ -46,11 +46,22 @@ function resultReference(result: ParseDownloadResult): string | undefined {
   return undefined;
 }
 
-function resultResourceCount(result: ParseDownloadResult): number {
-  return result.confirmation?.resources.length
-    ?? result.task?.files?.length
-    ?? result.duplicate?.task.files?.length
-    ?? 0;
+function hasRelativeDirectoryPath(path: string): boolean {
+  if (/^(?:[a-z]:)?[\\/]/i.test(path)) return false;
+  return path.split(/[\\/]/).filter(Boolean).length > 1;
+}
+
+export function hasExpandableResourceTree(resources: readonly Pick<ConfirmResource, 'name'>[]): boolean {
+  return resources.length > 1 || resources.some(resource => hasRelativeDirectoryPath(resource.name));
+}
+
+export function canExpandDownloadDraft(result: ParseDownloadResult): boolean {
+  const task = result.task ?? result.duplicate?.task;
+  if (task?.kind === 'folder') return true;
+  const resources = result.confirmation?.resources
+    ?? task?.files?.map(file => ({ name: file.path }))
+    ?? [];
+  return hasExpandableResourceTree(resources);
 }
 
 export function selectedResourceIds(item: DownloadDraftItem): string[] {
@@ -98,7 +109,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
               result,
               status: 'ready',
               error: undefined,
-              expanded: candidate.expanded || resultResourceCount(result) > 1,
+              expanded: candidate.expanded || canExpandDownloadDraft(result),
             };
           }));
         })
@@ -198,7 +209,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
       if (item.id !== id || !item.result?.confirmation) return item;
       return {
         ...item,
-        expanded: item.expanded || resources.length > 1,
+        expanded: item.expanded || hasExpandableResourceTree(resources),
         result: {
           confirmation: {
             ...item.result.confirmation,

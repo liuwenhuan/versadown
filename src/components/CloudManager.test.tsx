@@ -1135,6 +1135,26 @@ it('uses smaller cloud-card typography while preserving the signed-in account na
   }
 });
 
+it('keeps an authorization card at the connected-card height while its provider information is open', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const user = userEvent.setup();
+    render(<div className="cloud-provider-auths"><CloudManager provider="uc" client={createCloudFake()} authorizationOnly initialAccount={{ id: 'uc-1', displayName: 'alice', provider: 'uc', authMethod: 'web' }} restoreOnMount={false} /></div>);
+
+    await act(async () => { await Promise.resolve(); });
+    const card = screen.getByRole('region', { name: 'UC账号授权' });
+    expect(getComputedStyle(card).minHeight).toBe('168px');
+
+    await user.click(screen.getByRole('button', { name: '查看UC网盘信息' }));
+    expect(screen.getByRole('region', { name: 'UC网盘信息' })).toBeVisible();
+    expect(getComputedStyle(card).minHeight).toBe('168px');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
 it('repositions a bottom file context menu using its rendered height', async () => {
   const innerWidth = vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(900);
   const innerHeight = vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(500);

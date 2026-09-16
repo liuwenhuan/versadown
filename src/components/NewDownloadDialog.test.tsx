@@ -307,6 +307,26 @@ it('traps modal Tab navigation and restores focus to its opener when closed', as
   expect(opener).toHaveFocus();
 });
 
+it('does not offer expansion for a task that contains only one standalone file', async () => {
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="https://example.test/standalone.zip"
+    onScan={async () => [{ input: 'https://example.test/standalone.zip', valid: true, kind: 'direct' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'standalone', title: 'standalone.zip', requiresConfirmation: true, processing: [],
+      resources: [{ id: 'standalone', name: 'standalone.zip', size: '121.9 MB', selected: true }],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('standalone.zip')).toBeVisible();
+  expect(screen.queryByRole('button', { name: '展开standalone.zip' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '收起standalone.zip' })).not.toBeInTheDocument();
+});
+
 it('shows all pasted tasks in one dialog and submits one shared post-processing note', async () => {
   const user = userEvent.setup();
   const onSubmitBatch = vi.fn().mockResolvedValue(undefined);
@@ -334,7 +354,7 @@ it('shows all pasted tasks in one dialog and submits one shared post-processing 
 
   expect(await screen.findByText('目录一')).toBeVisible();
   expect(screen.getByText('目录二')).toBeVisible();
-  await user.click(screen.getByRole('button', { name: '展开目录一' }));
+  expect(screen.getByRole('button', { name: '收起目录一' })).toBeVisible();
   expect(screen.getByText('a.zip')).toBeVisible();
   await user.click(screen.getByRole('button', { name: '解压密码和后处理' }));
   await user.type(screen.getByRole('textbox', { name: '解压密码和后处理' }), '密码 88in\n完成后拼接');
@@ -583,7 +603,7 @@ it('renders expanded resources as a compact tree table with aligned type and siz
       onClose={vi.fn()}
     />);
 
-    await user.click(await screen.findByRole('button', { name: '展开相册' }));
+    expect(await screen.findByRole('button', { name: '收起相册' })).toBeVisible();
     expect(screen.getByText('JPG')).toBeVisible();
     expect(screen.getByText('photo.jpg')).toBeVisible();
     expect(screen.queryByText('相册/photo.jpg')).not.toBeInTheDocument();
@@ -603,6 +623,10 @@ it('renders expanded resources as a compact tree table with aligned type and siz
     expect(getComputedStyle(expand)).toMatchObject({ display: 'grid', placeItems: 'center' });
     const size = within(row!).getByText('219.9 KB');
     expect(getComputedStyle(size).justifySelf).toBe('end');
+    const resourceList = row!.closest('.batch-resource-list');
+    expect(resourceList).not.toBeNull();
+    expect(getComputedStyle(resourceList!).maxHeight).toBe('none');
+    expect(getComputedStyle(resourceList!).overflow).toBe('visible');
   } finally {
     stylesheet.remove();
   }
@@ -719,21 +743,14 @@ it('refreshes a pending magnet into its actual file list', async () => {
   expect(screen.getByText('episode-02.mp4')).toBeVisible();
 });
 
-it('does not submit a partial magnet preview and replaces it with the complete native file list', async () => {
+it('submits an indexed magnet preview so confirmation can unpause native metadata retrieval', async () => {
   vi.mocked(isTauriRuntime).mockReturnValue(true);
-  let finishMetadata!: (tasks: Awaited<ReturnType<typeof listPersistedTasks>>) => void;
-  vi.mocked(listPersistedTasks).mockReturnValue(new Promise(resolve => { finishMetadata = resolve; }));
+  const user = userEvent.setup();
+  const onSubmitBatch = vi.fn().mockResolvedValue(undefined);
   const preview = Array.from({ length: 100 }, (_, index) => ({
     id: String(index + 1),
     name: `Black Myth Wukong/preview-${index + 1}.bin`,
     size: '1 B',
-    selected: true,
-  }));
-  const completeFiles = Array.from({ length: 137 }, (_, index) => ({
-    index: index + 1,
-    path: `Black Myth Wukong/complete-${index + 1}.bin`,
-    length: 1,
-    completed_length: 0,
     selected: true,
   }));
 
@@ -747,24 +764,90 @@ it('does not submit a partial magnet preview and replaces it with the complete n
       resources: preview, processing: [], isBitTorrent: true, metadataPending: true,
     } })}
     onDiscardPrepared={vi.fn()}
+    onSubmitBatch={onSubmitBatch}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('100 项可下载')).toBeVisible();
+  expect(screen.getByText('已选 100 / 100 个文件，共 100 B')).toBeVisible();
+  const submit = screen.getByRole('button', { name: '新建任务' });
+  expect(submit).toBeEnabled();
+  await user.click(submit);
+  await waitFor(() => expect(onSubmitBatch).toHaveBeenCalledTimes(1));
+});
+
+it('keeps the selected task summary in the dialog title and makes only the change control pick a directory', async () => {
+  const user = userEvent.setup();
+  const browseDirectory = vi.fn(async () => 'D:/其他目录');
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="https://example.test/archive.zip"
+    onScan={async () => [{ input: 'https://example.test/archive.zip', valid: true, kind: 'direct' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'archive', title: 'archive.zip', requiresConfirmation: true, processing: [],
+      resources: [{ id: '1', name: 'archive.zip', size: '10 MB', selected: true }],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+    browseDirectory={browseDirectory}
+    privacyEnabled
+  />);
+
+  expect(await screen.findByText('1 项可下载')).toBeVisible();
+  const dialog = screen.getByRole('dialog', { name: '新建下载' });
+  expect(dialog.querySelector('.launcher-title')).toHaveTextContent('新建任务已选 1 个任务');
+  const footer = dialog.querySelector('.batch-download-footer')!;
+  expect(footer).not.toHaveTextContent('已选 1 个任务');
+  expect(screen.getByRole('button', { name: '新建隐私任务' })).toBeVisible();
+
+  await user.click(screen.getByRole('button', { name: '更改' }));
+  expect(browseDirectory).toHaveBeenCalledWith('');
+});
+
+it('marks a parsing task with the same live progress indicator used for metadata retrieval', async () => {
+  let resolveParse!: (result: { confirmation: { taskId: string; title: string; requiresConfirmation: true; resources: []; processing: [] } }) => void;
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="https://example.test/waiting.zip"
+    onScan={async () => [{ input: 'https://example.test/waiting.zip', valid: true, kind: 'direct' }]}
+    onParse={() => new Promise(resolve => { resolveParse = resolve; })}
+    onDiscardPrepared={vi.fn()}
     onSubmitBatch={vi.fn()}
     onClose={vi.fn()}
   />);
 
-  expect(await screen.findByText('正在获取完整文件信息')).toBeVisible();
-  expect(screen.getByText('已选 100 / 100 个文件，共 100 B')).toBeVisible();
-  expect(screen.getByRole('button', { name: '新建任务' })).toBeDisabled();
+  await screen.findByLabelText('选择 https://example.test/waiting.zip');
+  const status = screen.getByText('任务解析中');
+  expect(status.closest('.batch-loading-status')?.querySelector('.task-metadata-indicator')).toBeVisible();
 
   await act(async () => {
-    finishMetadata([{
-      id: 'large-magnet', name: 'Black Myth Wukong', kind: 'magnet', status: 'awaiting_user', progress: 0,
-      aria_gid: 'download-gid', followed_by_gid: 'download-gid', metadata_gid: 'metadata-gid',
-      files: completeFiles,
-    }]);
+    resolveParse({ confirmation: { taskId: 'waiting', title: 'waiting.zip', requiresConfirmation: true, resources: [], processing: [] } });
   });
+});
 
-  expect(await screen.findByText('137 项可下载')).toBeVisible();
-  expect(screen.getByText('已选 137 / 137 个文件，共 137 B')).toBeVisible();
+it('presents an indexed external magnet list as downloadable while aria2 metadata is paused', async () => {
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:external-list"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:external-list', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'external-list', title: '完整文件列表', requiresConfirmation: true, processing: [], isBitTorrent: true, metadataPending: true,
+      resources: [
+        { id: '1', name: '完整文件列表/one.bin', size: '10 MB', selected: true },
+        { id: '2', name: '完整文件列表/two.bin', size: '20 MB', selected: true },
+      ],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('2 项可下载')).toBeVisible();
+  expect(screen.queryByText('文件信息已获取，正在同步下载引擎')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
 });
 

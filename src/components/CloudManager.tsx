@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { LocalUploadPicker } from './LocalUploadPicker';
 import type { LocalUploadListing } from '../lib/localUpload';
@@ -55,6 +55,11 @@ export interface CloudManagerProps {
   showSessionActions?: boolean;
   workspaceVisible?: boolean;
   privacyDownloadEnabled?: boolean;
+  authorizationCardDrag?: {
+    dragging: boolean;
+    dropTarget: boolean;
+    onPointerDown(event: ReactPointerEvent<HTMLElement>): void;
+  };
   onAccountAuthorized?(account: CloudAccount): void;
   onAccountLoggedOut?(provider: CloudProvider): void;
 }
@@ -479,7 +484,7 @@ function CloudDestinationPicker({ action, provider, descriptor, client, excluded
   </div>, document.body);
 }
 
-export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryFailed = false, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryFailed = false, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, authorizationCardDrag, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const label = descriptor.displayName;
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
@@ -1176,8 +1181,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   function authorizationView(expired = false) {
     const showAuthorizationFeedback = authorizationStatus !== initialAuthorizationStatus;
     const showAuthorizationError = expired || authorizationStatus === expiredAuthorizationStatus;
-    return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading"><h2>{label}网盘</h2><button type="button" className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+    return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={`${label}账号授权`}>
+      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{label}网盘</h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <><form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsDirectPasswordLogin && <>
           <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
@@ -1223,8 +1228,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const capacityText = accountCapacity?.value
       ? formatCloudCapacity(accountCapacity.value.capacity)
       : accountCapacity?.loading || !accountCapacity ? '容量获取中…' : '容量暂不可用';
-    return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}`} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading"><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+    return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={`${label}账号授权`}>
+      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {!providerInfoOpen && <p className="cloud-account-capacity" aria-live="polite">{capacityText}{accountCapacity?.value && accountCapacity.refreshFailed && <span> · 更新失败</span>}</p>}
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{sessionActions()}{logoutConfirmation()}{operationStatus()}</>}
     </section>;

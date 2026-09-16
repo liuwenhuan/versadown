@@ -153,6 +153,13 @@ function taskSubtitle(task: QueueTask): string | undefined {
   return undefined;
 }
 
+function isFetchingTaskMetadata(task: QueueTask, subtitle: string | undefined): boolean {
+  return !task.error
+    && task.status === 'downloading'
+    && (task.kind === 'magnet' || task.kind === 'torrent')
+    && Boolean(subtitle?.match(/正在获取(?:完整)?(?:文件|种子)信息/));
+}
+
 function taskPeerMetric(task: QueueTask): string | undefined {
   if (task.status !== 'downloading') return undefined;
   const connections = task.connections ?? 0;
@@ -388,7 +395,19 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<{ movingIds: string[]; targetId?: string; placeAfter?: boolean } | null>(null);
   const dragStateRef = useRef<typeof dragState>(null);
-  const pendingDrag = useRef<{ pointerId: number; originX: number; originY: number; movingIds: string[]; source: HTMLElement } | null>(null);
+  const [previewOrder, setPreviewOrder] = useState<string[] | null>(null);
+  const pendingDrag = useRef<{
+    pointerId: number;
+    originX: number;
+    originY: number;
+    offsetX: number;
+    offsetY: number;
+    movingIds: string[];
+    order: string[];
+    previewOrder: string[] | null;
+    preview: HTMLElement | null;
+    source: HTMLElement;
+  } | null>(null);
   const suppressClickAfterDrag = useRef(false);
   const closeContextMenu = () => setContextMenu(null);
   useEffect(() => {
@@ -418,6 +437,9 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
     document.addEventListener('keydown', selectAllTasks);
     return () => document.removeEventListener('keydown', selectAllTasks);
   }, [tasks, onSelect]);
+  useEffect(() => () => {
+    pendingDrag.current?.preview?.remove();
+  }, []);
   function runCommand(command: TaskMenuCommand) {
     const targets = contextMenu?.tasks ?? [];
     closeContextMenu();
@@ -467,14 +489,54 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
     const movingIds = selectedTaskIds.includes(task.id)
       ? tasks.filter((item) => selectedTaskIds.includes(item.id)).map((item) => item.id)
       : [task.id];
-    pendingDrag.current = { pointerId: event.pointerId, originX: event.clientX, originY: event.clientY, movingIds, source: event.currentTarget };
+    const group = event.currentTarget.closest<HTMLElement>('.task-group');
+    if (!group) return;
+    const bounds = group.getBoundingClientRect();
+    pendingDrag.current = {
+      pointerId: event.pointerId,
+      originX: event.clientX,
+      originY: event.clientY,
+      offsetX: event.clientX - bounds.left,
+      offsetY: event.clientY - bounds.top,
+      movingIds,
+      order: tasks.map((item) => item.id),
+      previewOrder: null,
+      preview: null,
+      source: event.currentTarget,
+    };
     event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+  function startTaskDragPreview(pending: NonNullable<typeof pendingDrag.current>) {
+    if (pending.preview) return;
+    const group = pending.source.closest<HTMLElement>('.task-group');
+    if (!group) return;
+    const bounds = group.getBoundingClientRect();
+    const preview = group.cloneNode(true) as HTMLElement;
+    preview.classList.add('task-drag-preview');
+    preview.setAttribute('aria-hidden', 'true');
+    preview.style.width = `${bounds.width}px`;
+    preview.style.height = `${bounds.height}px`;
+    if (pending.movingIds.length > 1) {
+      const count = document.createElement('span');
+      count.className = 'task-drag-preview-count';
+      count.textContent = `已选 ${pending.movingIds.length} 个任务`;
+      preview.append(count);
+    }
+    document.body.append(preview);
+    pending.preview = preview;
+    const state = { movingIds: pending.movingIds };
+    dragStateRef.current = state;
+    setDragState(state);
   }
   function updateTaskDrop(event: React.PointerEvent<HTMLElement>) {
     const pending = pendingDrag.current;
     if (!pending || pending.pointerId !== event.pointerId) return;
     const distance = Math.hypot(event.clientX - pending.originX, event.clientY - pending.originY);
-    if (!dragStateRef.current && distance < 5) return;
+    if (!pending.preview && distance < 5) return;
+    startTaskDragPreview(pending);
+    if (!pending.preview) return;
+    pending.preview.style.left = `${event.clientX - pending.offsetX}px`;
+    pending.preview.style.top = `${event.clientY - pending.offsetY}px`;
     const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('.task-row[data-task-id]');
     const targetId = target?.dataset.taskId;
     if (!targetId || pending.movingIds.includes(targetId)) return;
@@ -483,31 +545,43 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
     const next = { movingIds: pending.movingIds, targetId, placeAfter: event.clientY >= bounds.top + bounds.height / 2 };
     dragStateRef.current = next;
     setDragState(next);
+    const nextOrder = reorderTaskIds(pending.order, pending.movingIds, targetId, next.placeAfter);
+    if (nextOrder.every((id, index) => id === pending.previewOrder?.[index])) return;
+    pending.previewOrder = nextOrder;
+    setPreviewOrder(nextOrder);
+  }
+  function clearTaskDrag(pending: NonNullable<typeof pendingDrag.current>) {
+    pending.source.releasePointerCapture?.(pending.pointerId);
+    pending.preview?.remove();
+    pendingDrag.current = null;
+    dragStateRef.current = null;
+    setDragState(null);
+    setPreviewOrder(null);
   }
   function finishTaskDrop(event: React.PointerEvent<HTMLElement>) {
     const pending = pendingDrag.current;
     if (!pending || pending.pointerId !== event.pointerId) return;
-    const completedDrag = dragStateRef.current;
-    pending.source.releasePointerCapture?.(event.pointerId);
-    pendingDrag.current = null;
-    dragStateRef.current = null;
-    setDragState(null);
-    if (!completedDrag?.targetId) return;
+    updateTaskDrop(event);
+    const nextOrder = pending.previewOrder;
+    const didDrag = Boolean(pending.preview);
+    clearTaskDrag(pending);
+    if (!didDrag) return;
     suppressClickAfterDrag.current = true;
-    const reordered = reorderTaskIds(tasks.map((task) => task.id), completedDrag.movingIds, completedDrag.targetId, Boolean(completedDrag.placeAfter));
-    onReorder?.(reordered);
+    if (nextOrder) onReorder?.(nextOrder);
   }
   function cancelTaskDrag(event: React.PointerEvent<HTMLElement>) {
     const pending = pendingDrag.current;
     if (!pending || pending.pointerId !== event.pointerId) return;
-    pendingDrag.current = null;
-    dragStateRef.current = null;
-    setDragState(null);
+    clearTaskDrag(pending);
   }
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const displayedTasks = previewOrder
+    ? previewOrder.map((id) => taskById.get(id)).filter((task): task is QueueTask => task !== undefined)
+    : tasks;
   return (
     <section className="download-queue" aria-label="下载队列" onPointerMove={updateTaskDrop} onPointerUp={finishTaskDrop} onPointerCancel={cancelTaskDrag} onContextMenu={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
       <div className="queue-heading"><span>任务</span><span>进度</span><span>状态</span></div>
-      {tasks.length === 0 ? <p className="queue-empty">还没有下载任务</p> : tasks.map((task) => {
+      {tasks.length === 0 ? <p className="queue-empty">还没有下载任务</p> : displayedTasks.map((task) => {
         const isExpanded = expanded[task.id] ?? false;
         const isCompleted = task.status === 'completed';
         const hasPersistentChildren = Boolean(task.children?.length);
@@ -533,6 +607,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const hasSpeed = !isPaused && (task.speed !== undefined || task.speedBytes !== undefined || task.download_speed !== undefined);
         const transferSize = task.total_length !== undefined || task.completed_length !== undefined ? transferProgress(task) : task.size;
         const subtitle = taskSubtitle(task);
+        const fetchingMetadata = isFetchingTaskMetadata(task, subtitle);
         const peerMetric = taskPeerMetric(task);
         const primaryAction = task.status === 'downloading' ? 'pause' as const
           : task.status === 'paused' ? 'resume' as const
@@ -544,14 +619,14 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const completedFileType = isCompleted ? taskAssociatedFileType(task) : undefined;
         const isDragged = dragState?.movingIds.includes(task.id) ?? false;
         const dropPosition = dragState?.targetId === task.id ? (dragState.placeAfter ? ' drop-after' : ' drop-before') : '';
-        return <div className={`task-group${isCompleted ? ' completed-task-group' : ''}${isExpanded ? ' is-expanded' : ''}${isDragged ? ' is-dragging' : ''}${dropPosition}`} key={task.id}>
+        return <div data-task-id={task.id} className={`task-group${isCompleted ? ' completed-task-group' : ''}${isExpanded ? ' is-expanded' : ''}${isDragged ? ' is-dragging' : ''}${dropPosition}`} key={task.id}>
           <article data-task-id={task.id} className={`task-row ${isCompleted ? 'completed-task' : ''} ${hasChildren ? 'has-children' : ''} ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} aria-selected={selectedTaskIds.includes(task.id)} onPointerDown={(event) => beginTaskDrag(event, task)} onClick={(event) => selectTask(event, task)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); openContextMenu(task, event.clientX, event.clientY); }}>
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
               <span className="task-copy"><b title={taskName}>{taskName}</b>{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}</span>
             </div>
-            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>P2P 分享中</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span className="transfer-eta">剩余 {eta}</span>}{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></div></div>}
+            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>P2P 分享中</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error ? ' task-error' : ''}`} title={subtitle}>{subtitle}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span className="transfer-eta">剩余 {eta}</span>}{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></div></div>}
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasPlayableMedia ? `播放 ${taskName}` : completedFileType ? `${associatedFileLabels[completedFileType]} ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasPlayableMedia ? '播放视频或音频' : completedFileType ? '使用系统默认应用打开' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasPlayableMedia ? 'play_videos' : completedFileType ? 'open_file' : 'open_directory'); }}><ActionIcon action={completedHasPlayableMedia ? 'play' : completedFileType ?? 'folder'} /></button>}
