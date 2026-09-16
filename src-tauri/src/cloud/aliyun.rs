@@ -1032,7 +1032,22 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
             if let Some(parent) = parent {
                 body["to_parent_file_id"] = Value::String(parent.into());
             }
-            self.api(&session, path, body)?;
+            let response = self.http.send(CloudHttpRequest {
+                method: "POST",
+                url: format!("{API}{path}"),
+                headers: Self::bearer_headers(&session),
+                body: Some(body.to_string()),
+            })?;
+            let already_absent = path == "/v2/recyclebin/trash"
+                && response.status == 404
+                && serde_json::from_str::<Value>(&response.body)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("code").and_then(Value::as_str) == Some("NotFound.FileId")
+                    });
+            if !already_absent {
+                self.response(&response)?;
+            }
         }
         Ok(())
     }

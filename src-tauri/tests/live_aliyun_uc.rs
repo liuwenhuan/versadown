@@ -65,8 +65,19 @@ impl CloudHttpTransport for LiveTransport {
                 let code = value
                     .as_ref()
                     .and_then(|value| value.get("code"))
-                    .and_then(serde_json::Value::as_i64)
-                    .map_or_else(|| "absent".into(), |value| value.to_string());
+                    .map(|value| match value {
+                        serde_json::Value::Number(value) => value.to_string(),
+                        serde_json::Value::String(value)
+                            if value.len() <= 64
+                                && value.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || b"._-".contains(&byte)
+                                }) =>
+                        {
+                            value.clone()
+                        }
+                        _ => "redacted".into(),
+                    })
+                    .unwrap_or_else(|| "absent".into());
                 let status = value
                     .as_ref()
                     .and_then(|value| value.get("status"))
@@ -916,6 +927,27 @@ fn run_uc_requested_upload() -> LiveResult<()> {
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
 fn live_aliyun_complete_crud_and_transfer_matrix() -> LiveResult<()> {
     run_provider(CloudProvider::Aliyun)
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
+fn live_aliyun_trash_already_absent_file_is_idempotent() -> LiveResult<()> {
+    require_live_authorization()?;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveTransport::new()?;
+    let result = trash(
+        &state,
+        &http,
+        CloudProvider::Aliyun,
+        "0000000000000000000000000000000000000000",
+    );
+    http.report();
+    result.map_err(|error| {
+        failure(format!(
+            "Aliyun trash should be idempotent for an already absent file: {}",
+            error_kind(&error)
+        ))
+    })
 }
 
 #[test]
