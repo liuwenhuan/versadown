@@ -161,7 +161,7 @@ it('shows privacy task controls immediately after enabling an existing privacy p
   fireEvent.paste(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), {
     clipboardData: { getData: () => 'https://example.test/private.zip' },
   });
-  expect(within(await screen.findByRole('dialog', { name: '新建下载' })).getByRole('button', { name: '隐私新建' })).toBeVisible();
+  expect(within(await screen.findByRole('dialog', { name: '新建下载' })).getByRole('button', { name: '新建隐私任务' })).toBeVisible();
 });
 
 it('opens application information from About and returns to the task list', async () => {
@@ -503,10 +503,11 @@ it('uses the dark launcher graphic and vector icons in the primary navigation', 
 });
 
 it('places recycle clear immediately after the tabs without page-wide start or pause links', async () => {
-  state.list.mockResolvedValueOnce([
-    { id: 'active-task', name: 'active.zip', kind: 'file', status: 'downloading', progress: 25 },
-    { id: 'recycled-task', name: 'removed.zip', kind: 'file', status: 'recycled', progress: 100 }
-  ]);
+  const active = { id: 'active-task', name: 'active.zip', kind: 'file', status: 'downloading' as const, progress: 25 };
+  const recycled = { id: 'recycled-task', name: 'removed.zip', kind: 'file', status: 'recycled' as const, progress: 100 };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'active' ? [active] : scope === 'terminal' ? [recycled] : [active, recycled]
+  ));
   const user = userEvent.setup();
   render(<App />);
 
@@ -540,12 +541,17 @@ it('renders the total download speed in bold', async () => {
 });
 
 it('sorts only the active task tab from the menu beside total speed', async () => {
-  state.list.mockResolvedValueOnce([
-    { id: 'active-old', name: 'alpha.zip', kind: 'file', status: 'downloading', progress: 80, total_length: 800, created_at: 100 },
-    { id: 'active-new', name: 'zeta.zip', kind: 'file', status: 'downloading', progress: 20, total_length: 200, created_at: 200 },
-    { id: 'done-old', name: 'beta.zip', kind: 'file', status: 'completed', progress: 100, total_length: 400, created_at: 100 },
-    { id: 'done-new', name: 'delta.zip', kind: 'file', status: 'completed', progress: 100, total_length: 300, created_at: 300 },
-  ]);
+  const active = [
+    { id: 'active-old', name: 'alpha.zip', kind: 'file', status: 'downloading' as const, progress: 80, total_length: 800, created_at: 100 },
+    { id: 'active-new', name: 'zeta.zip', kind: 'file', status: 'downloading' as const, progress: 20, total_length: 200, created_at: 200 },
+  ];
+  const terminal = [
+    { id: 'done-old', name: 'beta.zip', kind: 'file', status: 'completed' as const, progress: 100, total_length: 400, created_at: 100 },
+    { id: 'done-new', name: 'delta.zip', kind: 'file', status: 'completed' as const, progress: 100, total_length: 300, created_at: 300 },
+  ];
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'active' ? active : scope === 'terminal' ? terminal : [...active, ...terminal]
+  ));
   const user = userEvent.setup();
   render(<App />);
 
@@ -698,9 +704,16 @@ it('selects only the current tab tasks with Ctrl+A across all four task tabs', a
     { tab: /下载中/, status: 'downloading' }, { tab: /已完成/, status: 'completed' },
     { tab: /失败/, status: 'failed' }, { tab: /回收站/, status: 'recycled' },
   ] as const;
-  state.list.mockResolvedValueOnce(groups.flatMap(({ status }) => [1, 2].map(index => ({
+  const tasks = groups.flatMap(({ status }) => [1, 2].map(index => ({
     ...oldTask, id: `${status}-${index}`, name: `${status}-${index}.zip`, status,
-  }))));
+  })));
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'active'
+      ? tasks.filter((task) => task.status === 'downloading')
+      : scope === 'terminal'
+        ? tasks.filter((task) => task.status !== 'downloading')
+        : tasks
+  ));
   const user = userEvent.setup();
   render(<App />);
   await screen.findByText('downloading-1.zip');
@@ -1648,7 +1661,9 @@ it('replaces a virtual failed directory leaf from its retry root without adding 
     ...root, status: 'queued',
     children: [{ id: 'new-cloud-member', name: 'unavailable.mkv', kind: 'cloud', status: 'queued', progress: 0 }],
   };
-  state.list.mockResolvedValueOnce([root]);
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'terminal' ? [root] : []
+  ));
   state.taskAction.mockResolvedValueOnce({
     task: { ...retriedRoot.children![0] },
     queueTask: retriedRoot,

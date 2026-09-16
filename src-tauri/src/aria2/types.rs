@@ -116,6 +116,11 @@ pub struct Aria2Status {
 pub struct Aria2BitTorrent {
     #[serde(default)]
     pub info: Option<Aria2TorrentInfo>,
+    /// Aria2 Next keeps a magnet on its original GID while awaiting a
+    /// file-selection decision. Legacy aria2 instead exposes a followed child
+    /// GID, so this field is optional for compatibility with both engines.
+    #[serde(default, rename = "fileSelectionState")]
+    pub file_selection_state: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

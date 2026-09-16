@@ -1092,6 +1092,163 @@ async fn external_magnet_preview_defers_selection_until_metadata_child_is_ready(
 }
 
 #[tokio::test]
+async fn aria2_next_same_gid_selection_is_applied_before_resuming_a_paused_magnet() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let wire = calls.clone();
+    let selection_applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_selection_applied = selection_applied.clone();
+    let resumed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_resumed = resumed.clone();
+    let (client, server) = fixture::server(move |request| {
+        wire.lock().unwrap().push(request.clone());
+        match request["method"].as_str().unwrap() {
+            "aria2.tellStatus" => {
+                assert_eq!(request["params"][1], "magnet-gid");
+                let running = wire_resumed.load(std::sync::atomic::Ordering::SeqCst);
+                let selected = wire_selection_applied.load(std::sync::atomic::Ordering::SeqCst);
+                let mut status = fixture::status(
+                    "magnet-gid",
+                    if running { "active" } else { "paused" },
+                    0,
+                );
+                status["bittorrent"] = json!({
+                    "fileSelectionState": if selected { "selected" } else { "awaiting" }
+                });
+                status["files"] = json!([
+                    {"index":"1","path":"a.bin","length":"40","completedLength":"0","selected":"true"},
+                    {"index":"2","path":"b.bin","length":"60","completedLength":"0","selected":if selected { "false" } else { "true"}}
+                ]);
+                status
+            }
+            "aria2.changeOption" => {
+                assert_eq!(request["params"][1], "magnet-gid");
+                assert_eq!(request["params"][2]["select-file"], "1");
+                wire_selection_applied.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("OK")
+            }
+            "aria2.unpause" => {
+                assert_eq!(request["params"][1], "magnet-gid");
+                wire_resumed.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("magnet-gid")
+            }
+            other => panic!("unexpected method {other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(magnet_task()).unwrap();
+    store.bind_metadata_gid(task.id, "magnet-gid").unwrap();
+    store.transition(task.id, TaskStatus::Queued).unwrap();
+    store.transition(task.id, TaskStatus::Paused).unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[
+                (1, "a.bin".into(), 40, 0, true),
+                (2, "b.bin".into(), 60, 0, false),
+            ],
+        )
+        .unwrap();
+    store.confirm_selection(task.id).unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let resumed_task = service
+        .control(task.id, alldownloader_lib::DownloadAction::Resume)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed_task.status, TaskStatus::Downloading);
+    assert!(!store.files(task.id).unwrap()[1].selected);
+    let calls = calls.lock().unwrap();
+    let select = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.changeOption")
+        .unwrap();
+    let start = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.unpause")
+        .unwrap();
+    assert!(select < start);
+    server.abort();
+}
+
+#[tokio::test]
+async fn aria2_next_same_gid_confirmation_starts_the_new_magnet_without_manual_resume() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let wire = calls.clone();
+    let selection_applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_selection_applied = selection_applied.clone();
+    let resumed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_resumed = resumed.clone();
+    let (client, server) = fixture::server(move |request| {
+        wire.lock().unwrap().push(request.clone());
+        match request["method"].as_str().unwrap() {
+            "aria2.tellStatus" => {
+                assert_eq!(request["params"][1], "magnet-gid");
+                let running = wire_resumed.load(std::sync::atomic::Ordering::SeqCst);
+                let selected = wire_selection_applied.load(std::sync::atomic::Ordering::SeqCst);
+                let mut status = fixture::status(
+                    "magnet-gid",
+                    if running { "active" } else { "paused" },
+                    0,
+                );
+                status["bittorrent"] = json!({
+                    "fileSelectionState": if selected { "selected" } else { "awaiting" }
+                });
+                status["files"] = json!([
+                    {"index":"1","path":"a.bin","length":"40","completedLength":"0","selected":"true"},
+                    {"index":"2","path":"b.bin","length":"60","completedLength":"0","selected":if selected { "false" } else { "true"}}
+                ]);
+                status
+            }
+            "aria2.changeOption" => {
+                assert_eq!(request["params"][1], "magnet-gid");
+                assert_eq!(request["params"][2]["select-file"], "1");
+                wire_selection_applied.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("OK")
+            }
+            "aria2.unpause" => {
+                assert_eq!(request["params"][1], "magnet-gid");
+                wire_resumed.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("magnet-gid")
+            }
+            other => panic!("unexpected method {other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(magnet_task()).unwrap();
+    store.bind_metadata_gid(task.id, "magnet-gid").unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[
+                (1, "a.bin".into(), 40, 0, true),
+                (2, "b.bin".into(), 60, 0, true),
+            ],
+        )
+        .unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let started = service.select_files(task.id, vec![1]).await.unwrap();
+
+    assert_eq!(started.status, TaskStatus::Downloading);
+    assert!(store.selection_confirmed(task.id).unwrap());
+    assert!(!store.files(task.id).unwrap()[1].selected);
+    let calls = calls.lock().unwrap();
+    let select = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.changeOption")
+        .unwrap();
+    let start = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.unpause")
+        .unwrap();
+    assert!(select < start);
+    server.abort();
+}
+
+#[tokio::test]
 async fn rejected_selection_does_not_unpause_or_change_persisted_files() {
     let (client, server) = fixture::server(|request| {
         assert_eq!(request["method"], "aria2.changeOption");

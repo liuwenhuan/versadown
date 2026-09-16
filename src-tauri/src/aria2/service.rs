@@ -659,7 +659,7 @@ impl DownloadService {
         if directory_intent {
             self.reconcile_task_unlocked(task_id).await?;
         }
-        let task = self.store.find(task_id)?;
+        let mut task = self.store.find(task_id)?;
         let action = if directory_intent
             && matches!(action, DownloadAction::Pause | DownloadAction::Resume)
         {
@@ -676,9 +676,9 @@ impl DownloadService {
         } else {
             action
         };
-        let gid = task
+        let mut gid = task
             .aria_gid
-            .as_deref()
+            .clone()
             .ok_or(DownloadServiceError::MissingGid(task_id))?;
         match action {
             DownloadAction::Pause => {
@@ -689,10 +689,10 @@ impl DownloadService {
                     interrupted_gid
                         .as_ref()
                         .is_some_and(|(interrupted, version)| {
-                            interrupted == gid && *version == self.resume_version(gid)
+                            interrupted == &gid && *version == self.resume_version(&gid)
                         });
                 if !still_interrupted && task.status != TaskStatus::Paused {
-                    if let Err(error) = self.api().force_pause(gid).await {
+                    if let Err(error) = self.api().force_pause(&gid).await {
                         let latest = self.reconcile_task_unlocked(task_id).await?;
                         if matches!(latest.status, TaskStatus::Paused | TaskStatus::Completed) {
                             return Ok(latest);
@@ -702,13 +702,33 @@ impl DownloadService {
                 }
             }
             DownloadAction::Resume => {
+                // Aria2 Next keeps the magnet metadata and payload on the
+                // same GID. A paused task can therefore still be waiting for
+                // `select-file`; calling unpause first makes that engine
+                // reject the request with HTTP 400. Reconcile once to apply
+                // the durable selection before deciding whether a normal
+                // resume is still needed.
+                if task.source.starts_with("magnet:")
+                    && task.metadata_gid.as_deref() == Some(&gid)
+                    && self.store.selection_confirmed(task_id)?
+                {
+                    let reconciled = self.reconcile_task_unlocked(task_id).await?;
+                    if reconciled.status != TaskStatus::Paused {
+                        return Ok(reconciled);
+                    }
+                    task = reconciled;
+                    gid = task
+                        .aria_gid
+                        .clone()
+                        .ok_or(DownloadServiceError::MissingGid(task_id))?;
+                }
                 if !directory_intent || task.status == TaskStatus::Paused {
-                    self.unpause_gid(gid).await?;
+                    self.unpause_gid(&gid).await?;
                 }
             }
             DownloadAction::Cancel => {
-                if self.api().remove(gid).await.is_err() {
-                    self.api().force_remove(gid).await?;
+                if self.api().remove(&gid).await.is_err() {
+                    self.api().force_remove(&gid).await?;
                 }
                 return self.persist_removed(task);
             }
@@ -740,13 +760,13 @@ impl DownloadService {
             .await
     }
 
-    /// Completes the one-time handoff from aria2's metadata GID to its paused
-    /// download child after an externally indexed magnet was confirmed.
+    /// Completes an externally confirmed magnet selection when its engine is
+    /// ready to receive it.
     ///
-    /// File-list availability and aria2 readiness are deliberately separate:
-    /// users can confirm a complete indexed list immediately, while this
-    /// background step waits for aria2 to produce the child GID that accepts
-    /// `select-file` and can be unpaused safely.
+    /// File-list availability and engine readiness are deliberately separate.
+    /// Legacy aria2 produces a paused child GID; Aria2 Next keeps one GID and
+    /// reports `bittorrent.fileSelectionState=awaiting` instead. Both paths
+    /// must submit `select-file` before unpausing.
     async fn activate_confirmed_magnet_child(
         &self,
         previous: &DownloadTask,
@@ -756,10 +776,25 @@ impl DownloadService {
             return Ok(updated);
         };
         let child_was_created = previous.aria_gid.as_deref() != Some(child_gid);
+        let same_gid_waiting_for_selection = previous.metadata_gid.as_deref() == Some(child_gid);
         if !previous.source.starts_with("magnet:")
             || previous.metadata_gid.is_none()
-            || !child_was_created
+            || (!child_was_created && !same_gid_waiting_for_selection)
             || !self.store.selection_confirmed(previous.id)?
+        {
+            return Ok(updated);
+        }
+
+        let status = self.api().tell_status(child_gid).await?;
+        if status.gid != child_gid {
+            return Err(Aria2Error::MalformedResponse.into());
+        }
+        if same_gid_waiting_for_selection
+            && status
+                .bittorrent
+                .as_ref()
+                .and_then(|torrent| torrent.file_selection_state.as_deref())
+                != Some("awaiting")
         {
             return Ok(updated);
         }
@@ -963,7 +998,8 @@ impl DownloadService {
         {
             self.store.set_file_selection(task_id, &indices)?;
             self.store.confirm_selection(task_id)?;
-            return self.store.find(task_id).map_err(Into::into);
+            let confirmed = self.store.find(task_id)?;
+            return self.activate_confirmed_magnet_child(&task, confirmed).await;
         }
         let selection = indices
             .iter()
@@ -1074,8 +1110,13 @@ impl DownloadService {
                 // after the snapshot records the child GID.
                 let confirmed_magnet_selection = if current.source.starts_with("magnet:")
                     && current.metadata_gid.is_some()
-                    && current.aria_gid.as_deref() != Some(status.gid.as_str())
                     && self.store.selection_confirmed(current.id)?
+                    && (current.aria_gid.as_deref() != Some(status.gid.as_str())
+                        || status
+                            .bittorrent
+                            .as_ref()
+                            .and_then(|torrent| torrent.file_selection_state.as_deref())
+                            == Some("awaiting"))
                 {
                     Some(
                         self.store
