@@ -204,7 +204,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     }));
   }, [replaceItems]);
 
-  const updateResources = useCallback((id: string, resources: readonly ConfirmResource[], metadataPending = false) => {
+  const updateResources = useCallback((id: string, resources: readonly ConfirmResource[], fileListPending = false) => {
     replaceItems(current => current.map(item => {
       if (item.id !== id || !item.result?.confirmation) return item;
       return {
@@ -213,7 +213,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
         result: {
           confirmation: {
             ...item.result.confirmation,
-            metadataPending,
+            fileListPending,
             resources: resources.map(resource => ({
               ...resource,
               selected: item.result?.confirmation?.resources.find(existing => existing.index === resource.index || existing.id === resource.id)?.selected ?? resource.selected,

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -733,8 +733,58 @@ impl DownloadService {
             .aria_gid
             .clone()
             .ok_or(DownloadServiceError::MissingGid(task_id))?;
-        self.apply_status(current, self.api().tell_status(&gid).await?, false)
+        let updated = self
+            .apply_status(current.clone(), self.api().tell_status(&gid).await?, false)
+            .await?;
+        self.activate_confirmed_magnet_child(&current, updated)
             .await
+    }
+
+    /// Completes the one-time handoff from aria2's metadata GID to its paused
+    /// download child after an externally indexed magnet was confirmed.
+    ///
+    /// File-list availability and aria2 readiness are deliberately separate:
+    /// users can confirm a complete indexed list immediately, while this
+    /// background step waits for aria2 to produce the child GID that accepts
+    /// `select-file` and can be unpaused safely.
+    async fn activate_confirmed_magnet_child(
+        &self,
+        previous: &DownloadTask,
+        updated: DownloadTask,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        let Some(child_gid) = updated.aria_gid.as_deref() else {
+            return Ok(updated);
+        };
+        let child_was_created = previous.aria_gid.as_deref() != Some(child_gid);
+        if !previous.source.starts_with("magnet:")
+            || previous.metadata_gid.is_none()
+            || !child_was_created
+            || !self.store.selection_confirmed(previous.id)?
+        {
+            return Ok(updated);
+        }
+
+        let selection = self
+            .store
+            .files(previous.id)?
+            .into_iter()
+            .filter(|file| file.selected)
+            .map(|file| file.index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        if selection.is_empty() {
+            return Err(DownloadServiceError::InvalidFileSelection);
+        }
+
+        let mut options = Aria2Options::new();
+        options.insert("select-file".into(), selection);
+        self.api().change_option(child_gid, options).await?;
+        self.unpause_gid(child_gid).await?;
+        let status = self.api().tell_status(child_gid).await?;
+        if status.gid != child_gid {
+            return Err(Aria2Error::MalformedResponse.into());
+        }
+        self.apply_status(updated, status, true).await
     }
 
     pub async fn prepare_magnet(
@@ -876,7 +926,17 @@ impl DownloadService {
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
         self.ensure_accepting()?;
-        let task = self.store.find(task_id)?;
+        let mut task = self.store.find(task_id)?;
+        // An external resolver can make a magnet's preview available before
+        // aria2 has produced its paused child GID. Refresh once so the normal
+        // child selection path wins whenever metadata completed in the gap.
+        if task.source.starts_with("magnet:")
+            && task.status == TaskStatus::AwaitingUser
+            && !self.store.selection_confirmed(task_id)?
+            && task.metadata_gid.as_deref() == task.aria_gid.as_deref()
+        {
+            task = self.reconcile_task_unlocked(task_id).await?;
+        }
         let gid = task
             .aria_gid
             .as_deref()
@@ -890,6 +950,20 @@ impl DownloadService {
                 .any(|index| !files.iter().any(|file| file.index == *index))
         {
             return Err(DownloadServiceError::InvalidFileSelection);
+        }
+        // `pause-metadata` pauses the child created after aria2 resolves a
+        // magnet, not the metadata GID itself. That GID owns no files, so
+        // sending it `select-file` makes aria2 reject the whole confirmation.
+        // Keep the preview selection durable and let `apply_status` install it
+        // on the real child as soon as aria2 creates that child.
+        if task.source.starts_with("magnet:")
+            && task.status == TaskStatus::AwaitingUser
+            && !self.store.selection_confirmed(task_id)?
+            && task.metadata_gid.as_deref() == task.aria_gid.as_deref()
+        {
+            self.store.set_file_selection(task_id, &indices)?;
+            self.store.confirm_selection(task_id)?;
+            return self.store.find(task_id).map_err(Into::into);
         }
         let selection = indices
             .iter()
@@ -934,7 +1008,12 @@ impl DownloadService {
                 let result = match response {
                     Ok(value) => match serde_json::from_value::<Aria2Status>(value) {
                         Ok(status) => match self.apply_status(task.clone(), status, false).await {
-                            Ok(updated) => self.sync_discovered_nodes(updated).await,
+                            Ok(updated) => {
+                                match self.activate_confirmed_magnet_child(task, updated).await {
+                                    Ok(updated) => self.sync_discovered_nodes(updated).await,
+                                    Err(error) => Err(error),
+                                }
+                            }
                             Err(error) => Err(error),
                         },
                         Err(_) => Err(Aria2Error::MalformedResponse.into()),
@@ -988,7 +1067,33 @@ impl DownloadService {
                         current.name = name;
                     }
                 }
+                // Until the child accepts `select-file`, aria2 reports all
+                // of its files as selected. Preserve the user's confirmed
+                // external-list choice through this one persistence step;
+                // `activate_confirmed_magnet_child` applies it immediately
+                // after the snapshot records the child GID.
+                let confirmed_magnet_selection = if current.source.starts_with("magnet:")
+                    && current.metadata_gid.is_some()
+                    && current.aria_gid.as_deref() != Some(status.gid.as_str())
+                    && self.store.selection_confirmed(current.id)?
+                {
+                    Some(
+                        self.store
+                            .files(current.id)?
+                            .into_iter()
+                            .filter(|file| file.selected)
+                            .map(|file| file.index)
+                            .collect::<HashSet<_>>(),
+                    )
+                } else {
+                    None
+                };
                 let mut snapshot = TransferSnapshot::try_from(status)?;
+                if let Some(selected_indices) = confirmed_magnet_selection {
+                    for file in &mut snapshot.files {
+                        file.selected = selected_indices.contains(&file.index);
+                    }
+                }
                 if !confirmed
                     && !self.store.selection_confirmed(current.id)?
                     && current.status == TaskStatus::AwaitingUser
@@ -1206,15 +1311,39 @@ impl DownloadService {
                 snapshot.error_message
             };
         }
+        // aria2 reports BT file paths relative to its download directory. Once
+        // a task has an approved absolute managed path, retain that path on
+        // later snapshots when it still denotes the same file. This keeps
+        // deletion safety independent from transient aria2 path formatting.
+        let stored_absolute_paths = self
+            .store
+            .files(task.id)?
+            .into_iter()
+            .filter_map(|file| {
+                Path::new(&file.path)
+                    .is_absolute()
+                    .then_some((file.index, file.path))
+            })
+            .collect::<BTreeMap<_, _>>();
         let files = (!preserve_paused_progress)
             .then(|| {
                 snapshot
                     .files
                     .into_iter()
                     .map(|file| {
+                        let relative_path = Path::new(&file.path);
+                        let path = stored_absolute_paths
+                            .get(&file.index)
+                            .filter(|stored_path| {
+                                !relative_path.is_absolute()
+                                    && Path::new(stored_path).file_name()
+                                        == relative_path.file_name()
+                            })
+                            .cloned()
+                            .unwrap_or(file.path);
                         (
                             file.index,
-                            file.path,
+                            path,
                             file.length,
                             file.completed_length,
                             file.selected,

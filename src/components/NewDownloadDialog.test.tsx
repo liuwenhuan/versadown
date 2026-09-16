@@ -761,7 +761,7 @@ it('submits an indexed magnet preview so confirmation can unpause native metadat
     onScan={async () => [{ input: 'magnet:?xt=urn:btih:large', valid: true, kind: 'magnet' }]}
     onParse={async () => ({ confirmation: {
       taskId: 'large-magnet', title: 'Black Myth Wukong', requiresConfirmation: true,
-      resources: preview, processing: [], isBitTorrent: true, metadataPending: true,
+      resources: preview, processing: [], isBitTorrent: true, fileListPending: false,
     } })}
     onDiscardPrepared={vi.fn()}
     onSubmitBatch={onSubmitBatch}
@@ -835,7 +835,7 @@ it('presents an indexed external magnet list as downloadable while aria2 metadat
     initialInput="magnet:?xt=urn:btih:external-list"
     onScan={async () => [{ input: 'magnet:?xt=urn:btih:external-list', valid: true, kind: 'magnet' }]}
     onParse={async () => ({ confirmation: {
-      taskId: 'external-list', title: '完整文件列表', requiresConfirmation: true, processing: [], isBitTorrent: true, metadataPending: true,
+      taskId: 'external-list', title: '完整文件列表', requiresConfirmation: true, processing: [], isBitTorrent: true, fileListPending: false,
       resources: [
         { id: '1', name: '完整文件列表/one.bin', size: '10 MB', selected: true },
         { id: '2', name: '完整文件列表/two.bin', size: '20 MB', selected: true },

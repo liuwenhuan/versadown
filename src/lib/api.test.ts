@@ -119,7 +119,7 @@ it('prepares every candidate without starting it and discards an abandoned nativ
   expect(native.invoke).toHaveBeenNthCalledWith(2, 'discard_prepared_download', { taskId: 'task-1' });
 });
 
-it('marks a magnet preview as pending while its native metadata task is unresolved', async () => {
+it('treats an indexed magnet file list as ready even while aria2 metadata is unresolved', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'task',
     task: {
@@ -135,13 +135,30 @@ it('marks a magnet preview as pending while its native metadata task is unresolv
     confirmation: {
       taskId: 'magnet-preview',
       isBitTorrent: true,
-      metadataPending: true,
+      fileListPending: false,
       resources: [{ id: '1', name: 'large torrent/preview.bin' }],
     },
   });
 });
 
-it('marks a followed magnet file list as complete even though its metadata gid is retained', async () => {
+it('marks an empty magnet file list as pending until a complete list is available', async () => {
+  native.invoke.mockResolvedValueOnce({
+    kind: 'task',
+    task: {
+      id: 'magnet-waiting', name: 'large torrent', kind: 'magnet', status: 'awaiting_user', progress: 0,
+      aria_gid: 'metadata-gid', metadata_gid: 'metadata-gid',
+    },
+    requires_confirmation: true,
+    resources: [],
+  });
+  const { prepareDownload } = await import('./api');
+
+  await expect(prepareDownload('magnet:?xt=urn:btih:waiting')).resolves.toMatchObject({
+    confirmation: { fileListPending: true },
+  });
+});
+
+it('keeps a followed magnet file list ready after aria2 creates its child', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'task',
     task: {
@@ -154,7 +171,7 @@ it('marks a followed magnet file list as complete even though its metadata gid i
   const { prepareDownload } = await import('./api');
 
   await expect(prepareDownload('magnet:?xt=urn:btih:complete')).resolves.toMatchObject({
-    confirmation: { metadataPending: false },
+    confirmation: { fileListPending: false },
   });
 });
 

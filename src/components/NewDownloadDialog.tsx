@@ -322,7 +322,7 @@ function BatchNewDownloadDialog({
   useEffect(() => {
     const pending = batch.items.filter(item => item.status === 'ready'
       && item.result?.confirmation?.isBitTorrent
-      && (item.result.confirmation.metadataPending ?? item.result.confirmation.resources.length === 0));
+      && (item.result.confirmation.fileListPending ?? item.result.confirmation.resources.length === 0));
     if (!pending.length || !isTauriRuntime()) return;
     let disposed = false;
     const refreshMetadata = () => {
@@ -392,7 +392,7 @@ function BatchNewDownloadDialog({
   const hasUnresolvedBitTorrentFileList = batch.items.some(item => item.selected
     && item.status === 'ready'
     && item.result?.confirmation?.isBitTorrent
-    && (item.result.confirmation.metadataPending ?? batchItemResources(item).length === 0)
+    && (item.result.confirmation.fileListPending ?? batchItemResources(item).length === 0)
     && batchItemResources(item).length === 0);
   const canSubmit = batch.canSubmit && !hasUnresolvedBitTorrentFileList;
   const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapFocus}>
@@ -402,9 +402,9 @@ function BatchNewDownloadDialog({
         const title = batchItemTitle(item);
         const resources = batchItemResources(item);
         const existingTask = Boolean(item.result?.duplicate);
-        const pendingBitTorrentMetadata = Boolean(item.result?.confirmation?.isBitTorrent
-          && (item.result.confirmation.metadataPending ?? resources.length === 0));
-        const waitingForBitTorrentFileList = pendingBitTorrentMetadata && resources.length === 0;
+        const fileListPending = Boolean(item.result?.confirmation?.isBitTorrent
+          && (item.result.confirmation.fileListPending ?? resources.length === 0));
+        const waitingForBitTorrentFileList = fileListPending && resources.length === 0;
         const loadingStatus = item.status === 'parsing'
           ? '任务解析中'
           : !existingTask && waitingForBitTorrentFileList

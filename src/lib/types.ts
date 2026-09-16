@@ -106,8 +106,8 @@ export interface ParseResult {
   processing: string[];
   discoveredPassword?: string;
   isBitTorrent?: boolean;
-  /** True while displayed files are only a metadata-service preview. */
-  metadataPending?: boolean;
+  /** True only until the complete selectable file list is available. */
+  fileListPending?: boolean;
 }
 
 export type DownloadInputKind = 'direct' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'magnet' | 'torrent' | 'thunder' | 'cloud_share' | 'quark_share' | 'pik_pak_share';

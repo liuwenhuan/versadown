@@ -1298,6 +1298,31 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Persist the user's intended BT file selection while a magnet metadata
+    /// request is still resolving to its real download GID.
+    pub fn set_file_selection(&self, id: Uuid, indices: &[u32]) -> Result<(), StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        if find_with_transaction(&transaction, id)?.is_none() {
+            return Err(StoreError::NotFound(id));
+        }
+        transaction.execute(
+            "UPDATE task_files SET selected = 0 WHERE task_id = ?1",
+            [id.to_string()],
+        )?;
+        for index in indices {
+            let changed = transaction.execute(
+                "UPDATE task_files SET selected = 1 WHERE task_id = ?1 AND file_index = ?2",
+                params![id.to_string(), index],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::NotFound(id));
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn find_by_gid(&self, gid: impl AsRef<str>) -> Result<Option<DownloadTask>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection

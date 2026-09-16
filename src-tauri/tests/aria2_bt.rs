@@ -961,6 +961,137 @@ async fn metadata_child_is_persisted_and_selection_precedes_unpause() {
 }
 
 #[tokio::test]
+async fn external_magnet_preview_defers_selection_until_metadata_child_is_ready() {
+    let calls = Arc::new(Mutex::new(vec![]));
+    let wire = calls.clone();
+    let child_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_child_ready = child_ready.clone();
+    let child_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_child_started = child_started.clone();
+    let selection_applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_selection_applied = selection_applied.clone();
+    let (client, server) = fixture::server(move |request| {
+        wire.lock().unwrap().push(request.clone());
+        match request["method"].as_str().unwrap() {
+            "aria2.addUri" => json!("metadata"),
+            "aria2.tellStatus" if request["params"][1] == "metadata" => {
+                if wire_child_ready.load(std::sync::atomic::Ordering::SeqCst) {
+                    let mut status = fixture::status("metadata", "complete", 100);
+                    status["followedBy"] = json!(["child"]);
+                    status
+                } else {
+                    fixture::status("metadata", "active", 0)
+                }
+            }
+            "aria2.tellStatus" if request["params"][1] == "child" => {
+                let running = wire_child_started.load(std::sync::atomic::Ordering::SeqCst);
+                let selected = wire_selection_applied.load(std::sync::atomic::Ordering::SeqCst);
+                let mut status = fixture::status("child", if running { "active" } else { "paused" }, 0);
+                status["files"] = json!([
+                    {"index":"1","path":"a.bin","length":"40","completedLength":"0","selected":"true"},
+                    {"index":"2","path":"b.bin","length":"30","completedLength":"0","selected":if selected { "false" } else { "true" }},
+                    {"index":"3","path":"c.bin","length":"30","completedLength":"0","selected":"true"}
+                ]);
+                status
+            }
+            "aria2.changeOption" => {
+                assert_eq!(request["params"][1], "child");
+                assert_eq!(request["params"][2]["select-file"], "1,3");
+                wire_selection_applied.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("OK")
+            }
+            "aria2.unpause" => {
+                assert_eq!(request["params"][1], "child");
+                wire_child_started.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("child")
+            }
+            other => panic!("unexpected method {other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(magnet_task()).unwrap();
+    store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+    let preview_directory = std::env::temp_dir().join("alldownloader-magnet-preview");
+    let preview_paths = [
+        preview_directory
+            .join("a.bin")
+            .to_string_lossy()
+            .into_owned(),
+        preview_directory
+            .join("b.bin")
+            .to_string_lossy()
+            .into_owned(),
+        preview_directory
+            .join("c.bin")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+
+    service.prepare_magnet(task.id, task.source).await.unwrap();
+    // The external resolver supplies a preview before aria2 finishes the magnet metadata.
+    store
+        .upsert_files(
+            task.id,
+            &[
+                (1, preview_paths[0].clone(), 40, 0, true),
+                (2, preview_paths[1].clone(), 30, 0, true),
+                (3, preview_paths[2].clone(), 30, 0, true),
+            ],
+        )
+        .unwrap();
+
+    let confirmed = service.select_files(task.id, vec![1, 3]).await.unwrap();
+    assert_eq!(confirmed.status, TaskStatus::AwaitingUser);
+    assert!(store.selection_confirmed(task.id).unwrap());
+    assert_eq!(
+        store
+            .files(task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|file| file.selected)
+            .map(|file| file.index)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+
+    child_ready.store(true, std::sync::atomic::Ordering::SeqCst);
+    let started = service.reconcile_task(task.id).await.unwrap();
+    assert_eq!(started.status, TaskStatus::Downloading);
+    assert_eq!(
+        store
+            .files(task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|file| file.selected)
+            .map(|file| file.index)
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    assert_eq!(
+        store
+            .files(task.id)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>(),
+        preview_paths
+    );
+    let calls = calls.lock().unwrap();
+    let select = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.changeOption")
+        .unwrap();
+    let start = calls
+        .iter()
+        .position(|call| call["method"] == "aria2.unpause")
+        .unwrap();
+    assert!(select < start);
+    server.abort();
+}
+
+#[tokio::test]
 async fn rejected_selection_does_not_unpause_or_change_persisted_files() {
     let (client, server) = fixture::server(|request| {
         assert_eq!(request["method"], "aria2.changeOption");
