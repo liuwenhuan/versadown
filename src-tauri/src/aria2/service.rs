@@ -1411,6 +1411,13 @@ impl DownloadService {
     }
 
     pub(super) fn publish_task(&self, task: &DownloadTask) -> Result<(), DownloadServiceError> {
+        // A magnet's metadata GID is a temporary resolver, not a user-created
+        // queue entry. Publishing it before the file-selection confirmation
+        // lets a later discarded draft leave a stale UI row that no longer has
+        // a durable task record to cancel.
+        if task.status == TaskStatus::AwaitingUser && !self.store.selection_confirmed(task.id)? {
+            return Ok(());
+        }
         let mut value = serde_json::to_value(task).map_err(|_| Aria2Error::MalformedResponse)?;
         value.as_object_mut().unwrap().remove("updated_at");
         value["files"] = serde_json::to_value(self.store.files(task.id)?)

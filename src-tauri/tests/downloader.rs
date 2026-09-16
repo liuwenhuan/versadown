@@ -7,7 +7,7 @@ use std::{
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
     cloud::{commands::apply_cloud_download_policy, CloudProvider},
-    prepare_download, DownloadAction, DownloadService, DownloadTask, NewTask, TaskStatus,
+    prepare_download, DownloadAction, DownloadService, DownloadTask, EventSink, NewTask, TaskStatus,
     TaskStore, UriSubmissionOptions,
 };
 use async_trait::async_trait;
@@ -56,6 +56,19 @@ impl RecordingAria2 {
     }
 }
 
+#[derive(Default)]
+struct RecordedEvents {
+    tasks: Mutex<Vec<DownloadTask>>,
+}
+
+impl EventSink for RecordedEvents {
+    fn task_updated(&self, task: &DownloadTask) {
+        self.tasks.lock().unwrap().push(task.clone());
+    }
+
+    fn global_stat_updated(&self, _: &Aria2GlobalStat) {}
+}
+
 fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> DownloadTask {
     store
         .create(NewTask {
@@ -65,6 +78,27 @@ fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> Dow
             is_private: false,
         })
         .unwrap()
+}
+
+#[tokio::test]
+async fn unconfirmed_magnet_metadata_is_not_published_to_the_queue() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let events = Arc::new(RecordedEvents::default());
+    let api = RecordingAria2::successful();
+    let task = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
+            name: "pending magnet".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let service = DownloadService::new(api, Arc::clone(&store)).with_events(events.clone());
+
+    let prepared = service.prepare_magnet(task.id, task.source.clone()).await.unwrap();
+
+    assert_eq!(prepared.status, TaskStatus::AwaitingUser);
+    assert!(events.tasks.lock().unwrap().is_empty());
 }
 
 #[async_trait]

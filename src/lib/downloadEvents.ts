@@ -1,6 +1,10 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { DownloadGlobalStat, QueueTask } from './types';
 
+export type TaskSnapshotScope = 'active' | 'terminal';
+
+const terminalTaskStatuses = new Set<QueueTask['status']>(['completed', 'failed', 'cancelled', 'recycled']);
+
 export function upsertTask(tasks: readonly QueueTask[], snapshot: QueueTask): QueueTask[] {
   // A directory snapshot owns its descendants. A list response may have observed
   // a member before it was linked; do not retain that stale standalone row.
@@ -34,6 +38,35 @@ export function mergeTaskSnapshot(
   return snapshots.reduce<QueueTask[]>((merged, snapshot) => (
     protectedIds.has(snapshot.id) ? merged : upsertTask(merged, preserveLiveTasks(snapshot, liveTasks))
   ), [...current]);
+}
+
+/**
+ * Reconcile one durable list scope instead of merely overlaying its rows. This
+ * drops stale rows left by an event that raced with removal of a prepared task,
+ * while retaining rows owned by the other list scope and newer live events.
+ */
+export function reconcileTaskSnapshot(
+  current: readonly QueueTask[],
+  snapshots: readonly QueueTask[],
+  scope: TaskSnapshotScope,
+  protectedIds: ReadonlySet<string> = new Set()
+): QueueTask[] {
+  const merged = mergeTaskSnapshot(current, snapshots, protectedIds);
+  const durableIds = new Set(snapshots.map((task) => task.id));
+  return merged.filter((task) => (
+    !taskMatchesSnapshotScope(task, scope)
+    || durableIds.has(task.id)
+    || containsProtectedTask(task, protectedIds)
+  ));
+}
+
+function taskMatchesSnapshotScope(task: QueueTask, scope: TaskSnapshotScope): boolean {
+  const terminal = terminalTaskStatuses.has(task.status);
+  return scope === 'terminal' ? terminal : !terminal;
+}
+
+function containsProtectedTask(task: QueueTask, protectedIds: ReadonlySet<string>): boolean {
+  return protectedIds.has(task.id) || Boolean(task.children?.some((child) => containsProtectedTask(child, protectedIds)));
 }
 
 function indexTasks(tasks: readonly QueueTask[], ids?: ReadonlySet<string>): Map<string, QueueTask> {

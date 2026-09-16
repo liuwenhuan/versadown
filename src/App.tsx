@@ -17,7 +17,7 @@ import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
-import { mergeTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
+import { reconcileTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import darkMintIcon from './assets/launcher/dark_mint_128.png';
@@ -472,7 +472,9 @@ export function App() {
       if (protectPurgeInProgress) {
         for (const id of purgingTaskIds.current) protectedIds.add(id);
       }
-      setTasks((current) => mergeTaskSnapshot(current, saved, protectedIds));
+      setTasks((current) => scope
+        ? reconcileTaskSnapshot(current, saved, scope, protectedIds)
+        : saved);
       return saved;
     }).catch((error: unknown) => {
       if (!disposed()) setNotice({ kind: 'error', message: String(error) });

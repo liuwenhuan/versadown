@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatCompactSpeed, formatEta, formatSpeed, upsertTask, mergeInitialTasks, mergeTaskSnapshot } from './downloadEvents';
+import { formatBytes, formatCompactSpeed, formatEta, formatSpeed, upsertTask, mergeInitialTasks, mergeTaskSnapshot, reconcileTaskSnapshot } from './downloadEvents';
 import type { QueueTask } from './types';
 
 function task(overrides: Partial<QueueTask> = {}): QueueTask {
@@ -88,6 +88,26 @@ describe('upsertTask', () => {
     const expected = { ...root, children: [{ ...root.children![0], children: [child] }] };
     expect(mergeInitialTasks([child], [root])).toEqual([expected]);
     expect(mergeTaskSnapshot([child], [root], new Set([child.id]))).toEqual([expected]);
+  });
+});
+
+describe('reconcileTaskSnapshot', () => {
+  it('removes an active task that no longer exists in the durable active snapshot', () => {
+    const stale = task({ id: 'discarded-magnet', kind: 'magnet', status: 'awaiting_user' });
+
+    expect(reconcileTaskSnapshot([stale], [], 'active')).toEqual([]);
+  });
+
+  it('keeps terminal tasks while reconciling the active scope', () => {
+    const completed = task({ id: 'completed-task', status: 'completed', progress: 100 });
+
+    expect(reconcileTaskSnapshot([completed], [], 'active')).toEqual([completed]);
+  });
+
+  it('keeps a task updated after the active snapshot request began', () => {
+    const live = task({ id: 'live-task', status: 'awaiting_user' });
+
+    expect(reconcileTaskSnapshot([live], [], 'active', new Set([live.id]))).toEqual([live]);
   });
 });
 
