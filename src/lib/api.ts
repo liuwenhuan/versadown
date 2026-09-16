@@ -112,7 +112,10 @@ export async function parseDownload(input: string, accessCode?: string, requireC
       requiresConfirmation: true,
       resources: result.resources ?? [],
       processing: ['文件选择确认后调用本地 aria2 下载'],
-      isBitTorrent: result.task.kind === 'magnet' || result.task.kind === 'torrent'
+      isBitTorrent: result.task.kind === 'magnet' || result.task.kind === 'torrent',
+      metadataPending: result.task.kind === 'magnet'
+        && Boolean(result.task.metadata_gid)
+        && result.task.followed_by_gid !== result.task.aria_gid
     }
   };
 }

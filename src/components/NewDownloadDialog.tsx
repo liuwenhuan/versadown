@@ -81,16 +81,11 @@ function batchResourceCommonDirectory(resources: readonly ConfirmResource[]): st
   return commonDirectory.length > 0 ? commonDirectory.join('/') : undefined;
 }
 
-function batchResourceDisplayName(resource: ConfirmResource, commonDirectory: string | undefined): string {
-  if (!commonDirectory) return resource.name;
-  const parts = resource.name.split(/[\\/]/).filter(Boolean);
-  const directory = commonDirectory.split('/');
-  if (!directory.every((part, index) => parts[index] === part)) return resource.name;
-  return parts.slice(directory.length).join('/') || resource.name;
-}
-
 type BatchResourceFilter = 'all' | 'video' | 'image' | 'other';
 type BatchResourceSortMode = 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
+type BatchResourceTreeNode =
+  | { kind: 'file'; key: string; name: string; resource: ConfirmResource; bytes: number }
+  | { kind: 'directory'; key: string; name: string; resources: readonly ConfirmResource[]; children: readonly BatchResourceTreeNode[]; bytes: number };
 
 function batchResourceCategory(resource: ConfirmResource): Exclude<BatchResourceFilter, 'all'> {
   if (/\.(?:3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|rmvb|ts|webm|wmv)$/i.test(resource.name)) return 'video';
@@ -106,12 +101,94 @@ function batchResourceBytes(value: string): number {
   return Number(match[1]) * units[match[2].toUpperCase() as keyof typeof units];
 }
 
-function BatchVisibleSelectionCheckbox({ checked, indeterminate, disabled, onChange }: { checked: boolean; indeterminate: boolean; disabled: boolean; onChange(): void }) {
+function BatchSelectionCheckbox({ ariaLabel, checked, indeterminate, disabled, onChange }: { ariaLabel: string; checked: boolean; indeterminate: boolean; disabled: boolean; onChange(): void }) {
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (input.current) input.current.indeterminate = indeterminate;
   }, [indeterminate]);
-  return <input ref={input} type="checkbox" aria-label="全选当前筛选结果" checked={checked} disabled={disabled} onChange={onChange} />;
+  return <input ref={input} type="checkbox" aria-label={ariaLabel} checked={checked} disabled={disabled} onChange={onChange} />;
+}
+
+function batchResourceRootPrefixLength(resources: readonly ConfirmResource[], rootName: string): number {
+  const paths = resources.map(resource => resource.name.split(/[\\/]/).filter(Boolean));
+  if (!paths.length) return 0;
+  const rootPositions = paths.map(parts => parts.findIndex(part => part === rootName));
+  if (rootPositions[0] >= 0 && rootPositions.every(position => position === rootPositions[0])) {
+    return rootPositions[0] + 1;
+  }
+  const first = paths[0][0];
+  return first && paths.every(parts => parts.length > 1 && parts[0] === first) ? 1 : 0;
+}
+
+function buildBatchResourceTree(resources: readonly ConfirmResource[], rootName: string, sortMode?: BatchResourceSortMode): readonly BatchResourceTreeNode[] {
+  const prefixLength = batchResourceRootPrefixLength(resources, rootName);
+  const entries = resources.map(resource => {
+    const original = resource.name.split(/[\\/]/).filter(Boolean);
+    const parts = original.slice(prefixLength);
+    return { resource, parts: parts.length ? parts : [original.at(-1) ?? resource.name] };
+  });
+  const build = (current: typeof entries, parentKey: string): BatchResourceTreeNode[] => {
+    const directories = new Map<string, typeof entries>();
+    const files: BatchResourceTreeNode[] = [];
+    current.forEach(entry => {
+      if (entry.parts.length <= 1) {
+        files.push({ kind: 'file', key: `file:${entry.resource.id}`, name: entry.parts[0], resource: entry.resource, bytes: batchResourceBytes(entry.resource.size) });
+        return;
+      }
+      const [directory, ...rest] = entry.parts;
+      const grouped = directories.get(directory) ?? [];
+      grouped.push({ resource: entry.resource, parts: rest });
+      directories.set(directory, grouped);
+    });
+    const nodes: BatchResourceTreeNode[] = [
+      ...Array.from(directories, ([name, children]) => {
+        const key = `${parentKey}/${name}`;
+        const descendants = children.map(child => child.resource);
+        return { kind: 'directory' as const, key, name, resources: descendants, children: build(children, key), bytes: descendants.reduce((sum, resource) => sum + batchResourceBytes(resource.size), 0) };
+      }),
+      ...files,
+    ];
+    if (!sortMode) return nodes;
+    return nodes.sort((left, right) => {
+      const comparison = sortMode.startsWith('name')
+        ? left.name.localeCompare(right.name, 'zh-Hans-CN')
+        : left.bytes - right.bytes;
+      return sortMode.endsWith('asc') ? comparison : -comparison;
+    });
+  };
+  return build(entries, '');
+}
+
+function BatchResourceTree({ nodes, disabled, expandedDirectories, depth = 0, onToggleDirectory, onToggleResource }: {
+  nodes: readonly BatchResourceTreeNode[];
+  disabled: boolean;
+  expandedDirectories: ReadonlySet<string>;
+  depth?: number;
+  onToggleDirectory(key: string): void;
+  onToggleResource(resourceId: string): void;
+}) {
+  return <>{nodes.map(node => {
+    if (node.kind === 'file') {
+      return <div key={node.key} className="batch-tree-file" style={{ paddingLeft: `${depth * 18}px` }}><ResourceFileRow resource={node.resource} displayName={node.name} disabled={disabled} showExtension compact onToggle={() => onToggleResource(node.resource.id)} /></div>;
+    }
+    const expanded = expandedDirectories.has(node.key);
+    const selectedCount = node.resources.filter(resource => resource.selected).length;
+    const allSelected = node.resources.length > 0 && selectedCount === node.resources.length;
+    const toggleSelection = () => node.resources.forEach(resource => {
+      if (resource.selected === allSelected) onToggleResource(resource.id);
+    });
+    return <div key={node.key} className="batch-directory-branch">
+      <div className="batch-directory-row" style={{ paddingLeft: `${depth * 18 + 8}px` }}>
+        <BatchSelectionCheckbox ariaLabel={`选择目录 ${node.name}`} checked={allSelected} indeterminate={selectedCount > 0 && !allSelected} disabled={disabled} onChange={toggleSelection} />
+        <button type="button" className="batch-expand" aria-label={`${expanded ? '收起' : '展开'}目录 ${node.name}`} aria-expanded={expanded} onClick={() => onToggleDirectory(node.key)}><svg className={expanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg></button>
+        <span className="batch-directory-icon" aria-hidden="true">▰</span>
+        <strong title={node.name}>{node.name}</strong>
+        <small>{node.resources.length} 项</small>
+        <small>{formatBytes(node.bytes)}</small>
+      </div>
+      {expanded && <BatchResourceTree nodes={node.children} disabled={disabled} expandedDirectories={expandedDirectories} depth={depth + 1} onToggleDirectory={onToggleDirectory} onToggleResource={onToggleResource} />}
+    </div>;
+  })}</>;
 }
 
 const batchResourceSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mode: BatchResourceSortMode; label: string; ariaLabel: string }> }> = [
@@ -153,28 +230,29 @@ function BatchResourceSortControl({ value, onChange }: { value?: BatchResourceSo
   </div>;
 }
 
-function BatchResourceList({ resources, disabled, rootRow, onToggle }: { resources: readonly ConfirmResource[]; disabled: boolean; rootRow: ReactNode; onToggle(resourceId: string): void }) {
+function BatchResourceList({ resources, disabled, rootName, rootRow, onToggle }: { resources: readonly ConfirmResource[]; disabled: boolean; rootName: string; rootRow: ReactNode; onToggle(resourceId: string): void }) {
   const [filter, setFilter] = useState<BatchResourceFilter>('all');
   const [sortMode, setSortMode] = useState<BatchResourceSortMode>();
+  const [expandedDirectories, setExpandedDirectories] = useState<Set<string>>(() => new Set());
   const filteredResources = filter === 'all' ? resources : resources.filter(resource => batchResourceCategory(resource) === filter);
-  const visibleResources = [...filteredResources].sort((left, right) => {
-    if (!sortMode) return 0;
-    const comparison = sortMode.startsWith('name')
-      ? left.name.localeCompare(right.name, 'zh-Hans-CN')
-      : batchResourceBytes(left.size) - batchResourceBytes(right.size);
-    return sortMode.endsWith('asc') ? comparison : -comparison;
-  });
+  const visibleResources = filteredResources;
+  const tree = buildBatchResourceTree(visibleResources, rootName, sortMode);
   const selectedCount = resources.filter(resource => resource.selected).length;
   const selectedBytes = resources.reduce((total, resource) => total + (resource.selected ? batchResourceBytes(resource.size) : 0), 0);
   const selectedVisibleCount = visibleResources.filter(resource => resource.selected).length;
-  const commonDirectory = batchResourceCommonDirectory(resources);
   const allVisibleSelected = visibleResources.length > 0 && selectedVisibleCount === visibleResources.length;
   const toggleVisibleSelection = () => visibleResources.forEach(resource => {
     if (resource.selected === allVisibleSelected) onToggle(resource.id);
   });
+  const toggleDirectory = (key: string) => setExpandedDirectories(current => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  });
   return <div className="batch-resource-card">
     <div className="parse-resource-toolbar batch-resource-toolbar">
-      <label className="parse-select-all"><BatchVisibleSelectionCheckbox checked={allVisibleSelected} indeterminate={selectedVisibleCount > 0 && !allVisibleSelected} disabled={disabled} onChange={toggleVisibleSelection} /><span>{filter === 'all' ? '全选' : '全选本类'}</span></label>
+      <label className="parse-select-all"><BatchSelectionCheckbox ariaLabel="全选当前筛选结果" checked={allVisibleSelected} indeterminate={selectedVisibleCount > 0 && !allVisibleSelected} disabled={disabled} onChange={toggleVisibleSelection} /><span>{filter === 'all' ? '全选' : '全选本类'}</span></label>
       <b>已选 {selectedCount} / {resources.length} 个文件，共 {formatBytes(selectedBytes)}</b>
       <div className="parse-resource-filters" role="group" aria-label="文件类型筛选">
         {(['all', 'video', 'image', 'other'] as BatchResourceFilter[]).map(option => <button key={option} type="button" className={filter === option ? 'active' : ''} onClick={() => setFilter(option)}>{option === 'all' ? '全部' : option === 'video' ? '视频' : option === 'image' ? '图片' : '其他'}</button>)}
@@ -182,7 +260,7 @@ function BatchResourceList({ resources, disabled, rootRow, onToggle }: { resourc
       <BatchResourceSortControl value={sortMode} onChange={setSortMode} />
     </div>
     {rootRow}
-    <div className="resource-list batch-resource-list">{visibleResources.map(resource => <ResourceFileRow key={resource.id} resource={resource} displayName={batchResourceDisplayName(resource, commonDirectory)} disabled={disabled} showExtension compact onToggle={() => onToggle(resource.id)} />)}</div>
+    <div className="resource-list batch-resource-list"><BatchResourceTree nodes={tree} disabled={disabled} expandedDirectories={expandedDirectories} onToggleDirectory={toggleDirectory} onToggleResource={onToggle} /></div>
   </div>;
 }
 
@@ -240,19 +318,20 @@ function BatchNewDownloadDialog({
   useEffect(() => {
     const pending = batch.items.filter(item => item.status === 'ready'
       && item.result?.confirmation?.isBitTorrent
-      && item.result.confirmation.resources.length === 0);
+      && (item.result.confirmation.metadataPending ?? item.result.confirmation.resources.length === 0));
     if (!pending.length || !isTauriRuntime()) return;
     let disposed = false;
     const refreshMetadata = () => {
       void listPersistedTasks().then((tasks) => {
         if (disposed) return;
         pending.forEach((item) => {
-          const files = tasks.find(task => task.id === item.result?.confirmation?.taskId)?.files;
-          if (!files?.length) return;
+          const task = tasks.find(candidate => candidate.id === item.result?.confirmation?.taskId);
+          const files = task?.files;
+          if (!files?.length || (task?.metadata_gid && task.followed_by_gid !== task.aria_gid)) return;
           batch.updateResources(item.id, files.map(file => ({
             id: String(file.index), index: file.index, name: file.path,
             size: `${file.completed_length} B / ${file.length} B`, selected: file.selected,
-          })));
+          })), false);
         });
       }).catch(() => undefined);
     };
@@ -309,7 +388,7 @@ function BatchNewDownloadDialog({
   const hasPendingBitTorrentMetadata = batch.items.some(item => item.selected
     && item.status === 'ready'
     && item.result?.confirmation?.isBitTorrent
-    && batchItemResources(item).length === 0);
+    && (item.result.confirmation.metadataPending ?? batchItemResources(item).length === 0));
   const canSubmit = batch.canSubmit && !hasPendingBitTorrentMetadata;
   const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="新建下载" onKeyDown={trapFocus}>
     <div className="launcher-title"><span>新建任务</span><button type="button" aria-label={placement === 'modal' ? '关闭新建下载' : '收起下载输入'} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
@@ -318,19 +397,20 @@ function BatchNewDownloadDialog({
         const title = batchItemTitle(item);
         const resources = batchItemResources(item);
         const existingTask = Boolean(item.result?.duplicate);
-        const pendingBitTorrentMetadata = Boolean(item.result?.confirmation?.isBitTorrent && resources.length === 0);
+        const pendingBitTorrentMetadata = Boolean(item.result?.confirmation?.isBitTorrent
+          && (item.result.confirmation.metadataPending ?? resources.length === 0));
         const resourceBytes = resources.reduce((total, resource) => total + batchResourceBytes(resource.size), 0);
         const rootRow = <div className="batch-download-row batch-tree-root">
             <input type="checkbox" aria-label={`选择 ${item.input}`} checked={item.selected} disabled={existingTask} onChange={() => batch.toggleItem(item.id)} />
             {resources.length > 0 ? <button type="button" className="batch-expand" aria-label={`${item.expanded ? '收起' : '展开'}${title}`} aria-expanded={item.expanded} onClick={() => batch.toggleExpanded(item.id)}><svg className={item.expanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg></button> : <span className="batch-expand-placeholder" />}
             <span className={`batch-root-icon${item.result?.confirmation?.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{item.result?.confirmation?.isBitTorrent ? 'BT' : resources.length > 1 ? '▱' : '↓'}</span>
-            <div className="batch-download-name"><strong title={title}>{title}</strong><small>{item.status === 'parsing' ? '任务解析中' : item.status === 'ready' ? existingTask ? `已存在任务 · ${resources.length} 个文件` : pendingBitTorrentMetadata ? '正在获取文件信息' : `${resources.length || 1} 项可下载` : item.error}</small></div>
+            <div className="batch-download-name"><strong title={title}>{title}</strong><small>{item.status === 'parsing' ? '任务解析中' : item.status === 'ready' ? existingTask ? `已存在任务 · ${resources.length} 个文件` : pendingBitTorrentMetadata ? resources.length ? '正在获取完整文件信息' : '正在获取文件信息' : `${resources.length || 1} 项可下载` : item.error}</small></div>
             {resources.length > 0 && <small className="batch-root-size">{formatBytes(resourceBytes)}</small>}
             {item.status === 'failed' && <button type="button" className="batch-retry-button" onClick={() => batch.retry(item.id)}>重试</button>}
             <button type="button" aria-label={`移除 ${title}`} onClick={() => batch.remove(item.id)}>×</button>
           </div>;
         return <article key={item.id} className={`batch-download-item ${item.status}${item.expanded && resources.length > 0 ? ' expanded' : ''}`}>
-          {item.expanded && resources.length > 0 ? <BatchResourceList resources={resources} disabled={existingTask} rootRow={rootRow} onToggle={resourceId => batch.toggleResource(item.id, resourceId)} /> : rootRow}
+          {item.expanded && resources.length > 0 ? <BatchResourceList resources={resources} disabled={existingTask} rootName={title} rootRow={rootRow} onToggle={resourceId => batch.toggleResource(item.id, resourceId)} /> : rootRow}
           {item.status === 'access_code_required' && <div className="batch-access-code">
             <span>{item.error}</span><input type="password" aria-label={`${title}访问码`} autoComplete="off" value={item.accessCode} onChange={event => batch.setAccessCode(item.id, event.target.value)} /><button type="button" className="batch-retry-button" disabled={!item.accessCode.trim()} onClick={() => batch.retry(item.id)}>重新解析</button>
           </div>}

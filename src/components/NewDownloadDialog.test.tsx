@@ -719,6 +719,87 @@ it('refreshes a pending magnet into its actual file list', async () => {
   expect(screen.getByText('episode-02.mp4')).toBeVisible();
 });
 
+it('does not submit a partial magnet preview and replaces it with the complete native file list', async () => {
+  vi.mocked(isTauriRuntime).mockReturnValue(true);
+  let finishMetadata!: (tasks: Awaited<ReturnType<typeof listPersistedTasks>>) => void;
+  vi.mocked(listPersistedTasks).mockReturnValue(new Promise(resolve => { finishMetadata = resolve; }));
+  const preview = Array.from({ length: 100 }, (_, index) => ({
+    id: String(index + 1),
+    name: `Black Myth Wukong/preview-${index + 1}.bin`,
+    size: '1 B',
+    selected: true,
+  }));
+  const completeFiles = Array.from({ length: 137 }, (_, index) => ({
+    index: index + 1,
+    path: `Black Myth Wukong/complete-${index + 1}.bin`,
+    length: 1,
+    completed_length: 0,
+    selected: true,
+  }));
+
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:large"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:large', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'large-magnet', title: 'Black Myth Wukong', requiresConfirmation: true,
+      resources: preview, processing: [], isBitTorrent: true, metadataPending: true,
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByText('正在获取完整文件信息')).toBeVisible();
+  expect(screen.getByText('已选 100 / 100 个文件，共 100 B')).toBeVisible();
+  expect(screen.getByRole('button', { name: '新建任务' })).toBeDisabled();
+
+  await act(async () => {
+    finishMetadata([{
+      id: 'large-magnet', name: 'Black Myth Wukong', kind: 'magnet', status: 'awaiting_user', progress: 0,
+      aria_gid: 'download-gid', followed_by_gid: 'download-gid', metadata_gid: 'metadata-gid',
+      files: completeFiles,
+    }]);
+  });
+
+  expect(await screen.findByText('137 项可下载')).toBeVisible();
+  expect(screen.getByText('已选 137 / 137 个文件，共 137 B')).toBeVisible();
+  expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
+});
+
+it('shows only the task root direct children by default and keeps deeper directories collapsed', async () => {
+  const user = userEvent.setup();
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="magnet:?xt=urn:btih:nested"
+    onScan={async () => [{ input: 'magnet:?xt=urn:btih:nested', valid: true, kind: 'magnet' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'nested', title: '合集', requiresConfirmation: true, isBitTorrent: true, processing: [],
+      resources: [
+        { id: 'episode-1', name: '合集/Season 1/Episode 1/movie.mkv', size: '10 MB', selected: true },
+        { id: 'episode-2', name: '合集/Season 1/Episode 2/movie.mkv', size: '20 MB', selected: true },
+        { id: 'poster', name: '合集/poster.jpg', size: '1 MB', selected: true },
+      ],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByRole('button', { name: '收起合集' })).toBeVisible();
+  expect(screen.getByText('Season 1')).toBeVisible();
+  expect(screen.getByText('poster.jpg')).toBeVisible();
+  expect(screen.queryByText('Episode 1')).not.toBeInTheDocument();
+  expect(screen.queryByText('movie.mkv')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '展开目录 Season 1' }));
+  expect(screen.getByText('Episode 1')).toBeVisible();
+  expect(screen.getByText('Episode 2')).toBeVisible();
+  expect(screen.queryByText('movie.mkv')).not.toBeInTheDocument();
+});
+
 it('allows a pending task to be deselected so ready tasks can be submitted', async () => {
   const user = userEvent.setup();
   let resolveSecond!: (value: unknown) => void;

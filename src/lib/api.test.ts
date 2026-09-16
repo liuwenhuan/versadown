@@ -119,6 +119,45 @@ it('prepares every candidate without starting it and discards an abandoned nativ
   expect(native.invoke).toHaveBeenNthCalledWith(2, 'discard_prepared_download', { taskId: 'task-1' });
 });
 
+it('marks a magnet preview as pending while its native metadata task is unresolved', async () => {
+  native.invoke.mockResolvedValueOnce({
+    kind: 'task',
+    task: {
+      id: 'magnet-preview', name: 'large torrent', kind: 'magnet', status: 'awaiting_user', progress: 0,
+      aria_gid: 'metadata-gid', metadata_gid: 'metadata-gid',
+    },
+    requires_confirmation: true,
+    resources: [{ id: '1', name: 'large torrent/preview.bin', size: '1 B', selected: true }],
+  });
+  const { prepareDownload } = await import('./api');
+
+  await expect(prepareDownload('magnet:?xt=urn:btih:large')).resolves.toMatchObject({
+    confirmation: {
+      taskId: 'magnet-preview',
+      isBitTorrent: true,
+      metadataPending: true,
+      resources: [{ id: '1', name: 'large torrent/preview.bin' }],
+    },
+  });
+});
+
+it('marks a followed magnet file list as complete even though its metadata gid is retained', async () => {
+  native.invoke.mockResolvedValueOnce({
+    kind: 'task',
+    task: {
+      id: 'magnet-complete', name: 'large torrent', kind: 'magnet', status: 'awaiting_user', progress: 0,
+      aria_gid: 'download-gid', followed_by_gid: 'download-gid', metadata_gid: 'metadata-gid',
+    },
+    requires_confirmation: true,
+    resources: [{ id: '137', name: 'large torrent/complete.bin', size: '1 B', selected: true }],
+  });
+  const { prepareDownload } = await import('./api');
+
+  await expect(prepareDownload('magnet:?xt=urn:btih:complete')).resolves.toMatchObject({
+    confirmation: { metadataPending: false },
+  });
+});
+
 it('sends opaque share plans to the cloud-share confirmation command', async () => {
   native.invoke.mockResolvedValueOnce({ outcomes: [], failures: [] });
   const { confirmCloudShareDownload } = await import('./api');

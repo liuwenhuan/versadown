@@ -27,6 +27,7 @@ export interface QueueTask {
   cleanup_pending?: boolean;
   aria_gid?: string;
   followed_by_gid?: string;
+  metadata_gid?: string;
   total_length?: number;
   completed_length?: number;
   aria_error_code?: string;
@@ -105,6 +106,8 @@ export interface ParseResult {
   processing: string[];
   discoveredPassword?: string;
   isBitTorrent?: boolean;
+  /** True while displayed files are only a metadata-service preview. */
+  metadataPending?: boolean;
 }
 
 export type DownloadInputKind = 'direct' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'magnet' | 'torrent' | 'thunder' | 'cloud_share' | 'quark_share' | 'pik_pak_share';
