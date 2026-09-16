@@ -286,7 +286,6 @@ pub fn run() {
             settings.aria2.ensure_rpc_token();
             settings.aria2.validate().map_err(std::io::Error::other)?;
             std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
-            let debug_reports = settings.debug_reports;
             let launcher_visibility = settings.launcher_visibility;
             let destination = std::path::PathBuf::from(&settings.download_directory);
             std::fs::create_dir_all(&destination)?;
@@ -316,7 +315,6 @@ pub fn run() {
             app.manage(commands::AppState {
                 store,
                 runtime: std::sync::Arc::clone(&runtime),
-                debug_reports: std::sync::Mutex::new(debug_reports),
                 settings: std::sync::Mutex::new(settings),
                 settings_path,
                 ai_secrets,
@@ -379,7 +377,6 @@ pub fn run() {
             commands::configure_privacy_download,
             commands::unlock_privacy_tasks,
             commands::lock_privacy_tasks,
-            commands::update_debug_reports,
             commands::update_settings,
             commands::update_ai_settings,
             commands::list_ai_models,

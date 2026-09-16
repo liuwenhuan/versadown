@@ -35,7 +35,6 @@ pub enum ParseDownloadOutcome {
 pub struct AppState {
     pub store: Arc<TaskStore>,
     pub runtime: Arc<crate::EngineRuntime>,
-    pub debug_reports: Mutex<bool>,
     pub settings: Mutex<AppSettings>,
     pub settings_path: PathBuf,
     pub ai_secrets: DpapiCredentialStore,
@@ -214,11 +213,6 @@ fn share_action_parse_outcome(action: TaskActionOutcome) -> ParseDownloadOutcome
         resources: Vec::new(),
         duplicate: action.duplicate,
     })
-}
-
-#[derive(Serialize)]
-pub struct Settings {
-    pub debug_reports: bool,
 }
 
 fn proxy_url(proxy: &ProxySettings) -> Result<Option<String>, String> {
@@ -3174,6 +3168,13 @@ pub fn get_privacy_task_visibility(
     privacy_task_visibility(&state)
 }
 
+fn privacy_change_requires_current_password(
+    was_configured: bool,
+    new_password: Option<&str>,
+) -> bool {
+    was_configured && new_password.is_some()
+}
+
 #[tauri::command]
 pub fn configure_privacy_download(
     enabled: bool,
@@ -3182,7 +3183,7 @@ pub fn configure_privacy_download(
     state: State<'_, AppState>,
 ) -> Result<AppSettings, String> {
     let was_configured = crate::privacy::password_is_configured(&state.ai_secrets)?;
-    if was_configured {
+    if privacy_change_requires_current_password(was_configured, new_password.as_deref()) {
         let current_password = current_password.ok_or_else(|| "请输入旧密码".to_string())?;
         if !state
             .privacy_session
@@ -3322,21 +3323,6 @@ pub async fn list_ai_models(
 }
 
 #[tauri::command]
-pub fn update_debug_reports(enabled: bool, state: State<'_, AppState>) -> Result<Settings, String> {
-    let mut setting = state
-        .debug_reports
-        .lock()
-        .map_err(|_| "设置锁不可用".to_string())?;
-    *setting = enabled;
-    if let Ok(mut settings) = state.settings.lock() {
-        settings.debug_reports = enabled;
-    }
-    Ok(Settings {
-        debug_reports: *setting,
-    })
-}
-
-#[tauri::command]
 pub async fn update_settings(
     mut settings: AppSettings,
     state: State<'_, AppState>,
@@ -3370,10 +3356,6 @@ pub async fn update_settings(
             .await?;
     }
     persist_settings(&state.settings_path, &settings)?;
-    *state
-        .debug_reports
-        .lock()
-        .map_err(|_| "设置锁不可用".to_string())? = settings.debug_reports;
     *state
         .settings
         .lock()
@@ -3760,6 +3742,19 @@ mod tests {
 
         session.lock();
         assert!(!session.is_unlocked());
+    }
+
+    #[test]
+    fn privacy_toggle_does_not_require_the_existing_password() {
+        assert!(!privacy_change_requires_current_password(true, None));
+        assert!(privacy_change_requires_current_password(
+            true,
+            Some("new password")
+        ));
+        assert!(!privacy_change_requires_current_password(
+            false,
+            Some("first password")
+        ));
     }
 
     #[test]

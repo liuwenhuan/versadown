@@ -15,7 +15,7 @@ const state = vi.hoisted(() => ({
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
-  privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
+  getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
   updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn(),
   dragDropHandler: undefined as undefined | ((event: { payload: unknown }) => void),
   onDragDropEvent: vi.fn(), scaleFactor: vi.fn()
@@ -28,8 +28,8 @@ vi.mock('./lib/api', () => ({
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   getPrivacyTaskVisibility: state.privacyVisibility,
   checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
-  defaultSettings: { debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 } },
-  getSettings: vi.fn().mockResolvedValue({ debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 } }),
+  defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 } },
+  getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
   moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
 }));
@@ -105,6 +105,9 @@ beforeEach(() => {
   state.reauthorizeFailedCloudTask.mockReset();
   state.getCompletedCloudAuthorization.mockReset().mockResolvedValue(null);
   state.completeCloudAuthorization.mockReset();
+  state.getSettings.mockReset();
+  state.getSettings.mockResolvedValue({ downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 } });
+  state.configurePrivacy.mockReset();
   state.privacyVisibility.mockReset();
   state.privacyVisibility.mockResolvedValue({ enabled: false, unlocked: false });
   state.updateCheck.mockReset();
@@ -125,6 +128,40 @@ beforeEach(() => {
     state.listeners.set(name, handler);
     return Promise.resolve(() => undefined);
   });
+});
+
+it('shows privacy task controls immediately after enabling an existing privacy password', async () => {
+  const settings = {
+    downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always' as const,
+    proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
+    ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
+    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
+    deleteTransferredShareFilesAfterDownload: true,
+    privacyDownloadEnabled: false,
+    privacyPasswordConfigured: true,
+  };
+  state.getSettings.mockResolvedValue(settings);
+  state.configurePrivacy.mockResolvedValue({ ...settings, privacyDownloadEnabled: true });
+  state.privacyVisibility
+    .mockResolvedValueOnce({ enabled: false, unlocked: false })
+    .mockResolvedValue({ enabled: true, unlocked: false });
+  const user = userEvent.setup();
+  render(<App />);
+
+  const navigation = screen.getByRole('navigation', { name: '主导航' });
+  await user.click(within(navigation).getByRole('button', { name: '设置' }));
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await user.click(screen.getByRole('checkbox', { name: '开启隐私下载' }));
+
+  await waitFor(() => expect(state.configurePrivacy).toHaveBeenCalledWith(true, undefined, undefined));
+  await user.click(within(navigation).getByRole('button', { name: /^任务/ }));
+  expect(await screen.findByRole('button', { name: '解锁隐私任务' })).toBeVisible();
+
+  fireEvent.paste(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), {
+    clipboardData: { getData: () => 'https://example.test/private.zip' },
+  });
+  expect(within(await screen.findByRole('dialog', { name: '新建下载' })).getByRole('button', { name: '隐私新建' })).toBeVisible();
 });
 
 it('opens application information from About and returns to the task list', async () => {

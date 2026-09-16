@@ -72,7 +72,7 @@ beforeEach(() => {
   state.updateSettings.mockReset();
   state.getManagerVisible.mockReset();
   state.getSettings.mockResolvedValue({
-    debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
+    downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
     proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
     aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 }
@@ -113,7 +113,7 @@ it('shows the current total speed above the launcher menu commands', async () =>
 
 it('keeps the compact launcher visible for an active task in download-only mode', async () => {
   state.getSettings.mockResolvedValueOnce({
-    debugReports: false, downloadDirectory: 'C:\\Downloads', launcherVisibility: 'downloading',
+    downloadDirectory: 'C:\\Downloads', launcherVisibility: 'downloading',
     proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
     aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 }

@@ -6,7 +6,6 @@ import { SettingsPanel } from './SettingsPanel';
 import { defaultSettings } from '../lib/api';
 
 const initial = {
-  debugReports: false,
   downloadDirectory: 'C:\\Users\\tester\\Downloads',
   launcherVisibility: 'always' as const,
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
@@ -15,12 +14,6 @@ const initial = {
   aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
   deleteTransferredShareFilesAfterDownload: true
 };
-
-it('keeps detailed report collection off by default', () => {
-  render(<SettingsPanel initial={initial} onChange={() => {}} />);
-  expect(screen.getByRole('tab', { name: '常用' })).toHaveAttribute('aria-selected', 'true');
-  expect(screen.queryByRole('checkbox', { name: '启用调试报告' })).not.toBeInTheDocument();
-});
 
 it('changes the interface theme from common settings', async () => {
   const user = userEvent.setup();
@@ -47,7 +40,8 @@ it('separates settings into common, network, and advanced workspaces', async () 
   expect(screen.queryByRole('textbox', { name: '下载目录' })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole('tab', { name: '高级' }));
-  expect(screen.getByRole('checkbox', { name: '启用调试报告' })).not.toBeChecked();
+  expect(screen.queryByRole('checkbox', { name: '启用调试报告' })).not.toBeInTheDocument();
+  expect(screen.queryByText('隐私规则')).not.toBeInTheDocument();
   expect(screen.getByRole('checkbox', { name: '开启隐私下载' })).toBeVisible();
   expect(screen.queryByRole('checkbox', { name: '启用磁链元数据服务' })).not.toBeInTheDocument();
 });
@@ -88,15 +82,6 @@ it('applies the download directory immediately after native folder selection', a
 
   expect(screen.getByRole('textbox', { name: '下载目录' })).toHaveValue('E:\\Library');
   expect(onChange).toHaveBeenLastCalledWith({ ...initial, downloadDirectory: 'E:\\Library' });
-});
-
-it('allows users to explicitly enable debug reports in beta', async () => {
-  const user = userEvent.setup();
-  const onChange = vi.fn();
-  render(<SettingsPanel initial={initial} onChange={onChange} />);
-  await user.click(screen.getByRole('tab', { name: '高级' }));
-  await user.click(screen.getByRole('checkbox', { name: '启用调试报告' }));
-  expect(onChange).toHaveBeenCalledWith({ ...initial, debugReports: true });
 });
 
 it('offers an OpenAI-compatible AI analysis configuration in advanced settings', async () => {
@@ -185,6 +170,7 @@ it('uses compact aligned controls and consistent cards across settings tabs', as
     ]);
     const aria2Fieldset = screen.getByRole('spinbutton', { name: 'BT 分享率' }).closest('fieldset');
     expect(screen.getByRole('button', { name: '保存 aria2 设置' }).parentElement).toBe(aria2Fieldset);
+    expect(getComputedStyle(aria2Fieldset!).gridTemplateColumns).toBe('repeat(3,minmax(0,1fr)) auto');
     expect(Array.from(aria2Fieldset!.children).slice(-2)).toEqual([
       screen.getByRole('spinbutton', { name: 'BT 分享率' }).closest('label'),
       screen.getByRole('button', { name: '保存 aria2 设置' }),
@@ -252,7 +238,6 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   await user.click(screen.getByRole('button', { name: '保存代理设置' }));
 
   expect(onChange).toHaveBeenLastCalledWith({
-    debugReports: false,
     downloadDirectory: 'C:\\Users\\tester\\Downloads',
     launcherVisibility: 'always',
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },

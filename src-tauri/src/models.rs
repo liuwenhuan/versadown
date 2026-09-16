@@ -130,7 +130,6 @@ pub enum LauncherVisibility {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
-    pub debug_reports: bool,
     pub download_directory: String,
     pub launcher_visibility: LauncherVisibility,
     pub proxy: ProxySettings,
@@ -152,7 +151,6 @@ const fn default_delete_transferred_share_files_after_download() -> bool {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            debug_reports: false,
             download_directory: String::new(),
             launcher_visibility: LauncherVisibility::default(),
             proxy: ProxySettings::default(),

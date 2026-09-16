@@ -177,7 +177,6 @@ export interface Aria2Settings {
 }
 
 export interface AppSettings {
-  debugReports: boolean;
   downloadDirectory: string;
   launcherVisibility: LauncherVisibility;
   proxy: ProxySettings;

@@ -23,7 +23,6 @@ const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '',
 const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
 const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 };
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, configurePrivacyDownload }: SettingsPanelProps) {
-  const [debugReports, setDebugReports] = useState(initial.debugReports);
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
@@ -46,10 +45,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
+  useEffect(() => { setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
 
   function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
-    return { debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, deleteTransferredShareFilesAfterDownload, ...overrides };
+    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, deleteTransferredShareFilesAfterDownload, ...overrides };
   }
 
   function saveWithoutStatus(settings: AppSettings) {
@@ -62,11 +61,6 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     model: ai.model.trim(),
     apiKey: aiApiKey.trim()
   });
-
-  function updateDebugReports(enabled: boolean) {
-    setDebugReports(enabled);
-    saveWithoutStatus(currentSettings({ debugReports: enabled }));
-  }
 
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
     setSaved(false);
@@ -133,6 +127,23 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   function updateTransferredShareCleanup(enabled: boolean) {
     setDeleteTransferredShareFilesAfterDownload(enabled);
     saveWithoutStatus(currentSettings({ deleteTransferredShareFilesAfterDownload: enabled }));
+  }
+
+  async function updatePrivacyDownload(enabled: boolean) {
+    const previous = privacyDownloadEnabled;
+    setPrivacyDownloadEnabled(enabled);
+    setPrivacyStatus(null);
+    if (!privacyPasswordConfigured) return;
+    try {
+      const saved = await configurePrivacyDownload?.(enabled)
+        ?? currentSettings({ privacyDownloadEnabled: enabled, privacyPasswordConfigured: true });
+      setPrivacyDownloadEnabled(saved.privacyDownloadEnabled ?? enabled);
+      setPrivacyPasswordConfigured(saved.privacyPasswordConfigured ?? true);
+      setPrivacyStatus({ kind: 'success', message: enabled ? '隐私下载已开启' : '隐私下载已关闭' });
+    } catch (error) {
+      setPrivacyDownloadEnabled(previous);
+      setPrivacyStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async function savePrivacyDownload(event: FormEvent) {
@@ -245,7 +256,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
       </>}
       {activeTab === 'advanced' && <>
         <form className="privacy-download-settings proxy-settings" onSubmit={(event) => void savePrivacyDownload(event)}>
-          <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => { setPrivacyDownloadEnabled(event.target.checked); setPrivacyStatus(null); }} /></label>
+          <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => void updatePrivacyDownload(event.target.checked)} /></label>
           <fieldset className="privacy-password-fields" disabled={!privacyDownloadEnabled && !privacyPasswordConfigured}>
             {privacyPasswordConfigured && <label><span>输入旧密码</span><input aria-label="输入旧密码" type="password" autoComplete="current-password" value={privacyCurrentPassword} onChange={(event) => setPrivacyCurrentPassword(event.target.value)} /></label>}
             <label><span>设置新密码</span><input aria-label="设置新密码" type="password" autoComplete="new-password" placeholder={privacyPasswordConfigured ? '留空则保留现有密码' : '设置隐私模式密码'} value={privacyNewPassword} onChange={(event) => setPrivacyNewPassword(event.target.value)} /></label>
@@ -263,8 +274,6 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           </fieldset>
           <div className="settings-actions"><button className="secondary" type="button" onClick={() => void fetchAiModels()} disabled={aiBusy}>获取可用模型</button><button className="primary" type="submit" disabled={aiBusy}>{aiBusy ? '正在保存…' : '保存 AI 配置'}</button>{aiStatus && <span role="status" className={aiStatus.kind}>{aiStatus.message}</span>}</div>
         </form>
-        <label className="setting-row"><span><b>启用调试报告</b></span><input aria-label="启用调试报告" type="checkbox" checked={debugReports} onChange={(event) => updateDebugReports(event.target.checked)} /></label>
-        <section className="setting-safety"><b>隐私规则</b><ul><li>标准链接优先使用本地规则解析。</li><li>AI 仅接收复杂任务的脱敏文本，绝不接收凭据或本地文件。</li><li>代理账号配置仅由本机 aria2 使用。</li></ul></section>
       </>}
     </div>
   </section>;
