@@ -42,6 +42,27 @@ it('keeps the floating-display menu heading to one row after its helper copy is 
   expect(styles).toContain('.launcher-context-menu>header button{grid-column:2;grid-row:1;');
 });
 
+it.each(['clear-blue', 'mint', 'warm-gold', 'lavender', 'coral', 'deep-ocean', 'night-violet'])('keeps the launcher viewport transparent with the %s theme', (theme) => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  const themeCanvas = document.createElement('style');
+  themeCanvas.textContent = `:root[data-theme="${theme}"]{background:rgb(1,2,3)!important}`;
+  document.head.appendChild(themeCanvas);
+  document.head.appendChild(stylesheet);
+  document.documentElement.classList.add('launcher-window');
+  document.documentElement.dataset.theme = theme;
+
+  try {
+    expect(getComputedStyle(document.documentElement).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+    expect(getComputedStyle(document.body).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+  } finally {
+    document.documentElement.classList.remove('launcher-window');
+    delete document.documentElement.dataset.theme;
+    themeCanvas.remove();
+    stylesheet.remove();
+  }
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   state.onGlobalStat = undefined;

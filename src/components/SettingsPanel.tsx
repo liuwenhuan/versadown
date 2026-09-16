@@ -5,7 +5,7 @@ import { getThemeMode, setThemeMode, subscribeTheme, themeOptions, ThemeMode } f
 type SettingsTab = 'display' | 'network' | 'advanced';
 
 const tabs: ReadonlyArray<{ id: SettingsTab; label: string }> = [
-  { id: 'display', label: '显示' },
+  { id: 'display', label: '常用' },
   { id: 'network', label: '网络' },
   { id: 'advanced', label: '高级' }
 ];
@@ -28,7 +28,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
   const [ai, setAi] = useState<AiSettings>(initial.ai ?? disabledAiSettings);
-  const [magnetMetadata, setMagnetMetadata] = useState<MagnetMetadataSettings>(initial.magnetMetadata ?? defaultMagnetMetadataSettings);
+  const magnetMetadata: MagnetMetadataSettings = initial.magnetMetadata ?? defaultMagnetMetadataSettings;
   const [aria2, setAria2] = useState<Aria2Settings>(initial.aria2 ?? defaultAria2Settings);
   const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
   const [privacyDownloadEnabled, setPrivacyDownloadEnabled] = useState(initial.privacyDownloadEnabled ?? false);
@@ -37,7 +37,6 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [privacyNewPassword, setPrivacyNewPassword] = useState('');
   const [privacyPasswordConfirmation, setPrivacyPasswordConfirmation] = useState('');
   const [privacyStatus, setPrivacyStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
-  const [magnetMetadataSaved, setMagnetMetadataSaved] = useState(false);
   const [aria2Status, setAria2Status] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
@@ -47,7 +46,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setMagnetMetadata(initial.magnetMetadata ?? defaultMagnetMetadataSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
+  useEffect(() => { setDebugReports(initial.debugReports); setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
 
   function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
     return { debugReports, downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, deleteTransferredShareFilesAfterDownload, ...overrides };
@@ -167,14 +166,6 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     }
   }
 
-  function saveMagnetMetadata(event: FormEvent) {
-    event.preventDefault();
-    const savedMetadata = { ...magnetMetadata, baseUrl: magnetMetadata.baseUrl.trim() };
-    setMagnetMetadata(savedMetadata);
-    saveWithoutStatus(currentSettings({ magnetMetadata: savedMetadata }));
-    setMagnetMetadataSaved(true);
-  }
-
   function updateAria2<Key extends keyof Aria2Settings>(key: Key, value: Aria2Settings[Key]) {
     setAria2Status(null);
     setAria2((current) => ({ ...current, [key]: value }));
@@ -205,26 +196,54 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     <div className="settings-content">
       {activeTab === 'display' && <>
         <section className="theme-setting" aria-labelledby="theme-setting-title">
-          <header><span><b id="theme-setting-title">界面主题</b><small>点击色块立即切换并保存；跟随系统会自动使用薄荷青或深海蓝。</small></span></header>
+          <header><span><b id="theme-setting-title">界面主题</b></span></header>
           <div className="theme-picker" role="radiogroup" aria-label="界面主题">
             <button type="button" role="radio" aria-checked={themeMode === 'auto'} aria-label="跟随系统主题" className="theme-option theme-option-auto" onClick={() => updateThemeMode('auto')}>
               <span className="theme-preview" aria-hidden="true"><i /><i /><i /></span>
-              <span><b>跟随系统</b><small>自动</small></span>
+              <span><b>跟随系统</b></span>
               <i className="theme-check" aria-hidden="true">✓</i>
             </button>
             {themeOptions.map((theme) => <button key={theme.id} type="button" role="radio" aria-checked={themeMode === theme.id} aria-label={`${theme.label}主题`} className="theme-option" onClick={() => updateThemeMode(theme.id)}>
               <span className="theme-preview" aria-hidden="true">{theme.preview.map((color) => <i key={color} style={{ background: color }} />)}</span>
-              <span><b>{theme.label}</b><small>{theme.appearance === 'dark' ? '深色' : '浅色'}</small></span>
+              <span><b>{theme.label}</b></span>
               <i className="theme-check" aria-hidden="true">✓</i>
             </button>)}
           </div>
         </section>
         <form className="directory-settings" onSubmit={saveDownloadDirectory}>
-          <label><span><b>下载目录</b><small>后续新建任务默认保存到此目录。</small></span><input aria-label="下载目录" required value={downloadDirectory} placeholder="C:\\Users\\用户名\\Downloads" onChange={(event) => setDownloadDirectory(event.target.value)} onBlur={(event) => commitDownloadDirectory(event.target.value)} /></label>
+          <label><span><b>下载目录</b></span><input aria-label="下载目录" required value={downloadDirectory} placeholder="C:\\Users\\用户名\\Downloads" onChange={(event) => setDownloadDirectory(event.target.value)} onBlur={(event) => commitDownloadDirectory(event.target.value)} /></label>
           <button className="secondary" type="button" aria-label="浏览下载目录" onClick={() => void browseForDownloadDirectory()}>浏览</button>
         </form>
-        <label className="setting-row"><span><b>悬浮球显示</b><small>“关闭显示”后仍可在这里重新开启。</small></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
-        <label className="setting-row"><span><b>下载完成后自动删除转存文件</b><small>仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。</small></span><input aria-label="下载完成后自动删除转存文件" type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
+        <label className="setting-row"><span><b>悬浮球显示</b></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
+        <label className="setting-row"><span><b>下载完成后自动删除转存文件</b></span><input aria-label="下载完成后自动删除转存文件" type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
+      </>}
+      {activeTab === 'network' && <>
+      <form className="proxy-settings" onSubmit={saveProxy}>
+        <div className="setting-row"><span><b>下载代理服务器</b></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
+        <fieldset aria-disabled={!proxy.enabled}>
+          <label><span>协议</span><select aria-label="代理协议" disabled={!proxy.enabled} value={proxy.protocol} onChange={(event) => updateProxy('protocol', event.target.value as ProxyProtocol)}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
+          <label className="proxy-host"><span>服务器</span><input aria-label="代理服务器" disabled={!proxy.enabled} required value={proxy.host} placeholder="127.0.0.1" onChange={(event) => updateProxy('host', event.target.value)} /></label>
+          <label><span>端口</span><input aria-label="代理端口" disabled={!proxy.enabled} required type="number" min="1" max="65535" value={proxy.port} onChange={(event) => updateProxy('port', Number(event.target.value))} /></label>
+          <label><span>用户名（可选）</span><input aria-label="代理用户名" disabled={!proxy.enabled} value={proxy.username} autoComplete="off" onChange={(event) => updateProxy('username', event.target.value)} /></label>
+          <label><span>密码（可选）</span><input aria-label="代理密码" disabled={!proxy.enabled} type="password" value={proxy.password} autoComplete="new-password" onChange={(event) => updateProxy('password', event.target.value)} /></label>
+          <button className="primary settings-inline-save" type="submit">保存代理设置</button>
+        </fieldset>
+        {saved && <div className="settings-actions"><span role="status">已保存，后续新任务生效</span></div>}
+      </form>
+      <form className="proxy-settings aria2-settings" onSubmit={saveAria2}>
+        <div className="setting-row"><span><b>aria2 下载引擎</b></span></div>
+        <fieldset>
+          <label><span>RPC 端口</span><input aria-label="aria2 RPC 端口" required type="number" min="1024" max="65535" value={aria2.rpcPort} onChange={(event) => updateAria2('rpcPort', Number(event.target.value))} /></label>
+          <label className="aria2-token"><span>RPC Token</span><input aria-label="aria2 RPC Token" required type="password" autoComplete="new-password" value={aria2.rpcToken} onChange={(event) => updateAria2('rpcToken', event.target.value)} /></label>
+          <label><span>最大并行任务数</span><input aria-label="最大并行任务数" required type="number" min="1" max="64" value={aria2.maxConcurrentDownloads} onChange={(event) => updateAria2('maxConcurrentDownloads', Number(event.target.value))} /></label>
+          <label><span>单任务并发连接数</span><input aria-label="单任务并发连接数" required type="number" min="1" max="16" value={aria2.maxConnectionsPerServer} onChange={(event) => updateAria2('maxConnectionsPerServer', Number(event.target.value))} /></label>
+          <label className="aria2-seed-ratio"><span>BT 分享率</span><input aria-label="BT 分享率" required type="number" min="0.1" max="1000" step="0.1" value={aria2.btSeedRatio} onChange={(event) => updateAria2('btSeedRatio', Number(event.target.value))} /></label>
+          <button className="primary settings-inline-save" type="submit">保存 aria2 设置</button>
+        </fieldset>
+        {aria2Status && <div className="settings-actions"><span role="status" className={aria2Status.kind}>{aria2Status.message}</span></div>}
+      </form>
+      </>}
+      {activeTab === 'advanced' && <>
         <form className="privacy-download-settings proxy-settings" onSubmit={(event) => void savePrivacyDownload(event)}>
           <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => { setPrivacyDownloadEnabled(event.target.checked); setPrivacyStatus(null); }} /></label>
           <fieldset className="privacy-password-fields" disabled={!privacyDownloadEnabled && !privacyPasswordConfigured}>
@@ -235,41 +254,8 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           </fieldset>
           {privacyStatus && <div className="settings-actions"><span role="status" className={privacyStatus.kind}>{privacyStatus.message}</span></div>}
         </form>
-      </>}
-      {activeTab === 'network' && <>
-      <form className="proxy-settings" onSubmit={saveProxy}>
-        <div className="setting-row"><span><b>下载代理服务器</b><small>启用后，后续新建任务将携带代理参数启动 aria2。</small></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
-        <fieldset disabled={!proxy.enabled}>
-          <label><span>协议</span><select aria-label="代理协议" value={proxy.protocol} onChange={(event) => updateProxy('protocol', event.target.value as ProxyProtocol)}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
-          <label className="proxy-host"><span>服务器</span><input aria-label="代理服务器" required value={proxy.host} placeholder="127.0.0.1" onChange={(event) => updateProxy('host', event.target.value)} /></label>
-          <label><span>端口</span><input aria-label="代理端口" required type="number" min="1" max="65535" value={proxy.port} onChange={(event) => updateProxy('port', Number(event.target.value))} /></label>
-          <label><span>用户名（可选）</span><input aria-label="代理用户名" value={proxy.username} autoComplete="off" onChange={(event) => updateProxy('username', event.target.value)} /></label>
-          <label><span>密码（可选）</span><input aria-label="代理密码" type="password" value={proxy.password} autoComplete="new-password" onChange={(event) => updateProxy('password', event.target.value)} /></label>
-        </fieldset>
-        <div className="settings-actions"><button className="primary" type="submit">保存代理设置</button>{saved && <span role="status">已保存，后续新任务生效</span>}</div>
-      </form>
-      <form className="proxy-settings aria2-settings" onSubmit={saveAria2}>
-        <div className="setting-row"><span><b>aria2 下载引擎</b><small>端口与 Token 保存后会立即重启本机 aria2 并恢复任务；并行和分享规则同时生效。</small></span></div>
-        <fieldset>
-          <label><span>RPC 端口</span><input aria-label="aria2 RPC 端口" required type="number" min="1024" max="65535" value={aria2.rpcPort} onChange={(event) => updateAria2('rpcPort', Number(event.target.value))} /></label>
-          <label className="aria2-token"><span>RPC Token</span><input aria-label="aria2 RPC Token" required type="password" autoComplete="new-password" value={aria2.rpcToken} onChange={(event) => updateAria2('rpcToken', event.target.value)} /></label>
-          <label><span>最大并行任务数</span><input aria-label="最大并行任务数" required type="number" min="1" max="64" value={aria2.maxConcurrentDownloads} onChange={(event) => updateAria2('maxConcurrentDownloads', Number(event.target.value))} /></label>
-          <label><span>单任务并发连接数</span><input aria-label="单任务并发连接数" required type="number" min="1" max="16" value={aria2.maxConnectionsPerServer} onChange={(event) => updateAria2('maxConnectionsPerServer', Number(event.target.value))} /></label>
-          <label><span>BT 分享率</span><input aria-label="BT 分享率" required type="number" min="0.1" max="1000" step="0.1" value={aria2.btSeedRatio} onChange={(event) => updateAria2('btSeedRatio', Number(event.target.value))} /></label>
-        </fieldset>
-        <div className="settings-actions"><button className="primary" type="submit">保存 aria2 设置</button>{aria2Status && <span role="status" className={aria2Status.kind}>{aria2Status.message}</span>}</div>
-      </form>
-      </>}
-      {activeTab === 'advanced' && <>
-        <form className="ai-settings" onSubmit={saveMagnetMetadata}>
-          <label className="setting-row"><span><b>磁链元数据服务</b><small>磁链优先经此服务获取种子和文件清单；服务不可用时自动回退到本地 aria2 DHT。</small></span><input aria-label="启用磁链元数据服务" type="checkbox" checked={magnetMetadata.enabled} onChange={(event) => setMagnetMetadata((current) => ({ ...current, enabled: event.target.checked }))} /></label>
-          <fieldset disabled={!magnetMetadata.enabled}>
-            <label><span>服务地址</span><input aria-label="磁链元数据服务地址" required placeholder="http://peer.aigutta.com:8080" value={magnetMetadata.baseUrl} onChange={(event) => { setMagnetMetadataSaved(false); setMagnetMetadata((current) => ({ ...current, baseUrl: event.target.value })); }} /></label>
-          </fieldset>
-          <div className="settings-actions"><button className="primary" type="submit">保存磁链服务</button>{magnetMetadataSaved && <span role="status">已保存，后续磁链任务生效</span>}</div>
-        </form>
         <form className="ai-settings" onSubmit={(event) => void saveAiConfiguration(event)}>
-          <label className="setting-row"><span><b>启用 AI 智能分析</b><small>仅用于规则无法可靠解析的文本、网页和后处理说明。</small></span><input aria-label="启用 AI 智能分析" type="checkbox" checked={ai.enabled} onChange={(event) => setAi((current) => ({ ...current, enabled: event.target.checked }))} /></label>
+          <label className="setting-row"><span><b>启用 AI 智能分析</b></span><input aria-label="启用 AI 智能分析" type="checkbox" checked={ai.enabled} onChange={(event) => setAi((current) => ({ ...current, enabled: event.target.checked }))} /></label>
           <fieldset disabled={aiBusy}>
             <label><span>服务地址</span><input aria-label="AI 服务地址" required placeholder="https://api.openai.com/v1" value={ai.baseUrl} onChange={(event) => setAi((current) => ({ ...current, baseUrl: event.target.value }))} /></label>
             <label><span>API Key</span><input aria-label="AI API Key" type="password" autoComplete="new-password" placeholder={ai.apiKeyConfigured ? '已配置；留空则保持不变' : '输入服务 API Key'} value={aiApiKey} onChange={(event) => setAiApiKey(event.target.value)} /></label>
@@ -277,7 +263,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           </fieldset>
           <div className="settings-actions"><button className="secondary" type="button" onClick={() => void fetchAiModels()} disabled={aiBusy}>获取可用模型</button><button className="primary" type="submit" disabled={aiBusy}>{aiBusy ? '正在保存…' : '保存 AI 配置'}</button>{aiStatus && <span role="status" className={aiStatus.kind}>{aiStatus.message}</span>}</div>
         </form>
-        <label className="setting-row"><span><b>启用调试报告</b><small>记录脱敏的解析与后处理步骤，供高级用户排查。</small></span><input aria-label="启用调试报告" type="checkbox" checked={debugReports} onChange={(event) => updateDebugReports(event.target.checked)} /></label>
+        <label className="setting-row"><span><b>启用调试报告</b></span><input aria-label="启用调试报告" type="checkbox" checked={debugReports} onChange={(event) => updateDebugReports(event.target.checked)} /></label>
         <section className="setting-safety"><b>隐私规则</b><ul><li>标准链接优先使用本地规则解析。</li><li>AI 仅接收复杂任务的脱敏文本，绝不接收凭据或本地文件。</li><li>代理账号配置仅由本机 aria2 使用。</li></ul></section>
       </>}
     </div>

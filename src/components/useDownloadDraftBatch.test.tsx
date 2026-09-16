@@ -88,6 +88,49 @@ it('keeps access-code state on one item, retries it, and discards only unsubmitt
   expect(discard).toHaveBeenCalledTimes(1);
 });
 
+it('returns an access-code task to an empty code field when the entered code is rejected', async () => {
+  const first = deferred<ParseDownloadResult>();
+  const rejectedCode = deferred<ParseDownloadResult>();
+  const acceptedCode = deferred<ParseDownloadResult>();
+  const prepare = vi.fn()
+    .mockReturnValueOnce(first.promise)
+    .mockReturnValueOnce(rejectedCode.promise)
+    .mockReturnValueOnce(acceptedCode.promise);
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: 'https://pan.quark.cn/s/example', valid: true, kind: 'cloud_share' }],
+    prepare,
+    discard: vi.fn(),
+  }));
+
+  await act(async () => { await result.current.start('share'); });
+  await act(async () => {
+    first.resolve({ shareAccessCodeRequired: { provider: 'quark', message: '请输入分享码' } });
+    await first.promise;
+  });
+  await waitFor(() => expect(result.current.items[0].status).toBe('access_code_required'));
+
+  act(() => result.current.setAccessCode(result.current.items[0].id, 'wrong'));
+  act(() => result.current.retry(result.current.items[0].id));
+  await act(async () => {
+    rejectedCode.reject(new Error('夸克分享访问码错误'));
+    await rejectedCode.promise.catch(() => undefined);
+  });
+
+  await waitFor(() => expect(result.current.items[0]).toMatchObject({
+    status: 'access_code_required',
+    accessCode: '',
+    error: '夸克分享访问码错误',
+  }));
+
+  act(() => result.current.setAccessCode(result.current.items[0].id, 'correct'));
+  act(() => result.current.retry(result.current.items[0].id));
+  await act(async () => {
+    acceptedCode.resolve(ready('cloud-share://quark/plan/file'));
+    await acceptedCode.promise;
+  });
+  await waitFor(() => expect(result.current.items[0].status).toBe('ready'));
+});
+
 it('discards a draft that finishes parsing after the batch window was closed', async () => {
   const work = deferred<ParseDownloadResult>();
   const discard = vi.fn().mockResolvedValue(undefined);

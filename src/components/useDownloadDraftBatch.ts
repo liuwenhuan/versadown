@@ -24,7 +24,15 @@ interface Options {
   concurrency?: number;
 }
 
-type WorkItem = { id: string; generation: number };
+type WorkItem = { id: string; generation: number; accessCodeRetry?: boolean };
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+function isRejectedAccessCode(message: string): boolean {
+  return /(?:访问码|分享码).*(?:错误|不正确|缺失)|提取码.*(?:错误|不正确|失败|缺失)/.test(message);
+}
 
 function preparedReference(item: DownloadDraftItem): string | undefined {
   if (item.result?.confirmation) return item.result.confirmation.taskId;
@@ -95,9 +103,14 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
           }));
         })
         .catch(reason => {
-          replaceItems(current => current.map(candidate => candidate.id === work.id && candidate.generation === work.generation
-            ? { ...candidate, status: 'failed', error: reason instanceof Error ? reason.message : String(reason) }
-            : candidate));
+          const message = errorMessage(reason);
+          replaceItems(current => current.map(candidate => {
+            if (candidate.id !== work.id || candidate.generation !== work.generation) return candidate;
+            if (work.accessCodeRetry && isRejectedAccessCode(message)) {
+              return { ...candidate, status: 'access_code_required', accessCode: '', error: message };
+            }
+            return { ...candidate, status: 'failed', error: message };
+          }));
         })
         .finally(() => {
           activeRef.current -= 1;
@@ -135,7 +148,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     replaceItems(current => current.map(item => {
       if (item.id !== id) return item;
       const generation = item.generation + 1;
-      work = { id, generation };
+      work = { id, generation, accessCodeRetry: item.status === 'access_code_required' };
       return { ...item, status: 'parsing', error: undefined, result: undefined, generation };
     }));
     if (work) {
