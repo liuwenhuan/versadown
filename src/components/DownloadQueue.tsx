@@ -139,8 +139,13 @@ function taskSubtitle(task: QueueTask): string | undefined {
   if (task.error) return task.error;
   if (task.statusMessage) return task.statusMessage;
   const fileCount = task.children?.length ?? task.files?.length ?? 0;
-  if (task.kind === 'magnet') return `磁力任务 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
-  if (task.kind === 'torrent') return `BT 种子 · ${fileCount ? `${fileCount} 个文件` : '正在获取文件信息'}`;
+  const hasTransferData = task.progress > 0 || (task.completed_length ?? 0) > 0 || (task.total_length ?? 0) > 0;
+  if (task.kind === 'magnet') return fileCount
+    ? `磁力任务 · ${fileCount} 个文件`
+    : hasTransferData ? '磁力任务' : '磁力任务 · 正在获取文件信息';
+  if (task.kind === 'torrent') return fileCount
+    ? `BT 种子 · ${fileCount} 个文件`
+    : hasTransferData ? 'BT 种子' : 'BT 种子 · 正在获取文件信息';
   if (task.kind === 'ed2k') return 'ED2K 下载';
   if (task.kind === 'ftp') return 'FTP 下载';
   if (task.kind === 'hls') return 'HLS 流媒体下载';

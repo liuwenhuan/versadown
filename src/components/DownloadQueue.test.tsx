@@ -563,6 +563,22 @@ it('keeps magnet metadata on the compact transfer-metrics row', () => {
   expect(metadata.closest('.task-copy')).toBeNull();
 });
 
+it('does not show file-information loading after a magnet transfer has started', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'magnet-active', name: '正在下载的视频', kind: 'magnet', status: 'downloading', progress: 8,
+      completed_length: 42 * 1024 * 1024, total_length: 502.5 * 1024 * 1024,
+      download_speed: 410_500, connections: 2,
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('磁力任务')).toBeVisible();
+  expect(screen.queryByText(/正在获取文件信息/)).not.toBeInTheDocument();
+});
+
 it('keeps the live magnet metadata stage in the transfer-metrics row', () => {
   render(<DownloadQueue
     tasks={[{ id: 'magnet-stage', name: '磁力下载', source: 'magnet:?xt=urn:btih:0123456789ABCDEF', kind: 'magnet', status: 'downloading', progress: 0, speed: '0 B/s', connections: 0, statusMessage: '正在获取种子信息，暂无节点连接' }]}

@@ -65,7 +65,7 @@ function replaceExistingTask(tasks: readonly QueueTask[], snapshot: QueueTask): 
   const next = tasks.map((task) => {
     if (task.id === snapshot.id) {
       changed = true;
-      return snapshot;
+      return preserveKnownBitTorrentFiles(task, snapshot);
     }
     if (!task.children?.length) return task;
     const children = replaceExistingTask(task.children, snapshot);
@@ -74,6 +74,12 @@ function replaceExistingTask(tasks: readonly QueueTask[], snapshot: QueueTask): 
     return { ...task, children };
   });
   return changed ? next : tasks;
+}
+
+function preserveKnownBitTorrentFiles(current: QueueTask, snapshot: QueueTask): QueueTask {
+  const isBitTorrent = snapshot.kind === 'magnet' || snapshot.kind === 'torrent';
+  if (!isBitTorrent || snapshot.files?.length || !current.files?.length) return snapshot;
+  return { ...snapshot, files: current.files };
 }
 
 export function formatBytes(value: number | undefined): string {

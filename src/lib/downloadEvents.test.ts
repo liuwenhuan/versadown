@@ -20,6 +20,20 @@ describe('upsertTask', () => {
     expect(upsertTask([task()], task({ id: 'task-2', name: 'other.zip' }))).toHaveLength(2);
   });
 
+  it('keeps known torrent files when a live update temporarily omits them', () => {
+    const files = [{
+      index: 1,
+      path: 'D:\\Downloads\\movie.mkv',
+      length: 500 * 1024 * 1024,
+      completed_length: 42 * 1024 * 1024,
+      selected: true,
+    }];
+    const current = task({ kind: 'magnet', files, progress: 8 });
+    const snapshot = task({ kind: 'magnet', files: [], progress: 9, download_speed: 410_500 });
+
+    expect(upsertTask([current], snapshot)).toEqual([{ ...snapshot, files }]);
+  });
+
   it('does not insert an unrelated snapshot into a parent task children', () => {
     const folder = task({ id: 'folder', children: [task({ id: 'child' })] });
     const result = upsertTask([folder], task({ id: 'task-2' }));

@@ -366,7 +366,7 @@ it('filters batch resources by category and toggles the visible category selecti
     onClose={vi.fn()}
   />);
 
-  await user.click(await screen.findByRole('button', { name: '展开分类目录' }));
+  expect(await screen.findByRole('button', { name: '收起分类目录' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '压缩包' })).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '图片' }));
 
@@ -403,7 +403,7 @@ it('sorts expanded batch resources by name and size', async () => {
     onClose={vi.fn()}
   />);
 
-  await user.click(await screen.findByRole('button', { name: '展开排序目录' }));
+  expect(await screen.findByRole('button', { name: '收起排序目录' })).toBeVisible();
   expect(screen.queryByRole('group', { name: '文件排序' })).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '排序文件' }));
   expect(screen.getByRole('menu', { name: '文件排序' })).toBeVisible();
@@ -440,6 +440,127 @@ it('derives a directory task name when a share parser returns a generic title', 
 
   expect(await screen.findByText('旅行相册')).toBeVisible();
   expect(screen.queryByText('网盘分享文件')).not.toBeInTheDocument();
+});
+
+it('expands a multi-file directory task as soon as parsing completes', async () => {
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput="https://share.example.test/expanded"
+    onScan={async () => [{ input: 'https://share.example.test/expanded', valid: true, kind: 'cloud' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'expanded', title: '默认展开目录', requiresConfirmation: true, processing: [],
+      resources: [
+        { id: 'one', name: '默认展开目录/one.mp4', size: '10 MB', selected: true },
+        { id: 'two', name: '默认展开目录/two.jpg', size: '2 MB', selected: true },
+      ],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={vi.fn()}
+    onClose={vi.fn()}
+  />);
+
+  expect(await screen.findByRole('button', { name: '收起默认展开目录' })).toBeVisible();
+  expect(screen.getByText('one.mp4')).toBeVisible();
+  expect(screen.getByText('two.jpg')).toBeVisible();
+});
+
+it('uses a shorter batch dialog and vertically centers the post-processing arrow', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<NewDownloadDialog
+      open
+      placement="modal"
+      initialInput="https://example.test/file.zip"
+      onScan={async () => [{ input: 'https://example.test/file.zip', valid: true, kind: 'direct' }]}
+      onParse={async () => ({ confirmation: {
+        taskId: 'file', title: 'file.zip', requiresConfirmation: true, processing: [], resources: [],
+      } })}
+      onDiscardPrepared={vi.fn()}
+      onSubmitBatch={vi.fn()}
+      onClose={vi.fn()}
+    />);
+
+    await screen.findByText('file.zip');
+    const dialog = screen.getByRole('dialog', { name: '新建下载' });
+    expect(getComputedStyle(dialog).height).toContain('520px');
+    const disclosure = screen.getByRole('button', { name: '解压密码和后处理' });
+    expect(getComputedStyle(disclosure).display).toBe('flex');
+    expect(getComputedStyle(disclosure).alignItems).toBe('center');
+    const arrow = disclosure.querySelector('svg');
+    expect(arrow).not.toBeNull();
+    expect(getComputedStyle(arrow!).display).toBe('block');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('returns to a structured manual input after removing the final draft', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const user = userEvent.setup();
+    render(<NewDownloadDialog
+      open
+      placement="modal"
+      initialInput="https://example.test/remove-me.zip"
+      onScan={async input => [{ input, valid: true, kind: 'direct' }]}
+      onParse={async () => ({ confirmation: {
+        taskId: 'remove-me', title: 'remove-me.zip', requiresConfirmation: true, processing: [], resources: [],
+      } })}
+      onDiscardPrepared={vi.fn().mockResolvedValue(undefined)}
+      onSubmitBatch={vi.fn()}
+      onClose={vi.fn()}
+    />);
+
+    await user.click(await screen.findByRole('button', { name: '移除 remove-me.zip' }));
+    const input = screen.getByRole('textbox', { name: '下载内容' });
+    expect(input).toBeVisible();
+    expect(screen.queryByRole('region', { name: '待新建任务' })).not.toBeInTheDocument();
+    const form = input.closest('form');
+    expect(form).not.toBeNull();
+    expect(getComputedStyle(form!)).toMatchObject({ display: 'flex', flexDirection: 'column' });
+    expect(getComputedStyle(input).flexGrow).toBe('1');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('uses matching button text and action-column alignment for retry controls', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<NewDownloadDialog
+      open
+      placement="modal"
+      initialInput={'https://example.test/failed\nhttps://example.test/code'}
+      onScan={async () => [
+        { input: 'https://example.test/failed', valid: true, kind: 'cloud_share' },
+        { input: 'https://example.test/code', valid: true, kind: 'cloud_share' },
+      ]}
+      onParse={async input => {
+        if (input.endsWith('/failed')) throw new Error('网盘请求失败');
+        return { shareAccessCodeRequired: { provider: 'aliyun', message: '此分享需要访问码，请输入后重新解析' } };
+      }}
+      onDiscardPrepared={vi.fn()}
+      onSubmitBatch={vi.fn()}
+      onClose={vi.fn()}
+    />);
+
+    const retry = await screen.findByRole('button', { name: '重试' });
+    const reparse = screen.getByRole('button', { name: '重新解析' });
+    expect(getComputedStyle(reparse).fontSize).toBe(getComputedStyle(retry).fontSize);
+    const accessCodeRow = reparse.closest('.batch-access-code');
+    expect(accessCodeRow).not.toBeNull();
+    expect(getComputedStyle(accessCodeRow!).display).toBe('grid');
+    expect(getComputedStyle(reparse).gridColumn).toBe('3');
+  } finally {
+    stylesheet.remove();
+  }
 });
 
 it('renders expanded resources as a compact tree table with aligned type and size columns', async () => {
@@ -541,7 +662,7 @@ it('shows files from an existing multi-file magnet instead of a fallback single 
   />);
 
   expect(await screen.findByText('已存在任务 · 2 个文件')).toBeVisible();
-  await user.click(screen.getByRole('button', { name: '展开合集' }));
+  expect(screen.getByRole('button', { name: '收起合集' })).toBeVisible();
   expect(screen.getByText('episode-01.mp4')).toBeVisible();
   expect(screen.getByText('episode-02.mp4')).toBeVisible();
   expect(screen.queryByText('1 项可下载')).not.toBeInTheDocument();
@@ -593,7 +714,7 @@ it('refreshes a pending magnet into its actual file list', async () => {
 
   expect(await screen.findByText('2 项可下载')).toBeVisible();
   expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
-  await user.click(screen.getByRole('button', { name: '展开待获取的合集' }));
+  expect(screen.getByRole('button', { name: '收起待获取的合集' })).toBeVisible();
   expect(screen.getByText('episode-01.mp4')).toBeVisible();
   expect(screen.getByText('episode-02.mp4')).toBeVisible();
 });

@@ -38,6 +38,13 @@ function resultReference(result: ParseDownloadResult): string | undefined {
   return undefined;
 }
 
+function resultResourceCount(result: ParseDownloadResult): number {
+  return result.confirmation?.resources.length
+    ?? result.task?.files?.length
+    ?? result.duplicate?.task.files?.length
+    ?? 0;
+}
+
 export function selectedResourceIds(item: DownloadDraftItem): string[] {
   return item.result?.confirmation?.resources
     .filter(resource => resource.selected)
@@ -78,7 +85,13 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
             if (result.shareAccessCodeRequired) {
               return { ...candidate, result, status: 'access_code_required', error: result.shareAccessCodeRequired.message };
             }
-            return { ...candidate, result, status: 'ready', error: undefined };
+            return {
+              ...candidate,
+              result,
+              status: 'ready',
+              error: undefined,
+              expanded: candidate.expanded || resultResourceCount(result) > 1,
+            };
           }));
         })
         .catch(reason => {
@@ -172,6 +185,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
       if (item.id !== id || !item.result?.confirmation) return item;
       return {
         ...item,
+        expanded: item.expanded || resources.length > 1,
         result: {
           confirmation: {
             ...item.result.confirmation,
