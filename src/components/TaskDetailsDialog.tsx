@@ -17,7 +17,7 @@ export function TaskDetailsDialog({ task, onClose }: TaskDetailsDialogProps) {
     return () => document.removeEventListener('keydown', closeForEscape);
   }, [onClose]);
 
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
     <section className="task-details-dialog" role="dialog" aria-modal="true" aria-label="任务详情">
       <button ref={closeRef} className="dialog-close" aria-label="关闭任务详情" onClick={onClose}>×</button>
       <TaskDetails task={task} />

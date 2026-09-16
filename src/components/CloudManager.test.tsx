@@ -1309,6 +1309,8 @@ it('shows concise file details in a separate dialog', async () => {
   expect(dialog).toHaveTextContent('2025-06-07 08:09:10');
   expect(dialog).not.toHaveTextContent('file-1');
   expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
+  fireEvent.mouseDown(document.querySelector('.cloud-confirm-backdrop')!);
+  expect(screen.getByRole('dialog', { name: '文件详情' })).toBeVisible();
   await user.tab();
   expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
   await user.click(screen.getByRole('button', { name: '关闭文件详情' }));

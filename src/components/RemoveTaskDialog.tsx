@@ -29,7 +29,7 @@ export function RemoveTaskDialog({ taskNames, onConfirm, onClose }: { taskNames:
     document.addEventListener('keydown', closeForEscape);
     return () => document.removeEventListener('keydown', closeForEscape);
   }, [onClose]);
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
     <section className="remove-task-dialog" role="dialog" aria-modal="true" aria-labelledby="remove-task-title">
       <div className="dialog-warning" aria-hidden="true">!</div>
       <div><h2 id="remove-task-title">彻底删除任务</h2><p>确定彻底删除{subject}吗？</p><label className="delete-files-option"><input aria-label="同时删除下载文件" type="checkbox" checked={deleteFiles} onChange={(event) => { setDeleteFiles(event.target.checked); saveDeleteFilesPreference(event.target.checked); }} /> <span>同时删除下载文件</span></label><small>任务将从回收站永久移除；勾选后会一并删除记录中的本地下载文件。</small></div>

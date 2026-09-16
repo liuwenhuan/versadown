@@ -23,11 +23,14 @@ it('shows task details in an independent dialog and closes from its explicit clo
   expect(onClose).toHaveBeenCalledOnce();
 });
 
-it('closes task details with Escape or a backdrop click', () => {
+it('keeps task details open when its backdrop is clicked', () => {
   const onClose = vi.fn();
   render(<TaskDetailsDialog task={task} onClose={onClose} />);
 
-  fireEvent.keyDown(document, { key: 'Escape' });
   fireEvent.mouseDown(screen.getByRole('presentation'));
-  expect(onClose).toHaveBeenCalledTimes(2);
+  expect(onClose).not.toHaveBeenCalled();
+  expect(screen.getByRole('dialog', { name: '任务详情' })).toBeVisible();
+
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(onClose).toHaveBeenCalledOnce();
 });

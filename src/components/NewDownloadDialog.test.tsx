@@ -106,20 +106,20 @@ it('requires confirmation for a standalone non-direct candidate', async () => {
   expect(screen.getByRole('button', { name: '确认并完成' })).toBeEnabled();
 });
 
-it('closes the modal through Escape, its backdrop, and its modal close button', async () => {
+it('keeps the new-download modal open when its backdrop is clicked', async () => {
   const user = userEvent.setup();
   const onClose = vi.fn();
   render(<NewDownloadDialog open placement="modal" onParse={vi.fn()} onClose={onClose} />);
 
   expect(screen.getByRole('button', { name: '关闭新建下载' })).toBeVisible();
-  await user.keyboard('{Escape}');
-  expect(onClose).toHaveBeenCalledTimes(1);
-
   await user.click(screen.getByTestId('new-download-backdrop'));
-  expect(onClose).toHaveBeenCalledTimes(2);
+  expect(onClose).not.toHaveBeenCalled();
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
 
+  await user.keyboard('{Escape}');
+  expect(onClose).toHaveBeenCalledOnce();
   await user.click(screen.getByRole('button', { name: '关闭新建下载' }));
-  expect(onClose).toHaveBeenCalledTimes(3);
+  expect(onClose).toHaveBeenCalledTimes(2);
 });
 
 it('waits for parsing before closing and prevents duplicate submissions', async () => {

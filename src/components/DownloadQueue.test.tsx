@@ -369,7 +369,7 @@ it('does not turn non-BT file metadata into a file-selection tree', () => {
   expect(onFileSelection).not.toHaveBeenCalled();
 });
 
-it('keeps completed BT file lists collapsed while completed cloud folders remain inspectable', async () => {
+it('keeps completed multi-file BT tasks inspectable alongside completed cloud folders', async () => {
   const user = userEvent.setup();
   render(<DownloadQueue
     tasks={[
@@ -390,8 +390,10 @@ it('keeps completed BT file lists collapsed while completed cloud folders remain
     onCommand={() => {}}
   />);
 
-  expect(screen.queryByRole('button', { name: '展开 完成的 BT 合集' })).not.toBeInTheDocument();
   expect(screen.queryByText('one.mkv')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '展开 完成的 BT 合集' }));
+  expect(screen.getByText('one.mkv')).toBeVisible();
+  expect(screen.getByText('two.mkv')).toBeVisible();
   await user.click(screen.getByRole('button', { name: '展开 完成的云盘目录' }));
   expect(screen.getByText('archived.mkv')).toBeVisible();
 });

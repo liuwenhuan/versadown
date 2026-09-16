@@ -49,7 +49,7 @@ export function DuplicateDownloadDialog({ task, state, onOpenDirectory, onResolv
     else onResolve(state === 'resume_available' ? 'resume' : 'overwrite');
   };
 
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
     <section className="duplicate-download-dialog" role="dialog" aria-modal="true" aria-labelledby="duplicate-download-title">
       <div className="dialog-warning" aria-hidden="true">!</div>
       <div>

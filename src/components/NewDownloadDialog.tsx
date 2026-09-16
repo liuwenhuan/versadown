@@ -431,7 +431,7 @@ function BatchNewDownloadDialog({
     </footer>
   </aside>;
   if (placement !== 'modal') return dialog;
-  return <div className="modal-backdrop new-download-backdrop" data-testid="new-download-backdrop" onClick={event => { if (event.target === event.currentTarget) void requestClose(); }}>{dialog}</div>;
+  return <div className="modal-backdrop new-download-backdrop" data-testid="new-download-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) event.preventDefault(); }}>{dialog}</div>;
 }
 
 function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan, onClose, onOpenTaskList, initialInput }: NewDownloadDialogProps) {
@@ -623,5 +623,5 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
   );
 
   if (placement === 'launcher' || placement === 'header') return dialog;
-  return <div className="modal-backdrop new-download-backdrop" data-testid="new-download-backdrop" onClick={(event) => { if (event.target === event.currentTarget) requestClose(); }}>{dialog}</div>;
+  return <div className="modal-backdrop new-download-backdrop" data-testid="new-download-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>{dialog}</div>;
 }

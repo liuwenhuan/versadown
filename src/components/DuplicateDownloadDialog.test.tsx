@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, vi } from 'vitest';
@@ -52,6 +52,24 @@ it('only exposes overwrite after explaining that a safe resume is unavailable', 
 
   expect(screen.getByText(/无法安全续传/)).toBeVisible();
   expect(screen.getByRole('button', { name: '覆盖并重新下载' })).toBeVisible();
+});
+
+it('keeps duplicate-download resolution open when its backdrop is clicked', () => {
+  const onClose = vi.fn();
+  render(
+    <DuplicateDownloadDialog
+      task={{ id: 'task-1', name: 'fixture.mkv', kind: 'file', status: 'failed', progress: 28 }}
+      state="overwrite_required"
+      onOpenDirectory={() => {}}
+      onResolve={() => {}}
+      onRestartMissing={() => {}}
+      onClose={onClose}
+    />,
+  );
+
+  fireEvent.mouseDown(screen.getByRole('presentation'));
+  expect(onClose).not.toHaveBeenCalled();
+  expect(screen.getByRole('dialog', { name: '检测到重复下载' })).toBeVisible();
 });
 
 it('keeps the existing-task primary action colored while hovered', () => {

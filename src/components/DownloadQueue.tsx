@@ -524,7 +524,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         })) : undefined;
         const hasChildren = Boolean(taskChildren?.length)
           && (task.kind === 'folder' || taskChildren!.length > 1)
-          && (!isCompleted || (task.kind === 'folder' && hasPersistentChildren));
+          && (!isCompleted || (task.kind === 'folder' && hasPersistentChildren) || isBtFileTree);
         const childRoot = taskChildren ? sharedChildRoot(taskChildren) : undefined;
         const taskName = displayTaskName(task);
         const isPaused = task.status === 'paused';
