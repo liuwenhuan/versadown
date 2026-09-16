@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager};
 
 mod ai;
 pub mod aria2;
+mod bandwidth;
 pub mod cloud;
 mod cloud_directory_events;
 mod commands;
@@ -287,6 +288,7 @@ pub fn run() {
             settings.aria2.validate().map_err(std::io::Error::other)?;
             std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
             let launcher_visibility = settings.launcher_visibility;
+            let cloud_upload_limit = settings.cloud_upload_limit;
             let destination = std::path::PathBuf::from(&settings.download_directory);
             std::fs::create_dir_all(&destination)?;
             let launch_config = Aria2LaunchConfig {
@@ -312,6 +314,7 @@ pub fn run() {
                 events.clone(),
                 events,
             ));
+            runtime.set_cloud_upload_limit(cloud_upload_limit);
             app.manage(commands::AppState {
                 store,
                 runtime: std::sync::Arc::clone(&runtime),

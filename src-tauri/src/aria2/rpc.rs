@@ -62,6 +62,9 @@ pub trait Aria2Api: Send + Sync {
     async fn remove_download_result(&self, gid: &str) -> Result<String, Aria2Error> {
         self.force_remove(gid).await
     }
+    async fn change_global_option(&self, _options: Aria2Options) -> Result<String, Aria2Error> {
+        Err(Aria2Error::Transport)
+    }
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error>;
     async fn get_option(&self, gid: &str) -> Result<Aria2Options, Aria2Error>;
     async fn save_session(&self) -> Result<String, Aria2Error>;
@@ -258,6 +261,10 @@ impl Aria2Api for Aria2RpcClient {
     }
     async fn remove_download_result(&self, gid: &str) -> Result<String, Aria2Error> {
         self.call("aria2.removeDownloadResult", vec![json!(gid)])
+            .await
+    }
+    async fn change_global_option(&self, options: Aria2Options) -> Result<String, Aria2Error> {
+        self.call("aria2.changeGlobalOption", vec![json!(options)])
             .await
     }
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error> {

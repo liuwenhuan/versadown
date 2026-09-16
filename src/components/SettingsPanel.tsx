@@ -21,14 +21,37 @@ interface SettingsPanelProps {
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
 const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
-const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 };
+const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 };
+const mebibyte = 1024 * 1024;
+type RateLimitInput = 'overallDownloadLimit' | 'p2pUploadLimit' | 'cloudUploadLimit';
+
+function formatRateLimit(bytes: number) {
+  return (bytes / mebibyte).toFixed(1);
+}
+
+function toRateLimitBytes(value: string) {
+  if (!value || !/^\d*(?:\.\d?)?$/.test(value)) return null;
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * mebibyte) : null;
+}
+
+function createRateLimitInputs(aria2: Aria2Settings, cloudUploadLimit: number) {
+  return {
+    overallDownloadLimit: formatRateLimit(aria2.overallDownloadLimit),
+    p2pUploadLimit: formatRateLimit(aria2.p2pUploadLimit),
+    cloudUploadLimit: formatRateLimit(cloudUploadLimit)
+  };
+}
+
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, configurePrivacyDownload }: SettingsPanelProps) {
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
   const [ai, setAi] = useState<AiSettings>(initial.ai ?? disabledAiSettings);
   const magnetMetadata: MagnetMetadataSettings = initial.magnetMetadata ?? defaultMagnetMetadataSettings;
-  const [aria2, setAria2] = useState<Aria2Settings>(initial.aria2 ?? defaultAria2Settings);
+  const [aria2, setAria2] = useState<Aria2Settings>({ ...defaultAria2Settings, ...initial.aria2 });
+  const [cloudUploadLimit, setCloudUploadLimit] = useState(initial.cloudUploadLimit ?? 0);
+  const [rateLimitInputs, setRateLimitInputs] = useState(() => createRateLimitInputs({ ...defaultAria2Settings, ...initial.aria2 }, initial.cloudUploadLimit ?? 0));
   const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
   const [privacyDownloadEnabled, setPrivacyDownloadEnabled] = useState(initial.privacyDownloadEnabled ?? false);
   const [privacyPasswordConfigured, setPrivacyPasswordConfigured] = useState(initial.privacyPasswordConfigured ?? false);
@@ -37,6 +60,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [privacyPasswordConfirmation, setPrivacyPasswordConfirmation] = useState('');
   const [privacyStatus, setPrivacyStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aria2Status, setAria2Status] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [rateLimitStatus, setRateLimitStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
@@ -45,10 +69,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(initial.aria2 ?? defaultAria2Settings); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
+  useEffect(() => { const nextAria2 = { ...defaultAria2Settings, ...initial.aria2 }; const nextCloudUploadLimit = initial.cloudUploadLimit ?? 0; setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(nextAria2); setCloudUploadLimit(nextCloudUploadLimit); setRateLimitInputs(createRateLimitInputs(nextAria2, nextCloudUploadLimit)); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
 
   function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
-    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, deleteTransferredShareFilesAfterDownload, ...overrides };
+    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, ...(cloudUploadLimit || initial.cloudUploadLimit !== undefined ? { cloudUploadLimit } : {}), deleteTransferredShareFilesAfterDownload, ...overrides };
   }
 
   function saveWithoutStatus(settings: AppSettings) {
@@ -195,6 +219,45 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     }
   }
 
+  function updateRateLimitInput(key: RateLimitInput, value: string) {
+    if (!/^\d*(?:\.\d?)?$/.test(value)) return;
+    setRateLimitStatus(null);
+    setRateLimitInputs((current) => ({ ...current, [key]: value }));
+    const bytes = toRateLimitBytes(value);
+    if (bytes === null) return;
+    if (key === 'cloudUploadLimit') {
+      setCloudUploadLimit(bytes);
+      return;
+    }
+    setAria2((current) => ({ ...current, [key]: bytes }));
+  }
+
+  function normalizeRateLimitInput(key: RateLimitInput) {
+    const bytes = toRateLimitBytes(rateLimitInputs[key]) ?? (key === 'cloudUploadLimit' ? cloudUploadLimit : aria2[key]);
+    setRateLimitInputs((current) => ({ ...current, [key]: formatRateLimit(bytes) }));
+  }
+
+  async function saveRateLimits(event: FormEvent) {
+    event.preventDefault();
+    const savedAria2 = {
+      ...aria2,
+      rpcToken: aria2.rpcToken.trim(),
+      overallDownloadLimit: toRateLimitBytes(rateLimitInputs.overallDownloadLimit) ?? aria2.overallDownloadLimit,
+      p2pUploadLimit: toRateLimitBytes(rateLimitInputs.p2pUploadLimit) ?? aria2.p2pUploadLimit
+    };
+    const savedCloudUploadLimit = toRateLimitBytes(rateLimitInputs.cloudUploadLimit) ?? cloudUploadLimit;
+    setAria2(savedAria2);
+    setCloudUploadLimit(savedCloudUploadLimit);
+    setRateLimitInputs(createRateLimitInputs(savedAria2, savedCloudUploadLimit));
+    setRateLimitStatus(null);
+    try {
+      await onChange(currentSettings({ aria2: savedAria2, cloudUploadLimit: savedCloudUploadLimit }));
+      setRateLimitStatus({ kind: 'success', message: '已保存并立即应用' });
+    } catch (error) {
+      setRateLimitStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function browseForDownloadDirectory() {
     const selected = await browseDirectory?.(downloadDirectory);
     if (selected) commitDownloadDirectory(selected);
@@ -230,7 +293,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
       </>}
       {activeTab === 'network' && <>
       <form className="proxy-settings" onSubmit={saveProxy}>
-        <div className="setting-row"><span><b>下载代理服务器</b></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
+        <div className="setting-row"><span><b>启用下载代理服务器</b></span><input aria-label="启用下载代理" type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
         <fieldset aria-disabled={!proxy.enabled}>
           <label><span>协议</span><select aria-label="代理协议" disabled={!proxy.enabled} value={proxy.protocol} onChange={(event) => updateProxy('protocol', event.target.value as ProxyProtocol)}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
           <label className="proxy-host"><span>服务器</span><input aria-label="代理服务器" disabled={!proxy.enabled} required value={proxy.host} placeholder="127.0.0.1" onChange={(event) => updateProxy('host', event.target.value)} /></label>
@@ -240,6 +303,16 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           <button className="primary settings-inline-save" type="submit">保存代理设置</button>
         </fieldset>
         {saved && <div className="settings-actions"><span role="status">已保存，后续新任务生效</span></div>}
+      </form>
+      <form className="proxy-settings rate-limit-settings" onSubmit={saveRateLimits}>
+        <div className="setting-row"><span><b>限速设置</b></span></div>
+        <fieldset>
+          <label><span>整体下载限速（MiB/s）</span><input aria-label="整体下载限速" type="number" min="0" step="0.1" required value={rateLimitInputs.overallDownloadLimit} onChange={(event) => updateRateLimitInput('overallDownloadLimit', event.target.value)} onBlur={() => normalizeRateLimitInput('overallDownloadLimit')} /></label>
+          <label><span>P2P 上传限速（MiB/s）</span><input aria-label="P2P 上传限速" type="number" min="0" step="0.1" required value={rateLimitInputs.p2pUploadLimit} onChange={(event) => updateRateLimitInput('p2pUploadLimit', event.target.value)} onBlur={() => normalizeRateLimitInput('p2pUploadLimit')} /></label>
+          <label><span>网盘上传限速（MiB/s）</span><input aria-label="网盘上传限速" type="number" min="0" step="0.1" required value={rateLimitInputs.cloudUploadLimit} onChange={(event) => updateRateLimitInput('cloudUploadLimit', event.target.value)} onBlur={() => normalizeRateLimitInput('cloudUploadLimit')} /></label>
+          <button className="primary settings-inline-save" type="submit">保存限速设置</button>
+        </fieldset>
+        {rateLimitStatus && <div className="settings-actions"><span role="status" className={rateLimitStatus.kind}>{rateLimitStatus.message}</span></div>}
       </form>
       <form className="proxy-settings aria2-settings" onSubmit={saveAria2}>
         <div className="setting-row"><span><b>aria2 下载引擎</b></span></div>

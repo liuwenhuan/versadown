@@ -3507,6 +3507,9 @@ pub async fn update_settings(
             .reconfigure_aria2_settings(settings.aria2.clone())
             .await?;
     }
+    state
+        .runtime
+        .set_cloud_upload_limit(settings.cloud_upload_limit);
     persist_settings(&state.settings_path, &settings)?;
     *state
         .settings

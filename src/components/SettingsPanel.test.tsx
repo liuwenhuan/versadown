@@ -11,8 +11,9 @@ const initial = {
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
-  deleteTransferredShareFilesAfterDownload: true
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+  deleteTransferredShareFilesAfterDownload: true,
+  cloudUploadLimit: 0
 };
 
 it('changes the interface theme from common settings', async () => {
@@ -44,6 +45,65 @@ it('separates settings into common, network, and advanced workspaces', async () 
   expect(screen.queryByText('隐私规则')).not.toBeInTheDocument();
   expect(screen.getByRole('checkbox', { name: '开启隐私下载' })).toBeVisible();
   expect(screen.queryByRole('checkbox', { name: '启用磁链元数据服务' })).not.toBeInTheDocument();
+});
+
+it('keeps proxy, traffic caps, and aria2 configuration in separate network settings groups', async () => {
+  const user = userEvent.setup();
+  render(<SettingsPanel initial={initial} onChange={() => {}} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  expect(screen.getByText('启用下载代理服务器')).toBeVisible();
+  const rateLimitForm = screen.getByText('限速设置').closest('form');
+  const aria2Form = screen.getByText('aria2 下载引擎').closest('form');
+  const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速' });
+  const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速' });
+  const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速' });
+  const rateLimitFieldset = overallDownloadLimit.closest('fieldset');
+
+  expect(rateLimitForm).toContainElement(overallDownloadLimit);
+  expect(rateLimitForm).toContainElement(p2pUploadLimit);
+  expect(rateLimitForm).toContainElement(cloudUploadLimit);
+  expect(p2pUploadLimit.closest('fieldset')).toBe(rateLimitFieldset);
+  expect(cloudUploadLimit.closest('fieldset')).toBe(rateLimitFieldset);
+  expect(screen.getByRole('button', { name: '保存限速设置' }).parentElement).toBe(rateLimitFieldset);
+  expect(aria2Form).not.toContainElement(overallDownloadLimit);
+  expect(aria2Form).not.toContainElement(p2pUploadLimit);
+  expect(aria2Form).not.toContainElement(cloudUploadLimit);
+});
+
+it('keeps rate limits and their save control inline while accepting one decimal place', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<SettingsPanel initial={initial} onChange={onChange} />);
+    await user.click(screen.getByRole('tab', { name: '网络' }));
+
+    const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速' });
+    const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速' });
+    const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速' });
+    const rateLimitFieldset = overallDownloadLimit.closest('fieldset')!;
+    expect(screen.getByRole('button', { name: '保存限速设置' }).parentElement).toBe(rateLimitFieldset);
+    expect(getComputedStyle(rateLimitFieldset).gridTemplateColumns).toBe('repeat(3, minmax(0, 1fr)) auto');
+    expect(overallDownloadLimit).toHaveAttribute('step', '0.1');
+    expect(p2pUploadLimit.value).toBe('1.0');
+    expect(cloudUploadLimit.value).toBe('0.0');
+
+    await user.clear(overallDownloadLimit);
+    await user.type(overallDownloadLimit, '2.56');
+    expect(overallDownloadLimit.value).toBe('2.5');
+    await user.click(screen.getByRole('button', { name: '保存限速设置' }));
+
+    expect(onChange).toHaveBeenLastCalledWith({
+      ...initial,
+      aria2: { ...initial.aria2, overallDownloadLimit: 2_621_440 },
+      cloudUploadLimit: 0
+    });
+  } finally {
+    stylesheet.remove();
+  }
 });
 
 it('removes helper descriptions except for the privacy download explanation', async () => {
@@ -243,12 +303,13 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
-    deleteTransferredShareFilesAfterDownload: true
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+    deleteTransferredShareFilesAfterDownload: true,
+    cloudUploadLimit: 0
   });
 });
 
-it('saves aria2 RPC and transfer limits from the network settings', async () => {
+it('saves aria2 RPC and engine settings from the network settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} />);
@@ -272,8 +333,35 @@ it('saves aria2 RPC and transfer limits from the network settings', async () => 
       rpcToken: 'local-token',
       maxConcurrentDownloads: 3,
       maxConnectionsPerServer: 4,
-      btSeedRatio: 1.5
+      btSeedRatio: 1.5,
+      overallDownloadLimit: 0,
+      p2pUploadLimit: 1048576
     }
+  });
+});
+
+it('saves the standalone rate limits in bytes per second', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={initial} onChange={onChange} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  await user.clear(screen.getByRole('spinbutton', { name: '整体下载限速' }));
+  await user.type(screen.getByRole('spinbutton', { name: '整体下载限速' }), '2.5');
+  await user.clear(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }));
+  await user.type(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }), '1.5');
+  await user.clear(screen.getByRole('spinbutton', { name: '网盘上传限速' }));
+  await user.type(screen.getByRole('spinbutton', { name: '网盘上传限速' }), '3');
+  await user.click(screen.getByRole('button', { name: '保存限速设置' }));
+
+  expect(onChange).toHaveBeenLastCalledWith({
+    ...initial,
+    aria2: {
+      ...initial.aria2,
+      overallDownloadLimit: 2_621_440,
+      p2pUploadLimit: 1_572_864
+    },
+    cloudUploadLimit: 3_145_728
   });
 });
 

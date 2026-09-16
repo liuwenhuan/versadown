@@ -551,6 +551,7 @@ async fn upload_selected_paths(
     paths: Vec<PathBuf>,
     tracker: UploadProgressTracker,
     control: UploadControl,
+    rate_limiter: Arc<crate::bandwidth::BandwidthLimiter>,
 ) -> Result<CloudUploadOutcome, QuarkError> {
     let scan_control = control.clone();
     let scan_tracker = tracker.clone();
@@ -584,7 +585,9 @@ async fn upload_selected_paths(
         descriptor.max_upload_concurrency,
         control,
         move |(input_index, item_name, prepared), control| {
-            let control = control.with_progress(tracker.clone(), input_index);
+            let control = control
+                .with_progress(tracker.clone(), input_index)
+                .with_rate_limiter(rate_limiter.clone());
             let result = prepared
                 .and_then(|prepared| {
                     upload_selected_path(&state, provider, &parent_id, prepared, control.clone())
@@ -660,7 +663,9 @@ pub async fn cloud_upload_files(
                     cancelled: false,
                 });
             }
-            upload_selected_paths(
+            let runtime = app.state::<crate::commands::AppState>().runtime.clone();
+            let lease = runtime.begin_cloud_upload().await;
+            let result = upload_selected_paths(
                 app.state::<Arc<CloudState>>().inner().clone(),
                 descriptor,
                 provider,
@@ -668,8 +673,11 @@ pub async fn cloud_upload_files(
                 paths,
                 tracker,
                 control,
+                lease.limiter(),
             )
-            .await
+            .await;
+            lease.release().await;
+            result
         },
     )
     .await?;
@@ -728,7 +736,9 @@ pub async fn cloud_upload_directory(
                     cancelled: false,
                 });
             };
-            upload_selected_paths(
+            let runtime = app.state::<crate::commands::AppState>().runtime.clone();
+            let lease = runtime.begin_cloud_upload().await;
+            let result = upload_selected_paths(
                 app.state::<Arc<CloudState>>().inner().clone(),
                 descriptor,
                 provider,
@@ -736,8 +746,11 @@ pub async fn cloud_upload_directory(
                 vec![path],
                 tracker,
                 control,
+                lease.limiter(),
             )
-            .await
+            .await;
+            lease.release().await;
+            result
         },
     )
     .await?;
