@@ -255,6 +255,128 @@ fn validated_download_directory(value: &str) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+fn magnet_preview_file_path(
+    download_directory: &Path,
+    task_name: &str,
+    metadata_path: &str,
+    multi_file: bool,
+) -> Result<PathBuf, String> {
+    let unsafe_path = || "磁链文件路径不安全，无法创建任务".to_string();
+    if !download_directory.is_absolute() {
+        return Err(unsafe_path());
+    }
+    let relative = Path::new(metadata_path.trim());
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(unsafe_path());
+    }
+
+    let mut path = download_directory.to_path_buf();
+    if multi_file {
+        let torrent_root = Path::new(task_name.trim());
+        if torrent_root.as_os_str().is_empty()
+            || !torrent_root
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            || torrent_root.components().count() != 1
+        {
+            return Err(unsafe_path());
+        }
+        if !relative.starts_with(torrent_root) {
+            path.push(torrent_root);
+        }
+    }
+    path.push(relative);
+    if !path.is_absolute()
+        || !path.strip_prefix(download_directory).is_ok_and(|suffix| {
+            suffix
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        })
+    {
+        return Err(unsafe_path());
+    }
+    Ok(path)
+}
+
+fn magnet_preview_relative_path(
+    task_name: &str,
+    stored_path: &Path,
+    multi_file: bool,
+) -> Result<PathBuf, String> {
+    let unsafe_path = || "磁链文件路径不安全，无法创建任务".to_string();
+    if !stored_path.is_absolute() {
+        return stored_path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+            .then(|| stored_path.to_path_buf())
+            .ok_or_else(unsafe_path);
+    }
+    if !multi_file {
+        return stored_path
+            .file_name()
+            .map(PathBuf::from)
+            .ok_or_else(unsafe_path);
+    }
+
+    let components = stored_path.components().collect::<Vec<_>>();
+    let Some(root_index) = components
+        .iter()
+        .rposition(|component| matches!(component, Component::Normal(name) if *name == task_name))
+    else {
+        return Err(unsafe_path());
+    };
+    let mut relative = PathBuf::new();
+    for component in &components[root_index + 1..] {
+        let Component::Normal(name) = component else {
+            return Err(unsafe_path());
+        };
+        relative.push(name);
+    }
+    (!relative.as_os_str().is_empty())
+        .then_some(relative)
+        .ok_or_else(unsafe_path)
+}
+
+fn rebase_magnet_preview_files(
+    store: &TaskStore,
+    task: &DownloadTask,
+    download_directory: &Path,
+) -> Result<(), String> {
+    if !matches!(task.kind.as_str(), "magnet" | "torrent") {
+        return Ok(());
+    }
+    let files = store.files(task.id).map_err(|error| error.to_string())?;
+    let multi_file = files.len() > 1;
+    let rebased = files
+        .into_iter()
+        .map(|file| {
+            let relative =
+                magnet_preview_relative_path(&task.name, Path::new(&file.path), multi_file)?;
+            let path = magnet_preview_file_path(
+                download_directory,
+                &task.name,
+                &relative.to_string_lossy(),
+                multi_file,
+            )?;
+            Ok((
+                file.index,
+                path.to_string_lossy().into_owned(),
+                file.length,
+                file.completed_length,
+                file.selected,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    store
+        .upsert_files(task.id, &rebased)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) fn download_submission_options_for_directory(
     state: &AppState,
     destination_directory: Option<&str>,
@@ -492,11 +614,32 @@ pub async fn parse_download(
                     .await
                     .map_err(|error| fail_engine_submission(&state.store, &outcome.task, error))?;
             } else {
+                let download_directory = options
+                    .directory
+                    .as_deref()
+                    .ok_or_else(|| "磁链任务缺少下载目录".to_string())?;
+                let multi_file = resolved.files.len() > 1;
                 let preview_files = resolved
                     .files
                     .iter()
-                    .map(|file| (file.index, file.path.clone(), file.length, 0, true))
-                    .collect::<Vec<_>>();
+                    .map(|file| {
+                        magnet_preview_file_path(
+                            download_directory,
+                            &outcome.task.name,
+                            &file.path,
+                            multi_file,
+                        )
+                        .map(|path| {
+                            (
+                                file.index,
+                                path.to_string_lossy().into_owned(),
+                                file.length,
+                                0,
+                                true,
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 state
                     .store
                     .upsert_files(outcome.task.id, &preview_files)
@@ -851,10 +994,15 @@ pub async fn confirm_download_command(
             .into_iter()
             .map(|value| value.parse::<u32>().map_err(|_| "文件索引无效".to_string()))
             .collect::<Result<Vec<_>, _>>()?;
+        let download_directory = options
+            .directory
+            .clone()
+            .ok_or_else(|| "磁链任务缺少下载目录".to_string())?;
         let task = service
             .select_files_with_options(id, indices, options)
             .await
             .map_err(|error| fail_engine_submission(&state.store, &current, error))?;
+        rebase_magnet_preview_files(&state.store, &task, &download_directory)?;
         return task_payload(&state.store, task);
     }
     if let Some(error) = unbound_torrent_confirmation_error(&current) {
@@ -2556,6 +2704,7 @@ fn remove_recorded_download_file(path: &Path) -> Result<(), String> {
 }
 
 fn recorded_task_payload_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, String> {
+    let task = store.find(task_id).map_err(|error| error.to_string())?;
     let mut paths = Vec::new();
     for file in store.files(task_id).map_err(|error| error.to_string())? {
         if file.path.trim().is_empty() {
@@ -2563,6 +2712,9 @@ fn recorded_task_payload_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<P
         }
         let path = PathBuf::from(file.path);
         if !path.is_absolute() {
+            if matches!(task.kind.as_str(), "magnet" | "torrent") && file.completed_length == 0 {
+                continue;
+            }
             return Err(format!("拒绝删除非绝对路径的下载文件：{}", path.display()));
         }
         paths.push(path.clone());
@@ -5749,6 +5901,94 @@ mod tests {
         assert!(!sidecar.exists());
         assert!(neighbor.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn magnet_preview_paths_are_persisted_as_absolute_download_paths() {
+        let root = Path::new(r"D:\Downloads");
+
+        assert_eq!(
+            magnet_preview_file_path(
+                root,
+                "Black.Myth.Wukong.Digital.Deluxe.Edition-InsaneRamZes",
+                "b1.exe",
+                true,
+            )
+            .unwrap(),
+            root.join("Black.Myth.Wukong.Digital.Deluxe.Edition-InsaneRamZes")
+                .join("b1.exe")
+        );
+        assert!(magnet_preview_file_path(root, "safe", r"..\outside.exe", true).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn magnet_preview_paths_follow_the_confirmed_download_directory() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask {
+                source: "magnet:?xt=urn:btih:rebase-preview".into(),
+                name: "Collection".into(),
+                kind: "magnet".into(),
+                is_private: false,
+            })
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[
+                    (1, r"D:\Old\Collection\Disc 1\a.bin".into(), 1, 0, true),
+                    (2, r"D:\Old\Collection\b.bin".into(), 2, 0, true),
+                ],
+            )
+            .unwrap();
+
+        rebase_magnet_preview_files(&store, &task, Path::new(r"E:\Chosen")).unwrap();
+
+        let paths = store
+            .files(task.id)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                r"E:\Chosen\Collection\Disc 1\a.bin",
+                r"E:\Chosen\Collection\b.bin"
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_recycle_cleanup_accepts_legacy_zero_byte_metadata_preview_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let plans = crate::cloud::share::CloudSharePlanStore::new(
+            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+        );
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask {
+                source: "magnet:?xt=urn:btih:metadata-preview".into(),
+                name: "metadata-preview".into(),
+                kind: "magnet".into(),
+                is_private: false,
+            })
+            .unwrap();
+        store
+            .upsert_files(task.id, &[(1, "b1.exe".into(), 142_100_000_000, 0, true)])
+            .unwrap();
+        let task = store.fail(task.id, "已取消").unwrap();
+        let task = store.transition(task.id, TaskStatus::Recycled).unwrap();
+
+        purge_recycled_task_records(&store, &plans, &[task.id], true).unwrap();
+
+        assert!(matches!(
+            store.find(task.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
     }
 
     #[cfg(windows)]
