@@ -3,7 +3,7 @@ import { FloatingLauncher } from '../components/FloatingLauncher';
 import { setThemeMode } from '../lib/theme';
 import '../styles.css';
 
-setThemeMode('light');
+setThemeMode('mint');
 document.documentElement.style.background = '#000';
 document.body.style.background = '#000';
 

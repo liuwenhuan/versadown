@@ -34,7 +34,7 @@ const client = {
   pickAndUploadDirectory: async () => ({ uploaded: [], failures: [] }),
 };
 
-document.documentElement.dataset.theme = 'dark';
+document.documentElement.dataset.theme = 'deep-ocean';
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <main className="view-panel" style={{ minHeight: '100vh' }}>
     <CloudManager descriptor={cloudCatalog[0]} provider="quark" client={client} initialAccount={account} restoreOnMount={false} showSessionActions={false} />

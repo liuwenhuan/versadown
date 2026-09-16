@@ -53,16 +53,47 @@ describe('theme state', () => {
     vi.unstubAllGlobals();
   });
 
-  it('restores a valid saved mode and applies it to the document', async () => {
+  it('restores a saved color theme and applies its light appearance', async () => {
     installSystemTheme(true);
-    localStorage.setItem('theme-mode', 'light');
+    localStorage.setItem('theme-mode', 'warm-gold');
 
     const theme = await loadTheme();
 
-    expect(theme.loadThemeMode()).toBe('light');
-    expect(theme.getThemeMode()).toBe('light');
-    expect(document.documentElement.dataset.themeMode).toBe('light');
-    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(theme.loadThemeMode()).toBe('warm-gold');
+    expect(theme.getThemeMode()).toBe('warm-gold');
+    expect(theme.getResolvedTheme()).toBe('light');
+    expect(document.documentElement.dataset.themeMode).toBe('warm-gold');
+    expect(document.documentElement.dataset.theme).toBe('warm-gold');
+  });
+
+  it('offers five light themes and two dark themes', async () => {
+    installSystemTheme(false);
+
+    const theme = await loadTheme();
+
+    expect(theme.themeOptions.map(({ id, appearance }) => [id, appearance])).toEqual([
+      ['clear-blue', 'light'],
+      ['mint', 'light'],
+      ['warm-gold', 'light'],
+      ['lavender', 'light'],
+      ['coral', 'light'],
+      ['deep-ocean', 'dark'],
+      ['night-violet', 'dark']
+    ]);
+  });
+
+  it.each([
+    ['light', 'mint', 'light'],
+    ['dark', 'deep-ocean', 'dark']
+  ] as const)('migrates the legacy %s mode to %s', async (storedMode, expectedTheme, expectedAppearance) => {
+    installSystemTheme(false);
+    localStorage.setItem('theme-mode', storedMode);
+
+    const theme = await loadTheme();
+
+    expect(theme.getThemeMode()).toBe(expectedTheme);
+    expect(theme.getResolvedTheme()).toBe(expectedAppearance);
+    expect(document.documentElement.dataset.theme).toBe(expectedTheme);
   });
 
   it('falls back to auto for an invalid saved value', async () => {
@@ -74,7 +105,7 @@ describe('theme state', () => {
     expect(theme.loadThemeMode()).toBe('auto');
     expect(theme.getThemeMode()).toBe('auto');
     expect(document.documentElement.dataset.themeMode).toBe('auto');
-    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(document.documentElement.dataset.theme).toBe('deep-ocean');
   });
 
   it('persists explicit changes and exposes a React-compatible subscription', async () => {
@@ -83,16 +114,17 @@ describe('theme state', () => {
     const onChange = vi.fn();
     const unsubscribe = theme.subscribeTheme(onChange);
 
-    theme.setThemeMode('dark');
+    theme.setThemeMode('night-violet');
 
-    expect(theme.getThemeMode()).toBe('dark');
-    expect(localStorage.getItem('theme-mode')).toBe('dark');
-    expect(document.documentElement.dataset.themeMode).toBe('dark');
-    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(theme.getThemeMode()).toBe('night-violet');
+    expect(theme.getResolvedTheme()).toBe('dark');
+    expect(localStorage.getItem('theme-mode')).toBe('night-violet');
+    expect(document.documentElement.dataset.themeMode).toBe('night-violet');
+    expect(document.documentElement.dataset.theme).toBe('night-violet');
     expect(onChange).toHaveBeenCalledTimes(1);
 
     unsubscribe();
-    theme.setThemeMode('light');
+    theme.setThemeMode('clear-blue');
     expect(onChange).toHaveBeenCalledTimes(1);
   });
 
@@ -104,15 +136,15 @@ describe('theme state', () => {
 
     systemTheme.setDark(true);
 
-    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(document.documentElement.dataset.theme).toBe('deep-ocean');
     expect(onChange).toHaveBeenCalledTimes(1);
 
-    theme.setThemeMode('light');
+    theme.setThemeMode('coral');
     onChange.mockClear();
     systemTheme.setDark(false);
     systemTheme.setDark(true);
 
-    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(document.documentElement.dataset.theme).toBe('coral');
     expect(onChange).not.toHaveBeenCalled();
   });
 
@@ -122,12 +154,12 @@ describe('theme state', () => {
     const onChange = vi.fn();
     theme.subscribeTheme(onChange);
 
-    localStorage.setItem('theme-mode', 'dark');
-    window.dispatchEvent(new StorageEvent('storage', { key: 'theme-mode', newValue: 'dark' }));
+    localStorage.setItem('theme-mode', 'lavender');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'theme-mode', newValue: 'lavender' }));
 
-    expect(theme.getThemeMode()).toBe('dark');
-    expect(document.documentElement.dataset.themeMode).toBe('dark');
-    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(theme.getThemeMode()).toBe('lavender');
+    expect(document.documentElement.dataset.themeMode).toBe('lavender');
+    expect(document.documentElement.dataset.theme).toBe('lavender');
     expect(onChange).toHaveBeenCalledTimes(1);
   });
 });

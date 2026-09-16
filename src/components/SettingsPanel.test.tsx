@@ -25,9 +25,11 @@ it('changes the interface theme from display settings', async () => {
   const user = userEvent.setup();
   render(<SettingsPanel initial={initial} onChange={() => {}} />);
 
-  await user.selectOptions(screen.getByRole('combobox', { name: '界面主题' }), 'dark');
+  expect(screen.getAllByRole('radio', { name: /主题/ })).toHaveLength(8);
+  await user.click(screen.getByRole('radio', { name: '暖阳金主题' }));
 
-  expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
+  expect(document.documentElement).toHaveAttribute('data-theme', 'warm-gold');
+  expect(screen.getByRole('radio', { name: '暖阳金主题' })).toHaveAttribute('aria-checked', 'true');
 });
 
 it('separates settings into display, network, and advanced workspaces', async () => {

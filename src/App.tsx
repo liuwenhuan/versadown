@@ -1410,6 +1410,7 @@ export function App() {
               wrap="off"
               aria-label="搜索任务或粘贴下载链接"
               placeholder="此处可搜索本地任务，粘贴下载链接，拖入bt种子文件"
+              disabled={newDownloadOpen}
               value={searchInput}
               onChange={(event) => {
                 const next = event.target.value;

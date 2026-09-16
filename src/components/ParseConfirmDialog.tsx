@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ConfirmResource, ParseResult } from '../lib/types';
-import { formatBytes } from '../lib/downloadEvents';
+import { ResourceFileRow, resourceFileCategory } from './ResourceFileRow';
 
 interface ParseConfirmDialogProps {
   result: ParseResult;
@@ -45,20 +45,8 @@ function displayResourceName(resource: ConfirmResource, root: string | undefined
   return root && parts[0] === root ? parts.slice(1).join('/') || root : parts.join('/');
 }
 
-function displayResourceSize(value: string): string {
-  const matches = [...value.matchAll(/(\d+)\s*B\b/gi)];
-  const bytes = Number(matches.at(-1)?.[1]);
-  return Number.isSafeInteger(bytes) ? formatBytes(bytes) : value;
-}
-
 function resourceCategory(resource: ConfirmResource): Exclude<ResourceFilter, 'all'> {
-  return /\.(?:3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|rmvb|ts|webm|wmv)$/i.test(resource.name) ? 'video' : 'other';
-}
-
-function FileKindIcon({ resource }: { resource: ConfirmResource }) {
-  const category = resourceCategory(resource);
-  const extension = resource.name.split('.').pop()?.slice(0, 4).toUpperCase();
-  return <span className={`parse-file-icon ${category}`} aria-hidden="true">{category === 'video' ? '▶' : extension || '文'}</span>;
+  return resourceFileCategory(resource);
 }
 
 function SelectAllCheckbox({ checked, indeterminate, onChange }: { checked: boolean; indeterminate: boolean; onChange(): void }) {
@@ -110,7 +98,7 @@ export function ParseConfirmDialog({ result, placement = 'modal', downloadDirect
           {(['all', 'video', 'other'] as ResourceFilter[]).map((option) => <button key={option} type="button" className={filter === option ? 'active' : ''} onClick={() => setFilter(option)}>{option === 'all' ? '全部' : option === 'video' ? '视频' : '其他'}</button>)}
         </div>
       </div>}
-      <div className="resource-list">{resources.length ? visibleResources.map((resource) => { const displayName = displayResourceName(resource, root, downloadDirectory); return <label className={`resource${resource.selected ? ' selected' : ''}`} key={resource.id}><input type="checkbox" aria-label={`选择 ${displayName}`} checked={resource.selected} onChange={() => changeSelection(resource.id)} /><FileKindIcon resource={resource} /><span title={displayName}>{displayName}</span><small>{displayResourceSize(resource.size)}</small></label>; }) : <p className="resource-loading">正在获取文件信息…</p>}</div>
+      <div className="resource-list">{resources.length ? visibleResources.map((resource) => <ResourceFileRow key={resource.id} resource={resource} displayName={displayResourceName(resource, root, downloadDirectory)} onToggle={() => changeSelection(resource.id)} />) : <p className="resource-loading">正在获取文件信息…</p>}</div>
     </div>
     {hasProcessing && <button className="disclosure" onClick={() => setShowProcessing(!showProcessing)}>{showProcessing ? '收起' : '查看'}后处理与密码 {showProcessing ? '⌃' : '⌄'}</button>}
     {hasProcessing && showProcessing && <div className="processing-summary"><ul>{processing.map((step) => <li key={step}>{step}</li>)}</ul>{hasPassword && <p>解压密码：<code>{showPassword ? result.discoveredPassword : '••••••••'}</code><button onClick={() => setShowPassword(!showPassword)}>{showPassword ? '隐藏密码' : '显示密码'}</button></p>}</div>}

@@ -20,6 +20,6 @@ async function listEntries(path = 'D:/上传示例'): Promise<LocalUploadListing
 function Preview() {
   const [open, setOpen] = useState(true);
   const [paths, setPaths] = useState<string[]>([]);
-  return <main style={{ padding: 24 }}><h1>统一上传选择器预览</h1><p>仅使用模拟目录，不读取本地文件，也不会执行上传。</p><button onClick={() => setOpen(true)}>上传</button><button onClick={() => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; }}>切换主题</button><output>{JSON.stringify(paths)}</output>{open && <LocalUploadPicker listEntries={listEntries} onCancel={() => setOpen(false)} onConfirm={selected => { setPaths(selected); setOpen(false); }} />}</main>;
+  return <main style={{ padding: 24 }}><h1>统一上传选择器预览</h1><p>仅使用模拟目录，不读取本地文件，也不会执行上传。</p><button onClick={() => setOpen(true)}>上传</button><button onClick={() => { document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'deep-ocean' ? 'mint' : 'deep-ocean'; }}>切换主题</button><output>{JSON.stringify(paths)}</output>{open && <LocalUploadPicker listEntries={listEntries} onCancel={() => setOpen(false)} onConfirm={selected => { setPaths(selected); setOpen(false); }} />}</main>;
 }
 ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><Preview /></React.StrictMode>);

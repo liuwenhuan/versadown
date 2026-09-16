@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState, useSyncExternalStore } from 'react';
 import { AiSettings, AiSettingsInput, AppSettings, Aria2Settings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
-import { getThemeMode, setThemeMode, subscribeTheme, ThemeMode } from '../lib/theme';
+import { getThemeMode, setThemeMode, subscribeTheme, themeOptions, ThemeMode } from '../lib/theme';
 
 type SettingsTab = 'display' | 'network' | 'advanced';
 
@@ -22,8 +22,6 @@ interface SettingsPanelProps {
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
 const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
 const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 };
-const themeLabels: Record<ThemeMode, string> = { auto: '跟随系统', light: '浅色', dark: '深色' };
-
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, configurePrivacyDownload }: SettingsPanelProps) {
   const [debugReports, setDebugReports] = useState(initial.debugReports);
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
@@ -188,7 +186,21 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     </div>
     <div className="settings-content">
       {activeTab === 'display' && <>
-        <label className="setting-row"><span><b>界面主题</b><small>立即切换界面外观；“跟随系统”会自动匹配 Windows 主题。</small></span><select aria-label="界面主题" value={themeMode} onChange={(event) => updateThemeMode(event.target.value as ThemeMode)}>{(['auto', 'light', 'dark'] as const).map((mode) => <option key={mode} value={mode}>{themeLabels[mode]}</option>)}</select></label>
+        <section className="theme-setting" aria-labelledby="theme-setting-title">
+          <header><span><b id="theme-setting-title">界面主题</b><small>点击色块立即切换并保存；跟随系统会自动使用薄荷青或深海蓝。</small></span></header>
+          <div className="theme-picker" role="radiogroup" aria-label="界面主题">
+            <button type="button" role="radio" aria-checked={themeMode === 'auto'} aria-label="跟随系统主题" className="theme-option theme-option-auto" onClick={() => updateThemeMode('auto')}>
+              <span className="theme-preview" aria-hidden="true"><i /><i /><i /></span>
+              <span><b>跟随系统</b><small>自动</small></span>
+              <i className="theme-check" aria-hidden="true">✓</i>
+            </button>
+            {themeOptions.map((theme) => <button key={theme.id} type="button" role="radio" aria-checked={themeMode === theme.id} aria-label={`${theme.label}主题`} className="theme-option" onClick={() => updateThemeMode(theme.id)}>
+              <span className="theme-preview" aria-hidden="true">{theme.preview.map((color) => <i key={color} style={{ background: color }} />)}</span>
+              <span><b>{theme.label}</b><small>{theme.appearance === 'dark' ? '深色' : '浅色'}</small></span>
+              <i className="theme-check" aria-hidden="true">✓</i>
+            </button>)}
+          </div>
+        </section>
         <form className="directory-settings" onSubmit={saveDownloadDirectory}>
           <label><span><b>下载目录</b><small>后续新建任务默认保存到此目录。</small></span><input aria-label="下载目录" required value={downloadDirectory} placeholder="C:\\Users\\用户名\\Downloads" onChange={(event) => setDownloadDirectory(event.target.value)} /></label>
           <button className="secondary" type="button" aria-label="浏览下载目录" onClick={() => void browseForDownloadDirectory()}>浏览</button>

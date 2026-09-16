@@ -433,6 +433,7 @@ it('opens a unified task window and parses a typed download link immediately', a
   await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), 'magnet:?xt=urn:btih:abc{Enter}');
   const dialog = screen.getByRole('dialog', { name: '新建下载' });
   expect(dialog).toHaveClass('batch-download-dialog', 'modal');
+  expect(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' })).toBeDisabled();
   expect(await within(dialog).findByText('collection')).toBeVisible();
   await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
 
@@ -442,7 +443,7 @@ it('opens a unified task window and parses a typed download link immediately', a
 
 it('uses the dark launcher graphic and vector icons in the primary navigation', async () => {
   const previousTheme = getThemeMode();
-  setThemeMode('dark');
+  setThemeMode('deep-ocean');
   const app = render(<App />);
 
   try {

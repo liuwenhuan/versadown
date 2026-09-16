@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { afterEach, vi } from 'vitest';
@@ -335,7 +335,7 @@ it('shows all pasted tasks in one dialog and submits one shared post-processing 
   expect(await screen.findByText('目录一')).toBeVisible();
   expect(screen.getByText('目录二')).toBeVisible();
   await user.click(screen.getByRole('button', { name: '展开目录一' }));
-  expect(screen.getByText('one/a.zip')).toBeVisible();
+  expect(screen.getByText('a.zip')).toBeVisible();
   await user.click(screen.getByRole('button', { name: '解压密码和后处理' }));
   await user.type(screen.getByRole('textbox', { name: '解压密码和后处理' }), '密码 88in\n完成后拼接');
   await user.click(screen.getByRole('button', { name: '新建任务' }));
@@ -356,6 +356,7 @@ it('filters batch resources by category and toggles the visible category selecti
       taskId: 'categorized', title: '分类目录', requiresConfirmation: true, isBitTorrent: true, processing: [],
       resources: [
         { id: 'video', name: '分类目录/movie.mkv', size: '1 GB', selected: true },
+        { id: 'image', name: '分类目录/poster.jpg', size: '2 MB', selected: true },
         { id: 'archive', name: '分类目录/source.zip', size: '2 GB', selected: true },
         { id: 'other', name: '分类目录/readme.txt', size: '3 KB', selected: true },
       ],
@@ -366,13 +367,20 @@ it('filters batch resources by category and toggles the visible category selecti
   />);
 
   await user.click(await screen.findByRole('button', { name: '展开分类目录' }));
-  await user.click(screen.getByRole('button', { name: '压缩包' }));
+  expect(screen.queryByRole('button', { name: '压缩包' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '图片' }));
 
-  expect(screen.getByText('分类目录/source.zip')).toBeVisible();
-  expect(screen.queryByText('分类目录/movie.mkv')).not.toBeInTheDocument();
-  expect(screen.queryByText('分类目录/readme.txt')).not.toBeInTheDocument();
+  expect(screen.getByText('poster.jpg')).toBeVisible();
+  expect(screen.queryByText('movie.mkv')).not.toBeInTheDocument();
+  expect(screen.queryByText('source.zip')).not.toBeInTheDocument();
+  expect(screen.queryByText('readme.txt')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '其他' }));
+
+  expect(screen.getByText('source.zip')).toBeVisible();
+  expect(screen.queryByText('movie.mkv')).not.toBeInTheDocument();
+  expect(screen.getByText('readme.txt')).toBeVisible();
   await user.click(screen.getByRole('checkbox', { name: '全选当前筛选结果' }));
-  expect(screen.getByRole('checkbox', { name: '选择 分类目录/source.zip' })).not.toBeChecked();
+  expect(screen.getByRole('checkbox', { name: '选择 source.zip' })).not.toBeChecked();
 });
 
 it('sorts expanded batch resources by name and size', async () => {
@@ -396,14 +404,19 @@ it('sorts expanded batch resources by name and size', async () => {
   />);
 
   await user.click(await screen.findByRole('button', { name: '展开排序目录' }));
-  await user.click(screen.getByRole('button', { name: '按文件名升序排序' }));
-  expect(screen.getAllByRole('checkbox', { name: /选择 排序目录\// }).map(input => input.getAttribute('aria-label'))).toEqual([
-    '选择 排序目录/alpha.mp4', '选择 排序目录/middle.zip', '选择 排序目录/zeta.txt',
+  expect(screen.queryByRole('group', { name: '文件排序' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '排序文件' }));
+  expect(screen.getByRole('menu', { name: '文件排序' })).toBeVisible();
+  await user.click(screen.getByRole('menuitemradio', { name: '按文件名称从 A 到 Z' }));
+  expect(screen.getAllByRole('checkbox', { name: /选择 (?:alpha|middle|zeta)/ }).map(input => input.getAttribute('aria-label'))).toEqual([
+    '选择 alpha.mp4', '选择 middle.zip', '选择 zeta.txt',
   ]);
 
-  await user.click(screen.getByRole('button', { name: '按文件大小升序排序' }));
-  expect(screen.getAllByRole('checkbox', { name: /选择 排序目录\// }).map(input => input.getAttribute('aria-label'))).toEqual([
-    '选择 排序目录/middle.zip', '选择 排序目录/zeta.txt', '选择 排序目录/alpha.mp4',
+  expect(screen.queryByRole('menu', { name: '文件排序' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '排序文件' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '按文件大小从小到大' }));
+  expect(screen.getAllByRole('checkbox', { name: /选择 (?:alpha|middle|zeta)/ }).map(input => input.getAttribute('aria-label'))).toEqual([
+    '选择 middle.zip', '选择 zeta.txt', '选择 alpha.mp4',
   ]);
 });
 
@@ -429,7 +442,7 @@ it('derives a directory task name when a share parser returns a generic title', 
   expect(screen.queryByText('网盘分享文件')).not.toBeInTheDocument();
 });
 
-it('renders a batch resource without an extension badge and pins its size to the right', async () => {
+it('renders expanded resources as a compact tree table with aligned type and size columns', async () => {
   const stylesheet = document.createElement('style');
   stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
   document.head.appendChild(stylesheet);
@@ -450,9 +463,56 @@ it('renders a batch resource without an extension badge and pins its size to the
     />);
 
     await user.click(await screen.findByRole('button', { name: '展开相册' }));
-    expect(screen.queryByText('JPG')).not.toBeInTheDocument();
-    const size = screen.getByText('219.9 KB');
+    expect(screen.getByText('JPG')).toBeVisible();
+    expect(screen.getByText('photo.jpg')).toBeVisible();
+    expect(screen.queryByText('相册/photo.jpg')).not.toBeInTheDocument();
+    expect(screen.getByText('已选 1 / 1 个文件，共 219.9 KB')).toBeVisible();
+    expect(getComputedStyle(screen.getByRole('checkbox', { name: '全选当前筛选结果' }).closest('label')!)).toMatchObject({ display: 'flex', marginTop: '0px' });
+    const row = screen.getByRole('checkbox', { name: '选择 photo.jpg' }).closest('.resource');
+    expect(row).not.toBeNull();
+    expect(row).toHaveClass('batch-resource-row');
+    expect(within(row!).getByText('jpg')).toHaveClass('resource-extension');
+    expect(getComputedStyle(row!).display).toBe('grid');
+    expect(getComputedStyle(row!).gridTemplateColumns.split(' ').length).toBe(5);
+    expect(parseFloat(getComputedStyle(row!).minHeight)).toBeLessThanOrEqual(36);
+    const dialog = screen.getByRole('dialog', { name: '新建下载' });
+    expect(getComputedStyle(dialog).width).toContain('720px');
+    const expand = screen.getByRole('button', { name: '收起相册' });
+    expect(expand.querySelector('svg')).not.toBeNull();
+    expect(getComputedStyle(expand)).toMatchObject({ display: 'grid', placeItems: 'center' });
+    const size = within(row!).getByText('219.9 KB');
     expect(getComputedStyle(size).justifySelf).toBe('end');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('keeps batch task rows at their content height while post-processing is expanded', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const user = userEvent.setup();
+    const entries = Array.from({ length: 10 }, (_, index) => `https://example.test/file-${index}.zip`);
+    render(<NewDownloadDialog
+      open
+      placement="modal"
+      initialInput={entries.join('\n')}
+      onScan={async () => entries.map(input => ({ input, valid: true, kind: 'direct' }))}
+      onParse={async input => ({ confirmation: {
+        taskId: input, title: input.split('/').at(-1), requiresConfirmation: true, processing: [], resources: [],
+      } })}
+      onDiscardPrepared={vi.fn()}
+      onSubmitBatch={vi.fn()}
+      onClose={vi.fn()}
+    />);
+
+    expect(await screen.findByText('已选 10 个任务')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '解压密码和后处理' }));
+    const list = screen.getByRole('region', { name: '待新建任务' });
+    expect(getComputedStyle(list).gridAutoRows).toBe('max-content');
+    expect(getComputedStyle(list).alignContent).toBe('start');
+    expect(getComputedStyle(screen.getByRole('textbox', { name: '解压密码和后处理' })).flexShrink).toBe('0');
   } finally {
     stylesheet.remove();
   }
@@ -482,8 +542,8 @@ it('shows files from an existing multi-file magnet instead of a fallback single 
 
   expect(await screen.findByText('已存在任务 · 2 个文件')).toBeVisible();
   await user.click(screen.getByRole('button', { name: '展开合集' }));
-  expect(screen.getByText('合集/episode-01.mp4')).toBeVisible();
-  expect(screen.getByText('合集/episode-02.mp4')).toBeVisible();
+  expect(screen.getByText('episode-01.mp4')).toBeVisible();
+  expect(screen.getByText('episode-02.mp4')).toBeVisible();
   expect(screen.queryByText('1 项可下载')).not.toBeInTheDocument();
 });
 
@@ -534,8 +594,8 @@ it('refreshes a pending magnet into its actual file list', async () => {
   expect(await screen.findByText('2 项可下载')).toBeVisible();
   expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
   await user.click(screen.getByRole('button', { name: '展开待获取的合集' }));
-  expect(screen.getByText('待获取的合集/episode-01.mp4')).toBeVisible();
-  expect(screen.getByText('待获取的合集/episode-02.mp4')).toBeVisible();
+  expect(screen.getByText('episode-01.mp4')).toBeVisible();
+  expect(screen.getByText('episode-02.mp4')).toBeVisible();
 });
 
 it('allows a pending task to be deselected so ready tasks can be submitted', async () => {
