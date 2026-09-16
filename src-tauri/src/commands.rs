@@ -2638,6 +2638,78 @@ fn remove_directory_payload_fallbacks(
     Ok(())
 }
 
+fn directory_payload_directories(
+    store: &TaskStore,
+    tasks: &[DownloadTask],
+) -> Result<Vec<PathBuf>, String> {
+    let mut directories = HashSet::new();
+    for task in tasks {
+        let Some(group) = store
+            .cloud_directory_group_for_task(task.id)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|item| item.task_id == Some(task.id))
+            .ok_or_else(|| "目录下载任务缺少文件归属记录，未删除本地目录".to_string())?;
+        let Some(path) = directory_payload_fallback_path(&group, &item)? else {
+            continue;
+        };
+        let mut parent = path.parent().map(Path::to_path_buf);
+        while let Some(directory) = parent {
+            if directory == group.output_directory {
+                break;
+            }
+            if !directory.starts_with(&group.output_directory) {
+                return Err("目录下载文件路径不安全，已保留目录和任务记录".to_string());
+            }
+            parent = directory.parent().map(Path::to_path_buf);
+            directories.insert(directory);
+        }
+    }
+    let mut directories = directories.into_iter().collect::<Vec<_>>();
+    directories.sort_by(|left, right| {
+        right
+            .components()
+            .count()
+            .cmp(&left.components().count())
+            .then_with(|| right.cmp(left))
+    });
+    Ok(directories)
+}
+
+fn remove_empty_download_directory(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("无法读取下载目录 {}：{error}", path.display())),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("目录下载文件路径不安全，已保留目录和任务记录".to_string());
+        }
+    }
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!("拒绝删除非目录下载项：{}", path.display()));
+    }
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("无法读取下载目录 {}：{error}", path.display()))?;
+    if entries.next().is_some() {
+        return Ok(());
+    }
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("无法删除下载目录 {}：{error}", path.display())),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TianyiLocalStatePurgeReport {
     pub removed_tasks: usize,
@@ -2880,10 +2952,12 @@ fn prepare_cloud_directory_group_for_purge(
         .cloud_directory_group(group_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "目录下载任务不存在".to_string())?;
-    if group.status == TaskStatus::Cancelled {
+    if matches!(group.status, TaskStatus::Cancelled | TaskStatus::Recycled) {
         // Only runs after an explicit purge request; completion records/files
-        // stay untouched by cancellation itself. This validates all members
-        // are stopped before transitioning terminal siblings to the recycle bin.
+        // stay untouched by cancellation itself. Re-run the recycle transition
+        // for already-recycled roots as well so databases written by older
+        // builds cannot strand completed or failed member rows outside the
+        // recycle state.
         recycle_cloud_directory_group(store, group_id)?;
         group = store
             .cloud_directory_group(group_id)
@@ -2943,9 +3017,13 @@ fn purge_recycled_task_records(
         tasks.push(task);
     }
     if delete_files {
+        let directories = directory_payload_directories(store, &tasks)?;
         remove_directory_payload_fallbacks(store, &tasks)?;
         for id in ids {
             remove_task_payload_files(store, *id)?;
+        }
+        for directory in directories {
+            remove_empty_download_directory(&directory)?;
         }
     }
     let linked_cloud_tasks = tasks
@@ -5069,6 +5147,83 @@ mod tests {
             Err(crate::StoreError::NotFound(_))
         ));
         assert!(store.find(second.id).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_purge_batch_deletes_legacy_recycled_directory_with_terminal_members() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let cloud = Arc::new(
+            crate::cloud::commands::CloudState::new(directory.path().join("cloud")).unwrap(),
+        );
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote-directory",
+                    "Series",
+                    directory.path(),
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "remote-file",
+                    &["Series"],
+                    "episode.mkv",
+                    Some(7),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+        let output_root = directory.path().join("Series");
+        let payload = output_root.join("episode.mkv");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, b"payload").unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/episode.mkv"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                total_length: Some(7),
+                completed_length: 7,
+                ..task
+            })
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 7, 7, true)],
+            )
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+        // Older builds could persist only the directory root as recycled,
+        // leaving completed or failed member rows in their terminal state.
+        store.recycle_cloud_directory_group(group.id).unwrap();
+        assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Completed);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(purge_recycled_task_batch(
+                Arc::clone(&store),
+                Arc::clone(&cloud),
+                vec![group.id.to_string()],
+                true,
+            ))
+            .unwrap();
+
+        assert!(!payload.exists());
+        assert!(!output_root.exists());
+        assert!(store.cloud_directory_group(group.id).unwrap().is_none());
+        assert!(matches!(
+            store.find(task.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
     }
 
     #[test]
