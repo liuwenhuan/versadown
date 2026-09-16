@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
@@ -49,7 +50,7 @@ it('separates settings into display, network, and advanced workspaces', async ()
   expect(screen.getByRole('checkbox', { name: '启用调试报告' })).not.toBeChecked();
 });
 
-it('saves a custom directory for subsequent downloads', async () => {
+it('saves a custom directory on blur without a separate save button', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} />);
@@ -57,18 +58,21 @@ it('saves a custom directory for subsequent downloads', async () => {
   const directory = screen.getByRole('textbox', { name: '下载目录' });
   await user.clear(directory);
   await user.type(directory, 'D:\\Downloads\\Games');
-  await user.click(screen.getByRole('button', { name: '保存下载目录' }));
+  await user.tab();
 
   expect(onChange).toHaveBeenLastCalledWith({ ...initial, downloadDirectory: 'D:\\Downloads\\Games' });
+  expect(screen.queryByRole('button', { name: '保存下载目录' })).not.toBeInTheDocument();
 });
 
-it('fills the download directory from the native folder picker', async () => {
+it('applies the download directory immediately after native folder selection', async () => {
   const user = userEvent.setup();
-  render(<SettingsPanel initial={initial} onChange={() => {}} browseDirectory={async () => 'E:\\Library'} />);
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={initial} onChange={onChange} browseDirectory={async () => 'E:\\Library'} />);
 
   await user.click(screen.getByRole('button', { name: '浏览下载目录' }));
 
   expect(screen.getByRole('textbox', { name: '下载目录' })).toHaveValue('E:\\Library');
+  expect(onChange).toHaveBeenLastCalledWith({ ...initial, downloadDirectory: 'E:\\Library' });
 });
 
 it('allows users to explicitly enable debug reports in beta', async () => {
@@ -110,25 +114,74 @@ it('defaults new connections to four while preserving an explicit eight', async 
   expect(screen.getByRole('spinbutton', { name: '单任务并发连接数' })).toHaveValue(8);
 });
 
-it('requires a confirmed password before saving enabled private downloads', async () => {
+it('asks for and confirms a new password when privacy has no existing password', async () => {
   const user = userEvent.setup();
   const configurePrivacyDownload = vi.fn().mockResolvedValue({ ...initial, privacyDownloadEnabled: true, privacyPasswordConfigured: true });
   render(<SettingsPanel initial={initial} onChange={() => {}} configurePrivacyDownload={configurePrivacyDownload} />);
 
   await user.click(screen.getByRole('checkbox', { name: '开启隐私下载' }));
-  await user.type(screen.getByLabelText('隐私模式密码'), 'private-pass');
-  await user.type(screen.getByLabelText('确认隐私模式密码'), 'private-pass');
-  await user.click(screen.getByRole('button', { name: '保存隐私下载设置' }));
+  await user.type(screen.getByLabelText('设置新密码'), 'private-pass');
+  await user.type(screen.getByLabelText('确认新密码'), 'private-pass');
+  await user.click(screen.getByRole('button', { name: '保存密码' }));
 
-  expect(configurePrivacyDownload).toHaveBeenCalledWith(true, 'private-pass');
+  expect(configurePrivacyDownload).toHaveBeenCalledWith(true, undefined, 'private-pass');
   expect(await screen.findByRole('status')).toHaveTextContent('隐私下载已开启');
 });
 
-it('uses the shared settings form treatment for privacy password inputs', () => {
-  render(<SettingsPanel initial={{ ...initial, privacyDownloadEnabled: true }} onChange={() => {}} />);
+it('requires the old password before replacing an existing privacy password', async () => {
+  const user = userEvent.setup();
+  const configurePrivacyDownload = vi.fn().mockResolvedValue({ ...initial, privacyDownloadEnabled: true, privacyPasswordConfigured: true });
+  render(<SettingsPanel initial={{ ...initial, privacyDownloadEnabled: true, privacyPasswordConfigured: true }} onChange={() => {}} configurePrivacyDownload={configurePrivacyDownload} />);
 
-  expect(screen.getByLabelText('隐私模式密码').closest('form')).toHaveClass('proxy-settings');
-  expect(screen.getByLabelText('确认隐私模式密码').closest('form')).toHaveClass('proxy-settings');
+  await user.type(screen.getByLabelText('输入旧密码'), 'old-pass');
+  await user.type(screen.getByLabelText('设置新密码'), 'new-pass');
+  await user.click(screen.getByRole('button', { name: '保存密码' }));
+
+  expect(screen.queryByLabelText('确认新密码')).not.toBeInTheDocument();
+  expect(configurePrivacyDownload).toHaveBeenCalledWith(true, 'old-pass', 'new-pass');
+});
+
+it('uses compact aligned controls and consistent cards across settings tabs', async () => {
+  const user = userEvent.setup();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<SettingsPanel initial={{ ...initial, privacyDownloadEnabled: true, privacyPasswordConfigured: true }} onChange={() => {}} />);
+
+    const privacyToggle = screen.getByRole('checkbox', { name: '开启隐私下载' });
+    const cleanupToggle = screen.getByRole('checkbox', { name: '下载完成后自动删除转存文件' });
+    expect(getComputedStyle(privacyToggle).width).toBe('18px');
+    expect(getComputedStyle(privacyToggle).height).toBe('18px');
+    expect(getComputedStyle(cleanupToggle).width).toBe('18px');
+    expect(getComputedStyle(screen.getByText(/私密任务只会/)).whiteSpace).toBe('nowrap');
+
+    const oldPassword = screen.getByLabelText('输入旧密码');
+    const newPassword = screen.getByLabelText('设置新密码');
+    const savePassword = screen.getByRole('button', { name: '保存密码' });
+    expect(oldPassword.parentElement?.parentElement).toBe(newPassword.parentElement?.parentElement);
+    expect(savePassword.parentElement).toBe(oldPassword.parentElement?.parentElement);
+    expect(getComputedStyle(oldPassword).width).toBe(getComputedStyle(newPassword).width);
+
+    const theme = screen.getByRole('region', { name: '界面主题' });
+    const directory = screen.getByRole('textbox', { name: '下载目录' }).closest('form');
+    expect(Number.parseFloat(getComputedStyle(directory!).marginTop)).toBeGreaterThan(0);
+    expect(getComputedStyle(theme).borderRadius).toBe(getComputedStyle(directory!).borderRadius);
+
+    await user.click(screen.getByRole('tab', { name: '网络' }));
+    expect(getComputedStyle(screen.getByRole('checkbox', { name: '启用下载代理' })).width).toBe('18px');
+    await user.click(screen.getByRole('tab', { name: '高级' }));
+    expect(getComputedStyle(screen.getByRole('checkbox', { name: '启用磁链元数据服务' })).width).toBe('18px');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('uses the shared settings form treatment for privacy password inputs', () => {
+  render(<SettingsPanel initial={{ ...initial, privacyDownloadEnabled: true, privacyPasswordConfigured: true }} onChange={() => {}} />);
+
+  expect(screen.getByLabelText('输入旧密码').closest('form')).toHaveClass('proxy-settings');
+  expect(screen.getByLabelText('设置新密码').closest('form')).toHaveClass('proxy-settings');
 });
 
 it('saves the preferred magnet metadata service from advanced settings', async () => {

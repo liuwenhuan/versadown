@@ -16,7 +16,7 @@ interface SettingsPanelProps {
   browseDirectory?(currentDirectory: string): Promise<string | null>;
   saveAiSettings?(settings: AiSettingsInput): Promise<AiSettings>;
   loadAiModels?(settings: AiSettingsInput): Promise<string[]>;
-  configurePrivacyDownload?(enabled: boolean, password?: string): Promise<AppSettings>;
+  configurePrivacyDownload?(enabled: boolean, currentPassword?: string, newPassword?: string): Promise<AppSettings>;
 }
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
@@ -33,7 +33,8 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
   const [privacyDownloadEnabled, setPrivacyDownloadEnabled] = useState(initial.privacyDownloadEnabled ?? false);
   const [privacyPasswordConfigured, setPrivacyPasswordConfigured] = useState(initial.privacyPasswordConfigured ?? false);
-  const [privacyPassword, setPrivacyPassword] = useState('');
+  const [privacyCurrentPassword, setPrivacyCurrentPassword] = useState('');
+  const [privacyNewPassword, setPrivacyNewPassword] = useState('');
   const [privacyPasswordConfirmation, setPrivacyPasswordConfirmation] = useState('');
   const [privacyStatus, setPrivacyStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [magnetMetadataSaved, setMagnetMetadataSaved] = useState(false);
@@ -81,7 +82,12 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   function saveDownloadDirectory(event: FormEvent) {
     event.preventDefault();
-    const normalized = downloadDirectory.trim();
+    commitDownloadDirectory(downloadDirectory);
+  }
+
+  function commitDownloadDirectory(directory: string) {
+    const normalized = directory.trim();
+    if (!normalized) return;
     setDownloadDirectory(normalized);
     saveWithoutStatus(currentSettings({ downloadDirectory: normalized }));
   }
@@ -133,15 +139,27 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   async function savePrivacyDownload(event: FormEvent) {
     event.preventDefault();
     setPrivacyStatus(null);
-    if (privacyDownloadEnabled && privacyPassword && privacyPassword !== privacyPasswordConfirmation) {
+    if (!privacyPasswordConfigured && privacyDownloadEnabled && !privacyNewPassword) {
+      setPrivacyStatus({ kind: 'error', message: '请设置隐私模式密码' });
+      return;
+    }
+    if (!privacyPasswordConfigured && privacyNewPassword !== privacyPasswordConfirmation) {
       setPrivacyStatus({ kind: 'error', message: '两次输入的隐私模式密码不一致' });
       return;
     }
+    if (privacyPasswordConfigured && !privacyCurrentPassword) {
+      setPrivacyStatus({ kind: 'error', message: '请输入旧密码' });
+      return;
+    }
     try {
-      const saved = await configurePrivacyDownload?.(privacyDownloadEnabled, privacyPassword || undefined)
-        ?? currentSettings({ privacyDownloadEnabled, privacyPasswordConfigured: privacyPasswordConfigured || Boolean(privacyPassword) });
-      setPrivacyPasswordConfigured(saved.privacyPasswordConfigured ?? Boolean(privacyPassword));
-      setPrivacyPassword('');
+      const saved = await configurePrivacyDownload?.(
+        privacyDownloadEnabled,
+        privacyPasswordConfigured ? privacyCurrentPassword : undefined,
+        privacyNewPassword || undefined
+      ) ?? currentSettings({ privacyDownloadEnabled, privacyPasswordConfigured: privacyPasswordConfigured || Boolean(privacyNewPassword) });
+      setPrivacyPasswordConfigured(saved.privacyPasswordConfigured ?? Boolean(privacyNewPassword));
+      setPrivacyCurrentPassword('');
+      setPrivacyNewPassword('');
       setPrivacyPasswordConfirmation('');
       setPrivacyStatus({ kind: 'success', message: privacyDownloadEnabled ? '隐私下载已开启' : '隐私下载已关闭' });
     } catch (error) {
@@ -177,7 +195,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
 
   async function browseForDownloadDirectory() {
     const selected = await browseDirectory?.(downloadDirectory);
-    if (selected) setDownloadDirectory(selected);
+    if (selected) commitDownloadDirectory(selected);
   }
 
   return <section className="settings-panel" aria-label="设置">
@@ -202,19 +220,20 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           </div>
         </section>
         <form className="directory-settings" onSubmit={saveDownloadDirectory}>
-          <label><span><b>下载目录</b><small>后续新建任务默认保存到此目录。</small></span><input aria-label="下载目录" required value={downloadDirectory} placeholder="C:\\Users\\用户名\\Downloads" onChange={(event) => setDownloadDirectory(event.target.value)} /></label>
+          <label><span><b>下载目录</b><small>后续新建任务默认保存到此目录。</small></span><input aria-label="下载目录" required value={downloadDirectory} placeholder="C:\\Users\\用户名\\Downloads" onChange={(event) => setDownloadDirectory(event.target.value)} onBlur={(event) => commitDownloadDirectory(event.target.value)} /></label>
           <button className="secondary" type="button" aria-label="浏览下载目录" onClick={() => void browseForDownloadDirectory()}>浏览</button>
-          <button className="primary" type="submit">保存下载目录</button>
         </form>
         <label className="setting-row"><span><b>悬浮球显示</b><small>“关闭显示”后仍可在这里重新开启。</small></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
         <label className="setting-row"><span><b>下载完成后自动删除转存文件</b><small>仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。</small></span><input aria-label="下载完成后自动删除转存文件" type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
         <form className="privacy-download-settings proxy-settings" onSubmit={(event) => void savePrivacyDownload(event)}>
           <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => { setPrivacyDownloadEnabled(event.target.checked); setPrivacyStatus(null); }} /></label>
-          <fieldset disabled={!privacyDownloadEnabled}>
-            <label><span>隐私模式密码</span><input aria-label="隐私模式密码" type="password" autoComplete="new-password" placeholder={privacyPasswordConfigured ? '留空则保留现有密码' : '设置隐私模式密码'} value={privacyPassword} onChange={(event) => setPrivacyPassword(event.target.value)} /></label>
-            <label><span>确认隐私模式密码</span><input aria-label="确认隐私模式密码" type="password" autoComplete="new-password" value={privacyPasswordConfirmation} onChange={(event) => setPrivacyPasswordConfirmation(event.target.value)} /></label>
+          <fieldset className="privacy-password-fields" disabled={!privacyDownloadEnabled && !privacyPasswordConfigured}>
+            {privacyPasswordConfigured && <label><span>输入旧密码</span><input aria-label="输入旧密码" type="password" autoComplete="current-password" value={privacyCurrentPassword} onChange={(event) => setPrivacyCurrentPassword(event.target.value)} /></label>}
+            <label><span>设置新密码</span><input aria-label="设置新密码" type="password" autoComplete="new-password" placeholder={privacyPasswordConfigured ? '留空则保留现有密码' : '设置隐私模式密码'} value={privacyNewPassword} onChange={(event) => setPrivacyNewPassword(event.target.value)} /></label>
+            {!privacyPasswordConfigured && <label><span>确认新密码</span><input aria-label="确认新密码" type="password" autoComplete="new-password" value={privacyPasswordConfirmation} onChange={(event) => setPrivacyPasswordConfirmation(event.target.value)} /></label>}
+            <button className="primary privacy-save-password" type="submit">保存密码</button>
           </fieldset>
-          <div className="settings-actions"><button className="primary" type="submit">保存隐私下载设置</button>{privacyStatus && <span role="status" className={privacyStatus.kind}>{privacyStatus.message}</span>}</div>
+          {privacyStatus && <div className="settings-actions"><span role="status" className={privacyStatus.kind}>{privacyStatus.message}</span></div>}
         </form>
       </>}
       {activeTab === 'network' && <>

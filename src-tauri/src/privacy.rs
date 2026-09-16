@@ -60,20 +60,6 @@ pub fn password_is_configured(credentials: &dyn CredentialStore) -> Result<bool,
         .map_err(|_| "无法读取隐私模式密码".to_string())
 }
 
-/// Once a password exists, changing the privacy configuration must be an
-/// authenticated action. The in-memory session is deliberately the authority:
-/// it expires when the application closes and is only opened by the password
-/// verification path above.
-pub fn require_unlocked_configuration(
-    session: &PrivacySession,
-    credentials: &dyn CredentialStore,
-) -> Result<(), String> {
-    if password_is_configured(credentials)? && !session.is_unlocked() {
-        return Err("请先解锁隐私任务，再修改隐私下载设置".into());
-    }
-    Ok(())
-}
-
 fn verify_password(
     credentials: &dyn CredentialStore,
     mut password: String,
@@ -96,23 +82,4 @@ fn constant_time_equal(expected: &[u8], candidate: &[u8]) -> bool {
             usize::from(*expected.get(index).unwrap_or(&0) ^ *candidate.get(index).unwrap_or(&0));
     }
     difference == 0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cloud::MemoryCredentialStore;
-
-    #[test]
-    fn existing_password_requires_an_unlocked_session_before_reconfiguration() {
-        let credentials = MemoryCredentialStore::default();
-        let session = PrivacySession::default();
-        configure_password(&credentials, "original-password".into()).unwrap();
-
-        assert!(require_unlocked_configuration(&session, &credentials).is_err());
-        assert!(session
-            .unlock(&credentials, "original-password".into())
-            .unwrap());
-        assert!(require_unlocked_configuration(&session, &credentials).is_ok());
-    }
 }

@@ -247,9 +247,13 @@ export async function updateSettings(settings: AppSettings): Promise<AppSettings
   return isTauriRuntime() ? invoke<AppSettings>('update_settings', { settings }) : settings;
 }
 
-export async function configurePrivacyDownload(enabled: boolean, password?: string): Promise<AppSettings> {
-  if (!isTauriRuntime()) return { ...defaultSettings, privacyDownloadEnabled: enabled, privacyPasswordConfigured: Boolean(password) };
-  return invoke<AppSettings>('configure_privacy_download', { enabled, password: password || null });
+export async function configurePrivacyDownload(enabled: boolean, currentPassword?: string, newPassword?: string): Promise<AppSettings> {
+  if (!isTauriRuntime()) return { ...defaultSettings, privacyDownloadEnabled: enabled, privacyPasswordConfigured: Boolean(newPassword) };
+  return invoke<AppSettings>('configure_privacy_download', {
+    enabled,
+    currentPassword: currentPassword || null,
+    newPassword: newPassword || null
+  });
 }
 
 export async function getPrivacyTaskVisibility(): Promise<PrivacyTaskVisibility> {

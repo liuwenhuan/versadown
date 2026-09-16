@@ -3177,11 +3177,21 @@ pub fn get_privacy_task_visibility(
 #[tauri::command]
 pub fn configure_privacy_download(
     enabled: bool,
-    password: Option<String>,
+    current_password: Option<String>,
+    new_password: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<AppSettings, String> {
-    crate::privacy::require_unlocked_configuration(&state.privacy_session, &state.ai_secrets)?;
-    if let Some(password) = password {
+    let was_configured = crate::privacy::password_is_configured(&state.ai_secrets)?;
+    if was_configured {
+        let current_password = current_password.ok_or_else(|| "请输入旧密码".to_string())?;
+        if !state
+            .privacy_session
+            .unlock(&state.ai_secrets, current_password)?
+        {
+            return Err("旧密码不正确".into());
+        }
+    }
+    if let Some(password) = new_password {
         crate::privacy::configure_password(&state.ai_secrets, password)?;
     }
     let configured = crate::privacy::password_is_configured(&state.ai_secrets)?;

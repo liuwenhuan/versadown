@@ -761,8 +761,8 @@ export function App() {
     return saved;
   }
 
-  async function savePrivacyConfiguration(enabled: boolean, password?: string) {
-    const saved = await configurePrivacyDownload(enabled, password);
+  async function savePrivacyConfiguration(enabled: boolean, currentPassword?: string, newPassword?: string) {
+    const saved = await configurePrivacyDownload(enabled, currentPassword, newPassword);
     setSettings(saved);
     setPrivacyVisibility(await getPrivacyTaskVisibility());
     return saved;
