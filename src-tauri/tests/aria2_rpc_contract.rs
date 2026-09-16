@@ -143,6 +143,33 @@ async fn protected_call_prepends_secret_and_preserves_options() {
 }
 
 #[tokio::test]
+async fn change_global_option_authenticates_and_sends_the_global_bandwidth_cap() {
+    let (url, calls, handle) = fixture(
+        json!({"jsonrpc":"2.0","id":"1","result":"OK"}),
+        StatusCode::OK,
+        Duration::ZERO,
+    )
+    .await;
+    let client = Aria2RpcClient::new(url, RpcSecret::from_bytes([0xab; 32])).unwrap();
+
+    client
+        .change_global_option(BTreeMap::from([(
+            "max-overall-upload-limit".into(),
+            "1024".into(),
+        )]))
+        .await
+        .unwrap();
+
+    let request = calls.lock().unwrap()[0].clone();
+    assert_eq!(request["method"], "aria2.changeGlobalOption");
+    assert_eq!(
+        request["params"],
+        json!([format!("token:{}", "ab".repeat(32)), {"max-overall-upload-limit":"1024"}])
+    );
+    handle.abort();
+}
+
+#[tokio::test]
 async fn get_peers_sends_the_gid_and_decodes_peer_addresses() {
     let (url, calls, handle) = fixture(
         json!({"jsonrpc":"2.0","id":"1","result":[

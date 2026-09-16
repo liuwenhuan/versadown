@@ -174,6 +174,8 @@ export interface Aria2Settings {
   maxConcurrentDownloads: number;
   maxConnectionsPerServer: number;
   btSeedRatio: number;
+  overallDownloadLimit: number;
+  p2pUploadLimit: number;
 }
 
 export interface AppSettings {
@@ -187,6 +189,7 @@ export interface AppSettings {
   deleteTransferredShareFilesAfterDownload: boolean;
   privacyDownloadEnabled?: boolean;
   privacyPasswordConfigured?: boolean;
+  cloudUploadLimit?: number;
 }
 
 export interface PrivacyTaskVisibility {

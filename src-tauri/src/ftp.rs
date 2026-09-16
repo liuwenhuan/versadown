@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     aria2::{DownloadAction, EventSink, UriSubmissionOptions},
+    bandwidth::BandwidthLimiter,
     DownloadTask, StoreError, TaskStatus, TaskStore,
 };
 
@@ -214,6 +215,7 @@ pub struct FtpDownloadEngine {
     events: Arc<dyn EventSink>,
     scheduler: Mutex<WorkerScheduler>,
     limits: RwLock<FtpDownloadLimits>,
+    download_limiter: Arc<BandwidthLimiter>,
     accepting: AtomicBool,
 }
 
@@ -229,6 +231,7 @@ impl FtpDownloadEngine {
             events,
             scheduler: Mutex::new(WorkerScheduler::default()),
             limits: RwLock::new(FtpDownloadLimits::default()),
+            download_limiter: Arc::new(BandwidthLimiter::new(0)),
             accepting: AtomicBool::new(true),
         }
     }
@@ -247,6 +250,10 @@ impl FtpDownloadEngine {
             .limits
             .read()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub fn set_download_limit(&self, bytes_per_second: u64) {
+        self.download_limiter.set_limit(bytes_per_second);
     }
 
     pub async fn submit_uri(
@@ -715,6 +722,7 @@ impl FtpDownloadEngine {
             if read == 0 {
                 break;
             }
+            self.download_limiter.consume_async(read).await;
             file.write_all(&buffer[..read]).await?;
             completed = completed.saturating_add(read as u64);
             if last_published.elapsed() >= Duration::from_millis(200)
@@ -943,6 +951,7 @@ impl FtpDownloadEngine {
                     segment.index
                 )));
             }
+            self.download_limiter.consume_async(read).await;
             file.write_all(&buffer[..read]).await?;
             segment.completed_length = segment.completed_length.saturating_add(read as u64);
             self.store

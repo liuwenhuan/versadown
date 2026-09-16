@@ -13,12 +13,14 @@ use std::{
 /// Keep HTTP upload readers responsive to pause and cancellation without adding
 /// enough read-call overhead to affect normal internet upload throughput.
 const MAX_UPLOAD_READ_SIZE: usize = 256 * 1024;
+const MAX_LIMITED_UPLOAD_READ_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Default)]
 pub struct UploadControl {
     signal: Arc<UploadSignal>,
     bytes: Arc<AtomicU64>,
     progress: Option<(UploadProgressTracker, usize)>,
+    rate_limiter: Option<Arc<crate::bandwidth::BandwidthLimiter>>,
 }
 #[derive(Default)]
 struct UploadSignal {
@@ -69,6 +71,13 @@ impl UploadControl {
     }
     pub(crate) fn with_progress(mut self, tracker: UploadProgressTracker, input: usize) -> Self {
         self.progress = Some((tracker, input));
+        self
+    }
+    pub(crate) fn with_rate_limiter(
+        mut self,
+        rate_limiter: Arc<crate::bandwidth::BandwidthLimiter>,
+    ) -> Self {
+        self.rate_limiter = Some(rate_limiter);
         self
     }
     pub(crate) fn start_file(&self, path: &Path) {
@@ -267,7 +276,12 @@ impl UploadBody {
         }
     }
     pub fn reader(&self, control: UploadControl) -> Result<Box<dyn Read + Send>, QuarkError> {
-        self.reader_for(control, true)
+        let rate_limiter = control.rate_limiter.clone();
+        let reader = self.reader_for(control, true)?;
+        Ok(match rate_limiter {
+            Some(limiter) => Box::new(RateLimitedReader { reader, limiter }),
+            None => reader,
+        })
     }
     fn reader_for(
         &self,
@@ -308,17 +322,22 @@ impl UploadBody {
             Self::Controlled {
                 body,
                 control: attached,
-            } => body.reader_for(
-                if transfer {
+            } => {
+                let control = if transfer {
                     attached.clone()
                 } else {
                     UploadControl {
                         signal: attached.signal.clone(),
                         ..UploadControl::default()
                     }
-                },
-                transfer,
-            ),
+                };
+                let rate_limiter = control.rate_limiter.clone();
+                let reader = body.reader_for(control, transfer)?;
+                Ok(match rate_limiter {
+                    Some(limiter) if transfer => Box::new(RateLimitedReader { reader, limiter }),
+                    _ => reader,
+                })
+            }
         }
     }
     /// AWS requires a payload digest before sending; hash in a bounded buffer.
@@ -335,6 +354,20 @@ impl UploadBody {
             hash.update(&buffer[..count]);
         }
         Ok(format!("{:x}", hash.finalize()))
+    }
+}
+
+struct RateLimitedReader {
+    reader: Box<dyn Read + Send>,
+    limiter: Arc<crate::bandwidth::BandwidthLimiter>,
+}
+
+impl Read for RateLimitedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let limit = buffer.len().min(MAX_LIMITED_UPLOAD_READ_SIZE);
+        let count = self.reader.read(&mut buffer[..limit])?;
+        self.limiter.consume_blocking(count);
+        Ok(count)
     }
 }
 struct SliceReader {
@@ -546,6 +579,26 @@ mod upload_progress_body_tests {
         control.cancel();
         assert!(body.sha256().is_err());
         assert_eq!(control.bytes_read(), 0);
+    }
+
+    #[test]
+    fn controlled_upload_body_shares_the_configured_cloud_upload_limit() {
+        let control = UploadControl::default()
+            .with_rate_limiter(Arc::new(crate::bandwidth::BandwidthLimiter::new(1_000)));
+        let body = UploadBody::Controlled {
+            body: Box::new(UploadBody::Bytes(vec![7; 50])),
+            control,
+        };
+
+        let started = std::time::Instant::now();
+        let mut bytes = Vec::new();
+        body.reader(UploadControl::default())
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+
+        assert_eq!(bytes.len(), 50);
+        assert!(started.elapsed() >= Duration::from_millis(45));
     }
 }
 

@@ -12,9 +12,10 @@ use tokio::sync::{watch, Mutex};
 
 use crate::{
     aria2::{
-        Aria2GlobalStat, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, DownloadAction,
-        DownloadService, EventSink, TransferSynchronizer, UriSubmissionOptions,
+        Aria2GlobalStat, Aria2LaunchConfig, Aria2Options, Aria2Process, Aria2RpcClient,
+        DownloadAction, DownloadService, EventSink, TransferSynchronizer, UriSubmissionOptions,
     },
+    bandwidth::BandwidthLimiter,
     DownloadTask, FtpDownloadEngine, TaskStatus, TaskStore,
 };
 
@@ -193,11 +194,78 @@ struct EngineSlot {
     sync_cancel: Option<watch::Sender<bool>>,
 }
 
+/// Keep peer connections alive while cloud uploads take precedence.
+/// aria2-next applies this value globally to BT, magnet, and ED2K uploads.
+const CLOUD_UPLOAD_P2P_LIMIT: u64 = 1_024;
+
+#[derive(Debug)]
+struct CloudUploadP2pState {
+    active_uploads: u64,
+    configured_limit: u64,
+}
+
+impl CloudUploadP2pState {
+    fn new(configured_limit: u64) -> Self {
+        Self {
+            active_uploads: 0,
+            configured_limit,
+        }
+    }
+
+    fn acquire(&mut self) -> Option<u64> {
+        self.active_uploads += 1;
+        (self.active_uploads == 1).then_some(CLOUD_UPLOAD_P2P_LIMIT)
+    }
+
+    fn release(&mut self) -> Option<u64> {
+        self.active_uploads = self.active_uploads.saturating_sub(1);
+        (self.active_uploads == 0).then_some(self.configured_limit)
+    }
+
+    fn set_configured_limit(&mut self, configured_limit: u64) {
+        self.configured_limit = configured_limit;
+    }
+
+    fn has_active_uploads(&self) -> bool {
+        self.active_uploads > 0
+    }
+}
+
+pub(crate) struct CloudUploadLease {
+    runtime: Arc<EngineRuntime>,
+    released: AtomicBool,
+}
+
+impl CloudUploadLease {
+    pub(crate) fn limiter(&self) -> Arc<BandwidthLimiter> {
+        Arc::clone(&self.runtime.cloud_upload_limiter)
+    }
+
+    pub(crate) async fn release(&self) {
+        if !self.released.swap(true, Ordering::AcqRel) {
+            self.runtime.release_cloud_upload().await;
+        }
+    }
+}
+
+impl Drop for CloudUploadLease {
+    fn drop(&mut self) {
+        if !self.released.swap(true, Ordering::AcqRel) {
+            let runtime = Arc::clone(&self.runtime);
+            tauri::async_runtime::spawn(async move {
+                runtime.release_cloud_upload().await;
+            });
+        }
+    }
+}
+
 pub struct EngineRuntime {
     launch_config: RwLock<Aria2LaunchConfig>,
     store: Arc<TaskStore>,
     download_events: Arc<dyn EventSink>,
     ftp: Arc<FtpDownloadEngine>,
+    cloud_upload_limiter: Arc<BandwidthLimiter>,
+    cloud_upload_p2p: Mutex<CloudUploadP2pState>,
     state_events: Arc<dyn EngineStateSink>,
     state: RwLock<EngineAvailability>,
     slot: Mutex<EngineSlot>,
@@ -213,6 +281,7 @@ impl EngineRuntime {
         download_events: Arc<dyn EventSink>,
         state_events: Arc<dyn EngineStateSink>,
     ) -> Self {
+        let configured_p2p_upload_limit = launch_config.aria2.p2p_upload_limit;
         let ftp = Arc::new(FtpDownloadEngine::new(
             &launch_config.download_dir,
             Arc::clone(&store),
@@ -222,11 +291,14 @@ impl EngineRuntime {
             launch_config.aria2.max_concurrent_downloads,
             launch_config.aria2.max_connections_per_server,
         );
+        ftp.set_download_limit(launch_config.aria2.overall_download_limit);
         Self {
             launch_config: RwLock::new(launch_config),
             store,
             download_events,
             ftp,
+            cloud_upload_limiter: Arc::new(BandwidthLimiter::new(0)),
+            cloud_upload_p2p: Mutex::new(CloudUploadP2pState::new(configured_p2p_upload_limit)),
             state_events,
             state: RwLock::new(EngineAvailability::starting()),
             slot: Mutex::new(EngineSlot {
@@ -359,6 +431,46 @@ impl EngineRuntime {
             .ok_or_else(|| EngineUnavailableError {
                 message: "下载引擎不可用，请稍后重试".into(),
             })
+    }
+
+    pub(crate) fn set_cloud_upload_limit(&self, bytes_per_second: u64) {
+        self.cloud_upload_limiter.set_limit(bytes_per_second);
+    }
+
+    pub(crate) async fn begin_cloud_upload(self: &Arc<Self>) -> CloudUploadLease {
+        let mut state = self.cloud_upload_p2p.lock().await;
+        if state.acquire().is_some() {
+            // Cloud uploads must remain usable while the local download engine
+            // is starting or recovering. In that state it cannot keep a P2P
+            // connection alive, so best-effort suppression is sufficient.
+            let _ = self
+                .set_aria2_global_upload_limit(CLOUD_UPLOAD_P2P_LIMIT)
+                .await;
+        }
+        CloudUploadLease {
+            runtime: Arc::clone(self),
+            released: AtomicBool::new(false),
+        }
+    }
+
+    async fn release_cloud_upload(&self) {
+        let mut state = self.cloud_upload_p2p.lock().await;
+        if let Some(limit) = state.release() {
+            let _ = self.set_aria2_global_upload_limit(limit).await;
+        }
+    }
+
+    async fn set_aria2_global_upload_limit(&self, bytes_per_second: u64) -> Result<(), String> {
+        let service = self.service().await.map_err(|error| error.to_string())?;
+        service
+            .api()
+            .change_global_option(Aria2Options::from([(
+                "max-overall-upload-limit".into(),
+                bytes_per_second.to_string(),
+            )]))
+            .await
+            .map_err(|error| format!("无法设置 P2P 上传限速：{error}"))?;
+        Ok(())
     }
 
     pub async fn global_stat(&self) -> Result<Aria2GlobalStat, EngineUnavailableError> {
@@ -542,6 +654,13 @@ impl EngineRuntime {
             };
             self.ftp
                 .set_limits(max_active_tasks, max_connections_per_task);
+            let overall_download_limit = self
+                .launch_config
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .aria2
+                .overall_download_limit;
+            self.ftp.set_download_limit(overall_download_limit);
             Ok(state)
         } else {
             let error = state.error.unwrap_or_else(|| "aria2 配置应用失败".into());
@@ -569,13 +688,25 @@ impl EngineRuntime {
         &self,
         aria2: crate::Aria2Settings,
     ) -> Result<EngineAvailability, String> {
+        let mut upload_state = self.cloud_upload_p2p.lock().await;
+        let previous_limit = upload_state.configured_limit;
+        upload_state.set_configured_limit(aria2.p2p_upload_limit);
         let mut launch_config = self
             .launch_config
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         launch_config.aria2 = aria2;
-        self.reconfigure(launch_config).await
+        let availability = self.reconfigure(launch_config).await;
+        if availability.is_err() {
+            upload_state.set_configured_limit(previous_limit);
+            return availability;
+        }
+        if upload_state.has_active_uploads() {
+            self.set_aria2_global_upload_limit(CLOUD_UPLOAD_P2P_LIMIT)
+                .await?;
+        }
+        availability
     }
 
     pub fn start_monitor(self: &Arc<Self>, interval: Duration) {
@@ -733,6 +864,18 @@ impl EngineRuntime {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_upload_state_suppresses_once_and_restores_the_latest_user_limit() {
+        let mut state = CloudUploadP2pState::new(1_048_576);
+
+        assert_eq!(state.acquire(), Some(CLOUD_UPLOAD_P2P_LIMIT));
+        assert_eq!(state.acquire(), None);
+        state.set_configured_limit(2_097_152);
+        assert!(state.has_active_uploads());
+        assert_eq!(state.release(), None);
+        assert_eq!(state.release(), Some(2_097_152));
+    }
 
     fn set_status(tasks: &TaskStore, id: uuid::Uuid, status: TaskStatus) -> crate::DownloadTask {
         let mut task = tasks.find(id).unwrap();

@@ -54,6 +54,14 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
             config.aria2.max_concurrent_downloads
         ),
         format!("--seed-ratio={}", config.aria2.bt_seed_ratio),
+        format!(
+            "--max-overall-download-limit={}",
+            config.aria2.overall_download_limit
+        ),
+        format!(
+            "--max-overall-upload-limit={}",
+            config.aria2.p2p_upload_limit
+        ),
         format!("--enable-dht={}", config.peer_discovery),
         "--enable-dht6=false".into(),
         format!("--bt-enable-lpd={}", config.peer_discovery),
@@ -211,5 +219,31 @@ pub async fn wait_rpc_ready(client: &Aria2RpcClient, duration: Duration) -> Resu
             return Err(Aria2Error::ReadinessTimeout);
         }
         tokio::time::sleep_until((Instant::now() + Duration::from_millis(50)).min(deadline)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passes_persistent_download_and_p2p_upload_limits_to_aria2_next() {
+        let config = Aria2LaunchConfig {
+            binary: PathBuf::from("aria2c"),
+            data_dir: PathBuf::from("data"),
+            download_dir: PathBuf::from("downloads"),
+            parent_pid: 42,
+            peer_discovery: false,
+            aria2: crate::Aria2Settings {
+                overall_download_limit: 2_621_440,
+                p2p_upload_limit: 1_572_864,
+                ..Default::default()
+            },
+        };
+
+        let args = build_aria2_args(&config, &RpcSecret::from_token("test-token").unwrap());
+
+        assert!(args.contains(&"--max-overall-download-limit=2621440".to_string()));
+        assert!(args.contains(&"--max-overall-upload-limit=1572864".to_string()));
     }
 }

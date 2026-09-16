@@ -12,8 +12,9 @@ const initial = {
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
-  deleteTransferredShareFilesAfterDownload: true
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+  deleteTransferredShareFilesAfterDownload: true,
+  cloudUploadLimit: 0
 };
 
 it('keeps detailed report collection off by default', () => {
@@ -258,8 +259,9 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
-    deleteTransferredShareFilesAfterDownload: true
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+    deleteTransferredShareFilesAfterDownload: true,
+    cloudUploadLimit: 0
   });
 });
 
@@ -287,8 +289,37 @@ it('saves aria2 RPC and transfer limits from the network settings', async () => 
       rpcToken: 'local-token',
       maxConcurrentDownloads: 3,
       maxConnectionsPerServer: 4,
-      btSeedRatio: 1.5
+      btSeedRatio: 1.5,
+      overallDownloadLimit: 0,
+      p2pUploadLimit: 1048576
     }
+  });
+});
+
+it('saves overall download, P2P upload, and cloud upload caps in bytes per second', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={initial} onChange={onChange} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  await user.type(screen.getByLabelText('aria2 RPC Token'), 'local-token');
+  await user.clear(screen.getByRole('spinbutton', { name: '整体下载限速' }));
+  await user.type(screen.getByRole('spinbutton', { name: '整体下载限速' }), '2.5');
+  await user.clear(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }));
+  await user.type(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }), '1.5');
+  await user.clear(screen.getByRole('spinbutton', { name: '网盘上传限速' }));
+  await user.type(screen.getByRole('spinbutton', { name: '网盘上传限速' }), '3');
+  await user.click(screen.getByRole('button', { name: '保存 aria2 设置' }));
+
+  expect(onChange).toHaveBeenLastCalledWith({
+    ...initial,
+    aria2: {
+      ...initial.aria2,
+      rpcToken: 'local-token',
+      overallDownloadLimit: 2_621_440,
+      p2pUploadLimit: 1_572_864
+    },
+    cloudUploadLimit: 3_145_728
   });
 });
 

@@ -36,6 +36,10 @@ pub struct Aria2Settings {
     pub max_concurrent_downloads: u16,
     pub max_connections_per_server: u8,
     pub bt_seed_ratio: f64,
+    /// Bytes per second; zero leaves all Aria2 downloads unrestricted.
+    pub overall_download_limit: u64,
+    /// Bytes per second; shared by all P2P uploads managed by Aria2 Next.
+    pub p2p_upload_limit: u64,
 }
 
 impl Default for Aria2Settings {
@@ -46,6 +50,8 @@ impl Default for Aria2Settings {
             max_concurrent_downloads: 5,
             max_connections_per_server: 4,
             bt_seed_ratio: 1.5,
+            overall_download_limit: 0,
+            p2p_upload_limit: 1_048_576,
         }
     }
 }
@@ -137,6 +143,8 @@ pub struct AppSettings {
     pub aria2: Aria2Settings,
     pub ai: AiSettings,
     pub magnet_metadata: MagnetMetadataSettings,
+    /// Bytes per second; zero leaves cloud uploads unrestricted.
+    pub cloud_upload_limit: u64,
     #[serde(default = "default_delete_transferred_share_files_after_download")]
     pub delete_transferred_share_files_after_download: bool,
     #[serde(default)]
@@ -159,6 +167,7 @@ impl Default for AppSettings {
             aria2: Aria2Settings::default(),
             ai: AiSettings::default(),
             magnet_metadata: MagnetMetadataSettings::default(),
+            cloud_upload_limit: 0,
             delete_transferred_share_files_after_download: true,
             privacy_download_enabled: false,
             privacy_password_configured: false,
@@ -495,7 +504,7 @@ impl NewCloudDirectoryGroupItem {
 
 #[cfg(test)]
 mod tests {
-    use super::Aria2Settings;
+    use super::{AppSettings, Aria2Settings};
 
     #[test]
     fn aria2_default_connections() {
@@ -508,6 +517,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(persisted).unwrap()["maxConnectionsPerServer"],
             8
+        );
+    }
+
+    #[test]
+    fn aria2_bandwidth_limits_default_and_serialize_in_bytes_per_second() {
+        let defaults: Aria2Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.overall_download_limit, 0);
+        assert_eq!(defaults.p2p_upload_limit, 1_048_576);
+        assert_eq!(
+            serde_json::to_value(defaults).unwrap()["p2pUploadLimit"],
+            1_048_576
+        );
+        assert_eq!(AppSettings::default().cloud_upload_limit, 0);
+        assert_eq!(
+            serde_json::to_value(AppSettings::default()).unwrap()["cloudUploadLimit"],
+            0
         );
     }
 }
