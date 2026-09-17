@@ -961,6 +961,105 @@ async fn metadata_child_is_persisted_and_selection_precedes_unpause() {
 }
 
 #[tokio::test]
+async fn resumed_detached_magnet_reapplies_saved_selection_before_starting() {
+    let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let active_for_server = active.clone();
+    let selection_applied = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let selection_for_server = selection_applied.clone();
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.addUri" => {
+                assert_eq!(request["params"][1][0], VALID_MAGNET);
+                assert_eq!(request["params"][2]["pause-metadata"], "true");
+                assert_eq!(request["params"][2]["check-integrity"], "true");
+                assert_eq!(request["params"][2]["continue"], "true");
+                json!("metadata")
+            }
+            "aria2.tellStatus" if request["params"][1] == "metadata" => {
+                let mut status = fixture::status("metadata", "complete", 100);
+                status["followedBy"] = json!(["child"]);
+                status
+            }
+            "aria2.tellStatus" if request["params"][1] == "child" => {
+                let state = if active_for_server.load(std::sync::atomic::Ordering::SeqCst) {
+                    "active"
+                } else {
+                    "paused"
+                };
+                let second_selected =
+                    if selection_for_server.load(std::sync::atomic::Ordering::SeqCst) {
+                        "false"
+                    } else {
+                        "true"
+                    };
+                let mut status = fixture::status("child", state, 0);
+                status["files"] = json!([
+                    {"index":"1","path":"keep.bin","length":"60","completedLength":"0","selected":"true"},
+                    {"index":"2","path":"skip.bin","length":"40","completedLength":"0","selected":second_selected}
+                ]);
+                status
+            }
+            "aria2.changeOption" => {
+                assert_eq!(request["params"][1], "child");
+                assert_eq!(request["params"][2]["select-file"], "1");
+                selection_for_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("OK")
+            }
+            "aria2.unpause" => {
+                assert_eq!(request["params"][1], "child");
+                active_for_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("child")
+            }
+            other => panic!("unexpected method {other}"),
+        })
+        .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(magnet_task()).unwrap();
+    store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
+    store.transition(task.id, TaskStatus::Queued).unwrap();
+    store.transition(task.id, TaskStatus::Paused).unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[
+                (1, "keep.bin".into(), 60, 30, true),
+                (2, "skip.bin".into(), 40, 0, false),
+            ],
+        )
+        .unwrap();
+    store.confirm_selection(task.id).unwrap();
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let resumed = service
+        .prepare_magnet_with_options(
+            task.id,
+            task.source,
+            UriSubmissionOptions {
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.status, TaskStatus::Downloading);
+    assert_eq!(resumed.aria_gid.as_deref(), Some("child"));
+    assert_eq!(resumed.metadata_gid.as_deref(), Some("metadata"));
+    assert!(store.selection_confirmed(task.id).unwrap());
+    assert_eq!(
+        store
+            .files(task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|file| file.selected)
+            .map(|file| file.index)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn external_magnet_preview_defers_selection_until_metadata_child_is_ready() {
     let calls = Arc::new(Mutex::new(vec![]));
     let wire = calls.clone();

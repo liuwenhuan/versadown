@@ -919,13 +919,28 @@ impl DownloadService {
         if task.aria_gid.is_some() {
             return self.reconcile_task_unlocked(task_id).await;
         }
-        let mut options = options.into_aria2_options()?;
-        options.insert("pause-metadata".into(), "true".into());
+        // A detached paused magnet already has an explicit, durable file
+        // selection. Retain it before aria2 refreshes the metadata snapshot,
+        // then reapply it after its new metadata GID is ready.
+        let resume_selection = (options.continue_download && task.status == TaskStatus::Paused)
+            .then(|| {
+                self.store.files(task.id).map(|files| {
+                    files
+                        .into_iter()
+                        .filter(|file| file.selected)
+                        .map(|file| file.index)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .transpose()?
+            .filter(|indices| !indices.is_empty());
+        let mut aria_options = options.clone().into_aria2_options()?;
+        aria_options.insert("pause-metadata".into(), "true".into());
         // A magnet resolves to a torrent after metadata retrieval. Keep this on
         // the metadata task so its followed download verifies an existing payload
         // before retrying network pieces.
-        options.insert("check-integrity".into(), "true".into());
-        let gid = self.api().add_uri(vec![magnet], options).await?;
+        aria_options.insert("check-integrity".into(), "true".into());
+        let gid = self.api().add_uri(vec![magnet], aria_options).await?;
         let current = match self.store.bind_metadata_gid(task_id, &gid) {
             Ok(task) => task,
             Err(error) => {
@@ -934,8 +949,16 @@ impl DownloadService {
             }
         };
         self.publish_task(&current)?;
-        self.apply_status(current, self.api().tell_status(&gid).await?, false)
-            .await
+        let prepared = self
+            .apply_status(current, self.api().tell_status(&gid).await?, false)
+            .await?;
+        match resume_selection {
+            Some(indices) => {
+                self.select_files_with_options_unlocked(task_id, indices, options)
+                    .await
+            }
+            None => Ok(prepared),
+        }
     }
 
     pub async fn select_files(

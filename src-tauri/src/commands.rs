@@ -15,10 +15,9 @@ use crate::models::{CloudDirectoryGroup, CloudDirectoryGroupItem, QueueTaskPaylo
 use crate::{
     cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, DpapiCredentialStore},
     confirm_download, duplicate_state, prepare_download, resolve_magnet_metadata,
-    resolve_magnet_torrent, retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings,
-    DownloadAction, DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility,
-    ParseOutcome, ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile,
-    UriSubmissionOptions,
+    retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings, DownloadAction,
+    DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility, ParseOutcome,
+    ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
 
 #[derive(Serialize)]
@@ -2343,40 +2342,13 @@ pub(crate) async fn resubmit_task(
             .service()
             .await
             .map_err(|error| error.to_string())?;
-        let selected_indices = state
-            .store
-            .files(task.id)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .filter(|file| file.selected)
-            .map(|file| file.index)
-            .collect();
-        let metadata_settings = state
-            .settings
-            .lock()
-            .map_err(|_| "设置锁不可用".to_string())?
-            .magnet_metadata
-            .clone();
-        let resolved = resolve_magnet_torrent(&metadata_settings, &task.source)
-            .await
-            .map_err(|error| format!("无法重新解析磁链：{error}"))?
-            .ok_or_else(|| "磁链解析服务未返回种子文件，无法安全覆盖下载".to_string())?;
-        if let Some(title) = resolved.title {
-            let mut titled_task = task.clone();
-            titled_task.name = title;
-            state
-                .store
-                .apply_transfer_snapshot(titled_task)
-                .map_err(|error| error.to_string())?;
-        }
+        // The engine keeps magnet metadata in its native state directory. A
+        // degraded task must therefore return its original magnet to aria2
+        // instead of requiring the optional metadata service to export a
+        // separate .torrent file. aria2 reuses local state when available and
+        // otherwise performs normal P2P metadata discovery.
         return service
-            .resubmit_torrent_with_options(
-                task.id,
-                resolved.torrent,
-                vec![],
-                selected_indices,
-                options,
-            )
+            .prepare_magnet_with_options(task.id, task.source, options)
             .await
             .map_err(|error| error.to_string());
     }
