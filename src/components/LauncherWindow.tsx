@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { FloatingLauncher } from './FloatingLauncher';
+import { FloatingLauncher, type LauncherPointerPosition } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging, type LauncherInputRegion, type LauncherPopupPlacement } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, moveLauncherPointerDrag, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement } from '../lib/launcherWindow';
 import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, updateSettings } from '../lib/api';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
@@ -29,6 +29,11 @@ export function LauncherWindow() {
   const quickAddElement = useRef<HTMLElement | null>(null);
   const menuElement = useRef<HTMLElement | null>(null);
   const [inputReady, setInputReady] = useState(false);
+  const dragSession = useRef<LauncherPointerDragSession | null>(null);
+  const dragPendingPointer = useRef<LauncherPointerPosition | null>(null);
+  const dragStartQueue = useRef(Promise.resolve());
+  const dragPositionQueue = useRef(Promise.resolve());
+  const launcherDragging = useRef(false);
   popupPlacementRef.current = popupPlacement;
   const hasActiveDownload = activeCount > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
@@ -113,7 +118,7 @@ export function LauncherWindow() {
     if (!isTauriRuntime()) return;
     let cleanedUp = false;
     const unlisten: (() => void)[] = [];
-    const refresh = () => { void refreshLauncherGeometry(); };
+    const refresh = () => { if (!launcherDragging.current) void refreshLauncherGeometry(); };
     const launcher = getCurrentWindow();
     void launcher.onMoved(refresh).then((stop) => {
       if (cleanedUp) stop(); else unlisten.push(stop);
@@ -181,19 +186,52 @@ export function LauncherWindow() {
     requestMode('compact');
   }
 
-  async function beginLauncherDrag() {
+  function queueLauncherDragMove(pointer: LauncherPointerPosition) {
+    dragPendingPointer.current = pointer;
+    if (!dragSession.current) return;
+    dragPositionQueue.current = dragPositionQueue.current.then(async () => {
+      const next = dragPendingPointer.current;
+      dragPendingPointer.current = null;
+      const session = dragSession.current;
+      if (next && session) await moveLauncherPointerDrag(session, next);
+    }).catch(() => undefined);
+  }
+
+  async function beginLauncherDrag(pointer: LauncherPointerPosition) {
     if (disposed.current) return;
+    launcherDragging.current = true;
     requestedMode.current = 'compact';
     setMode('compact');
     try {
       await applyRegions([launcherIconRegion]);
-      if (disposed.current) return;
-      await startLauncherDragging();
-      const placement = await getLauncherPopupPlacement().catch(() => popupPlacementRef.current);
-      if (!disposed.current) setPopupPlacement(placement);
+      if (disposed.current || !launcherDragging.current) return;
+      dragSession.current = await beginLauncherPointerDrag(pointer);
+      if (disposed.current || !launcherDragging.current) return;
+      const pendingPointer = dragPendingPointer.current;
+      if (pendingPointer) queueLauncherDragMove(pendingPointer);
     } catch {
-      // Never begin native dragging after the compact-region update fails.
+      launcherDragging.current = false;
+      dragSession.current = null;
+      // Never begin pointer-driven dragging after the compact-region update fails.
     }
+  }
+
+  function moveLauncherDrag(pointer: LauncherPointerPosition) {
+    if (launcherDragging.current) queueLauncherDragMove(pointer);
+  }
+
+  function finishLauncherDrag(pointer: LauncherPointerPosition) {
+    if (!launcherDragging.current) return;
+    queueLauncherDragMove(pointer);
+    // A fast pointer-up can arrive while the safe icon-only region is still
+    // being applied.  Wait for that start sequence to install its session,
+    // then flush the final captured pointer position before refreshing.
+    void dragStartQueue.current.then(() => dragPositionQueue.current).finally(async () => {
+      launcherDragging.current = false;
+      dragSession.current = null;
+      dragPendingPointer.current = null;
+      if (!disposed.current) await refreshLauncherGeometry();
+    });
   }
 
   function runContextAction(action: LauncherMenuAction) {
@@ -219,7 +257,9 @@ export function LauncherWindow() {
         onParse={(input) => { void sendLauncherInput(input); }}
         onScan={scanDownloadInputs}
         onOpenTaskList={() => { void openLauncherManager(); }}
-        onDragStart={() => { void beginLauncherDrag(); }}
+        onDragStart={(pointer) => { dragStartQueue.current = beginLauncherDrag(pointer); }}
+        onDragMove={moveLauncherDrag}
+        onDragEnd={finishLauncherDrag}
         onContextMenu={openContextMenu}
       />
       {mode === 'context-menu' && <LauncherContextMenu onElement={captureMenu} downloadSpeed={formatSpeed(downloadSpeed)} managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}

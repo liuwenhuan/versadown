@@ -3,10 +3,10 @@
 //! The credential store deliberately contains only the renewable session fields.
 //! Signed download URLs are requested immediately before use and never written here.
 use super::{
-    http::response_json, types::required, CloudAccount, CloudAuthMethod, CloudDirectory,
-    CloudFile, CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
-    CloudProvider, CloudShare, CloudShareOptions, CloudStorageCapacity, CloudUploadTransport,
-    CredentialStore, QuarkError, UploadHttpRequest,
+    http::response_json, types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile,
+    CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
+    CloudShare, CloudShareOptions, CloudStorageCapacity, CloudUploadTransport, CredentialStore,
+    QuarkError, UploadHttpRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -186,6 +186,36 @@ mod tests {
             Err(QuarkError::AuthorizationExpired)
         ));
     }
+    #[test]
+    fn aliyun_personal_share_list_uses_the_consumer_route() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive","browser_access_ready":true}"#,
+            )
+            .unwrap();
+        let http = Http::new(vec![
+            json!({"user_id":"u1","nick_name":"alice"}),
+            json!({"items":[],"next_marker":""}),
+            json!({"items":[],"next_marker":""}),
+        ]);
+
+        assert!(AliyunClient::new(&credentials, &http)
+            .list_shares()
+            .unwrap()
+            .is_empty());
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].url.ends_with("/adrive/v2/share_link/list"));
+        let body: Value = serde_json::from_str(requests[2].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["creator"], "u1");
+        assert_eq!(body["limit"], 100);
+        assert_eq!(body["marker"], "");
+        assert!(body.get("drive_id").is_none());
+    }
+
     #[test]
     fn aliyun_share_reuses_the_inspected_token_without_a_personal_bearer() {
         let credentials = MemoryCredentialStore::default();
@@ -977,10 +1007,18 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
         CloudStorageCapacity::from_json(&value["total_size"], &value["used_size"], true)
     }
 
-    pub fn create_share(&self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, QuarkError> {
-        if file_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into())); }
+    pub fn create_share(
+        &self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, QuarkError> {
+        if file_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
+        }
         if options.generate_pass_code {
-            return Err(QuarkError::InvalidInput("阿里云盘需要设置自定义提取码".into()));
+            return Err(QuarkError::InvalidInput(
+                "阿里云盘需要设置自定义提取码".into(),
+            ));
         }
         let (session, _, _) = self.refreshed_validated_session()?;
         let mut body = json!({
@@ -988,33 +1026,68 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
             "file_id_list": file_ids,
             "share_name": options.name,
         });
-        if let Some(pass_code) = options.pass_code.as_deref().filter(|code| !code.trim().is_empty()) { body["share_pwd"] = json!(pass_code); }
+        if let Some(pass_code) = options
+            .pass_code
+            .as_deref()
+            .filter(|code| !code.trim().is_empty())
+        {
+            body["share_pwd"] = json!(pass_code);
+        }
         if let Some(days) = options.expires_in_days {
-            let expiration = time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days));
-            body["expiration"] = json!(expiration.format(&time::format_description::well_known::Rfc3339).map_err(|_| QuarkError::InvalidResponse)?);
+            let expiration =
+                time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days));
+            body["expiration"] = json!(expiration
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| QuarkError::InvalidResponse)?);
         }
         let value = self.api(&session, "/v2/share_link/create", body)?;
         aliyun_share_from_value(&value, Some(file_ids), options.pass_code.as_deref())
     }
 
     pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
-        let (session, _, _) = self.refreshed_validated_session()?;
+        let (session, account, _) = self.refreshed_validated_session()?;
         let mut marker = String::new();
         let mut shares = Vec::new();
         for _ in 0..10_000 {
-            let value = self.api(&session, "/v2/share_link/list", json!({"drive_id": session.drive_id, "limit": 200, "marker": marker}))?;
-            let page = value.get("items").or_else(|| value.get("share_links")).and_then(Value::as_array).ok_or(QuarkError::InvalidResponse)?;
-            shares.extend(page.iter().map(|share| aliyun_share_from_value(share, None, None)).collect::<Result<Vec<_>, _>>()?);
-            marker = value.get("next_marker").and_then(Value::as_str).unwrap_or("").to_owned();
-            if marker.is_empty() { return Ok(shares); }
+            let value = self.api(
+                &session,
+                "/adrive/v2/share_link/list",
+                json!({"creator": account.id, "limit": 100, "marker": marker}),
+            )?;
+            let page = value
+                .get("items")
+                .or_else(|| value.get("share_links"))
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            shares.extend(
+                page.iter()
+                    .map(|share| aliyun_share_from_value(share, None, None))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            marker = value
+                .get("next_marker")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            if marker.is_empty() {
+                return Ok(shares);
+            }
         }
         Err(QuarkError::InvalidResponse)
     }
 
     pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
-        if share_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个分享".into())); }
+        if share_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
+        }
         let (session, _, _) = self.refreshed_validated_session()?;
-        for share_id in share_ids { self.api(&session, "/v2/share_link/cancel", json!({"share_id": share_id}))?; }
+        for share_id in share_ids {
+            self.api(
+                &session,
+                "/v2/share_link/cancel",
+                json!({"share_id": share_id}),
+            )?;
+        }
         Ok(())
     }
 
@@ -1202,16 +1275,60 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
     }
 }
 
-fn aliyun_share_from_value(value: &Value, fallback_file_ids: Option<&[String]>, pass_code: Option<&str>) -> Result<CloudShare, QuarkError> {
+fn aliyun_share_from_value(
+    value: &Value,
+    fallback_file_ids: Option<&[String]>,
+    pass_code: Option<&str>,
+) -> Result<CloudShare, QuarkError> {
     let id = required(value, "share_id")?;
-    let source_file_ids = value.get("file_id_list").and_then(Value::as_array).map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()).or_else(|| fallback_file_ids.map(|ids| ids.to_vec())).unwrap_or_default();
+    let source_file_ids = value
+        .get("file_id_list")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .or_else(|| fallback_file_ids.map(|ids| ids.to_vec()))
+        .unwrap_or_default();
     Ok(CloudShare {
-        id: id.clone(), url: value.get("share_url").or_else(|| value.get("url")).and_then(Value::as_str).filter(|url| !url.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("https://www.alipan.com/s/{id}")),
-        name: value.get("share_name").or_else(|| value.get("name")).and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("分享文件").into(),
-        kind: if value.get("type").and_then(Value::as_str) == Some("folder") { CloudFileKind::Folder } else { CloudFileKind::File },
+        id: id.clone(),
+        url: value
+            .get("share_url")
+            .or_else(|| value.get("url"))
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("https://www.alipan.com/s/{id}")),
+        name: value
+            .get("share_name")
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("分享文件")
+            .into(),
+        kind: if value.get("type").and_then(Value::as_str) == Some("folder") {
+            CloudFileKind::Folder
+        } else {
+            CloudFileKind::File
+        },
         source_file_ids,
-        pass_code: value.get("share_pwd").and_then(Value::as_str).filter(|code| !code.is_empty()).map(str::to_owned).or_else(|| pass_code.map(str::to_owned)),
-        created_at: value.get("created_at").and_then(Value::as_str).map(str::to_owned), expires_at: value.get("expiration").and_then(Value::as_str).filter(|time| !time.is_empty()).map(str::to_owned),
+        pass_code: value
+            .get("share_pwd")
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .map(str::to_owned)
+            .or_else(|| pass_code.map(str::to_owned)),
+        created_at: value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        expires_at: value
+            .get("expiration")
+            .and_then(Value::as_str)
+            .filter(|time| !time.is_empty())
+            .map(str::to_owned),
     })
 }
 

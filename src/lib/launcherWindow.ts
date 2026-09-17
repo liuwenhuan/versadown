@@ -17,6 +17,12 @@ type WorkArea = { x: number; y: number; width: number; height: number };
 type Rect = { x: number; y: number; width: number; height: number };
 export type LauncherPopupPlacement = 'above' | 'below';
 export type LauncherInputRegion = { x: number; y: number; width: number; height: number };
+export type LauncherPointerPosition = { x: number; y: number };
+export type LauncherPointerDragSession = {
+  windowPosition: { x: number; y: number };
+  pointerPosition: LauncherPointerPosition;
+  scaleFactor: number;
+};
 
 export const launcherIconRegion: LauncherInputRegion = {
   x: launcherCanvas.width - launcherCanvas.iconSize,
@@ -62,6 +68,41 @@ export function launcherIconScreenRect(
     width: Math.round(launcherCanvas.iconSize * scaleFactor),
     height: Math.round(launcherCanvas.iconSize * scaleFactor),
   };
+}
+
+// Dragging the full fixed canvas with the native titlebar loop makes Windows
+// constrain the canvas itself to the work area.  The icon lives 328 CSS px
+// inside that canvas, so it can never reach the top edge.  Keep tracking the
+// captured icon pointer instead, allowing the transparent canvas to extend
+// above the work area while the visible icon remains under the pointer.
+export function launcherPointerDragPosition(
+  session: LauncherPointerDragSession,
+  pointerPosition: LauncherPointerPosition,
+) {
+  return {
+    x: session.windowPosition.x + Math.round((pointerPosition.x - session.pointerPosition.x) * session.scaleFactor),
+    y: session.windowPosition.y + Math.round((pointerPosition.y - session.pointerPosition.y) * session.scaleFactor),
+  };
+}
+
+export async function beginLauncherPointerDrag(
+  pointerPosition: LauncherPointerPosition,
+): Promise<LauncherPointerDragSession> {
+  const launcher = getCurrentWindow();
+  const [windowPosition, monitor] = await Promise.all([launcher.outerPosition(), currentMonitor()]);
+  return {
+    windowPosition,
+    pointerPosition,
+    scaleFactor: monitor?.scaleFactor ?? 1,
+  };
+}
+
+export async function moveLauncherPointerDrag(
+  session: LauncherPointerDragSession,
+  pointerPosition: LauncherPointerPosition,
+) {
+  const position = launcherPointerDragPosition(session, pointerPosition);
+  await getCurrentWindow().setPosition(new PhysicalPosition(position.x, position.y));
 }
 
 export function launcherPopupPlacementFromIcon(

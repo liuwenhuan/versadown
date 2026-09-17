@@ -37,4 +37,28 @@ describe('buildTaskFileTree', () => {
     expect(tree.map(node => node.name)).toEqual(['_crack', 'readme.txt']);
     expect(tree[0]).toEqual(expect.objectContaining({ kind: 'folder', bytes: 8, count: 1 }));
   });
+
+  it('does not turn file children with an empty children array into folders', () => {
+    const tree = buildTaskFileTree({
+      name: '倩种1987',
+      children: [
+        {
+          id: 'video', name: '씨받이[倩种].The.Surrogate.Woman.1986.web-1080P.mp4', kind: 'file', status: 'completed', progress: 100,
+          total_length: 0, completed_length: 0, children: [],
+        },
+        {
+          id: 'subtitles', name: '字幕', kind: 'folder', status: 'completed', progress: 100,
+          children: [{ id: 'subtitle', name: '简体中字.srt', kind: 'file', status: 'completed', progress: 100, total_length: 0, completed_length: 0, children: [] }],
+        },
+      ],
+    });
+
+    expect(tree).toEqual([
+      expect.objectContaining({ kind: 'file', name: '씨받이[倩种].The.Surrogate.Woman.1986.web-1080P.mp4' }),
+      expect.objectContaining({ kind: 'folder', name: '字幕', count: 1 }),
+    ]);
+    expect((tree[1] as Extract<typeof tree[number], { kind: 'folder' }>).children).toEqual([
+      expect.objectContaining({ kind: 'file', name: '简体中字.srt' }),
+    ]);
+  });
 });

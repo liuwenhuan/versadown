@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   getGlobalStat: vi.fn(), getSettings: vi.fn(), scanDownloadInputs: vi.fn(),
   updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(),
   setLauncherInputRegions: vi.fn(),
+  beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(),
   onMoved: vi.fn(), onScaleChanged: vi.fn(),
   movedHandler: undefined as undefined | (() => void),
   scaleChangedHandler: undefined as undefined | (() => void),
@@ -34,7 +35,8 @@ vi.mock('../lib/launcherWindow', () => ({
   runLauncherMenuAction: vi.fn().mockResolvedValue(undefined),
   getLauncherManagerVisible: state.getManagerVisible,
   showLauncherMenu: vi.fn().mockResolvedValue(undefined),
-  startLauncherDragging: vi.fn().mockResolvedValue(undefined),
+  beginLauncherPointerDrag: state.beginLauncherPointerDrag,
+  moveLauncherPointerDrag: state.moveLauncherPointerDrag,
   openLauncherManager: vi.fn().mockResolvedValue(undefined),
   sendLauncherInput: vi.fn().mockResolvedValue(undefined),
 }));
@@ -47,7 +49,7 @@ vi.mock('../lib/downloadEvents', () => ({
 }));
 
 import { LauncherWindow } from './LauncherWindow';
-import { setLauncherInputRegions, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
+import { beginLauncherPointerDrag, moveLauncherPointerDrag, setLauncherInputRegions, setLauncherWindowVisible } from '../lib/launcherWindow';
 
 const icon = { x: 346, y: 328, width: 64, height: 64 };
 const quickAdd = { x: 0, y: 92, width: 410, height: 236 };
@@ -69,6 +71,10 @@ beforeEach(() => {
   state.getManagerVisible.mockReset().mockResolvedValue(true);
   state.getLauncherPopupPlacement.mockReset().mockResolvedValue('above');
   state.setLauncherInputRegions.mockReset().mockResolvedValue(undefined);
+  state.beginLauncherPointerDrag.mockReset().mockResolvedValue({
+    windowPosition: { x: 1369, y: 506 }, pointerPosition: { x: 10, y: 10 }, scaleFactor: 1.5,
+  });
+  state.moveLauncherPointerDrag.mockReset().mockResolvedValue(undefined);
   state.movedHandler = undefined;
   state.scaleChangedHandler = undefined;
   state.onMoved.mockReset().mockImplementation((handler) => {
@@ -206,7 +212,7 @@ it.each(['Escape', 'blur', 'drag'] as const)('restores icon-only input for %s', 
   if (reason === 'Escape') fireEvent.keyDown(window, { key: 'Escape' });
   if (reason === 'blur') fireEvent.blur(window);
   if (reason === 'drag') {
-    fireEvent.mouseDown(trigger, { button: 0, clientX: 10, clientY: 10 });
+    fireEvent.mouseDown(trigger, { button: 0, buttons: 1, clientX: 10, clientY: 10 });
     fireEvent.mouseMove(trigger, { buttons: 1, clientX: 30, clientY: 30 });
   }
   await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
@@ -227,7 +233,7 @@ it('serializes region writes so a slow popup update cannot override compact inpu
   await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
 });
 
-it('awaits icon-only input before native dragging and then refreshes placement once', async () => {
+it('awaits icon-only input before beginning a captured pointer drag', async () => {
   render(<LauncherWindow />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   fireEvent.contextMenu(trigger);
@@ -235,13 +241,13 @@ it('awaits icon-only input before native dragging and then refreshes placement o
   const pending = deferred<void>();
   state.setLauncherInputRegions.mockReturnValueOnce(pending.promise);
   state.getLauncherPopupPlacement.mockClear();
-  fireEvent.mouseDown(trigger, { button: 0, clientX: 10, clientY: 10 });
+  fireEvent.mouseDown(trigger, { button: 0, buttons: 1, clientX: 10, clientY: 10 });
   fireEvent.mouseMove(trigger, { buttons: 1, clientX: 30, clientY: 30 });
   await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
-  expect(startLauncherDragging).not.toHaveBeenCalled();
+  expect(beginLauncherPointerDrag).not.toHaveBeenCalled();
   await act(async () => pending.resolve());
-  await waitFor(() => expect(startLauncherDragging).toHaveBeenCalledOnce());
-  await waitFor(() => expect(state.getLauncherPopupPlacement).toHaveBeenCalledOnce());
+  await waitFor(() => expect(beginLauncherPointerDrag).toHaveBeenCalledWith({ x: 10, y: 10 }));
+  await waitFor(() => expect(moveLauncherPointerDrag).toHaveBeenCalledWith(expect.anything(), { x: 30, y: 30 }));
 });
 
 it('retains the previous input on failure and never falls back to the full canvas', async () => {

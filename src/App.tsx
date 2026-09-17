@@ -739,7 +739,11 @@ export function App() {
     previousPrivacyUnlocked.current = privacyVisibility.unlocked;
     if (privacyVisibility.unlocked) return;
     setPrivacyTaskFilter('all');
-    setSelectedTaskId((id) => id && privacyVisibleTasks.some((task) => task.id === id) ? id : null);
+    const visibleTaskIds = new Set(privacyVisibleTasks.map((task) => task.id));
+    setSelectedTaskIds((ids) => {
+      const visibleSelectedIds = ids.filter((id) => visibleTaskIds.has(id));
+      return visibleSelectedIds.length === ids.length ? ids : visibleSelectedIds;
+    });
     setDetailsTaskId((id) => id && privacyVisibleTasks.some((task) => task.id === id) ? id : null);
     if (!wasUnlocked) return;
     setConfirmation(null);
@@ -1061,7 +1065,7 @@ export function App() {
           recordTaskEvent(updated);
           setTasks((current) => upsertTask(current, updated));
           if (command === 'move_to_private' && !privacyVisibility.unlocked && isPrivateTask(updated)) {
-            setSelectedTaskId((current) => current === id ? null : current);
+            setSelectedTaskIds((current) => current.filter((selectedId) => selectedId !== id));
             setDetailsTaskId((current) => current === id ? null : current);
           }
         }
@@ -1166,7 +1170,7 @@ export function App() {
         }
       });
       if (newlyHiddenIds.size) {
-        setSelectedTaskId((current) => current && newlyHiddenIds.has(current) ? null : current);
+        setSelectedTaskIds((current) => current.filter((id) => !newlyHiddenIds.has(id)));
         setDetailsTaskId((current) => current && newlyHiddenIds.has(current) ? null : current);
       }
       if (failure) throw failure;
@@ -1221,7 +1225,7 @@ export function App() {
     const removeTasksFromQueue = (taskIds: readonly string[]) => {
       const removed = new Set(taskIds);
       setTasks((current) => current.filter((task) => !removed.has(task.id)));
-      setSelectedTaskId((current) => current && removed.has(current) ? null : current);
+      setSelectedTaskIds((current) => current.filter((id) => !removed.has(id)));
       setDetailsTaskId((current) => current && removed.has(current) ? null : current);
     };
     const successMessage = deleteFiles ? '任务和下载文件已彻底删除' : '任务已从回收站彻底删除，下载文件已保留';
@@ -1539,7 +1543,7 @@ export function App() {
           </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
-        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
+        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
         {view === 'about' && <section className="view-panel" aria-label="关于"><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
       </div>
       {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {

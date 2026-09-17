@@ -120,6 +120,17 @@ it('maps the fixed hexagon to a physical screen rectangle', () => {
   });
 });
 
+it('moves the fixed canvas above the work area when a captured icon drag reaches the desktop top', () => {
+  expect(launcherWindow.launcherPointerDragPosition(
+    {
+      windowPosition: { x: 1369, y: 506 },
+      pointerPosition: { x: 378, y: 360 },
+      scaleFactor: 1.5,
+    },
+    { x: 378, y: -292 },
+  )).toEqual({ x: 1369, y: -472 });
+});
+
 it('chooses the lower slot without moving the hexagon when upper space is insufficient', () => {
   const icon = { x: 850, y: 20, width: 64, height: 64 };
   expect(launcherWindow.launcherPopupPlacementFromIcon(

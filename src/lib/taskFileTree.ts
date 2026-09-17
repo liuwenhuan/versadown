@@ -53,7 +53,7 @@ function fromChildren(children: readonly QueueTask[], parentKey: string): readon
   return children.map((child, position) => {
     const key = `${parentKey}/${child.id || position}`;
     const nested = child.children;
-    if (child.kind === 'folder' || nested !== undefined) {
+    if (child.kind === 'folder' || Boolean(nested?.length)) {
       const descendants = fromChildren(nested ?? [], key);
       return { kind: 'folder' as const, key, name: child.name, children: descendants, bytes: descendants.reduce<number>((total, node) => total + node.bytes, 0), count: descendants.reduce<number>((total, node) => total + node.count, 0) };
     }

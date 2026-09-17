@@ -502,12 +502,15 @@ async function run() {
     await evaluate(launcher, `(() => {
       window.__launcherSmokeEvents = [];
       const button = document.querySelector('.launcher-trigger');
-      for (const type of ['mousedown', 'mousemove', 'mouseup', 'click', 'contextmenu']) {
+      const compact = ${JSON.stringify({ position: nativeCompact.position, scale: compact.scale, workArea: nativeCompact.monitor.workArea })};
+      const desiredCanvasTop = compact.workArea.position.y + Math.round(24 * compact.scale) - Math.round(328 * compact.scale);
+      const topPointerY = 360 + (desiredCanvasTop - compact.position.y) / compact.scale;
+      for (const type of ['pointerdown', 'pointermove', 'pointerup', 'click', 'contextmenu']) {
         button.addEventListener(type, (event) => window.__launcherSmokeEvents.push({ type, button: event.button, buttons: event.buttons, clientX: event.clientX, clientY: event.clientY }), { capture: true, once: true });
       }
-      button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1, clientX: 378, clientY: 360 }));
-      button.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, button: 0, buttons: 1, clientX: 388, clientY: 368 }));
-      button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, buttons: 0, clientX: 388, clientY: 368 }));
+      button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0, buttons: 1, clientX: 378, clientY: 360 }));
+      button.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, button: -1, buttons: 1, clientX: 378, clientY: topPointerY }));
+      button.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, button: 0, buttons: 0, clientX: 378, clientY: topPointerY }));
       button.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
       button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 }));
     })()`);
@@ -516,10 +519,9 @@ async function run() {
       `(async () => JSON.stringify({ state: await window.__TAURI_INTERNALS__.invoke('launcher_interaction_snapshot'), events: window.__launcherSmokeEvents, compact: Boolean(document.querySelector('.launcher-trigger')), expanded: Boolean(document.querySelector('.launcher-panel')), menu: Boolean(document.querySelector('.launcher-context-menu')), menuText: document.querySelector('.launcher-context-menu')?.innerText ?? '', manager: await window.__TAURI_INTERNALS__.invoke('manager_window_snapshot') }))()`,
       (value) => {
         const state = JSON.parse(value).state;
-        return state.dragRequests === 1 && state.menuRequests === 1 && JSON.parse(value).menu;
+        return state.menuRequests === 1 && JSON.parse(value).menu;
       }
     ));
-    assert(launcherInteractions.state.dragRequests === 1, `Launcher drag did not invoke native window dragging: ${JSON.stringify(launcherInteractions)}`);
     assert(launcherInteractions.state.menuRequests === 1, `Launcher right click did not request its custom menu: ${JSON.stringify(launcherInteractions)}`);
     assert(launcherInteractions.compact && !launcherInteractions.expanded && launcherInteractions.menu, `Drag or right click unexpectedly expanded the launcher: ${JSON.stringify(launcherInteractions)}`);
     assert(!launcherInteractions.menuText.includes('本次隐藏悬浮球'), `Launcher menu still exposes temporary hiding: ${JSON.stringify(launcherInteractions)}`);
@@ -527,6 +529,16 @@ async function run() {
       launcherInteractions.menuText.includes(launcherInteractions.manager.visible ? '隐藏主界面' : '显示主界面'),
       `Launcher menu did not reflect the actual main-window state: ${JSON.stringify(launcherInteractions)}`
     );
+    const topDragBounds = await waitForEvaluation(launcher, `(async () => JSON.stringify({
+      position: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_position', { label: 'launcher' })
+    }))()`, (value) => {
+      const position = JSON.parse(value).position;
+      const iconTop = position.y + Math.round(328 * compact.scale);
+      return iconTop <= nativeCompact.monitor.workArea.position.y + Math.round(24 * compact.scale) + 1;
+    });
+    const topDragIconTop = JSON.parse(topDragBounds).position.y + Math.round(328 * compact.scale);
+    assert(topDragIconTop <= nativeCompact.monitor.workArea.position.y + Math.round(24 * compact.scale) + 1,
+      `Captured dragging could not move the fixed-canvas icon to the work-area top: ${JSON.stringify({ topDragBounds, nativeCompact })}`);
     const menuGeometry = JSON.parse(await evaluate(launcher, `JSON.stringify((() => {
       const menu = document.querySelector('.launcher-context-menu').getBoundingClientRect();
       return { width: innerWidth, height: innerHeight, left: menu.left, top: menu.top, right: menu.right, bottom: menu.bottom };

@@ -320,6 +320,40 @@ it('keeps a live snapshot when the initial list returns an older copy', async ()
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
 });
 
+it('keeps Ctrl and Shift task selections through live progress updates', async () => {
+  const first: QueueTask = { ...oldTask, id: 'multi-1', name: 'first.iso' };
+  const second: QueueTask = { ...oldTask, id: 'multi-2', name: 'second.iso' };
+  const third: QueueTask = { ...oldTask, id: 'multi-3', name: 'third.iso' };
+  state.list.mockResolvedValue([first, second, third]);
+  render(<App />);
+
+  await screen.findByText('first.iso');
+  fireEvent.click(screen.getByText('first.iso'));
+  fireEvent.click(screen.getByText('second.iso'), { ctrlKey: true });
+  fireEvent.click(screen.getByText('third.iso'), { shiftKey: true });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
+
+  act(() => { state.onTask?.({ ...first, progress: 20, completed_length: 20 }); });
+  await waitFor(() => expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3));
+});
+
+it('keeps Ctrl+A task selection after the keys are released and progress updates', async () => {
+  const first: QueueTask = { ...oldTask, id: 'select-all-1', name: 'first.iso' };
+  const second: QueueTask = { ...oldTask, id: 'select-all-2', name: 'second.iso' };
+  state.list.mockResolvedValue([first, second]);
+  render(<App />);
+
+  await screen.findByText('first.iso');
+  fireEvent.keyDown(document, { key: 'Control', ctrlKey: true });
+  fireEvent.keyDown(document, { key: 'a', ctrlKey: true });
+  fireEvent.keyUp(document, { key: 'a', ctrlKey: true });
+  fireEvent.keyUp(document, { key: 'Control' });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+
+  act(() => { state.onTask?.({ ...second, progress: 20, completed_length: 20 }); });
+  await waitFor(() => expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2));
+});
+
 it('requests active tasks for the first paint before loading terminal tabs in the background', async () => {
   const terminal = deferred<QueueTask[]>();
   const activeTask: QueueTask = { ...oldTask, id: 'active-startup', name: 'active-startup.iso' };
@@ -1468,7 +1502,7 @@ it('closes an overwrite confirmation before its native resolution completes', as
   await act(async () => { resolution.resolve({ id: 'overwrite-existing', name: 'overwrite.bin', kind: 'file', status: 'downloading', progress: 0 }); });
 });
 
-it('retrieves a compatible service model and persists the selected AI configuration', async () => {
+it('retrieves a compatible service model from its selector and persists the selected AI configuration', async () => {
   const user = userEvent.setup();
   state.listAiModels.mockResolvedValue(['gpt-4.1-mini', 'gpt-5-mini']);
   state.updateAiSettings.mockResolvedValue({ enabled: true, baseUrl: 'https://gateway.example.test/v1', model: 'gpt-5-mini', apiKeyConfigured: true });
@@ -1479,18 +1513,16 @@ it('retrieves a compatible service model and persists the selected AI configurat
   await user.click(screen.getByRole('checkbox', { name: '启用 AI 智能分析' }));
   await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
   await user.type(screen.getByLabelText('AI API Key'), 'sk-local-secret');
-  await user.click(screen.getByRole('button', { name: '获取可用模型' }));
+  fireEvent.pointerDown(screen.getByRole('combobox', { name: 'AI 模型' }));
   await screen.findByRole('option', { name: 'gpt-5-mini' });
   await user.selectOptions(screen.getByRole('combobox', { name: 'AI 模型' }), 'gpt-5-mini');
-  await user.click(screen.getByRole('button', { name: '保存 AI 配置' }));
 
-  expect(await screen.findByRole('status')).toHaveTextContent('AI 服务配置已保存。');
-  expect(state.updateAiSettings).toHaveBeenCalledWith({
+  await waitFor(() => expect(state.updateAiSettings).toHaveBeenCalledWith({
     enabled: true,
     baseUrl: 'https://gateway.example.test/v1',
     model: 'gpt-5-mini',
     apiKey: 'sk-local-secret'
-  });
+  }));
 });
 
 it('opens the normal new-download dialog from the floating-ball menu command', async () => {

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState, useSyncExternalStore } from 'react';
+import { FormEvent, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AiSettings, AiSettingsInput, AppSettings, Aria2Settings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
 import { getThemeMode, setThemeMode, subscribeTheme, themeOptions, ThemeMode } from '../lib/theme';
 
@@ -16,6 +16,7 @@ interface SettingsPanelProps {
   browseDirectory?(currentDirectory: string): Promise<string | null>;
   saveAiSettings?(settings: AiSettingsInput): Promise<AiSettings>;
   loadAiModels?(settings: AiSettingsInput): Promise<string[]>;
+  onNotice?(notice: { kind: 'success' | 'error'; message: string }): void;
   configurePrivacyDownload?(enabled: boolean, currentPassword?: string, newPassword?: string): Promise<AppSettings>;
 }
 
@@ -43,7 +44,7 @@ function createRateLimitInputs(aria2: Aria2Settings, cloudUploadLimit: number) {
   };
 }
 
-export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, configurePrivacyDownload }: SettingsPanelProps) {
+export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, onNotice, configurePrivacyDownload }: SettingsPanelProps) {
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
@@ -65,6 +66,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [aiModels, setAiModels] = useState<string[]>([]);
   const [aiStatus, setAiStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  const aiModelRequestInFlight = useRef(false);
   const [saved, setSaved] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
@@ -85,6 +87,11 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     model: ai.model.trim(),
     apiKey: aiApiKey.trim()
   });
+
+  function notifyAi(notice: { kind: 'success' | 'error'; message: string }) {
+    setAiStatus(notice);
+    onNotice?.(notice);
+  }
 
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
     setSaved(false);
@@ -118,31 +125,52 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     setThemeMode(mode);
   }
 
-  async function fetchAiModels() {
+  async function reloadAiModels() {
+    if (aiModelRequestInFlight.current) return;
+    const configuration = currentAiInput();
     setAiStatus(null);
+    if (!configuration.baseUrl) {
+      notifyAi({ kind: 'error', message: '无法获取模型列表：请先填写服务地址。' });
+      return;
+    }
+    if (!configuration.apiKey && !ai.apiKeyConfigured) {
+      notifyAi({ kind: 'error', message: '无法获取模型列表：请先填写 API Key。' });
+      return;
+    }
+    aiModelRequestInFlight.current = true;
     setAiBusy(true);
     try {
-      const models = await loadAiModels?.(currentAiInput()) ?? [];
+      const models = await loadAiModels?.(configuration) ?? [];
+      if (!models.length) throw new Error('服务未返回可选模型');
       setAiModels(models);
-      setAiStatus({ kind: 'success', message: models.length ? `已获取 ${models.length} 个模型` : '服务未返回可选模型。' });
     } catch (error) {
-      setAiStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+      const detail = error instanceof Error ? error.message : String(error);
+      notifyAi({ kind: 'error', message: `无法获取模型列表，可能是服务地址或 API Key 不正确：${detail}` });
     } finally {
+      aiModelRequestInFlight.current = false;
       setAiBusy(false);
     }
   }
 
-  async function saveAiConfiguration(event: FormEvent) {
-    event.preventDefault();
+  async function selectAiModel(model: string) {
+    if (!model) {
+      setAi((current) => ({ ...current, model }));
+      return;
+    }
+    const previous = ai;
+    const configuration = { ...currentAiInput(), model };
+    setAi((current) => ({ ...current, model }));
     setAiStatus(null);
     setAiBusy(true);
     try {
-      const savedAi = await saveAiSettings?.(currentAiInput()) ?? { ...ai, apiKeyConfigured: ai.apiKeyConfigured || Boolean(aiApiKey.trim()) };
+      const savedAi = await saveAiSettings?.(configuration) ?? { ...ai, model, apiKeyConfigured: ai.apiKeyConfigured || Boolean(aiApiKey.trim()) };
       setAi(savedAi);
       setAiApiKey('');
-      setAiStatus({ kind: 'success', message: 'AI 服务配置已保存。' });
+      notifyAi({ kind: 'success', message: 'AI 服务配置已保存。' });
     } catch (error) {
-      setAiStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+      setAi(previous);
+      const detail = error instanceof Error ? error.message : String(error);
+      notifyAi({ kind: 'error', message: `保存 AI 配置失败：${detail}` });
     } finally {
       setAiBusy(false);
     }
@@ -338,15 +366,15 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           </fieldset>
           {privacyStatus && <div className="settings-actions"><span role="status" className={privacyStatus.kind}>{privacyStatus.message}</span></div>}
         </form>
-        <form className="ai-settings" onSubmit={(event) => void saveAiConfiguration(event)}>
+        <section className="ai-settings">
           <label className="setting-row"><span><b>启用 AI 智能分析</b></span><input aria-label="启用 AI 智能分析" type="checkbox" checked={ai.enabled} onChange={(event) => setAi((current) => ({ ...current, enabled: event.target.checked }))} /></label>
-          <fieldset disabled={aiBusy}>
+          <fieldset aria-busy={aiBusy}>
             <label><span>服务地址</span><input aria-label="AI 服务地址" required placeholder="https://api.openai.com/v1" value={ai.baseUrl} onChange={(event) => setAi((current) => ({ ...current, baseUrl: event.target.value }))} /></label>
             <label><span>API Key</span><input aria-label="AI API Key" type="password" autoComplete="new-password" placeholder={ai.apiKeyConfigured ? '已配置；留空则保持不变' : '输入服务 API Key'} value={aiApiKey} onChange={(event) => setAiApiKey(event.target.value)} /></label>
-            <label><span>模型</span><select aria-label="AI 模型" required value={ai.model} onChange={(event) => setAi((current) => ({ ...current, model: event.target.value }))}><option value="">选择模型</option>{ai.model && !aiModels.includes(ai.model) && <option value={ai.model}>{ai.model}</option>}{aiModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            <label><span>模型</span><select aria-label="AI 模型" required value={ai.model} onPointerDown={() => void reloadAiModels()} onFocus={() => void reloadAiModels()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') void reloadAiModels(); }} onChange={(event) => void selectAiModel(event.target.value)}><option value="">选择模型</option>{ai.model && !aiModels.includes(ai.model) && <option value={ai.model}>{ai.model}</option>}{aiModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
           </fieldset>
-          <div className="settings-actions"><button className="secondary" type="button" onClick={() => void fetchAiModels()} disabled={aiBusy}>获取可用模型</button><button className="primary" type="submit" disabled={aiBusy}>{aiBusy ? '正在保存…' : '保存 AI 配置'}</button>{aiStatus && <span role="status" className={aiStatus.kind}>{aiStatus.message}</span>}</div>
-        </form>
+          {!onNotice && aiStatus && <div className="settings-actions"><span role="status" className={aiStatus.kind}>{aiStatus.message}</span></div>}
+        </section>
       </>}
     </div>
   </section>;

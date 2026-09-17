@@ -7,12 +7,13 @@
 //! printed.
 
 use alldownloader_lib::cloud::{
-    commands::CloudState, CloudDirectory, CloudError, CloudFile, CloudFileKind,
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShareOptions,
-    CloudUploadTransport, CredentialStore, DpapiCredentialStore, ProviderRegistry,
-    ReqwestTransport, ResolvedCloudDownload, UploadHttpRequest, UploadHttpResponse,
+    commands::CloudState, CloudDirectory, CloudError, CloudFile, CloudFileKind, CloudHttpRequest,
+    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShareOptions, CloudUploadTransport,
+    CredentialStore, DpapiCredentialStore, ProviderRegistry, ReqwestTransport,
+    ResolvedCloudDownload, UploadHttpRequest, UploadHttpResponse,
 };
 use std::{
+    collections::BTreeSet,
     error::Error,
     fs, io,
     path::{Path, PathBuf},
@@ -384,10 +385,7 @@ fn wait_until_absent(
     Err(failure("isolated item remained visible after deletion"))
 }
 
-fn cleanup_abandoned_uc_e2e_shares(
-    state: &CloudState,
-    http: &LiveTransport,
-) -> LiveResult<()> {
+fn cleanup_abandoned_uc_e2e_shares(state: &CloudState, http: &LiveTransport) -> LiveResult<()> {
     let provider = CloudProvider::Uc;
     let shares = ProviderRegistry::global()
         .driver(provider, &state.store, http)
@@ -1056,7 +1054,9 @@ fn run_uc_personal_share_lifecycle() -> LiveResult<()> {
                 .list_shares()
         })?;
         if !listed.iter().any(|candidate| candidate.id == share.id) {
-            return Err(failure("UC personal-share list did not contain the created share"));
+            return Err(failure(
+                "UC personal-share list did not contain the created share",
+            ));
         }
         step(provider, "personal-share cancel", || {
             ProviderRegistry::global()
@@ -1129,6 +1129,27 @@ fn run_uc_personal_share_lifecycle() -> LiveResult<()> {
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
 fn live_aliyun_complete_crud_and_transfer_matrix() -> LiveResult<()> {
     run_provider(CloudProvider::Aliyun)
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session; read-only personal-share listing"]
+fn live_aliyun_personal_share_list() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Aliyun;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveTransport::new()?;
+    let result = step(provider, "personal-share list", || {
+        ProviderRegistry::global()
+            .driver(provider, &state.store, &http)
+            .list_shares()
+    });
+    http.report();
+    result.map(|shares| {
+        eprintln!(
+            "LIVE-E2E aliyun personal-share list returned {} item(s): PASS",
+            shares.len()
+        );
+    })
 }
 
 #[test]

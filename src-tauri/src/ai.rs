@@ -49,14 +49,35 @@ pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>, 
         .bearer_auth(api_key)
         .send()
         .await
-        .map_err(|_| "无法连接 AI 服务".to_string())?;
+        .map_err(|error| {
+            if error.is_timeout() {
+                format!("请求 AI 服务超时：{error}")
+            } else if error.is_connect() {
+                format!("无法连接 AI 服务：{error}")
+            } else {
+                format!("请求 AI 服务失败：{error}")
+            }
+        })?;
     if !response.status().is_success() {
-        return Err(format!("AI 服务返回 HTTP {}", response.status().as_u16()));
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(512)
+            .collect::<String>();
+        return Err(if body.is_empty() {
+            format!("AI 服务返回 HTTP {}", status.as_u16())
+        } else {
+            format!("AI 服务返回 HTTP {}：{body}", status.as_u16())
+        });
     }
     let mut models = response
         .json::<ModelsResponse>()
         .await
-        .map_err(|_| "AI 服务返回的模型列表无效".to_string())?
+        .map_err(|error| format!("AI 服务返回的模型列表无效：{error}"))?
         .data
         .into_iter()
         .map(|model| model.id.trim().to_string())
@@ -132,6 +153,28 @@ mod tests {
             authorization.lock().unwrap().as_deref(),
             Some("Bearer local-test-key")
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_models_keeps_the_server_error_detail() {
+        use axum::{http::StatusCode, routing::get, Router};
+        use std::future::IntoFuture;
+
+        async fn models() -> (StatusCode, &'static str) {
+            (StatusCode::UNAUTHORIZED, "invalid api key")
+        }
+
+        let app = Router::new().route("/v1/models", get(models));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+
+        let error = fetch_models(&format!("http://{address}/v1"), "bad-key")
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, "AI 服务返回 HTTP 401：invalid api key");
         server.abort();
     }
 }

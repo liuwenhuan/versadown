@@ -1,9 +1,11 @@
-import { MouseEvent, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { MouseEvent as ReactMouseEvent, PointerEvent, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { NewDownloadDialog } from './NewDownloadDialog';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 import type { ScanDownloadResult } from '../lib/types';
 import type { LauncherSurfaceMode } from './LauncherWindow';
 import type { LauncherPopupPlacement } from '../lib/launcherWindow';
+
+export type LauncherPointerPosition = { x: number; y: number };
 
 interface FloatingLauncherProps {
   onParse(input: string): void | Promise<void>;
@@ -15,7 +17,9 @@ interface FloatingLauncherProps {
   onScan?(input: string): Promise<ScanDownloadResult[]>;
   onOpenTaskList?(): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
-  onDragStart?(): void;
+  onDragStart?(pointer: LauncherPointerPosition): void;
+  onDragMove?(pointer: LauncherPointerPosition): void;
+  onDragEnd?(pointer: LauncherPointerPosition): void;
   onContextMenu?(): void;
 }
 
@@ -32,9 +36,11 @@ function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
   );
 }
 
-export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placement, onModeChange, onQuickAddElement, onScan, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placement, onModeChange, onQuickAddElement, onScan, onOpenTaskList, onExpandedChange, onDragStart, onDragMove, onDragEnd, onContextMenu }: FloatingLauncherProps) {
   const [uncontrolledExpanded, setUncontrolledExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+  const dragPointerId = useRef<number | null>(null);
+  const dragging = useRef(false);
   const suppressClick = useRef(false);
   const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
   const expanded = mode ? mode === 'quick-add' : expandedProp ?? uncontrolledExpanded;
@@ -53,19 +59,69 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
     onExpandedChange?.(next);
   }
 
-  function beginPointer(event: MouseEvent<HTMLDivElement>) {
+  function beginPointer(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
     dragOrigin.current = { x: event.clientX, y: event.clientY };
+    dragPointerId.current = event.pointerId;
+    dragging.current = false;
+    suppressClick.current = false;
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* synthetic events have no native pointer */ }
+  }
+
+  function movePointer(event: PointerEvent<HTMLDivElement>) {
+    const origin = dragOrigin.current;
+    if (!origin || dragPointerId.current !== event.pointerId) return;
+    if (!dragging.current) {
+      if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < dragThreshold) return;
+      dragging.current = true;
+      suppressClick.current = true;
+      setLauncherExpanded(false);
+      onDragStart?.(origin);
+    }
+    onDragMove?.({ x: event.clientX, y: event.clientY });
+  }
+
+  function endPointer(event: PointerEvent<HTMLDivElement>) {
+    if (dragPointerId.current !== event.pointerId) return;
+    if (dragging.current) onDragEnd?.({ x: event.clientX, y: event.clientY });
+    dragging.current = false;
+    dragOrigin.current = null;
+    dragPointerId.current = null;
+    try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* pointer may already be released */ }
+  }
+
+  // WebView2 dispatches Pointer Events before compatibility mouse events, so
+  // this fallback remains dormant there once pointer capture is active.  It
+  // keeps mouse-only runtimes (including the lightweight DOM test environment)
+  // functional without weakening the captured production path.
+  function beginMouseFallback(event: ReactMouseEvent<HTMLDivElement>) {
+    if (dragPointerId.current !== null || event.button !== 0) return;
+    dragOrigin.current = { x: event.clientX, y: event.clientY };
+    dragPointerId.current = -1;
+    dragging.current = false;
     suppressClick.current = false;
   }
 
-  function movePointer(event: MouseEvent<HTMLDivElement>) {
+  function moveMouseFallback(event: ReactMouseEvent<HTMLDivElement>) {
+    if (dragPointerId.current !== -1) return;
     const origin = dragOrigin.current;
-    if (!origin || event.buttons !== 1 || suppressClick.current) return;
-    if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < dragThreshold) return;
-    suppressClick.current = true;
-    setLauncherExpanded(false);
-    onDragStart?.();
+    if (!origin) return;
+    if (!dragging.current) {
+      if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < dragThreshold) return;
+      dragging.current = true;
+      suppressClick.current = true;
+      setLauncherExpanded(false);
+      onDragStart?.(origin);
+    }
+    onDragMove?.({ x: event.clientX, y: event.clientY });
+  }
+
+  function endMouseFallback(event: ReactMouseEvent<HTMLDivElement>) {
+    if (dragPointerId.current !== -1) return;
+    if (dragging.current) onDragEnd?.({ x: event.clientX, y: event.clientY });
+    dragging.current = false;
+    dragOrigin.current = null;
+    dragPointerId.current = null;
   }
 
   function openFromClick() {
@@ -81,9 +137,13 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
     <>
       <div
         className="launcher-interaction-target"
-        onMouseDown={beginPointer}
-        onMouseMove={movePointer}
-        onMouseUp={() => { dragOrigin.current = null; }}
+        onPointerDown={beginPointer}
+        onPointerMove={movePointer}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+        onMouseDown={beginMouseFallback}
+        onMouseMove={moveMouseFallback}
+        onMouseUp={endMouseFallback}
         onClick={openFromClick}
         onContextMenu={(event) => {
           event.preventDefault();

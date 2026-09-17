@@ -66,3 +66,22 @@ it('keeps nested detail files hidden until their folder is expanded', async () =
   await user.click(screen.getByRole('button', { name: '展开 _crack' }));
   expect(screen.getByText('Win64')).toBeVisible();
 });
+
+it('only provides expand controls for actual directories', () => {
+  render(<TaskDetails task={{
+    id: 'task-cloud-tree', name: '倩种1987', kind: 'folder', status: 'completed', progress: 100,
+    children: [
+      {
+        id: 'video', name: '씨받이[倩种].The.Surrogate.Woman.1986.web-1080P.mp4', kind: 'file', status: 'completed', progress: 100,
+        children: [],
+      },
+      {
+        id: 'subtitles', name: '字幕', kind: 'folder', status: 'completed', progress: 100,
+        children: [{ id: 'subtitle', name: '简体中字.srt', kind: 'file', status: 'completed', progress: 100, children: [] }],
+      },
+    ],
+  }} />);
+
+  expect(screen.queryByRole('button', { name: '展开 씨받이[倩种].The.Surrogate.Woman.1986.web-1080P.mp4' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '展开 字幕' })).toBeVisible();
+});

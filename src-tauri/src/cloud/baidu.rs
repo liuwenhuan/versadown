@@ -88,6 +88,28 @@ mod tests {
         assert_eq!(share.pass_code.as_deref(), Some("a7b2"));
     }
 
+    #[test]
+    fn personal_share_record_uses_shorturl_when_link_is_empty() {
+        let http = Http::new(vec![json!({
+            "errno": 0,
+            "list": [{
+                "shareid": 42,
+                "link": "",
+                "shorturl": "share-code",
+                "filename": "归档",
+                "isdir": 1,
+                "fs_id": 9,
+            }],
+        })]);
+
+        let shares = BaiduClient::new(BaiduSession::cookie("BDUSS=current"), &http)
+            .list_shares()
+            .unwrap();
+
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].url, "https://pan.baidu.com/s/1share-code");
+    }
+
     fn baidu_capacity_entry() -> CloudShareResolvedEntry {
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
@@ -2424,12 +2446,11 @@ fn baidu_share_from_value(
         .and_then(string_or_number)
         .filter(|id| !id.is_empty())
         .ok_or(QuarkError::InvalidResponse)?;
-    let short_url = value
-        .get("link")
-        .or_else(|| value.get("shorturl"))
-        .or_else(|| value.get("short_url"))
-        .and_then(Value::as_str)
-        .filter(|url| !url.is_empty())
+    let short_url = ["link", "shorturl", "short_url"]
+        .into_iter()
+        .filter_map(|name| value.get(name).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|url| !url.is_empty())
         .map(|url| {
             if url.starts_with("http://") || url.starts_with("https://") {
                 url.to_owned()

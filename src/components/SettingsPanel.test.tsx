@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { SettingsPanel } from './SettingsPanel';
@@ -153,8 +153,40 @@ it('offers an OpenAI-compatible AI analysis configuration in advanced settings',
   expect(screen.getByRole('checkbox', { name: '启用 AI 智能分析' })).toBeVisible();
   expect(screen.getByRole('textbox', { name: 'AI 服务地址' })).toBeVisible();
   expect(screen.getByLabelText('AI API Key')).toHaveAttribute('type', 'password');
-  expect(screen.getByRole('button', { name: '获取可用模型' })).toBeVisible();
   expect(screen.getByRole('combobox', { name: 'AI 模型' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '获取可用模型' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '保存 AI 配置' })).not.toBeInTheDocument();
+});
+
+it('refreshes models when its selector is opened and saves the complete AI configuration on selection', async () => {
+  const user = userEvent.setup();
+  const loadAiModels = vi.fn().mockResolvedValue(['gpt-4.1-mini', 'gpt-5-mini']);
+  const saveAiSettings = vi.fn().mockResolvedValue({ enabled: true, baseUrl: 'https://gateway.example.test/v1', model: 'gpt-5-mini', apiKeyConfigured: true });
+  render(<SettingsPanel initial={initial} onChange={() => {}} loadAiModels={loadAiModels} saveAiSettings={saveAiSettings} />);
+
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await user.click(screen.getByRole('checkbox', { name: '启用 AI 智能分析' }));
+  await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
+  await user.type(screen.getByLabelText('AI API Key'), 'sk-local-secret');
+  const model = screen.getByRole('combobox', { name: 'AI 模型' });
+  fireEvent.pointerDown(model);
+  expect(await screen.findByRole('option', { name: 'gpt-5-mini' })).toBeVisible();
+  expect(loadAiModels).toHaveBeenCalledWith({ enabled: true, baseUrl: 'https://gateway.example.test/v1', model: '', apiKey: 'sk-local-secret' });
+
+  await user.selectOptions(model, 'gpt-5-mini');
+  expect(saveAiSettings).toHaveBeenCalledWith({ enabled: true, baseUrl: 'https://gateway.example.test/v1', model: 'gpt-5-mini', apiKey: 'sk-local-secret' });
+});
+
+it('shows the returned model-list error when the selector cannot load models', async () => {
+  const user = userEvent.setup();
+  render(<SettingsPanel initial={initial} onChange={() => {}} loadAiModels={vi.fn().mockRejectedValue(new Error('AI 服务返回 HTTP 401：invalid api key'))} />);
+
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
+  await user.type(screen.getByLabelText('AI API Key'), 'bad-key');
+  fireEvent.pointerDown(screen.getByRole('combobox', { name: 'AI 模型' }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent('无法获取模型列表，可能是服务地址或 API Key 不正确：AI 服务返回 HTTP 401：invalid api key');
 });
 
 it('enables cleanup for application-created transfer files by default', () => {
