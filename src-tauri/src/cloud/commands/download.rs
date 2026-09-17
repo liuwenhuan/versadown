@@ -527,6 +527,9 @@ pub async fn queue_cloud_dispatch(
             configured.continue_download,
         )
         .await?;
+    configured = state
+        .cloud_download_dispatch
+        .retry_submission_options(task.id, configured);
     emit_cloud_dispatch_update(&app, state, &queued);
     let id = queued.id;
     let source = queued.source.clone();
@@ -629,6 +632,12 @@ pub fn apply_cloud_download_policy(
                 .max_connections_per_file,
         ),
     );
+    if provider == CloudProvider::Xunlei {
+        // Empty CDN replies are transient. Keep recovery in the engine so it
+        // retains its verified ranges and remains interruptible by pause/cancel.
+        options.max_tries = Some(5);
+        options.retry_wait_seconds = Some(3);
+    }
     options
 }
 

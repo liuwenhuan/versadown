@@ -21,11 +21,22 @@ impl CloudHttpTransport for Probe {
             .and_then(|b| serde_json::from_str(b).ok())
             .unwrap_or(Value::Null);
         if url.path() == "/v1/shield/captcha/init"
-            && std::env::var("PIKPAK_PROBE_NORMALIZE_DEVICE").as_deref() == Ok("1") {
-            let device = body["device_id"].as_str().unwrap().rsplit('.').next().unwrap()[..32].to_owned();
+            && std::env::var("PIKPAK_PROBE_NORMALIZE_DEVICE").as_deref() == Ok("1")
+        {
+            let device = body["device_id"]
+                .as_str()
+                .unwrap()
+                .rsplit('.')
+                .next()
+                .unwrap()[..32]
+                .to_owned();
             body["device_id"] = serde_json::json!(device);
-            body["meta"]["captcha_sign"] = serde_json::json!(alldownloader_lib::cloud::pikpak_captcha_sign(
-                body["client_id"].as_str().unwrap(), &device, body["meta"]["timestamp"].as_str().unwrap()));
+            body["meta"]["captcha_sign"] =
+                serde_json::json!(alldownloader_lib::cloud::pikpak_captcha_sign(
+                    body["client_id"].as_str().unwrap(),
+                    &device,
+                    body["meta"]["timestamp"].as_str().unwrap()
+                ));
             request.body = Some(body.to_string());
         }
         let deletion = url.path() == "/drive/v1/files:batchDelete";
@@ -59,7 +70,11 @@ impl CloudHttpTransport for Probe {
         let response = self.http.send(request)?;
         let value: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
         if response.status >= 400 {
-            let details = format!("{} {} {}", value["error_details"], value["details"], value["error_description"]).to_ascii_lowercase();
+            let details = format!(
+                "{} {} {}",
+                value["error_details"], value["details"], value["error_description"]
+            )
+            .to_ascii_lowercase();
             eprintln!(
                 "PikPak error detail categories: {:?}",
                 [
@@ -74,8 +89,14 @@ impl CloudHttpTransport for Probe {
                     "space",
                     "with_folders",
                     "empty",
-                    "invalid"
-                    ,"sign", "token", "expired", "argument", "length", "version", "format"
+                    "invalid",
+                    "sign",
+                    "token",
+                    "expired",
+                    "argument",
+                    "length",
+                    "version",
+                    "format"
                 ]
                 .into_iter()
                 .filter(|word| details.contains(word))
@@ -98,9 +119,12 @@ fn live_pikpak_selected_recycle_delete() -> Result<(), Box<dyn std::error::Error
         Ok("1")
     );
     let store = DpapiCredentialStore::new(
-        std::env::var_os("ALLDOWNLOADER_TEST_CLOUD_SESSIONS").map(PathBuf::from).unwrap_or(
-            PathBuf::from(std::env::var_os("APPDATA").ok_or("APPDATA missing")?)
-                .join("com.alldownloader.desktop/cloud-sessions")),
+        std::env::var_os("ALLDOWNLOADER_TEST_CLOUD_SESSIONS")
+            .map(PathBuf::from)
+            .unwrap_or(
+                PathBuf::from(std::env::var_os("APPDATA").ok_or("APPDATA missing")?)
+                    .join("com.alldownloader.desktop/cloud-sessions"),
+            ),
     )?;
     let http = Probe {
         http: ReqwestTransport::new()?,

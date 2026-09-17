@@ -18,9 +18,9 @@ use crate::cloud::{
     tianyi::TianyiSession,
     uc::UcSession,
     xunlei::{XunleiClientProfile, XunleiSession, XunleiWebContext},
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudPasswordCredential,
-    CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError, SessionWorkKind,
-    QUARK_DESKTOP_USER_AGENT,
+    CloudAuthMethod, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
+    CloudPasswordCredential, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
+    SessionWorkKind, QUARK_DESKTOP_USER_AGENT,
 };
 use crate::TaskStore;
 
@@ -1849,6 +1849,7 @@ fn tianyi_driver_rejects_a_web_snapshot_without_the_native_browser_identity() {
         cookies: vec!["SSON=official-browser-session".into()],
         storage: serde_json::Value::Null,
         browser_context: Some(serde_json::json!({})),
+        auth_method: CloudAuthMethod::Web,
     };
 
     let result = crate::cloud::ProviderRegistry::global()
@@ -1878,6 +1879,7 @@ fn disabled_tianyi_driver_does_not_reactivate_legacy_password_credentials() {
             "browser_id": "1234567890abcdef1234567890abcdef",
             "user_agent": "OfficialBrowser/140"
         })),
+        auth_method: CloudAuthMethod::Web,
     };
 
     let result = crate::cloud::ProviderRegistry::global()
@@ -1904,6 +1906,7 @@ fn tianyi_driver_does_not_let_a_valid_app_session_mask_an_invalid_web_candidate(
             "browser_id": "1234567890abcdef1234567890abcdef",
             "user_agent": "OfficialBrowser/140"
         })),
+        auth_method: CloudAuthMethod::Web,
     };
 
     let result = crate::cloud::ProviderRegistry::global()
@@ -1935,290 +1938,6 @@ fn tianyi_web_authorization_does_not_persist_a_session_when_root_is_unreadable()
 
     assert!(matches!(result, Err(QuarkError::Provider(_))));
     assert!(credentials.load("tianyi").unwrap().is_none());
-}
-
-#[test]
-fn xunlei_web_authorization_uses_bearer_when_the_cookie_context_has_no_session_id() {
-    // Break caught: rejecting a completed official browser login before
-    // the documented `sessionid || access_token` fallback can run leaves
-    // the authorization window polling forever.
-    let credentials = MemoryCredentialStore::default();
-    let session = XunleiSession::from_web_authorization(
-        "browser-access",
-        "browser-refresh",
-        "browser-user",
-        "",
-        XunleiClientProfile::default(),
-        0,
-    )
-    .unwrap();
-    let context = XunleiWebContext {
-        session_id: String::new(),
-        peer_id: "official-peer".into(),
-        device_id: String::new(),
-        credit_key: "official-credit".into(),
-    };
-
-    let root = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
-    let account = super::finalize_xunlei_web_authorization(
-        crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-        session,
-        context,
-        &credentials,
-        &root,
-    )
-    .expect("a complete browser context can use its current bearer as session id");
-
-    assert_eq!(account.id, "browser-user");
-    let saved: XunleiSession = serde_json::from_slice(
-        &credentials
-            .load("xunlei")
-            .unwrap()
-            .expect("session is saved"),
-    )
-    .unwrap();
-    assert_eq!(saved.web_context.session_id, "browser-access");
-}
-
-#[test]
-fn xunlei_web_authorization_accepts_a_current_bearer_without_a_refresh_token() {
-    // Break caught: treating an optional native refresh credential as a
-    // prerequisite for the already-current official browser bearer keeps
-    // a completed login stuck in its authorization window.
-    let credentials = MemoryCredentialStore::default();
-    let session = super::parse_xunlei_web_session(serde_json::json!({
-        "access_token": "browser-access",
-        "user_id": "browser-user",
-    }))
-    .expect("the current browser bearer needs no native refresh token");
-    let context = XunleiWebContext {
-        session_id: String::new(),
-        peer_id: "official-peer".into(),
-        device_id: String::new(),
-        credit_key: "official-credit".into(),
-    };
-
-    let root = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
-    let account = super::finalize_xunlei_web_authorization(
-        crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-        session,
-        context,
-        &credentials,
-        &root,
-    )
-    .expect("the current bearer completes authorization until it expires");
-
-    assert_eq!(account.id, "browser-user");
-    let saved: XunleiSession = serde_json::from_slice(
-        &credentials
-            .load("xunlei")
-            .unwrap()
-            .expect("session is saved"),
-    )
-    .unwrap();
-    assert!(saved.refresh_token.is_empty());
-    assert_eq!(saved.web_context.session_id, "browser-access");
-}
-
-#[test]
-fn xunlei_web_authorization_persists_only_after_the_root_directory_is_readable() {
-    // Break caught: accepting extracted browser state without probing the
-    // exact root request the workspace needs closes the official window
-    // and creates a tab backed by an unusable session.
-    let credentials = MemoryCredentialStore::default();
-    let transport = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
-    let session = XunleiSession::from_web_authorization(
-        "browser-access",
-        "",
-        "browser-user",
-        "",
-        XunleiClientProfile::default(),
-        0,
-    )
-    .unwrap();
-    let context = XunleiWebContext {
-        session_id: String::new(),
-        peer_id: "official-peer".into(),
-        device_id: String::new(),
-        credit_key: "official-credit".into(),
-    };
-
-    let account = super::finalize_xunlei_web_authorization(
-        crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-        session,
-        context,
-        &credentials,
-        &transport,
-    )
-    .expect("a browser session with a readable root directory should authorize");
-
-    assert_eq!(account.id, "browser-user");
-    let requests = transport.0.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].headers["Authorization"],
-        "Bearer browser-access"
-    );
-    assert_eq!(requests[0].headers["Peer-Id"], "official-peer");
-    assert!(requests[0].url.contains("_sessid=browser-access"));
-    assert!(credentials.load("xunlei").unwrap().is_some());
-}
-
-#[test]
-fn xunlei_web_authorization_keeps_the_window_open_when_root_is_unreadable() {
-    // Break caught: a displayable account is not an authorized workspace.
-    // The candidate must not replace stored credentials until the browser
-    // bearer can read the root directory.
-    let credentials = MemoryCredentialStore::default();
-    let previous = b"previous-verified-xunlei-session".to_vec();
-    credentials.save("xunlei", &previous).unwrap();
-    let session = XunleiSession::from_web_authorization(
-        "browser-access",
-        "",
-        "browser-user",
-        "",
-        XunleiClientProfile::default(),
-        0,
-    )
-    .unwrap();
-    let context = XunleiWebContext {
-        session_id: String::new(),
-        peer_id: "official-peer".into(),
-        device_id: String::new(),
-        credit_key: "official-credit".into(),
-    };
-    let rejecting = SequenceTransport(Mutex::new(VecDeque::from([
-        r#"{"error_code":4121,"error":"expired"}"#,
-    ])));
-
-    let error = super::finalize_xunlei_web_authorization(
-        crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-        session,
-        context,
-        &credentials,
-        &rejecting,
-    )
-    .unwrap_err();
-
-    assert!(matches!(error, QuarkError::AuthorizationPending));
-    assert_eq!(credentials.load("xunlei").unwrap(), Some(previous));
-}
-
-#[test]
-fn xunlei_modern_authorization_reports_final_root_rejection_instead_of_polling_forever() {
-    // Once the SDK has returned an account, exhausted authentication or
-    // captcha retries are a visible failure, not another "not logged in" poll.
-    for rejection in [
-        r#"{"error_code":16,"error":"unauthenticated","error_description":"private-response"}"#,
-        r#"{"error_code":4001,"error":"captcha_required","error_description":"private-response"}"#,
-        r#"{"error_code":4002,"error":"captcha_invalid","error_description":"private-response"}"#,
-    ] {
-        let credentials = MemoryCredentialStore::default();
-        let previous = b"previous-verified-xunlei-session".to_vec();
-        credentials.save("xunlei", &previous).unwrap();
-        let mut session = modern_xunlei_fixture();
-        session.refresh_token.clear();
-        let rejecting = SequenceTransport(Mutex::new(VecDeque::from([rejection, rejection])));
-        let error = super::finalize_xunlei_web_authorization(
-            crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-            session,
-            XunleiWebContext::default(),
-            &credentials,
-            &rejecting,
-        )
-        .unwrap_err();
-        assert!(matches!(&error, QuarkError::Provider(message) if !message.is_empty()));
-        assert!(!error.to_string().contains("private-response"));
-        assert_eq!(credentials.load("xunlei").unwrap(), Some(previous));
-    }
-}
-
-#[test]
-fn xunlei_modern_authorization_saves_the_account_after_a_successful_root_probe() {
-    let credentials = MemoryCredentialStore::default();
-    let transport = SequenceTransport(Mutex::new(VecDeque::from([
-        r#"{"files":[],"next_page_token":""}"#,
-    ])));
-    let account = super::finalize_xunlei_web_authorization(
-        crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-        modern_xunlei_fixture(),
-        XunleiWebContext::default(),
-        &credentials,
-        &transport,
-    )
-    .unwrap();
-    assert_eq!(account.id, "fixture-user");
-    let saved: XunleiSession =
-        super::load_provider_session(CloudProvider::Xunlei, &credentials).unwrap();
-    assert_eq!(saved.user_id, account.id);
-}
-
-#[test]
-fn xunlei_incomplete_modern_authorization_keeps_waiting_without_replacing_the_account() {
-    // Webpack module ids can change before the bridge is updated. A current
-    // bearer carrying only the public web identity is not an expired login;
-    // keep polling until the device/version profile can be captured.
-    let credentials = MemoryCredentialStore::default();
-    let previous = b"previous-verified-xunlei-session".to_vec();
-    credentials.save("xunlei", &previous).unwrap();
-    let session = super::parse_xunlei_web_session(serde_json::json!({
-        "access_token": "browser-access",
-        "refresh_token": "browser-refresh",
-        "user_id": "browser-user",
-        "client_id": "Xqp0kJBXWhwaTpB6",
-        "package_name": "pan.xunlei.com",
-        "user_agent": "Mozilla/5.0 fixture-browser"
-    }))
-    .unwrap();
-    let transport = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
-
-    let error = super::finalize_xunlei_web_authorization(
-        crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-        session,
-        XunleiWebContext::default(),
-        &credentials,
-        &transport,
-    )
-    .unwrap_err();
-
-    assert!(matches!(error, QuarkError::AuthorizationPending));
-    assert!(transport.0.lock().unwrap().is_empty());
-    assert_eq!(credentials.load("xunlei").unwrap(), Some(previous));
-}
-
-#[test]
-fn xunlei_web_authorization_uses_the_selected_context_from_official_web_storage() {
-    // Break caught: Xunlei's current browser login keeps the credentials
-    // and drive challenge context in separate Web Storage records. If the
-    // native bridge reads only cookies, a completed login remains pending
-    // and the authorization window never closes.
-    let (session, context) = super::parse_xunlei_web_authorization(serde_json::json!({
-        "access_token": "browser-access",
-        "user_id": "browser-user",
-        "peer_id": "official-peer",
-        "device_id": "official-device",
-        "credit_key": "official-credit"
-    }))
-    .expect("the selected fields emitted from official Web Storage form a usable browser session");
-
-    assert_eq!(session.user_id, "browser-user");
-    assert_eq!(context.peer_id, "official-peer");
-    assert_eq!(context.device_id, "official-device");
-    assert_eq!(context.credit_key, "official-credit");
-}
-
-#[test]
-fn xunlei_web_authorization_discards_a_native_client_secret_from_web_storage() {
-    // Break caught: the official web authorization bridge must never
-    // transfer a native client secret out of Web Storage or persist it.
-    let session = super::parse_xunlei_web_session(serde_json::json!({
-        "access_token": "browser-access",
-        "user_id": "browser-user",
-        "client_secret": "must-not-cross-webview-boundary"
-    }))
-    .expect("the browser bearer itself remains a valid candidate");
-
-    assert!(session.profile.client_secret.is_empty());
 }
 
 #[test]
@@ -2386,72 +2105,6 @@ fn tianyi_web_authorization_keeps_the_old_session_when_candidate_root_shape_is_m
 
     assert!(matches!(result, Err(QuarkError::InvalidResponse)));
     assert_eq!(credentials.load("tianyi").unwrap(), Some(existing));
-}
-
-#[test]
-fn xunlei_browser_session_does_not_require_a_native_client_secret() {
-    let session = super::parse_xunlei_web_session(serde_json::json!({
-        "access_token": "browser-access",
-        "refresh_token": "browser-refresh",
-        "user_id": "browser-user",
-        "client_id": "official-web-client",
-        "device_id": "web-device",
-        "client_version": "1.0.0",
-        "package_name": "pan.xunlei.com",
-        "user_agent": "Mozilla/5.0",
-    }))
-    .unwrap();
-
-    assert!(session.profile.client_secret.is_empty());
-    assert_eq!(session.user_id, "browser-user");
-}
-
-#[test]
-fn xunlei_web_authorization_accepts_the_official_browser_user_state_without_native_identity() {
-    // The current official web client keeps the freshly issued tokens in
-    // Nuxt's users.curUser state.  It does not publish a native client
-    // profile, so requiring that profile traps a completed web login in
-    // its authorization window forever.
-    let session = super::parse_xunlei_web_session(serde_json::json!({
-        "access_token": "browser-access",
-        "refresh_token": "browser-refresh",
-        "user_id": "browser-user"
-    }))
-    .expect("official browser state needs no fabricated native profile");
-
-    assert!(session.profile.client_id.is_empty());
-    assert_eq!(session.user_id, "browser-user");
-}
-
-#[test]
-fn xunlei_web_capture_preserves_modern_security_context_for_root_validation() {
-    // Dropping the bridge's official signature makes the first Rust root
-    // request unable to initialize its operation captcha.
-    let session = super::parse_xunlei_web_session(serde_json::json!({
-        "access_token": "browser-access", "user_id": "browser-user",
-        "client_id": "Xqp0kJBXWhwaTpB6", "package_name": "pan.xunlei.com",
-        "web_security": {
-            "captcha_sign": "official-signature", "timestamp": "1789036800000",
-            "action": "GET:/drive/v1/files", "client_version": "1.92.98",
-            "package_name": "pan.xunlei.com"
-        }
-    }))
-    .unwrap();
-    assert!(session.profile.is_modern_web());
-    assert_eq!(session.web_security.captcha_sign, "official-signature");
-    assert_eq!(session.web_security.timestamp, "1789036800000");
-    assert_eq!(session.web_security.action, "GET:/drive/v1/files");
-    assert!(session.web_security.captcha_token.is_empty());
-    assert!(session.web_context.credit_key.is_empty());
-}
-
-#[test]
-fn xunlei_web_capture_rejects_malformed_security_before_saving() {
-    let result = super::parse_xunlei_web_session(serde_json::json!({
-        "access_token": "browser-access", "user_id": "browser-user",
-        "web_security": {"captcha_sign": {"unexpected": "object"}}
-    }));
-    assert!(matches!(result, Err(QuarkError::AuthorizationPending)));
 }
 
 #[test]

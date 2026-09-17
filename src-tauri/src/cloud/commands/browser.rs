@@ -45,6 +45,10 @@ pub(crate) fn password_webview_data_directory(
     password_webview_data_directory_from_root(&root, provider)
 }
 
+pub(crate) fn password_login_url(provider: CloudProvider) -> &'static str {
+    ProviderRegistry::global().get(provider).authorization_url
+}
+
 pub(crate) fn prepare_baidu_account_login(
     store: &impl CredentialStore,
     submitted_username: &str,
@@ -294,6 +298,12 @@ fn capture_persistent_authorization(
     if ProviderRegistry::global().get(provider).browser_context {
         builder = builder.initialization_script(include_str!("../tianyi-browser-context.js"));
     }
+    if let Some(script) = ProviderRegistry::global()
+        .get(provider)
+        .web_initialization_script
+    {
+        builder = builder.initialization_script(script);
+    }
     let window = builder
         .build()
         .map_err(|_| CloudError::WebAuthorizationRequired)?;
@@ -316,10 +326,16 @@ fn capture_persistent_authorization(
         let input = crate::cloud::driver::WebAuthorizationInput {
             cookies: browser_cookies(&window, web_session_cookie_urls(provider))?,
             storage: match recipe.token_script {
-                Some(script) if recipe.asynchronous_tokens => {
-                    asynchronous_web_tokens(&window, script)?
+                Some(script) => {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                    loop {
+                        let snapshot = web_storage_tokens(&window, script)?;
+                        if snapshot["pending"] != true || std::time::Instant::now() >= deadline {
+                            break snapshot;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
                 }
-                Some(script) => web_storage_tokens(&window, script)?,
                 None => serde_json::Value::Null,
             },
             browser_context: if recipe.browser_context {
@@ -327,6 +343,7 @@ fn capture_persistent_authorization(
             } else {
                 None
             },
+            auth_method: CloudAuthMethod::Web,
         };
         let account = if recipe.browser_context {
             ProviderRegistry::global()
@@ -416,9 +433,19 @@ pub(crate) fn browser_password_login(
     let script = Arc::new(browser_login::password_script(
         provider, username, password,
     )?);
-    let url = crate::cloud::ProviderRegistry::global()
-        .get(provider)
-        .authorization_url;
+    let background_ui_test = std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+        .ok()
+        .as_deref()
+        == Some("1");
+    // The hidden live verifier can opt into an off-screen, non-focusable
+    // render target when a provider's own verification SDK rejects hidden
+    // documents. This is test-only and never changes production windows.
+    let background_ui_test_visible = background_ui_test
+        && std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST_VISIBLE")
+            .ok()
+            .as_deref()
+            == Some("1");
+    let url = password_login_url(provider);
     let mut builder = WebviewWindowBuilder::new(
         app,
         &label,
@@ -426,7 +453,7 @@ pub(crate) fn browser_password_login(
     )
     .title("网盘登录验证：请按官方页面提示完成")
     .inner_size(1024.0, 760.0)
-    .visible(challenge)
+    .visible((challenge && !background_ui_test) || background_ui_test_visible)
     // Keep one provider profile so Baidu/Tianyi can reuse the official page's
     // stable device context. Explicit account replacement clears this profile
     // before this window is built; validated sessions and passwords remain
@@ -446,20 +473,37 @@ pub(crate) fn browser_password_login(
             }
         }
     });
+    if background_ui_test_visible {
+        builder = builder.skip_taskbar(true).position(-10_000.0, -10_000.0);
+    }
     builder = builder.data_directory(password_webview_data_directory(app, provider)?);
     if ProviderRegistry::global().get(provider).browser_context {
         builder = builder.initialization_script(include_str!("../tianyi-browser-context.js"));
     }
-    let window = builder
-        .build()
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+    if let Some(script) = ProviderRegistry::global()
+        .get(provider)
+        .web_initialization_script
+    {
+        builder = builder.initialization_script(script);
+    }
+    let window = builder.build().map_err(|_| {
+        if background_ui_test {
+            QuarkError::Provider("后台验证未能创建网盘登录窗口".into())
+        } else {
+            QuarkError::WebAuthorizationRequired
+        }
+    })?;
     let started = std::time::Instant::now();
     let result = (|| {
-        let mut shown = challenge;
+        let mut shown = challenge || background_ui_test;
         let mut last_notice = String::new();
         while started.elapsed() < std::time::Duration::from_secs(180) {
             if app.get_webview_window(&label).is_none() {
-                return Err(QuarkError::WebAuthorizationRequired);
+                return Err(if background_ui_test {
+                    QuarkError::Provider("后台验证中的网盘登录窗口已提前关闭".into())
+                } else {
+                    QuarkError::WebAuthorizationRequired
+                });
             }
             if !shown && started.elapsed() >= std::time::Duration::from_secs(12) {
                 window
@@ -468,43 +512,90 @@ pub(crate) fn browser_password_login(
                 let _ = window.set_focus();
                 shown = true;
             }
-            let cookies = browser_cookies(&window, web_session_cookie_urls(provider))?;
+            // A newly created WebView may reject its first cookie read before
+            // navigating to the provider. Treat that as an incomplete login
+            // snapshot and let the bounded loop retry after the page is ready;
+            // returning here closes the official password window before its
+            // injected login script can complete.
+            let cookies =
+                browser_cookies(&window, web_session_cookie_urls(provider)).unwrap_or_default();
             let browser_context = if ProviderRegistry::global().get(provider).browser_context {
                 tianyi_browser_context(&window).ok()
             } else {
                 None
             };
             let mut validation_stage = "读取登录凭据";
-            let candidate = if ProviderRegistry::global().get(provider).browser_context {
-                let validation_http = TianyiBrowserValidationTransport {
-                    window: &window,
-                    native: http,
-                };
-                validate_browser_password_session(
-                    provider,
-                    store,
-                    &validation_http,
-                    &cookies,
-                    browser_context.as_ref(),
-                    expected_account,
-                    |stage| validation_stage = stage,
-                )
-            } else {
-                validate_browser_password_session(
-                    provider,
-                    store,
-                    http,
-                    &cookies,
-                    browser_context.as_ref(),
-                    expected_account,
-                    |stage| validation_stage = stage,
-                )
-            };
+            let descriptor = ProviderRegistry::global().get(provider);
+            let candidate = (|| {
+                if descriptor.authorization.password_login_mode
+                    == PasswordLoginMode::OfficialWebView
+                {
+                    validation_stage = "验证官网登录会话";
+                    let temporary = MemoryCredentialStore::default();
+                    let account = {
+                        let mut driver =
+                            ProviderRegistry::global().driver(provider, &temporary, http);
+                        let recipe = driver.auth().web_authorization_recipe();
+                        let input = crate::cloud::driver::WebAuthorizationInput {
+                            cookies,
+                            storage: match recipe.token_script {
+                                Some(script) => web_storage_tokens(&window, script)?,
+                                None => serde_json::Value::Null,
+                            },
+                            browser_context,
+                            auth_method: CloudAuthMethod::Password,
+                        };
+                        driver.auth().complete_web(&input)?
+                    };
+                    if account.id.is_empty()
+                        || expected_account.is_some_and(|expected| expected != account.id)
+                    {
+                        Err(QuarkError::InvalidInput(
+                            "登录账号与原任务账号不一致，已保留原凭据，请使用原账号登录".into(),
+                        ))
+                    } else {
+                        let verified =
+                            temporary.load(provider.key())?.ok_or(QuarkError::Storage)?;
+                        store.save(provider.key(), &verified)?;
+                        Ok(account)
+                    }
+                } else if descriptor.browser_context {
+                    let validation_http = TianyiBrowserValidationTransport {
+                        window: &window,
+                        native: http,
+                    };
+                    validate_browser_password_session(
+                        provider,
+                        store,
+                        &validation_http,
+                        &cookies,
+                        browser_context.as_ref(),
+                        expected_account,
+                        |stage| validation_stage = stage,
+                    )
+                } else {
+                    validate_browser_password_session(
+                        provider,
+                        store,
+                        http,
+                        &cookies,
+                        browser_context.as_ref(),
+                        expected_account,
+                        |stage| validation_stage = stage,
+                    )
+                }
+            })();
             match candidate {
                 Ok(account) => return Ok(account),
                 Err(QuarkError::Storage) => return Err(QuarkError::Storage),
                 Err(QuarkError::InvalidInput(message)) => {
                     return Err(QuarkError::InvalidInput(message))
+                }
+                Err(QuarkError::Provider(message))
+                    if descriptor.authorization.password_login_mode
+                        == PasswordLoginMode::OfficialWebView =>
+                {
+                    return Err(QuarkError::Provider(message));
                 }
                 Err(error) => {
                     // Only fixed stage/error labels are exposed. Never show
@@ -540,7 +631,12 @@ pub(crate) fn browser_password_login(
         }
         Err(QuarkError::WebAuthorizationRequired)
     })();
-    let _ = window.close();
+    // Retain a failed window only in the hidden diagnostic harness so it can
+    // report the official page's non-sensitive progress flags before process
+    // teardown. Normal interactive and production flows always close it.
+    if result.is_ok() || !background_ui_test {
+        let _ = window.close();
+    }
     if result.is_ok()
         && ProviderRegistry::global()
             .get(provider)
@@ -648,24 +744,6 @@ pub(crate) fn web_storage_tokens(
         .recv_timeout(std::time::Duration::from_secs(15))
         .map_err(|_| QuarkError::WebAuthorizationRequired)?;
     web_value(&raw)
-}
-
-/// WebView2's evaluation callback returns a Promise as `{}`, not its value.
-/// Keep one pending capture in the page, including during a manual challenge.
-pub(crate) fn asynchronous_web_tokens(
-    window: &tauri::WebviewWindow,
-    script: &str,
-) -> Result<serde_json::Value, QuarkError> {
-    let capture = include_str!("../xunlei-web-capture.js");
-    let state = web_storage_tokens(window, &format!("({capture})(() => ({script}))"))?;
-    if state["done"].as_bool() != Some(true) {
-        return Err(QuarkError::AuthorizationPending);
-    }
-    state
-        .get("value")
-        .filter(|value| value.is_object())
-        .cloned()
-        .ok_or(QuarkError::AuthorizationPending)
 }
 
 // Cloud vendors place their login controls at the upper right of their wide

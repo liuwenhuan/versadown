@@ -22,7 +22,6 @@ use std::{
     io::Read,
     path::Path,
 };
-pub(crate) const XUNLEI_WEB_TOKENS_JS: &str = include_str!("xunlei-web-session.js");
 
 #[cfg(test)]
 mod tests {
@@ -76,6 +75,127 @@ mod tests {
             .save("xunlei", &serde_json::to_vec(&session).unwrap())
             .unwrap();
         store
+    }
+    #[test]
+    fn xunlei_capacity_reuses_valid_official_root_ticket_for_both_login_methods() {
+        struct CapacityHttp {
+            reject: bool,
+        }
+        impl CloudHttpTransport for CapacityHttp {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                assert_eq!(request.method, "GET");
+                assert_eq!(request.url, "https://api-pan.xunlei.com/drive/v1/about");
+                assert_eq!(request.headers["X-Captcha-Token"], "official-root-ticket");
+                Ok(CloudHttpResponse {
+                    status: if self.reject { 412 } else { 200 },
+                    body: if self.reject {
+                        r#"{"error":"captcha_required"}"#
+                    } else {
+                        r#"{"quota":{"limit":"4096","usage":"1024"}}"#
+                    }
+                    .into(),
+                    ..Default::default()
+                })
+            }
+        }
+        for method in [CloudAuthMethod::Web, CloudAuthMethod::Password] {
+            for supervised in [false, true] {
+                for reject in [false, true] {
+                    let mut session: XunleiSession =
+                        serde_json::from_slice(&credentials().load("xunlei").unwrap().unwrap())
+                            .unwrap();
+                    session.auth_method = method;
+                    session.profile.client_version = "1.92.101".into();
+                    session.expires_at = now() + 3600;
+                    session.web_security = XunleiWebSecurity {
+                        captcha_token: "official-root-ticket".into(),
+                        expires_at: now() + 600,
+                        action: "GET:/drive/v1/files".into(),
+                        ..Default::default()
+                    };
+                    let http = CapacityHttp { reject };
+                    let client = XunleiClient::new(session, &http);
+                    let client = if supervised {
+                        client.supervised()
+                    } else {
+                        client
+                    };
+                    let result = client.storage_capacity();
+                    if reject {
+                        assert!(matches!(result, Err(QuarkError::WebAuthorizationRequired)));
+                    } else {
+                        assert_eq!(
+                            result.unwrap(),
+                            CloudStorageCapacity::Limited {
+                                total_bytes: 4096,
+                                used_bytes: 1024,
+                            }
+                        );
+                    }
+                    assert_eq!(client.session().web_security.action, "GET:/drive/v1/files");
+                }
+            }
+        }
+    }
+    #[test]
+    fn xunlei_download_metadata_reuses_valid_root_ticket_without_private_signer() {
+        struct DownloadHttp;
+        impl CloudHttpTransport for DownloadHttp {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                assert_eq!(request.method, "GET");
+                assert_eq!(
+                    request.url,
+                    "https://api-pan.xunlei.com/drive/v1/files/file-1"
+                );
+                assert_eq!(request.headers["X-Captcha-Token"], "official-root-ticket");
+                Ok(CloudHttpResponse {status:200,body:r#"{"id":"file-1","name":"test.zip","web_content_link":"https://cdn.example/test.zip"}"#.into(),..Default::default()})
+            }
+        }
+        let mut session: XunleiSession =
+            serde_json::from_slice(&credentials().load("xunlei").unwrap().unwrap()).unwrap();
+        session.profile.client_version = "1.92.101".into();
+        session.web_security = XunleiWebSecurity {
+            captcha_token: "official-root-ticket".into(),
+            expires_at: now() + 600,
+            action: "GET:/drive/v1/files".into(),
+            ..Default::default()
+        };
+        let client = XunleiClient::new(session, &DownloadHttp).supervised();
+        assert_eq!(
+            client.download("file-1").unwrap(),
+            ("https://cdn.example/test.zip".into(), "test.zip".into())
+        );
+    }
+    #[test]
+    fn current_modern_web_bearer_without_expiry_is_probed_before_refresh() {
+        struct RefusingHttp;
+        impl CloudHttpTransport for RefusingHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                Err(QuarkError::Transport("refresh should not run".into()))
+            }
+        }
+        let session = XunleiSession::from_web_authorization(
+            "current-access",
+            "current-refresh",
+            "current-user",
+            "",
+            XunleiClientProfile {
+                client_id: WEB_CLIENT_ID.into(),
+                client_version: "1.92.101".into(),
+                package_name: WEB_PACKAGE.into(),
+                device_id: "official-device".into(),
+                user_agent: "official-browser-ua".into(),
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        let client = XunleiClient::new(session, &RefusingHttp);
+
+        assert_eq!(
+            client.ready_session().unwrap().access_token,
+            "current-access"
+        );
     }
     #[test]
     fn supervised_recorded_xunlei_download_defers_expired_session_refresh_to_supervisor() {
@@ -1572,7 +1692,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             provider: CloudProvider::Xunlei,
             display_name: id.clone(),
             id,
-            auth_method: CloudAuthMethod::Web,
+            auth_method: session.auth_method,
         })
     }
 
@@ -1771,6 +1891,10 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     fn ready_session(&self) -> Result<XunleiSession, QuarkError> {
         let session = self.session();
         if (!session.access_token.is_empty() && session.expires_at > now().saturating_add(60))
+            // Official web OAuth credentials can omit an expiry even while
+            // their current bearer is valid. Probe that bearer first; a 401
+            // below still performs the bounded refresh path.
+            || (session.profile.is_modern_web() && !session.access_token.is_empty())
             || Self::is_browser_bearer_session(&session)
         {
             return Ok(session);
@@ -1858,7 +1982,13 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 || !security.captcha_token.is_empty()
                 || !security.captcha_sign.is_empty())
                 && (security.expires_at <= now().saturating_add(30)
-                    || (!security.action.is_empty() && security.action != action))
+                    // Quota and file-detail reads accept the current official
+                    // root ticket. Do not require private signing metadata before
+                    // trying it; retain normal server rejection/renewal handling.
+                    || (!security.action.is_empty()
+                        && security.action != action
+                        && action != "GET:/drive/v1/about"
+                        && !(method == "GET" && parsed.path().starts_with("/drive/v1/files/"))))
             {
                 session = self.refresh_web_captcha(&action)?;
                 renewed = true;

@@ -607,6 +607,9 @@ pub(crate) fn share_submission_options(
     options.output_name = configured.output_name.or(options.output_name);
     options.proxy = configured.proxy;
     options.max_connections_per_server = configured.max_connections_per_server;
+    options.max_tries = configured.max_tries;
+    options.retry_wait_seconds = configured.retry_wait_seconds;
+    options.native_resume_gid = configured.native_resume_gid;
     options.allow_overwrite = configured.allow_overwrite;
     options.continue_download = configured.continue_download;
     options

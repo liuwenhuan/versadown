@@ -56,10 +56,6 @@ const SHARED_RUNTIME_MODULES: &[(&str, &str)] = &[
         "cloud/password-login.js",
         include_str!("../src/cloud/password-login.js"),
     ),
-    (
-        "cloud/xunlei-web-capture.js",
-        include_str!("../src/cloud/xunlei-web-capture.js"),
-    ),
     ("cloud/session.rs", include_str!("../src/cloud/session.rs")),
     ("cloud/share.rs", include_str!("../src/cloud/share.rs")),
     (

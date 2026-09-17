@@ -52,6 +52,7 @@ pub(crate) fn password_profile_reset_key(provider: super::CloudProvider) -> Opti
     match provider {
         super::CloudProvider::Baidu => Some("cloud-password-profile-reset-baidu"),
         super::CloudProvider::Tianyi => Some("cloud-password-profile-reset-tianyi"),
+        super::CloudProvider::Xunlei => Some("cloud-password-profile-reset-xunlei"),
         _ => None,
     }
 }
@@ -72,13 +73,16 @@ pub fn credential_key_is_supported(key: &str) -> bool {
             | "cloud-password-pikpak"
             | "cloud-password-baidu"
             | "cloud-password-tianyi"
+            | "cloud-password-xunlei"
             | "cloud-password-draft-pikpak"
             | "cloud-password-draft-baidu"
             | "cloud-password-draft-tianyi"
+            | "cloud-password-draft-xunlei"
             | BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY
             | BAIDU_BROWSER_PROFILE_USERNAME_KEY
             | "cloud-password-profile-reset-baidu"
             | "cloud-password-profile-reset-tianyi"
+            | "cloud-password-profile-reset-xunlei"
             | "cloud-auth-maintenance-quark"
             | "cloud-auth-maintenance-pikpak"
             | "cloud-auth-maintenance-baidu"

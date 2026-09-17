@@ -1,3 +1,4 @@
+pub(crate) mod native_resume;
 pub mod process;
 pub mod recovery;
 pub mod rpc;

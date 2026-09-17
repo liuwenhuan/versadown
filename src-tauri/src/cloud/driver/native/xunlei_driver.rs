@@ -13,8 +13,9 @@ impl DriveOps for XunleiDriver<'_> {
             return Err(CloudError::NotAuthorized);
         }
         with_xunlei_client(store, http, |client| {
-            if client.session().auth_method == CloudAuthMethod::Web
-                && client.session().profile.client_secret.is_empty()
+            if client.session().profile.is_modern_web()
+                || (client.session().auth_method == CloudAuthMethod::Web
+                    && client.session().profile.client_secret.is_empty())
             {
                 // Validate the root before restoring the workspace. The helper
                 // also preserves modern refresh rotation when this probe fails.
@@ -131,6 +132,21 @@ impl DownloadOps for XunleiDriver<'_> {
     }
 }
 impl ProviderAuth for XunleiDriver<'_> {
+    fn login_password(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> Result<NativeLoginOutcome, CloudError> {
+        if username.trim().is_empty() || password.is_empty() {
+            return Err(CloudError::InvalidInput("请输入账号和密码".into()));
+        }
+        // Xunlei's official page owns the password exchange and any security
+        // challenge. Tell the shared login flow to open that trusted WebView
+        // instead of treating this supported mode as unavailable.
+        Ok(NativeLoginOutcome::NeedBrowserFallback(
+            CloudError::WebAuthorizationRequired,
+        ))
+    }
     fn refresh_session(&mut self) -> Result<bool, CloudError> {
         if self.store.load("xunlei")?.is_none() {
             return Ok(false);
@@ -143,26 +159,12 @@ impl ProviderAuth for XunleiDriver<'_> {
     }
     fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
         WebAuthorizationRecipe {
-            token_script: Some(xunlei::XUNLEI_WEB_TOKENS_JS),
-            asynchronous_tokens: true,
+            token_script: Some(super::xunlei_auth::SNAPSHOT),
             ..Default::default()
         }
     }
     fn complete_web(&mut self, input: &WebAuthorizationInput) -> Result<CloudAccount, CloudError> {
-        let store = &self.store;
-        let http = &self.http;
-        {
-            let (session, captured_context) =
-                parse_xunlei_web_authorization(input.storage.clone())?;
-            let account = finalize_xunlei_web_authorization(
-                crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei),
-                session,
-                captured_context,
-                store,
-                http,
-            )?;
-            Ok(account)
-        }
+        super::xunlei_auth::complete(input, &self.store, &self.http)
     }
 }
 impl UploadOps for XunleiDriver<'_> {

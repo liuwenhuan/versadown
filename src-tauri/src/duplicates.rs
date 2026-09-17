@@ -42,6 +42,13 @@ fn has_existing_payload(store: &TaskStore, task: &DownloadTask) -> Result<bool, 
 }
 
 fn can_resume(store: &TaskStore, task: &DownloadTask) -> Result<bool, StoreError> {
+    if task
+        .aria_gid
+        .as_deref()
+        .is_some_and(|gid| crate::aria2::native_resume::checkpoint(store, task, gid).is_some())
+    {
+        return Ok(true);
+    }
     let files = store.files(task.id)?;
     let has_resumable_progress = task.completed_length > 0
         && task
@@ -204,6 +211,63 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_preallocated_file_with_native_checkpoint_is_resumable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap();
+        let failed = task_with_status(
+            &store,
+            "https://example.test/native.bin",
+            TaskStatus::Failed,
+        );
+        let failed = store.bind_gid(failed.id, "0123456789abcdef").unwrap();
+        let failed = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(128),
+                completed_length: 7,
+                ..failed
+            })
+            .unwrap();
+        let payload = root.path().join("native.bin");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        store
+            .upsert_files(
+                failed.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 7, true)],
+            )
+            .unwrap();
+        let state_directory = root.path().join("aria2-next-state/stream");
+        std::fs::create_dir_all(&state_directory).unwrap();
+        let checkpoint = rusqlite::Connection::open(state_directory.join("state.db")).unwrap();
+        checkpoint.execute_batch("CREATE TABLE downloads (gid TEXT PRIMARY KEY, uri TEXT, path TEXT, total_length INTEGER, completed_length INTEGER, completed_ranges TEXT);").unwrap();
+        checkpoint
+            .execute(
+                "INSERT INTO downloads VALUES (?1, ?2, ?3, 128, 7, '0-7')",
+                rusqlite::params![
+                    "0123456789abcdef",
+                    "https://example.test/native.bin",
+                    payload.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            retry_duplicate_state(&store, &failed).unwrap(),
+            Some(DuplicateDownloadState::ResumeAvailable)
+        );
+        for invalid_ranges in ["0-128", "0-7,5-8", "0-129", "broken"] {
+            checkpoint
+                .execute("UPDATE downloads SET completed_ranges=?1", [invalid_ranges])
+                .unwrap();
+            assert_eq!(
+                retry_duplicate_state(&store, &failed).unwrap(),
+                Some(DuplicateDownloadState::OverwriteRequired)
+            );
+        }
     }
 
     #[test]

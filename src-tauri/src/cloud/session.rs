@@ -149,7 +149,7 @@ impl Zeroize for LoadedPasswordCredentials {
 }
 
 fn password_credential_key(provider: CloudProvider) -> Result<&'static str, QuarkError> {
-    if provider_capabilities(provider).password_login_mode != PasswordLoginMode::RustDirect {
+    if !provider_capabilities(provider).password {
         return Err(QuarkError::InvalidInput(
             "该网盘不支持账号密码自动恢复".to_owned(),
         ));
@@ -158,11 +158,9 @@ fn password_credential_key(provider: CloudProvider) -> Result<&'static str, Quar
         CloudProvider::Pikpak => Ok("cloud-password-pikpak"),
         CloudProvider::Baidu => Ok("cloud-password-baidu"),
         CloudProvider::Tianyi => Ok("cloud-password-tianyi"),
-        CloudProvider::Quark
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei
-        | CloudProvider::Uc => {
-            unreachable!("RustDirect providers must have a password credential key")
+        CloudProvider::Xunlei => Ok("cloud-password-xunlei"),
+        CloudProvider::Quark | CloudProvider::Aliyun | CloudProvider::Uc => {
+            unreachable!("password providers must have a password credential key")
         }
     }
 }
@@ -483,7 +481,7 @@ pub fn saved_cloud_credential_info(
     store: &impl CredentialStore,
     provider: CloudProvider,
 ) -> Result<Option<super::SavedCloudCredentialInfo>, QuarkError> {
-    if !cloud_session_policy(provider).supports_password_fallback {
+    if !provider_capabilities(provider).password {
         return Ok(None);
     }
     Ok(
@@ -522,7 +520,10 @@ pub fn resolve_password_login(
 }
 
 pub(crate) fn uses_password_browser_profile(provider: CloudProvider) -> bool {
-    matches!(provider, CloudProvider::Baidu | CloudProvider::Tianyi)
+    matches!(
+        provider,
+        CloudProvider::Baidu | CloudProvider::Tianyi | CloudProvider::Xunlei
+    )
 }
 
 fn password_profile_reset_pending(
@@ -982,7 +983,7 @@ mod tests {
 }
 
 fn password_login_draft_key(provider: CloudProvider) -> Result<&'static str, QuarkError> {
-    if provider_capabilities(provider).password_login_mode != PasswordLoginMode::RustDirect {
+    if !provider_capabilities(provider).password {
         return Err(QuarkError::InvalidInput(
             "该网盘不支持账号密码登录".to_owned(),
         ));
@@ -991,10 +992,10 @@ fn password_login_draft_key(provider: CloudProvider) -> Result<&'static str, Qua
         CloudProvider::Pikpak => Ok("cloud-password-draft-pikpak"),
         CloudProvider::Baidu => Ok("cloud-password-draft-baidu"),
         CloudProvider::Tianyi => Ok("cloud-password-draft-tianyi"),
-        CloudProvider::Quark
-        | CloudProvider::Aliyun
-        | CloudProvider::Xunlei
-        | CloudProvider::Uc => unreachable!("RustDirect providers have a login draft key"),
+        CloudProvider::Xunlei => Ok("cloud-password-draft-xunlei"),
+        CloudProvider::Quark | CloudProvider::Aliyun | CloudProvider::Uc => {
+            unreachable!("password providers have a login draft key")
+        }
     }
 }
 

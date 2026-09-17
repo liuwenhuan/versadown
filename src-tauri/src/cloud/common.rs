@@ -199,49 +199,6 @@ pub(crate) fn finalize_uc_web_authorization(
     Ok(account)
 }
 
-pub(crate) fn finalize_xunlei_web_authorization(
-    descriptor: &ProviderDescriptor,
-    mut session: xunlei::XunleiSession,
-    context: xunlei::XunleiWebContext,
-    store: &impl CredentialStore,
-    http: &impl CloudHttpTransport,
-) -> Result<CloudAccount, QuarkError> {
-    session.web_context = context;
-    let modern = session.profile.is_modern_web();
-    // The public client id/package identify the webpage, but they do not make
-    // a usable drive profile by themselves. Webpack chunks can still be
-    // loading (or may have changed) while the current account bearer is
-    // already visible, so keep polling instead of reporting a valid login as
-    // expired before any request is sent.
-    if modern && !session.profile.is_drive_complete() {
-        return Err(QuarkError::AuthorizationPending);
-    }
-    // Modern web SSO proves access with the drive API, not legacy cookie keys.
-    let client = xunlei::XunleiClient::new(session, http);
-    // Do not make the UI create a tab or close the official browser window
-    // until the same root request that initializes the workspace succeeds.
-    // A captured bearer plus browser context alone can still be rejected by
-    // Xunlei's live drive endpoint.
-    let final_error = |error| match error {
-        QuarkError::AuthorizationExpired if modern => {
-            QuarkError::Provider("迅雷登录凭据已失效，请在授权页重新登录后重试".into())
-        }
-        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired if modern => {
-            QuarkError::Provider("迅雷目录访问仍需操作验证，请在授权页完成验证后重试".into())
-        }
-        QuarkError::AuthorizationExpired
-        | QuarkError::WebAuthorizationRequired
-        | QuarkError::CaptchaRequired => QuarkError::AuthorizationPending,
-        other => other,
-    };
-    client
-        .directory(descriptor.root_directory_id)
-        .map_err(final_error)?;
-    let account = client.web_account().map_err(final_error)?;
-    save_provider_session(CloudProvider::Xunlei, store, &client.session())?;
-    Ok(account)
-}
-
 pub(crate) fn finalize_tianyi_web_authorization(
     descriptor: &ProviderDescriptor,
     session: tianyi::TianyiSession,
@@ -353,49 +310,6 @@ pub fn parse_web_tokens(raw: &str) -> Result<PikPakSession, QuarkError> {
     })
 }
 
-pub(crate) fn parse_xunlei_web_authorization(
-    value: serde_json::Value,
-) -> Result<(xunlei::XunleiSession, xunlei::XunleiWebContext), QuarkError> {
-    let context = xunlei_web_context_from_selected_tokens(&value);
-    Ok((parse_xunlei_web_session(value)?, context))
-}
-
-pub(crate) fn parse_xunlei_web_session(
-    value: serde_json::Value,
-) -> Result<xunlei::XunleiSession, QuarkError> {
-    if value["authorization_error"].as_str() == Some("captcha_verification_failed") {
-        return Err(QuarkError::Provider(
-            "迅雷操作验证未完成，请在授权页完成验证后重试".into(),
-        ));
-    }
-    let field = |key| {
-        crate::cloud::types::required(&value, key).map_err(|_| QuarkError::AuthorizationPending)
-    };
-    let optional = |key| value[key].as_str().unwrap_or_default().to_owned();
-    let mut session = xunlei::XunleiSession::from_web_authorization(
-        value["access_token"].as_str().unwrap_or_default(),
-        optional("refresh_token"),
-        field("user_id")?,
-        optional("security_token"),
-        xunlei::XunleiClientProfile {
-            client_id: optional("client_id"),
-            // The official browser session does not need, and must never
-            // export, a native client secret through the WebView bridge.
-            client_secret: String::new(),
-            device_id: optional("device_id"),
-            client_version: optional("client_version"),
-            package_name: optional("package_name"),
-            user_agent: optional("user_agent"),
-        },
-        value["expires_at"].as_u64().unwrap_or(0),
-    )?;
-    if value["web_security"].is_object() {
-        session.web_security = serde_json::from_value(value["web_security"].clone())
-            .map_err(|_| QuarkError::AuthorizationPending)?;
-    }
-    Ok(session)
-}
-
 pub(crate) fn parse_aliyun_web_session(
     value: serde_json::Value,
 ) -> Result<aliyun::AliyunSession, QuarkError> {
@@ -414,18 +328,6 @@ pub(crate) fn parse_aliyun_web_session(
         browser_access_ready: false,
         expires_at: value["expires_at"].as_u64(),
     })
-}
-
-pub(crate) fn xunlei_web_context_from_selected_tokens(
-    value: &serde_json::Value,
-) -> xunlei::XunleiWebContext {
-    let selected = |key| value[key].as_str().unwrap_or_default().to_owned();
-    xunlei::XunleiWebContext {
-        session_id: selected("session_id"),
-        peer_id: selected("peer_id"),
-        device_id: selected("device_id"),
-        credit_key: selected("credit_key"),
-    }
 }
 
 #[cfg(test)]

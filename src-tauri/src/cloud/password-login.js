@@ -4,7 +4,25 @@
   if (!Array.isArray(allowed) || !allowed.every(host => typeof host === 'string' && host)) return;
   if (location.protocol !== 'https:' || (location.port && location.port !== '443') || !allowed.includes(location.hostname)) return;
   const submittedKey = 'alldownloader-login-' + attemptId;
-  if (sessionStorage.getItem(submittedKey)) return;
+  // This contains only progress flags, never credential values. It lets the
+  // native host distinguish a page that is still loading from an official
+  // security challenge without inspecting the login form's private contents.
+  const status = {
+    formReady: false, valuesApplied: false, agreementAccepted: false,
+    challengeRequired: false, submitted: false, officialResult: 'pending',
+  };
+  window.__alldownloaderPasswordLoginStatus = status;
+  const report = () => {
+    if (document.documentElement) {
+      document.documentElement.setAttribute('data-alldownloader-password-login', JSON.stringify(status));
+    }
+  };
+  try {
+    if (sessionStorage.getItem(submittedKey)) return;
+  } catch (_) {
+    // Some official cross-origin login frames deny Web Storage to injected
+    // scripts. The in-page attempt guard below remains sufficient here.
+  }
   const visible = element => element && element.getClientRects().length > 0
     && !element.disabled && getComputedStyle(element).visibility !== 'hidden';
   const first = selector => [...document.querySelectorAll(selector)].find(visible);
@@ -15,9 +33,12 @@
   };
   const started = Date.now();
   const timer = setInterval(() => {
+    report();
     // The official login bundle/iframe can arrive well after the landing
     // document. Keep waiting within the native window's 180-second deadline.
-    if (Date.now() - started > 120000 || sessionStorage.getItem(submittedKey)) {
+    let submitted = false;
+    try { submitted = sessionStorage.getItem(submittedKey); } catch (_) {}
+    if (Date.now() - started > 120000 || submitted) {
       clearInterval(timer); username = ''; password = ''; return;
     }
     // Tianyi renders inputs below this overlay before its asynchronous page
@@ -33,6 +54,7 @@
     const passwordInput = first('input[type="password"]');
     const usernameInput = first('input[name="userName"],input[name="username"],input[name="account"],input#userName,input#username,input[id$="__userName"]');
     if (!passwordInput || !usernameInput) return;
+    status.formReady = true; report();
     const form = passwordInput.closest('form');
     if (form && !form.contains(usernameInput)) return;
     if (form?.getAttribute('action')) {
@@ -41,6 +63,7 @@
     }
     setValue(usernameInput, username);
     setValue(passwordInput, password);
+    status.valuesApplied = true; report();
     if (provider === 'tianyi') {
       const agreement = first('#j-agreement-box');
       if (agreement && !agreement.classList.contains('checkbox-icon2')) {
@@ -53,15 +76,18 @@
       const agreement = first('input[type="checkbox"][id$="__isAgree"]');
       if (agreement && !agreement.checked) agreement.click();
     }
+    status.agreementAccepted = true; report();
     // Never submit an empty verification field or operate a challenge widget.
     const challenge = first('input[name="verifyCode"],input[name="validateCode"],input[id$="__verifyCode"],input[name="smsCode"]');
     if (challenge && !challenge.value.trim()) {
+      status.challengeRequired = true; report();
       clearInterval(timer); username = ''; password = ''; return;
     }
     const submit = [...(form || document).querySelectorAll('button,input[type="submit"],input[type="button"],a')].find(element =>
       visible(element) && /^(登录|登\s+录|立即登录)$/.test((element.value || element.textContent).trim()));
     if (!submit) return;
-    sessionStorage.setItem(submittedKey, 'submitted');
+    status.submitted = true; report();
+    try { sessionStorage.setItem(submittedKey, 'submitted'); } catch (_) {}
     clearInterval(timer); username = ''; password = '';
     submit.click();
   }, 300);

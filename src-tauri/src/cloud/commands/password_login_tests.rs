@@ -1,8 +1,109 @@
+use super::super::browser::password_login_url;
 use super::super::password_login_with_browser;
 use super::*;
 use crate::cloud::{
-    load_saved_password_login, prepare_password_account_login, reset_password_profile_if_required,
+    browser_login, load_saved_password_login, prepare_password_account_login,
+    reset_password_profile_if_required, PasswordLoginMode,
 };
+
+#[test]
+fn xunlei_advertises_official_webview_password_login_on_exact_official_hosts() {
+    let descriptor = crate::cloud::ProviderRegistry::global().get(CloudProvider::Xunlei);
+    assert!(descriptor.authorization.password);
+    assert_eq!(
+        descriptor.authorization.password_login_mode,
+        PasswordLoginMode::OfficialWebView
+    );
+    for url in [
+        "https://pan.xunlei.com/",
+        "https://i.xunlei.com/xluser/login.html",
+    ] {
+        assert!(browser_login::trusted_login_url(
+            CloudProvider::Xunlei,
+            &url.parse().unwrap()
+        ));
+    }
+    for url in [
+        "http://i.xunlei.com/xluser/login.html",
+        "https://evil.i.xunlei.com/xluser/login.html",
+        "https://i.xunlei.com.evil.test/xluser/login.html",
+    ] {
+        assert!(!browser_login::trusted_login_url(
+            CloudProvider::Xunlei,
+            &url.parse().unwrap()
+        ));
+    }
+}
+
+#[test]
+fn xunlei_password_login_starts_at_the_cloud_parent_for_its_official_sso_callback() {
+    assert_eq!(
+        password_login_url(CloudProvider::Xunlei),
+        "https://pan.xunlei.com"
+    );
+}
+
+#[test]
+fn xunlei_password_login_enters_the_official_browser_flow() {
+    let store = MemoryCredentialStore::default();
+    let http = XunleiRootAcceptingTransport(Mutex::new(Vec::new()));
+    let browser_calls = Cell::new(0);
+
+    let error = password_login_with_browser(
+        CloudProvider::Xunlei,
+        &store,
+        crate::cloud::ProviderRegistry::global()
+            .driver(CloudProvider::Xunlei, &store, &http)
+            .auth(),
+        "fixture-user",
+        "fixture-password",
+        |_| {
+            browser_calls.set(browser_calls.get() + 1);
+            Err(QuarkError::Storage)
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, QuarkError::Storage));
+    assert_eq!(browser_calls.get(), 1);
+}
+
+#[test]
+fn xunlei_password_credentials_and_webview_profile_are_provider_isolated() {
+    let store = MemoryCredentialStore::default();
+    save_password_credential(
+        &store,
+        CloudPasswordCredential::new(CloudProvider::Xunlei, "xl-1", "alice", "secret"),
+    )
+    .unwrap();
+    assert_eq!(
+        load_saved_password_login(&store, CloudProvider::Xunlei)
+            .unwrap()
+            .unwrap()
+            .username(),
+        "alice"
+    );
+    let root = std::path::Path::new("C:/profiles");
+    assert_eq!(
+        password_webview_data_directory_from_root(root, CloudProvider::Xunlei).unwrap(),
+        root.join("web-auth").join("xunlei")
+    );
+}
+
+#[test]
+fn password_command_encrypts_the_submitted_draft_before_opening_the_browser() {
+    let source = include_str!("auth.rs")
+        .split("pub async fn cloud_login_password")
+        .nth(1)
+        .expect("password command should exist");
+    let draft = source
+        .find("save_password_login_draft(&state.store, provider")
+        .expect("password input should be encrypted before browser validation");
+    let browser = source
+        .find("password_login_with_browser(")
+        .expect("password command should enter the provider login flow");
+    assert!(draft < browser);
+}
 
 struct PostLoginFailure {
     stage: &'static str,
