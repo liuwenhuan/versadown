@@ -6,7 +6,11 @@ use std::{
     future::Future,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
+
+const EMPTY_STARTUP_SNAPSHOT_RETRIES: usize = 10;
+const EMPTY_STARTUP_SNAPSHOT_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 fn pending_recovery_name(gid: &str) -> String {
     format!("等待获取文件名（{gid}）")
@@ -118,25 +122,22 @@ impl DownloadService {
     ) -> Result<RecoveryReport, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         let api = self.api();
-        let mut statuses = api.tell_active().await?;
-        for stopped in [false, true] {
-            let mut offset = 0;
-            loop {
-                let page = if stopped {
-                    api.tell_stopped(offset, 1000).await?
-                } else {
-                    api.tell_waiting(offset, 1000).await?
-                };
-                let count = page.len();
-                statuses.extend(page);
-                if count < 1000 {
+        let store = self.store();
+        let has_persisted_engine_tasks = store.list()?.into_iter().any(|task| {
+            !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled)
+                && task.aria_gid.is_some()
+        });
+        let mut statuses = Self::native_statuses(api.as_ref()).await?;
+        if has_persisted_engine_tasks && statuses.is_empty() {
+            for _ in 0..EMPTY_STARTUP_SNAPSHOT_RETRIES {
+                tokio::time::sleep(EMPTY_STARTUP_SNAPSHOT_RETRY_DELAY).await;
+                statuses = Self::native_statuses(api.as_ref()).await?;
+                if !statuses.is_empty() {
                     break;
                 }
-                offset += 1000;
             }
         }
 
-        let store = self.store();
         // A completed metadata parent can bind its followed child while being
         // reconciled. Process already-owned GIDs first so that child is not
         // mistaken for an orphan merely because aria2 returned it earlier.
@@ -208,6 +209,27 @@ impl DownloadService {
             self.publish_task(&task)?;
         }
         Ok(report)
+    }
+
+    async fn native_statuses(api: &dyn Aria2Api) -> Result<Vec<Aria2Status>, DownloadServiceError> {
+        let mut statuses = api.tell_active().await?;
+        for stopped in [false, true] {
+            let mut offset = 0;
+            loop {
+                let page = if stopped {
+                    api.tell_stopped(offset, 1000).await?
+                } else {
+                    api.tell_waiting(offset, 1000).await?
+                };
+                let count = page.len();
+                statuses.extend(page);
+                if count < 1000 {
+                    break;
+                }
+                offset += 1000;
+            }
+        }
+        Ok(statuses)
     }
 
     async fn remove_unowned_native_task(

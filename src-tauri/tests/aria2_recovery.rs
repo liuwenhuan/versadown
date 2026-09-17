@@ -3,7 +3,13 @@ mod fixture;
 
 use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore};
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 async fn slow_server(
     delay: Duration,
@@ -70,6 +76,42 @@ async fn native_recovery_reconciles_only_owned_job() {
     assert_eq!(report.reconciled, 1);
     assert_eq!(report.imported, 0);
     assert_eq!(store.find(task.id).unwrap().progress, 25);
+    server.abort();
+}
+
+#[tokio::test]
+async fn native_recovery_retries_an_empty_startup_snapshot_before_detaching_tasks() {
+    let active_requests = Arc::new(AtomicUsize::new(0));
+    let observed_requests = Arc::clone(&active_requests);
+    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => {
+            if observed_requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                json!([])
+            } else {
+                json!([fixture::status("owned", "active", 25)])
+            }
+        }
+        "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+        other => panic!("{other}"),
+    })
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/owned"))
+        .unwrap();
+    store.bind_gid(task.id, "owned").unwrap();
+
+    let report = DownloadService::new(Arc::new(client), Arc::clone(&store))
+        .recover_native(root.path())
+        .await
+        .unwrap();
+
+    assert_eq!(report.reconciled, 1);
+    assert_eq!(active_requests.load(Ordering::SeqCst), 2);
+    let restored = store.find(task.id).unwrap();
+    assert_eq!(restored.aria_gid.as_deref(), Some("owned"));
+    assert_eq!(restored.progress, 25);
     server.abort();
 }
 
