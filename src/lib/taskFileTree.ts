@@ -69,5 +69,5 @@ function fromChildren(children: readonly QueueTask[], parentKey: string): readon
 }
 
 export function buildTaskFileTree(task: TaskFileTreeInput): readonly TaskFileTreeNode[] {
-  return task.children !== undefined ? fromChildren(task.children, 'root') : fromFiles(task.files ?? [], task.name);
+  return task.children?.length ? fromChildren(task.children, 'root') : fromFiles(task.files ?? [], task.name);
 }

@@ -1062,6 +1062,26 @@ it('keeps modifier-selected tasks together and exposes only batch-safe menu acti
   expect(onBatchCommand).toHaveBeenCalledWith(['running-1', 'paused-2'], 'copy_link');
 });
 
+it('reports the full Ctrl-click selection to its task-list parent', () => {
+  const onSelectionChange = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      { id: 'select-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+      { id: 'select-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+    ]}
+    privacyEnabled={false}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onSelectionChange={onSelectionChange}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.click(screen.getByText('first.zip'));
+  fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
+
+  expect(onSelectionChange).toHaveBeenLastCalledWith(['select-1', 'select-2']);
+});
+
 it('selects a contiguous task range with Shift-click', () => {
   render(<DownloadQueue
     tasks={[

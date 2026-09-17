@@ -29,7 +29,7 @@ it('shows downloaded bytes instead of a synthetic percent for an unknown total',
   expect(screen.queryByText('0%')).not.toBeInTheDocument();
 });
 
-it('renders the source on its own row before the file information', () => {
+it('renders the source before file information without a duplicate task-name label', () => {
   render(<TaskDetails task={{
     id: 'task-source', name: 'collection', source: 'magnet:?xt=urn:btih:collection', kind: 'magnet', status: 'downloading', progress: 10,
     files: [{ index: 1, path: 'collection/video.mkv', length: 1_024, completed_length: 0, selected: true }]
@@ -38,7 +38,8 @@ it('renders the source on its own row before the file information', () => {
   const source = screen.getByText('magnet:?xt=urn:btih:collection');
   const sourceSection = source.closest('.task-detail-source');
   const files = screen.getByRole('region', { name: '文件信息' });
-  expect(screen.getByText('任务名称')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'collection' })).toBeVisible();
+  expect(screen.queryByText('任务名称')).not.toBeInTheDocument();
   expect(sourceSection).not.toBeNull();
   expect(sourceSection!.compareDocumentPosition(files) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 });

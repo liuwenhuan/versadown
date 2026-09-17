@@ -149,7 +149,7 @@ async fn native_recovery_removes_unowned_engine_job_and_confined_payload() {
 }
 
 #[tokio::test]
-async fn native_recovery_deletes_missing_nonterminal_record_and_payload() {
+async fn native_recovery_preserves_missing_nonterminal_record_and_payload_for_resume() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("missing.bin");
     std::fs::write(&output, b"partial").unwrap();
@@ -161,7 +161,12 @@ async fn native_recovery_deletes_missing_nonterminal_record_and_payload() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(NewTask::direct("https://example.test/missing.bin"))
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
+            name: "missing".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
         .unwrap();
     let mut task = store.bind_gid(task.id, "missing-native-gid").unwrap();
     task.status = TaskStatus::Downloading;
@@ -172,15 +177,20 @@ async fn native_recovery_deletes_missing_nonterminal_record_and_payload() {
             &[(1, output.to_string_lossy().into_owned(), 100, 7, true)],
         )
         .unwrap();
+    store.confirm_selection(task.id).unwrap();
 
     let report = DownloadService::new(Arc::new(client), Arc::clone(&store))
         .recover_native(root.path())
         .await
         .unwrap();
-    assert_eq!(report.removed_tasks, 1);
-    assert!(store.find(task.id).is_err());
-    assert!(!output.exists());
-    assert!(!std::path::PathBuf::from(format!("{}.aria2", output.display())).exists());
+    assert_eq!(report.removed_tasks, 0);
+    let preserved = store.find(task.id).unwrap();
+    assert_eq!(preserved.status, TaskStatus::Paused);
+    assert_eq!(preserved.aria_gid, None);
+    assert_eq!(store.files(task.id).unwrap().len(), 1);
+    assert!(store.selection_confirmed(task.id).unwrap());
+    assert!(output.exists());
+    assert!(std::path::PathBuf::from(format!("{}.aria2", output.display())).exists());
     server.abort();
 }
 

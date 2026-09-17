@@ -15,6 +15,16 @@ describe('buildTaskFileTree', () => {
     expect(tree).toEqual([expect.objectContaining({ kind: 'folder', name: '_crack', bytes: 8, count: 1 })]);
   });
 
+  it('uses persisted files when the queue supplies an empty child collection', () => {
+    const tree = buildTaskFileTree({
+      name: 'release',
+      children: [],
+      files: [{ index: 1, path: 'release/_crack/setup.exe', length: 8, completed_length: 4, selected: true }],
+    });
+
+    expect(tree).toEqual([expect.objectContaining({ kind: 'folder', name: '_crack', bytes: 8, count: 1 })]);
+  });
+
   it('normalizes slash styles and omits the task-root path segment', () => {
     const tree = buildTaskFileTree({
       name: 'release',

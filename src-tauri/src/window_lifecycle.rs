@@ -31,7 +31,6 @@ pub fn manager_close_disposition(
     match window_label {
         "main" => ManagerCloseDisposition::Hide,
         "launcher" => ManagerCloseDisposition::KeepOpen,
-        "launcher-popup" => ManagerCloseDisposition::Hide,
         _ => ManagerCloseDisposition::Exit,
     }
 }
@@ -81,7 +80,6 @@ pub fn handle_manager_window_event(
         return;
     }
     if let WindowEvent::CloseRequested { api, .. } = event {
-        let window_label = window.label().to_string();
         match manager_close_disposition(window.label(), lifecycle.is_exiting()) {
             ManagerCloseDisposition::Exit => return,
             ManagerCloseDisposition::KeepOpen => {
@@ -100,16 +98,14 @@ pub fn handle_manager_window_event(
             }
             ManagerCloseDisposition::Hide => api.prevent_close(),
         }
-        if window_label == "main" {
-            lifecycle.record_manager_close_request();
-        }
+        lifecycle.record_manager_close_request();
         let app = window.app_handle().clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            let Some(target) = app.get_webview_window(&window_label) else {
+            let Some(manager) = app.get_webview_window("main") else {
                 return;
             };
-            if hide_window_immediately(&target).is_ok() && window_label == "main" {
+            if hide_window_immediately(&manager).is_ok() {
                 crate::launcher::set_tray_manager_visibility(&app, false);
             }
         });
@@ -130,19 +126,6 @@ pub fn show_manager_without_activation(window: &WebviewWindow) -> Result<(), Str
     #[cfg(not(windows))]
     {
         window.show().map_err(|error| error.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn launcher_popup_close_is_hidden_instead_of_destroyed() {
-        assert_eq!(
-            manager_close_disposition("launcher-popup", false),
-            ManagerCloseDisposition::Hide
-        );
     }
 }
 

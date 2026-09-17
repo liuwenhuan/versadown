@@ -7,8 +7,8 @@ use std::{
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
     cloud::{commands::apply_cloud_download_policy, CloudProvider},
-    prepare_download, DownloadAction, DownloadService, DownloadTask, EventSink, NewTask, TaskStatus,
-    TaskStore, UriSubmissionOptions,
+    prepare_download, DownloadAction, DownloadService, DownloadTask, EventSink, NewTask,
+    TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use async_trait::async_trait;
 use serde_json::Value;
@@ -95,7 +95,10 @@ async fn unconfirmed_magnet_metadata_is_not_published_to_the_queue() {
         .unwrap();
     let service = DownloadService::new(api, Arc::clone(&store)).with_events(events.clone());
 
-    let prepared = service.prepare_magnet(task.id, task.source.clone()).await.unwrap();
+    let prepared = service
+        .prepare_magnet(task.id, task.source.clone())
+        .await
+        .unwrap();
 
     assert_eq!(prepared.status, TaskStatus::AwaitingUser);
     assert!(events.tasks.lock().unwrap().is_empty());

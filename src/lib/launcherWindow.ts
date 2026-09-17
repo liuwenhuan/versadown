@@ -4,8 +4,6 @@ import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition, Window
 import { isTauriRuntime } from './api';
 
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
-export const LAUNCHER_POPUP_WINDOW_LABEL = 'launcher-popup';
-export type LauncherPopupMode = 'input' | 'menu';
 export const launcherDimensions = {
   compact: { width: 64, height: 64 },
   menu: { width: 304, height: 392 },
@@ -56,10 +54,6 @@ export function launcherPopupPlacement(
 
 export function isLauncherWindow() {
   return isTauriRuntime() && getCurrentWindow().label === LAUNCHER_WINDOW_LABEL;
-}
-
-export function isLauncherPopupWindow() {
-  return isTauriRuntime() && getCurrentWindow().label === LAUNCHER_POPUP_WINDOW_LABEL;
 }
 
 export function launcherCompactSize() {
@@ -185,16 +179,6 @@ export async function anchorLauncherToWorkArea() {
     monitor.scaleFactor
   );
   await launcher.setPosition(new PhysicalPosition(corner.x, corner.y));
-}
-
-export async function showLauncherPopup(mode: LauncherPopupMode) {
-  if (!isTauriRuntime()) return;
-  await invoke('show_launcher_popup', { mode });
-}
-
-export async function hideLauncherPopup() {
-  if (!isTauriRuntime()) return;
-  await invoke('hide_launcher_popup');
 }
 
 export async function openLauncherManager() {

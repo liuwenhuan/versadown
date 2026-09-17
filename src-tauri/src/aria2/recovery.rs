@@ -173,15 +173,22 @@ impl DownloadService {
                 continue;
             }
 
-            self.remove_unowned_native_task(api.as_ref(), &status)
-                .await?;
-            report.removed_engine_tasks += 1;
             report.failed += 1;
-            if !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled) {
-                let cleanup = store.purge_incompatible_tasks(&[task.id], download_root)?;
-                report.removed_tasks += cleanup.removed_tasks;
-                report.removed_files += cleanup.removed_files;
-            }
+            // A malformed or temporarily stale status is not authorization to
+            // delete either the durable task or its local payload. Retain the
+            // observed GID so a later recovery can reconcile the same entry.
+            let mut paused = task;
+            paused.status = TaskStatus::Paused;
+            paused.error = Some("下载引擎任务状态无法同步；请稍后重试".into());
+            paused.failure_code = None;
+            paused.download_speed = 0;
+            paused.upload_speed = 0;
+            paused.connections = 0;
+            paused.discovered_nodes = 0;
+            paused.eta_seconds = None;
+            paused.aria_error_code = None;
+            let paused = store.apply_transfer_snapshot(paused)?;
+            self.publish_task(&paused)?;
         }
 
         let missing = store
@@ -196,10 +203,9 @@ impl DownloadService {
             })
             .map(|task| task.id)
             .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            let cleanup = store.purge_incompatible_tasks(&missing, download_root)?;
-            report.removed_tasks += cleanup.removed_tasks;
-            report.removed_files += cleanup.removed_files;
+        for id in missing {
+            let task = store.detach_missing_engine_task(id)?;
+            self.publish_task(&task)?;
         }
         Ok(report)
     }

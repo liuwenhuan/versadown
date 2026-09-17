@@ -8,7 +8,9 @@ interface DownloadQueueProps {
   tasks: readonly QueueTask[];
   privacyEnabled: boolean;
   selectedTaskId: string | null;
+  selectedTaskIds?: readonly string[];
   onSelect(id: string): void;
+  onSelectionChange?(ids: readonly string[]): void;
   onCommand(id: string, command: TaskCommand): void;
   onBatchCommand?(ids: readonly string[], command: BatchTaskCommand): void;
   onReorder?(orderedTaskIds: readonly string[]): void;
@@ -454,9 +456,10 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
   })}</>;
 }
 
-export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, onSelect, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
+export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedTaskIds: controlledSelectedTaskIds, onSelect, onSelectionChange, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
+  const [localSelectedTaskIds, setLocalSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
+  const selectedTaskIds = controlledSelectedTaskIds ?? localSelectedTaskIds;
   const selectionAnchor = useRef<string | null>(selectedTaskId);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<{ movingIds: string[]; targetId?: string; placeAfter?: boolean } | null>(null);
@@ -476,15 +479,20 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, onSelect,
   } | null>(null);
   const suppressClickAfterDrag = useRef(false);
   const closeContextMenu = () => setContextMenu(null);
+  function updateSelectedTaskIds(next: string[]) {
+    setLocalSelectedTaskIds(next);
+    onSelectionChange?.(next);
+  }
   useEffect(() => {
+    if (controlledSelectedTaskIds !== undefined) return;
     const visibleIds = new Set(tasks.map((task) => task.id));
-    setSelectedTaskIds((current) => {
+    setLocalSelectedTaskIds((current) => {
       const visibleSelection = current.filter((id) => visibleIds.has(id));
       if (visibleSelection.length) return visibleSelection.length === current.length ? current : visibleSelection;
       if (selectedTaskId && visibleIds.has(selectedTaskId)) return [selectedTaskId];
       return current.length ? [] : current;
     });
-  }, [selectedTaskId, tasks]);
+  }, [controlledSelectedTaskIds, selectedTaskId, tasks]);
   useEffect(() => {
     const selectAllTasks = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey
@@ -495,14 +503,14 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, onSelect,
         .some(dialog => !dialog.closest('[hidden], [aria-hidden="true"]'));
       if (modalOpen) return;
       event.preventDefault();
-      setSelectedTaskIds(tasks.map(task => task.id));
+      updateSelectedTaskIds(tasks.map(task => task.id));
       selectionAnchor.current = tasks[0].id;
       setContextMenu(null);
       onSelect(tasks[0].id);
     };
     document.addEventListener('keydown', selectAllTasks);
     return () => document.removeEventListener('keydown', selectAllTasks);
-  }, [tasks, onSelect]);
+  }, [tasks, onSelect, onSelectionChange]);
   useEffect(() => () => {
     pendingDrag.current?.preview?.remove();
   }, []);
@@ -537,14 +545,14 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, onSelect,
       next = [task.id];
       selectionAnchor.current = task.id;
     }
-    setSelectedTaskIds(next);
+    updateSelectedTaskIds(next);
     onSelect(next.at(-1) ?? task.id);
   }
   function openContextMenu(task: QueueTask, x: number, y: number) {
     const keepsSelection = selectedTaskIds.includes(task.id);
     const targets = keepsSelection ? tasks.filter((item) => selectedTaskIds.includes(item.id)) : [task];
     if (!keepsSelection) {
-      setSelectedTaskIds([task.id]);
+      updateSelectedTaskIds([task.id]);
       selectionAnchor.current = task.id;
       onSelect(task.id);
     }

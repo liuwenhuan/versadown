@@ -12,8 +12,7 @@
   "app": {
     "windows": [
       { "label": "main", "title": "AllDownloader", "width": 960, "height": 640, "minWidth": 960, "minHeight": 640, "decorations": false, "shadow": true, "visible": false },
-      { "label": "launcher", "title": "", "width": 64, "height": 64, "minWidth": 64, "minHeight": 64, "maxWidth": 64, "maxHeight": 64, "resizable": false, "decorations": false, "transparent": true, "shadow": false, "alwaysOnTop": true, "skipTaskbar": true, "visible": false },
-      { "label": "launcher-popup", "title": "", "width": 410, "height": 364, "minWidth": 304, "minHeight": 364, "maxWidth": 410, "maxHeight": 392, "resizable": false, "decorations": false, "transparent": true, "shadow": false, "alwaysOnTop": true, "skipTaskbar": true, "visible": false }
+      { "label": "launcher", "title": "", "width": 64, "height": 64, "minWidth": 64, "minHeight": 64, "maxWidth": 470, "maxHeight": 392, "resizable": false, "decorations": false, "transparent": true, "shadow": false, "alwaysOnTop": true, "skipTaskbar": true, "visible": false }
     ],
     "security": { "csp": null }
   },

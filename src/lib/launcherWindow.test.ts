@@ -133,16 +133,6 @@ it('uses the native visibility command so background smoke runs cannot surface a
   expect(native.invoke).toHaveBeenCalledWith('set_launcher_window_visible', { visible: false });
 });
 
-it('opens the dedicated launcher popup without resizing or reshaping the fixed icon window', async () => {
-  await (launcherWindow as unknown as {
-    showLauncherPopup(mode: 'input' | 'menu'): Promise<void>;
-  }).showLauncherPopup('menu');
-
-  expect(native.invoke).toHaveBeenCalledWith('show_launcher_popup', { mode: 'menu' });
-  expect(native.invoke).not.toHaveBeenCalledWith('set_launcher_bounds', expect.anything());
-  expect(native.invoke).not.toHaveBeenCalledWith('set_launcher_compact_shape', expect.anything());
-});
-
 it('reveals the main task list without forwarding a parse request', async () => {
   await launcherWindow.openLauncherManager();
 

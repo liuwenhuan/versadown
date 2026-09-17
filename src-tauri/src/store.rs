@@ -1118,6 +1118,28 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    /// An aria2 session can lose its in-memory GID list after an interrupted
+    /// restart. Keep the durable task, its file selection, and its payload so
+    /// the user can explicitly resume it with a fresh engine submission.
+    pub fn detach_missing_engine_task(&self, id: Uuid) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET status='paused', error=?1, failure_code=NULL, aria_gid=NULL,
+             followed_by_gid=NULL, metadata_gid=NULL, download_speed=0, upload_speed=0,
+             connections=0, discovered_nodes=0, eta_seconds=NULL, aria_error_code=NULL,
+             updated_at=?2 WHERE id=?3",
+            params![
+                "下载引擎未恢复该任务；点击开始可继续下载",
+                current_timestamp(),
+                id.to_string()
+            ],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
+    }
+
     /// Records an aria2 GID accepted for an explicit retry without creating a
     /// second task. Output-file rows intentionally remain in place so a later
     /// retry can still decide whether it may resume or needs overwrite consent.

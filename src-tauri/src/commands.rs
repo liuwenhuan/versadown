@@ -2132,9 +2132,12 @@ async fn run_local_task_action(
         current = state.store.find(id).map_err(|error| error.to_string())?;
     }
     if action == "resume"
-        && current.kind == "cloud"
         && current.aria_gid.is_none()
         && current.status == TaskStatus::Paused
+        && matches!(
+            current.kind.as_str(),
+            "file" | "magnet" | "ed2k" | "hls" | "dash" | "cloud"
+        )
     {
         let task = resubmit_task(
             app.clone(),

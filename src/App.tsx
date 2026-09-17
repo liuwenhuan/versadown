@@ -292,7 +292,15 @@ function NavigationIcon({ kind }: { kind: 'tasks' | 'cloud' | 'settings' | 'abou
 
 export function App() {
   const [tasks, setTasks] = useState<QueueTask[]>([]);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+  const selectedTaskId = selectedTaskIds.at(-1) ?? null;
+  const setSelectedTaskId = (next: string | null | ((current: string | null) => string | null)) => {
+    setSelectedTaskIds((current) => {
+      const currentId = current.at(-1) ?? null;
+      const nextId = typeof next === 'function' ? next(currentId) : next;
+      return nextId ? [nextId] : [];
+    });
+  };
   const [confirmation, setConfirmation] = useState<ParseResult | null>(null);
   const [duplicateQueue, setDuplicateQueue] = useState<DuplicateDownload[]>([]);
   const [resolvingDuplicateId, setResolvingDuplicateId] = useState<string | null>(null);
@@ -1517,7 +1525,7 @@ export function App() {
             </div>
           </header>
           <section className="queue-area">
-            <DownloadQueue tasks={visibleTasks} privacyEnabled={settings.privacyDownloadEnabled === true} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onReorder={(orderedTaskIds) => setTaskOrderPreferences((current) => ({
+            <DownloadQueue tasks={visibleTasks} privacyEnabled={settings.privacyDownloadEnabled === true} selectedTaskId={selectedTaskId} selectedTaskIds={selectedTaskIds} onSelect={() => {}} onSelectionChange={(ids) => setSelectedTaskIds([...ids])} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onReorder={(orderedTaskIds) => setTaskOrderPreferences((current) => ({
               sorts: { ...current.sorts, [downloadTab]: 'manual' },
               orders: {
                 ...current.orders,

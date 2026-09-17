@@ -22,8 +22,7 @@ export function TaskDetails({ task }: { task: QueueTask | undefined }) {
   if (!task) return <aside className="task-details muted"><b>选择一个任务</b><span>查看来源、错误和后处理状态。</span></aside>;
   const fileTree = buildTaskFileTree(task);
   return <aside className="task-details">
-    <p className="eyebrow">任务名称</p>
-    <h2>{task.name}</h2>
+    <h2 className="task-detail-name">{task.name}</h2>
     <dl className="task-detail-summary">
       <div><dt>状态</dt><dd>{task.status}</dd></div>
       <div><dt>传输进度</dt><dd>{hasKnownTotal(task) ? `${task.progress}% · ${transferProgress(task)}` : transferProgress(task)}</dd></div>
