@@ -1,13 +1,13 @@
 import type { DownloadEngineState } from '../lib/types';
 
-export function EngineStatusBanner({ state, onRetry }: {
+export function EngineStatusToast({ state, onRetry }: {
   state: DownloadEngineState;
   onRetry: () => void;
 }) {
   if (state.available) return null;
   const retrying = state.retrying;
   return (
-    <section className="engine-status-banner" role="status" aria-live="polite">
+    <section className={`task-toast engine-status-toast ${retrying ? 'engine-starting' : 'error'}`} role="status" aria-live="polite">
       <div>
         <b>{retrying ? '正在启动下载引擎…' : '下载引擎不可用'}</b>
         <span>{state.error ?? (retrying ? '主界面仍可使用，请稍候。' : '下载操作暂不可用，可手动重试。')}</span>

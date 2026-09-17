@@ -35,6 +35,13 @@ pub fn manager_close_disposition(
     }
 }
 
+/// The event loop must remain resident unless the application's explicit quit
+/// action has marked the lifecycle as exiting. This prevents an unrelated
+/// native exit request from terminating active downloads.
+pub fn should_prevent_implicit_exit(application_exiting: bool, _exit_code: Option<i32>) -> bool {
+    !application_exiting
+}
+
 pub struct ApplicationLifecycle {
     exiting: AtomicBool,
     manager_close_requests: AtomicUsize,

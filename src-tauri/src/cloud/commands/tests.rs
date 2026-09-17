@@ -2333,6 +2333,64 @@ fn uc_web_authorization_saves_a_candidate_only_after_root_verification_succeeds(
 }
 
 #[test]
+fn uc_web_authorization_does_not_display_or_persist_an_opaque_cookie_identifier() {
+    // Break caught: __uid is an opaque session identifier. It is allowed as
+    // the internal account key, but must never be shown as the signed-in
+    // user's name or saved as a display name.
+    let credentials = MemoryCredentialStore::default();
+    let transport = SequenceTransport(Mutex::new(VecDeque::from([
+        r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+        r#"{"success":true,"data":{}}"#,
+    ])));
+
+    let account = super::finalize_uc_web_authorization(
+        crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
+        UcSession::cookie("__uid=uc-user-42; __pus=identity; __puus=session"),
+        &credentials,
+        &transport,
+    )
+    .expect("a verified UC login should complete without a profile nickname");
+
+    assert_eq!(account.id, "uc-user-42");
+    assert_eq!(account.display_name, "UC网盘");
+    let saved: UcSession =
+        serde_json::from_slice(&credentials.load("uc").unwrap().unwrap()).unwrap();
+    assert_eq!(saved.display_name, None);
+}
+
+#[test]
+fn uc_web_authorization_uses_the_official_web_profile_nickname_on_the_cloud_card() {
+    // Break caught: UC's drive member endpoint returns capacity and membership
+    // data, while the official web profile endpoint owns the visible nickname.
+    let credentials = MemoryCredentialStore::default();
+    let transport = SequenceTransport(Mutex::new(VecDeque::from([
+        r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+        r#"{"success":true,"data":{"nickname":"云端小橙"}}"#,
+    ])));
+
+    let account = super::finalize_uc_web_authorization(
+        crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
+        UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
+        &credentials,
+        &transport,
+    )
+    .expect("a verified UC login should return the signed-in nickname");
+
+    assert_eq!(account.id, "new-user");
+    assert_eq!(account.display_name, "云端小橙");
+
+    let restored = crate::cloud::ProviderRegistry::global()
+        .driver(
+            CloudProvider::Uc,
+            &credentials,
+            &SequenceTransport(Mutex::new(VecDeque::new())),
+        )
+        .account()
+        .expect("the saved UC session should retain the card nickname");
+    assert_eq!(restored.display_name, "云端小橙");
+}
+
+#[test]
 fn tianyi_web_authorization_maps_root_authorization_errors_to_pending() {
     for error in [
         TianyiRootAuthorizationError::Expired,

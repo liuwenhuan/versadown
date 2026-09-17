@@ -461,6 +461,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
   const [localSelectedTaskIds, setLocalSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
   const selectedTaskIds = controlledSelectedTaskIds ?? localSelectedTaskIds;
   const selectionAnchor = useRef<string | null>(selectedTaskId);
+  const heldSelectionModifiers = useRef({ control: false, meta: false, shift: false });
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<{ movingIds: string[]; targetId?: string; placeAfter?: boolean } | null>(null);
   const dragStateRef = useRef<typeof dragState>(null);
@@ -494,6 +495,24 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
     });
   }, [controlledSelectedTaskIds, selectedTaskId, tasks]);
   useEffect(() => {
+    const updateHeldModifier = (event: KeyboardEvent, pressed: boolean) => {
+      if (event.key === 'Control') heldSelectionModifiers.current.control = pressed;
+      else if (event.key === 'Meta') heldSelectionModifiers.current.meta = pressed;
+      else if (event.key === 'Shift') heldSelectionModifiers.current.shift = pressed;
+    };
+    const clearHeldModifiers = () => { heldSelectionModifiers.current = { control: false, meta: false, shift: false }; };
+    const keyDown = (event: KeyboardEvent) => updateHeldModifier(event, true);
+    const keyUp = (event: KeyboardEvent) => updateHeldModifier(event, false);
+    document.addEventListener('keydown', keyDown);
+    document.addEventListener('keyup', keyUp);
+    window.addEventListener('blur', clearHeldModifiers);
+    return () => {
+      document.removeEventListener('keydown', keyDown);
+      document.removeEventListener('keyup', keyUp);
+      window.removeEventListener('blur', clearHeldModifiers);
+    };
+  }, []);
+  useEffect(() => {
     const selectAllTasks = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey
         || event.key.toLowerCase() !== 'a' || !tasks.length) return;
@@ -523,24 +542,37 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
     }
     if (targets[0] && command !== 'delete') onCommand(targets[0].id, command);
   }
+  function selectionModifiers(event: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) {
+    const held = heldSelectionModifiers.current;
+    return {
+      controlOrMeta: event.ctrlKey || event.metaKey || held.control || held.meta,
+      shift: event.shiftKey || held.shift,
+    };
+  }
   function selectTask(event: React.MouseEvent<HTMLElement>, task: QueueTask) {
     if (suppressClickAfterDrag.current) {
       suppressClickAfterDrag.current = false;
       return;
     }
     const currentIndex = tasks.findIndex((item) => item.id === task.id);
+    const modifiers = selectionModifiers(event);
     let next: string[];
-    if (event.shiftKey && selectionAnchor.current) {
+    if (modifiers.shift && selectionAnchor.current) {
       const anchorIndex = tasks.findIndex((item) => item.id === selectionAnchor.current);
       const start = Math.min(anchorIndex < 0 ? currentIndex : anchorIndex, currentIndex);
       const end = Math.max(anchorIndex < 0 ? currentIndex : anchorIndex, currentIndex);
       next = tasks.slice(start, end + 1).map((item) => item.id);
-    } else if (event.ctrlKey || event.metaKey) {
+    } else if (modifiers.controlOrMeta) {
       next = selectedTaskIds.includes(task.id)
         ? selectedTaskIds.filter((id) => id !== task.id)
         : [...selectedTaskIds, task.id];
       if (!next.length) next = [task.id];
-      selectionAnchor.current = task.id;
+      // Keep the first task of a multi-selection as the range anchor. A
+      // subsequent Shift-click should extend that original selection instead
+      // of discarding tasks selected before the last Ctrl-click.
+      if (!selectionAnchor.current || !tasks.some((item) => item.id === selectionAnchor.current)) {
+        selectionAnchor.current = task.id;
+      }
     } else {
       next = [task.id];
       selectionAnchor.current = task.id;
@@ -559,7 +591,11 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
     setContextMenu({ tasks: targets, x, y });
   }
   function beginTaskDrag(event: React.PointerEvent<HTMLElement>, task: QueueTask) {
-    if (!onReorder || event.button !== 0 || (event.target as Element).closest('button, input, textarea, select, a')) return;
+    // Modifier-clicks are selection gestures, not drag gestures. In
+    // particular, suppressing the click after a drag preview would otherwise
+    // make Ctrl/Shift selection appear to do nothing.
+    const modifiers = selectionModifiers(event);
+    if (!onReorder || event.button !== 0 || modifiers.controlOrMeta || modifiers.shift || (event.target as Element).closest('button, input, textarea, select, a')) return;
     const movingIds = selectedTaskIds.includes(task.id)
       ? tasks.filter((item) => selectedTaskIds.includes(item.id)).map((item) => item.id)
       : [task.id];

@@ -185,7 +185,7 @@ pub(crate) fn cookie(store: &impl CredentialStore) -> Result<String, QuarkError>
 
 pub(crate) fn finalize_uc_web_authorization(
     descriptor: &ProviderDescriptor,
-    session: uc::UcSession,
+    mut session: uc::UcSession,
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
@@ -194,7 +194,16 @@ pub(crate) fn finalize_uc_web_authorization(
     // Verify the exact first read the workspace needs before replacing the
     // stored account and closing the official authorization window.
     authorization_result(client.directory(descriptor.root_directory_id))?;
-    let account = client.web_account()?;
+    // UC's official web profile endpoint exposes the nickname displayed by
+    // the card, but it is not the authorization proof. It may be unavailable
+    // while the root directory remains usable, so preserve the verified login
+    // and fall back to the provider label in that case.
+    let account = match client.account() {
+        Ok(account) => account,
+        Err(_) => client.web_account()?,
+    };
+    session.display_name = (account.display_name != uc::UC_CARD_DISPLAY_NAME)
+        .then(|| account.display_name.clone());
     save_provider_session(CloudProvider::Uc, store, &session)?;
     Ok(account)
 }

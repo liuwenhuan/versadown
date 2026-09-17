@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
+import { useState } from 'react';
 import { vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 import { DownloadQueue, taskContextMenuPosition } from './DownloadQueue';
@@ -1080,6 +1081,113 @@ it('reports the full Ctrl-click selection to its task-list parent', () => {
   fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
 
   expect(onSelectionChange).toHaveBeenLastCalledWith(['select-1', 'select-2']);
+});
+
+it('keeps the original selection anchor when Shift follows a Ctrl multi-selection', () => {
+  function ControlledQueue() {
+    const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+    return <DownloadQueue
+      tasks={[
+        { id: 'controlled-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'controlled-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'controlled-3', name: 'third.zip', kind: 'file', status: 'queued', progress: 0 },
+      ]}
+      privacyEnabled={false}
+      selectedTaskId={selectedTaskIds.at(-1) ?? null}
+      selectedTaskIds={selectedTaskIds}
+      onSelect={() => {}}
+      onSelectionChange={(ids) => setSelectedTaskIds([...ids])}
+      onCommand={() => {}}
+      onReorder={() => {}}
+    />;
+  }
+
+  render(<ControlledQueue />);
+
+  fireEvent.click(screen.getByText('first.zip'));
+  fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+
+  fireEvent.click(screen.getByText('third.zip'), { shiftKey: true });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
+});
+
+it('honors document-level modifier keys when a WebView click omits them', () => {
+  function ControlledQueue() {
+    const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+    return <DownloadQueue
+      tasks={[
+        { id: 'native-modifier-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'native-modifier-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'native-modifier-3', name: 'third.zip', kind: 'file', status: 'queued', progress: 0 },
+      ]}
+      privacyEnabled={false}
+      selectedTaskId={selectedTaskIds.at(-1) ?? null}
+      selectedTaskIds={selectedTaskIds}
+      onSelect={() => {}}
+      onSelectionChange={(ids) => setSelectedTaskIds([...ids])}
+      onCommand={() => {}}
+      onReorder={() => {}}
+    />;
+  }
+
+  render(<ControlledQueue />);
+  fireEvent.click(screen.getByText('first.zip'));
+
+  fireEvent.keyDown(document, { key: 'Control' });
+  fireEvent.click(screen.getByText('second.zip'));
+  fireEvent.keyUp(document, { key: 'Control' });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+
+  fireEvent.keyDown(document, { key: 'Shift' });
+  fireEvent.click(screen.getByText('third.zip'));
+  fireEvent.keyUp(document, { key: 'Shift' });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
+});
+
+it('does not turn a Ctrl-click into a task drag', () => {
+  class TestPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: MouseEventInit & { pointerId?: number } = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  const originalPointerEvent = window.PointerEvent;
+  Object.defineProperty(window, 'PointerEvent', { configurable: true, value: TestPointerEvent });
+  function ControlledQueue() {
+    const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+    return <DownloadQueue
+      tasks={[
+        { id: 'drag-select-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'drag-select-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+      ]}
+      privacyEnabled={false}
+      selectedTaskId={selectedTaskIds.at(-1) ?? null}
+      selectedTaskIds={selectedTaskIds}
+      onSelect={() => {}}
+      onSelectionChange={(ids) => setSelectedTaskIds([...ids])}
+      onCommand={() => {}}
+      onReorder={() => {}}
+    />;
+  }
+
+  render(<ControlledQueue />);
+  const first = screen.getByText('first.zip').closest('.task-row')!;
+  const second = screen.getByText('second.zip').closest('.task-row')!;
+  const secondGroup = second.closest('.task-group')!;
+  vi.spyOn(secondGroup, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 40, height: 40, left: 0, right: 100, width: 100, x: 0, y: 0, toJSON: () => ({}) });
+
+  fireEvent.click(first);
+  fireEvent.pointerDown(second, { pointerId: 18, button: 0, clientX: 5, clientY: 5, ctrlKey: true });
+  fireEvent.pointerMove(second, { pointerId: 18, clientX: 5, clientY: 18, ctrlKey: true });
+  fireEvent.pointerUp(second, { pointerId: 18, clientX: 5, clientY: 18, ctrlKey: true });
+  fireEvent.click(second, { ctrlKey: true });
+
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+  expect(document.querySelector('.task-drag-preview')).not.toBeInTheDocument();
+  if (originalPointerEvent) Object.defineProperty(window, 'PointerEvent', { configurable: true, value: originalPointerEvent });
+  else delete (window as Window & { PointerEvent?: typeof window.PointerEvent }).PointerEvent;
 });
 
 it('selects a contiguous task range with Shift-click', () => {

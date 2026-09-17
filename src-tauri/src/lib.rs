@@ -64,7 +64,8 @@ pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
 pub use store::{IncompatibleTaskPurgeReport, StoreError, TaskStore};
 pub use window_lifecycle::{
-    manager_close_disposition, ApplicationLifecycle, ManagerCloseDisposition,
+    manager_close_disposition, should_prevent_implicit_exit, ApplicationLifecycle,
+    ManagerCloseDisposition,
 };
 
 pub fn app_version() -> String {
@@ -432,8 +433,18 @@ pub fn run() {
             window_lifecycle::foreground_window_handle_for_test,
             window_lifecycle::manager_close_request_count_for_test
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running AllDownloader");
+        .build(tauri::generate_context!())
+        .expect("error while building AllDownloader")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                let application_exiting = app
+                    .try_state::<std::sync::Arc<ApplicationLifecycle>>()
+                    .is_some_and(|lifecycle| lifecycle.is_exiting());
+                if should_prevent_implicit_exit(application_exiting, code) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

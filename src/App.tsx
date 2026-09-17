@@ -14,7 +14,7 @@ import { CloudWorkspace, type CloudWorkspacePage } from './components/CloudWorks
 import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
-import { EngineStatusBanner } from './components/EngineStatusBanner';
+import { EngineStatusToast } from './components/EngineStatusBanner';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { reconcileTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
@@ -1493,7 +1493,7 @@ export function App() {
           <button className="window-close" aria-label="关闭" onClick={() => void runWindowAction('hide')}><WindowIcon kind="close" /></button>
         </div>
       </header>
-      <EngineStatusBanner state={engineState} onRetry={() => {
+      <EngineStatusToast state={engineState} onRetry={() => {
         if (engineState.retrying) return;
         setEngineState((current) => ({ ...current, retrying: true, error: undefined }));
         void retryDownloadEngine().then(setEngineState).catch((error: unknown) => setEngineState({ available: false, retrying: false, error: String(error) }));

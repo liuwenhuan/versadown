@@ -16,6 +16,7 @@ use std::{collections::BTreeMap, fmt, path::Path};
 
 const API: &str = "https://pc-api.uc.cn/1/clouddrive";
 const WEB: &str = "https://drive.uc.cn";
+pub(crate) const UC_CARD_DISPLAY_NAME: &str = "UC网盘";
 const UC_SHARE_TASK_MAX_POLLS: usize = 60;
 const UC_SHARE_TRANSIENT_RETRIES: usize = 2;
 const UC_SHARE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
@@ -39,6 +40,8 @@ pub const UC_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
 pub struct UcSession {
     pub cookie: String,
     #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
     pub auth_method: CloudAuthMethod,
 }
 
@@ -56,6 +59,7 @@ impl UcSession {
     pub fn cookie(cookie: impl Into<String>) -> Self {
         Self {
             cookie: cookie.into(),
+            display_name: None,
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -223,45 +227,77 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         unreachable!("retry loop always returns its final request result")
     }
 
-    /// Build the account shown immediately after the official browser has
-    /// issued a UC session.  The browser session itself is the authorization
-    /// proof; an undocumented `member` probe must not keep the authorization
-    /// window open, because that endpoint can be rejected independently of
-    /// normal directory access.
-    pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
+    fn account_id(&self) -> Result<String, QuarkError> {
         let cookie = self.cookie()?;
+        Ok(cookie_value(cookie, "__uid")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("uc-{:x}", md5::compute(cookie))))
+    }
+
+    fn saved_display_name(&self, account_id: &str) -> Option<&str> {
+        self.session
+            .display_name
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            // `__uid` is an opaque, browser-issued session identifier. It
+            // was written as a card label by older builds, but is never a
+            // user-visible UC account name.
+            .filter(|value| *value != account_id)
+            .filter(|value| *value != UC_CARD_DISPLAY_NAME)
+    }
+
+    pub fn has_saved_display_name(&self) -> Result<bool, QuarkError> {
+        Ok(self
+            .saved_display_name(&self.account_id()?)
+            .is_some())
+    }
+
+    fn web_profile_display_name(&self) -> Result<Option<String>, QuarkError> {
+        let response = self.http.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("{WEB}/account/info"),
+            headers: self.headers()?,
+            body: None,
+        })?;
+        if response.status == 401 {
+            return Err(QuarkError::AuthorizationExpired);
+        }
+        let value: Value =
+            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        if !(200..300).contains(&response.status) || value.get("success") != Some(&Value::Bool(true))
+        {
+            return Err(QuarkError::InvalidResponse);
+        }
+        Ok(value
+            .pointer("/data/nickname")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned))
+    }
+
+    /// Build the account shown from a browser-issued UC session. A nickname
+    /// fetched from UC's official web profile is retained with the encrypted
+    /// session, so the card can be restored without another profile request.
+    pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
+        let id = self.account_id()?;
         Ok(CloudAccount {
             provider: CloudProvider::Uc,
-            id: cookie_value(cookie, "__uid")
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| format!("uc-{:x}", md5::compute(cookie))),
-            display_name: "UC网盘".into(),
+            id: id.clone(),
+            display_name: self
+                .saved_display_name(&id)
+                .unwrap_or(UC_CARD_DISPLAY_NAME)
+                .to_owned(),
             auth_method: self.session.auth_method,
         })
     }
 
-    /// UC's member endpoint verifies that the cookie can access the drive.
-    /// It does not guarantee that a nickname is returned, so `__uid` supplies
-    /// a stable account identity and the display name has a safe fallback.
+    /// UC's official web profile endpoint owns the account nickname shown by
+    /// the UC Drive page. `__uid` remains only an internal account key.
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
-        let value = self.request_json(
-            "GET",
-            "member",
-            "fetch_subscribe=true&_ch=home&fetch_identity=true",
-            None,
-        )?;
-        let member = value.get("data").ok_or(QuarkError::InvalidResponse)?;
-        let id = cookie_value(self.cookie()?, "__uid")
-            .or_else(|| member.get("user_id").and_then(string_or_number))
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("uc-{:x}", md5::compute(self.cookie().unwrap_or_default())));
-        let display_name = member
-            .get("nickname")
-            .or_else(|| member.get("user_name"))
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("UC网盘")
-            .to_owned();
+        let id = self.account_id()?;
+        let display_name = self
+            .web_profile_display_name()?
+            .unwrap_or_else(|| UC_CARD_DISPLAY_NAME.to_owned());
         Ok(CloudAccount {
             provider: CloudProvider::Uc,
             id,
@@ -1453,6 +1489,109 @@ mod tests {
             signing.headers.get("x-csrf-token").map(String::as_str),
             Some("web-csrf")
         );
+    }
+
+    #[test]
+    fn uc_web_account_never_displays_an_opaque_cookie_identifier() {
+        // Break caught: __uid is an opaque browser-session identifier, not a
+        // user-visible UC account name. Older builds persisted it as the card
+        // label when the profile endpoint returned no nickname.
+        let mut session = UcSession::cookie("__uid=AAR/opaque-id; __puus=session");
+        session.display_name = Some("AAR/opaque-id".into());
+        let http = Http::new(vec![]);
+        let client = UcClient::new(session, &http);
+
+        let account = client.web_account().expect("a UC card account");
+
+        assert_eq!(account.id, "AAR/opaque-id");
+        assert_eq!(account.display_name, "UC网盘");
+    }
+
+    #[test]
+    fn uc_account_reads_nickname_from_the_official_web_profile() {
+        let http = Http::new(vec![json!({
+            "success": true,
+            "data": {"nickname": "云端小橙"}
+        })]);
+        let client = UcClient::new(
+            UcSession::cookie("__uid=AAR/opaque-id; __puus=session"),
+            &http,
+        );
+
+        let account = client.account().expect("the UC profile should load");
+
+        assert_eq!(account.id, "AAR/opaque-id");
+        assert_eq!(account.display_name, "云端小橙");
+        assert_eq!(
+            http.requests.lock().unwrap()[0].url,
+            "https://drive.uc.cn/account/info"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized UC session"]
+    fn live_uc_official_web_profile_returns_a_visible_nickname() -> Result<(), QuarkError> {
+        if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+            return Ok(());
+        }
+        let app_data = std::env::var_os("APPDATA").ok_or(QuarkError::Storage)?;
+        let sessions = crate::cloud::DpapiCredentialStore::new(
+            std::path::PathBuf::from(app_data)
+                .join("com.alldownloader.desktop")
+                .join("cloud-sessions"),
+        )?;
+        let session: UcSession = serde_json::from_slice(
+            &sessions
+                .load("uc")?
+                .ok_or(QuarkError::AuthorizationExpired)?,
+        )
+        .map_err(|_| QuarkError::Storage)?;
+        let transport = crate::cloud::ReqwestTransport::new()?;
+        let response = transport.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("{WEB}/account/info"),
+            headers: BTreeMap::from([
+                ("Accept".into(), "application/json, text/plain, */*".into()),
+                ("Accept-Language".into(), "zh-CN,zh;q=0.9".into()),
+                ("Cookie".into(), session.cookie.clone()),
+                ("Content-Type".into(), "application/json;charset=UTF-8".into()),
+                ("Origin".into(), WEB.into()),
+                ("Referer".into(), format!("{WEB}/")),
+                ("User-Agent".into(), UC_DESKTOP_USER_AGENT.into()),
+            ]),
+            body: None,
+        })?;
+        let value: Value = serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
+        let keys = value
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let data_keys = value
+            .get("data")
+            .and_then(Value::as_object)
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let success_kind = value
+            .get("success")
+            .map(|field| match field {
+                Value::Bool(_) => "boolean",
+                Value::String(_) => "string",
+                Value::Number(_) => "number",
+                Value::Null => "null",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+            })
+            .unwrap_or("missing");
+        eprintln!(
+            "UC official profile response metadata: status={}, success_type={}, keys={keys:?}, data_keys={data_keys:?}",
+            response.status, success_kind
+        );
+        let account = UcClient::new(session, &transport).account()?;
+        if account.display_name == UC_CARD_DISPLAY_NAME {
+            return Err(QuarkError::InvalidResponse);
+        }
+        eprintln!("UC official web profile returned a visible nickname");
+        Ok(())
     }
 
     #[test]

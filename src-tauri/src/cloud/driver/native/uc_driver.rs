@@ -13,12 +13,24 @@ impl DriveOps for UcDriver<'_> {
             return Err(CloudError::NotAuthorized);
         }
         {
-            let session = load_provider_session(CloudProvider::Uc, store)?;
-            // A browser-granted UC session is sufficient to restore its tab.
-            // File operations still validate the session against UC when the
-            // user opens it, but an internal member probe must not hide a
-            // previously authorized account at startup.
-            uc::UcClient::new(session, http).web_account()
+            let mut session: uc::UcSession = load_provider_session(CloudProvider::Uc, store)?;
+            let client = uc::UcClient::new(session.clone(), http);
+            if client.has_saved_display_name()? {
+                return client.web_account();
+            }
+            // Upgrade legacy sessions whose saved label is missing, generic,
+            // or an old opaque __uid value. A profile lookup is optional: it
+            // must never hide an otherwise restorable browser session from
+            // the card.
+            match client.account() {
+                Ok(account) => {
+                    session.display_name = (account.display_name != uc::UC_CARD_DISPLAY_NAME)
+                        .then(|| account.display_name.clone());
+                    save_provider_session(provider, store, &session)?;
+                    Ok(account)
+                }
+                Err(_) => client.web_account(),
+            }
         }
     }
     fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
