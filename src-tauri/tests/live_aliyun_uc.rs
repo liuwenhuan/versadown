@@ -184,8 +184,50 @@ impl CloudHttpTransport for LiveTransport {
                 } else {
                     String::new()
                 };
+                let download_url_contract = if endpoint.ends_with("/file/get_download_url") {
+                    let describe_url = |field: &str| {
+                        value
+                            .as_ref()
+                            .and_then(|value| value.get(field))
+                            .and_then(serde_json::Value::as_str)
+                            .map(|url| {
+                                if url.is_empty() {
+                                    "empty".into()
+                                } else {
+                                    url::Url::parse(url)
+                                        .ok()
+                                        .map(|url| format!("scheme={}", url.scheme()))
+                                        .unwrap_or_else(|| "invalid".into())
+                                }
+                            })
+                            .unwrap_or_else(|| "absent-or-not-string".into())
+                    };
+                    format!(
+                        "; download-url url={}, cdn_url={}",
+                        describe_url("url"),
+                        describe_url("cdn_url")
+                    )
+                } else {
+                    String::new()
+                };
+                let metadata_download_url_contract = if endpoint.ends_with("/v2/file/get") {
+                    match value
+                        .as_ref()
+                        .and_then(|value| value.get("download_url"))
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some(url) if url.is_empty() => "; metadata-download-url empty".into(),
+                        Some(url) => url::Url::parse(url)
+                            .ok()
+                            .map(|url| format!("; metadata-download-url scheme={}", url.scheme()))
+                            .unwrap_or_else(|| "; metadata-download-url invalid".into()),
+                        None => "; metadata-download-url absent-or-not-string".into(),
+                    }
+                } else {
+                    String::new()
+                };
                 self.observations.lock().unwrap().push(format!(
-                    "{method} {endpoint}; HTTP {}; code={code}; status={status}; message={message:?}; data={data_shape}({data_keys}); keys={keys}{upload_contract}{share_list_contract}",
+                    "{method} {endpoint}; HTTP {}; code={code}; status={status}; message={message:?}; data={data_shape}({data_keys}); keys={keys}{upload_contract}{share_list_contract}{download_url_contract}{metadata_download_url_contract}",
                     response.status,
                 ));
                 Ok(response)
@@ -1150,6 +1192,35 @@ fn live_aliyun_personal_share_list() -> LiveResult<()> {
             shares.len()
         );
     })
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing file in the current user's Aliyun root directory; read-only download URL resolution"]
+fn live_aliyun_existing_file_download_resolution() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Aliyun;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveTransport::new()?;
+    let directory = step(provider, "list root for existing-file download", || {
+        driver_list(
+            &state,
+            &http,
+            provider,
+            ProviderRegistry::global().get(provider).root_directory_id,
+        )
+    })?;
+    let file = directory
+        .items
+        .into_iter()
+        .find(|item| item.kind == CloudFileKind::File)
+        .ok_or_else(|| {
+            failure("Aliyun root has no file available for read-only download testing")
+        })?;
+    let result = step(provider, "resolve existing-file download", || {
+        resolve_download(&state, &http, provider, &file.id)
+    });
+    http.report();
+    result.map(|_| ())
 }
 
 #[test]

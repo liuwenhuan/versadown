@@ -217,6 +217,75 @@ mod tests {
     }
 
     #[test]
+    fn aliyun_personal_download_uses_a_browser_contract_and_short_lived_url() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive","browser_access_ready":true}"#,
+            )
+            .unwrap();
+        let http = Http::new(vec![
+            json!({"user_id":"u1","nick_name":"alice"}),
+            json!({"items":[],"next_marker":""}),
+            json!({"name":"file.txt"}),
+            json!({"url":"https://cdn.example/file"}),
+        ]);
+
+        assert_eq!(
+            AliyunClient::new(&credentials, &http)
+                .download("file-id")
+                .unwrap(),
+            ("https://cdn.example/file".into(), "file.txt".into())
+        );
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].url.ends_with("/v2/file/get_download_url"));
+        let body: Value = serde_json::from_str(requests[3].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["drive_id"], "drive");
+        assert_eq!(body["file_id"], "file-id");
+        assert_eq!(body["file_name"], "file.txt");
+        assert_eq!(body["expire_sec"], 900);
+    }
+
+    #[test]
+    fn aliyun_personal_download_retries_via_its_pds_resource_host_when_consumer_url_is_empty() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive","browser_access_ready":true}"#,
+            )
+            .unwrap();
+        let http = Http::new(vec![
+            json!({"user_id":"u1","nick_name":"alice"}),
+            json!({"items":[],"next_marker":""}),
+            json!({"name":"file.txt","domain_id":"bj29"}),
+            json!({"url":"","cdn_url":""}),
+            json!({"url":"https://cdn.example/file"}),
+        ]);
+
+        assert_eq!(
+            AliyunClient::new(&credentials, &http)
+                .download("file-id")
+                .unwrap(),
+            ("https://cdn.example/file".into(), "file.txt".into())
+        );
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[3]
+            .url
+            .ends_with("api.aliyundrive.com/v2/file/get_download_url"));
+        assert_eq!(
+            requests[4].url,
+            "https://bj29.api.aliyunpds.com/v2/file/get_download_url"
+        );
+        assert_eq!(requests[3].body, requests[4].body);
+    }
+
+    #[test]
     fn aliyun_share_reuses_the_inspected_token_without_a_personal_bearer() {
         let credentials = MemoryCredentialStore::default();
         credentials
@@ -1259,20 +1328,51 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
             json!({"drive_id":session.drive_id,"file_id":id}),
         )?;
         let name = required(&metadata, "name")?;
-        let value = self.api(
-            &session,
-            "/v2/file/get_download_url",
-            json!({"drive_id":session.drive_id,"file_id":id}),
+        let body =
+            json!({"drive_id":session.drive_id,"file_id":id,"file_name":name,"expire_sec":900});
+        let value = self.api(&session, "/v2/file/get_download_url", body.clone())?;
+        if let Some(url) = direct_download_url(&value) {
+            return Ok((url, name));
+        }
+
+        // The consumer gateway can acknowledge the request while returning an
+        // empty URL. Retry only against the file's own official PDS resource
+        // host, which is bounded to the server-provided domain label.
+        let resource_api = pds_resource_api(&metadata)?;
+        let fallback = self.send(
+            "POST",
+            format!("{resource_api}/v2/file/get_download_url"),
+            Self::bearer_headers(&session),
+            Some(body),
         )?;
-        value
-            .get("url")
-            .or_else(|| value.get("download_url"))
-            .and_then(Value::as_str)
-            .filter(|url| url.starts_with("https://"))
-            .map(str::to_owned)
+        direct_download_url(&fallback)
             .map(|url| (url, name))
             .ok_or(QuarkError::InvalidResponse)
     }
+}
+
+fn direct_download_url(value: &Value) -> Option<String> {
+    value
+        .get("url")
+        .or_else(|| value.get("download_url"))
+        .and_then(Value::as_str)
+        .filter(|url| url.starts_with("https://"))
+        .map(str::to_owned)
+}
+
+fn pds_resource_api(metadata: &Value) -> Result<String, QuarkError> {
+    let domain = required(metadata, "domain_id")?;
+    let valid_label = !domain.is_empty()
+        && domain.len() <= 63
+        && !domain.starts_with('-')
+        && !domain.ends_with('-')
+        && domain
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if !valid_label {
+        return Err(QuarkError::InvalidResponse);
+    }
+    Ok(format!("https://{domain}.api.aliyunpds.com"))
 }
 
 fn aliyun_share_from_value(
