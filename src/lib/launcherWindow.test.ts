@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { beforeEach, expect, it, vi } from 'vitest';
 
 const native = vi.hoisted(() => {
@@ -54,6 +56,13 @@ it('uses one fixed canvas with an invariant hexagon anchor', () => {
     iconTop: 328,
     margin: 24,
   });
+});
+
+it('does not expose native resize or visual clipping helpers to popup code', () => {
+  const source = readFileSync(resolve('src/lib/launcherWindow.ts'), 'utf8');
+  expect(source).not.toContain('set_launcher_bounds');
+  expect(source).not.toContain('set_launcher_compact_shape');
+  expect(source).not.toContain('resizeLauncher');
 });
 
 it('installs the compact icon input region without changing native bounds', async () => {
@@ -120,26 +129,6 @@ it('prefers the upper slot when the complete popup fits', () => {
     328,
     { x: 0, y: 0, width: 1000, height: 800 },
   )).toBe('above');
-});
-
-it('requests the clipped native compact shape instead of a transparent rectangle', async () => {
-  native.launcherPosition.mockResolvedValueOnce({ x: 1000, y: 800 });
-  native.launcherSize.mockResolvedValueOnce({ width: 64, height: 64 });
-  native.currentMonitor.mockResolvedValueOnce({
-    scaleFactor: 1,
-    workArea: { position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } }
-  });
-
-  await launcherWindow.setLauncherCompact();
-
-  expect(native.invoke).toHaveBeenCalledWith('set_launcher_bounds', {
-    x: 1000,
-    y: 800,
-    width: 64,
-    height: 64,
-    compact: true,
-    live: false
-  });
 });
 
 it('uses the native visibility command so background smoke runs cannot surface a launcher', async () => {

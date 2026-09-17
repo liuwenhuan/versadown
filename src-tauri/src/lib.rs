@@ -42,10 +42,8 @@ pub use engine_runtime::{
 };
 pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpDownloadLimits, FtpTarget};
 pub use launcher::{
-    launcher_hexagon_points, launcher_hexagon_region, launcher_live_regions, launcher_menu_entries,
-    launcher_native_chrome_policy, launcher_window_style_without_frame,
-    should_apply_launcher_window_visibility, tray_menu_entries, LauncherInteractionState,
-    LauncherLiveRegions, LauncherNativeChromePolicy, LauncherPoint, LauncherRegion,
+    launcher_menu_entries, should_apply_launcher_window_visibility, tray_menu_entries,
+    LauncherInteractionState,
 };
 pub use magnet_metadata::{
     resolve_magnet_metadata, resolve_magnet_torrent, MagnetMetadataError, ResolvedMagnetFile,
@@ -438,8 +436,6 @@ pub fn run() {
             cloud::commands::cloud_upload_directory,
             cloud::commands::cloud_control_upload,
             cloud::commands::cloud_logout,
-            launcher::set_launcher_compact_shape,
-            launcher::set_launcher_bounds,
             launcher::set_launcher_window_visible,
             launcher::start_launcher_dragging,
             launcher::show_launcher_menu,
