@@ -44,59 +44,49 @@ beforeEach(() => {
   native.launcherSize.mockReset();
 });
 
-it('anchors the complete native window inside the monitor work area even when Windows enforces a wider size', () => {
-  const position = (launcherWindow as unknown as {
-    launcherCornerPosition(workArea: { x: number; y: number; width: number; height: number }, windowSize: { width: number; height: number }, scaleFactor: number): { x: number; y: number };
-  }).launcherCornerPosition({ x: 100, y: 50, width: 1920, height: 1080 }, { width: 214, height: 86 }, 1.75);
-
-  expect(position).toEqual({ x: 1764, y: 1002 });
+it('uses one fixed canvas with an invariant hexagon anchor', () => {
+  expect(launcherWindow.launcherCanvas).toEqual({
+    width: 410,
+    height: 720,
+    popupSlotHeight: 328,
+    iconSize: 64,
+    iconTop: 328,
+    margin: 24,
+  });
 });
 
-it('resizes around the launcher bottom-right corner and clamps it to the work area', () => {
-  const resized = (launcherWindow as unknown as {
-    launcherResizedPosition(
-      position: { x: number; y: number },
-      currentSize: { width: number; height: number },
-      nextSize: { width: number; height: number },
-      workArea: { x: number; y: number; width: number; height: number }
-    ): { x: number; y: number };
-  }).launcherResizedPosition(
-    { x: 1000, y: 800 },
-    { width: 236, height: 98 },
-    { width: 822, height: 525 },
-    { x: 0, y: 0, width: 2560, height: 1516 }
-  );
-
-  expect(resized).toEqual({ x: 414, y: 373 });
+it('anchors the invariant hexagon to the work-area bottom right', () => {
+  expect(launcherWindow.launcherCanvasPosition(
+    { x: 100, y: 50, width: 1920, height: 1080 },
+    1.5,
+  )).toEqual({ x: 1369, y: 506 });
 });
 
-it('keeps the launcher fixed and opens its popup below when there is no room above it', () => {
-  const helpers = launcherWindow as unknown as {
-    launcherPopupPlacement(
-      position: { x: number; y: number },
-      currentSize: { width: number; height: number },
-      nextSize: { width: number; height: number },
-      workArea: { x: number; y: number; width: number; height: number }
-    ): 'above' | 'below';
-    launcherResizedPosition(
-      position: { x: number; y: number },
-      currentSize: { width: number; height: number },
-      nextSize: { width: number; height: number },
-      workArea: { x: number; y: number; width: number; height: number },
-      placement: 'above' | 'below'
-    ): { x: number; y: number };
-  };
-  const position = { x: 1000, y: 12 };
-  const currentSize = { width: 64, height: 64 };
-  const nextSize = { width: 304, height: 392 };
-  const workArea = { x: 0, y: 0, width: 1920, height: 1080 };
-
-  expect(helpers.launcherPopupPlacement(position, currentSize, nextSize, workArea)).toBe('below');
-  expect(helpers.launcherResizedPosition(position, currentSize, nextSize, workArea, 'below')).toEqual({ x: 760, y: 12 });
+it('maps the fixed hexagon to a physical screen rectangle', () => {
+  expect(launcherWindow.launcherIconScreenRect({ x: 100, y: 50 }, 1.5)).toEqual({
+    x: 619,
+    y: 542,
+    width: 96,
+    height: 96,
+  });
 });
 
-it('uses the hexagon as the complete compact launcher viewport', () => {
-  expect(launcherWindow.launcherCompactSize()).toEqual({ width: 64, height: 64 });
+it('chooses the lower slot without moving the hexagon when upper space is insufficient', () => {
+  const icon = { x: 850, y: 20, width: 64, height: 64 };
+  expect(launcherWindow.launcherPopupPlacementFromIcon(
+    icon,
+    328,
+    { x: 0, y: 0, width: 1000, height: 800 },
+  )).toBe('below');
+});
+
+it('prefers the upper slot when the complete popup fits', () => {
+  const icon = { x: 850, y: 500, width: 64, height: 64 };
+  expect(launcherWindow.launcherPopupPlacementFromIcon(
+    icon,
+    328,
+    { x: 0, y: 0, width: 1000, height: 800 },
+  )).toBe('above');
 });
 
 it('requests the clipped native compact shape instead of a transparent rectangle', async () => {
@@ -117,14 +107,6 @@ it('requests the clipped native compact shape instead of a transparent rectangle
     compact: true,
     live: false
   });
-});
-
-it('reserves vertical space for the quick-add panel above the persistent launcher', () => {
-  expect(launcherWindow.launcherDimensions.expanded).toEqual({ width: 410, height: 364 });
-});
-
-it('reserves a shadow-safe viewport for the launcher context menu', () => {
-  expect(launcherWindow.launcherDimensions.menu).toEqual({ width: 304, height: 392 });
 });
 
 it('uses the native visibility command so background smoke runs cannot surface a launcher', async () => {

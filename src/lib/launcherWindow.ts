@@ -10,12 +10,54 @@ export const launcherDimensions = {
   expanded: { width: 410, height: 364 }
 } as const;
 
+export const launcherCanvas = {
+  width: 410,
+  height: 720,
+  popupSlotHeight: 328,
+  iconSize: 64,
+  iconTop: 328,
+  margin: 24,
+} as const;
+
 const launcherMargin = 24;
 let launcherResizeQueue: Promise<void> = Promise.resolve();
 
 type WorkArea = { x: number; y: number; width: number; height: number };
+type Rect = { x: number; y: number; width: number; height: number };
 type NativeWindowSize = { width: number; height: number };
 export type LauncherPopupPlacement = 'above' | 'below';
+
+export function launcherCanvasPosition(workArea: WorkArea, scaleFactor: number) {
+  const canvasWidth = Math.round(launcherCanvas.width * scaleFactor);
+  const iconBottom = Math.round(
+    (launcherCanvas.iconTop + launcherCanvas.iconSize) * scaleFactor,
+  );
+  const margin = Math.round(launcherCanvas.margin * scaleFactor);
+  return {
+    x: workArea.x + workArea.width - canvasWidth - margin,
+    y: workArea.y + workArea.height - iconBottom - margin,
+  };
+}
+
+export function launcherIconScreenRect(
+  windowPosition: { x: number; y: number },
+  scaleFactor: number,
+): Rect {
+  return {
+    x: windowPosition.x + Math.round((launcherCanvas.width - launcherCanvas.iconSize) * scaleFactor),
+    y: windowPosition.y + Math.round(launcherCanvas.iconTop * scaleFactor),
+    width: Math.round(launcherCanvas.iconSize * scaleFactor),
+    height: Math.round(launcherCanvas.iconSize * scaleFactor),
+  };
+}
+
+export function launcherPopupPlacementFromIcon(
+  icon: Rect,
+  popupHeight: number,
+  workArea: WorkArea,
+): LauncherPopupPlacement {
+  return icon.y - popupHeight < workArea.y ? 'below' : 'above';
+}
 
 export function launcherCornerPosition(workArea: WorkArea, windowSize: NativeWindowSize, scaleFactor: number) {
   const margin = launcherMargin * scaleFactor;
