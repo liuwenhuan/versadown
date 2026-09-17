@@ -11,7 +11,7 @@ const initial = {
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
   deleteTransferredShareFilesAfterDownload: true,
   cloudUploadLimit: 0
 };
@@ -43,6 +43,7 @@ it('separates settings into common, network, and advanced workspaces', async () 
   await user.click(screen.getByRole('tab', { name: '高级' }));
   expect(screen.queryByRole('checkbox', { name: '启用调试报告' })).not.toBeInTheDocument();
   expect(screen.queryByText('隐私规则')).not.toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: '打开日志调试' })).toBeVisible();
   expect(screen.getByRole('checkbox', { name: '开启隐私下载' })).toBeVisible();
   expect(screen.queryByRole('checkbox', { name: '启用磁链元数据服务' })).not.toBeInTheDocument();
 });
@@ -106,7 +107,7 @@ it('keeps rate limits and their save control inline while accepting one decimal 
   }
 });
 
-it('removes helper descriptions except for the privacy download explanation', async () => {
+it('keeps helper descriptions limited to privacy and aria2 diagnostics', async () => {
   const user = userEvent.setup();
   const { container } = render(<SettingsPanel initial={initial} onChange={() => {}} />);
 
@@ -115,8 +116,9 @@ it('removes helper descriptions except for the privacy download explanation', as
   expect(container.querySelectorAll('.settings-content small')).toHaveLength(0);
   await user.click(screen.getByRole('tab', { name: '高级' }));
   const descriptions = Array.from(container.querySelectorAll('.settings-content small'));
-  expect(descriptions).toHaveLength(1);
-  expect(descriptions[0]).toHaveTextContent('私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。');
+  expect(descriptions).toHaveLength(2);
+  expect(descriptions[0]).toHaveTextContent('保存 aria2 引擎和本地 RPC 调试日志');
+  expect(descriptions[1]).toHaveTextContent('私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。');
 });
 
 it('saves a custom directory on blur without a separate save button', async () => {
@@ -335,7 +337,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
     deleteTransferredShareFilesAfterDownload: true,
     cloudUploadLimit: 0
   });
@@ -366,9 +368,25 @@ it('saves aria2 RPC and engine settings from the network settings', async () => 
       maxConcurrentDownloads: 3,
       maxConnectionsPerServer: 4,
       btSeedRatio: 1.5,
+      debugLogging: false,
       overallDownloadLimit: 0,
       p2pUploadLimit: 1048576
     }
+  });
+});
+
+it('saves aria2 debug logging from advanced settings', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={initial} onChange={onChange} />);
+
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await user.click(screen.getByRole('checkbox', { name: '打开日志调试' }));
+  await user.click(screen.getByRole('button', { name: '保存日志设置' }));
+
+  expect(onChange).toHaveBeenLastCalledWith({
+    ...initial,
+    aria2: { ...initial.aria2, debugLogging: true }
   });
 });
 

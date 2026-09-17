@@ -22,7 +22,7 @@ interface SettingsPanelProps {
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
 const defaultMagnetMetadataSettings: MagnetMetadataSettings = { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' };
-const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, overallDownloadLimit: 0, p2pUploadLimit: 1048576 };
+const defaultAria2Settings: Aria2Settings = { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 };
 const mebibyte = 1024 * 1024;
 type RateLimitInput = 'overallDownloadLimit' | 'p2pUploadLimit' | 'cloudUploadLimit';
 
@@ -356,6 +356,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
       </form>
       </>}
       {activeTab === 'advanced' && <>
+        <form className="aria2-debug-settings proxy-settings" onSubmit={saveAria2}>
+          <label className="setting-row"><span><b>打开日志调试</b><small>保存 aria2 引擎和本地 RPC 调试日志，用于排查下载问题；日志可能包含下载地址，仅在需要排障时开启。</small></span><input aria-label="打开日志调试" type="checkbox" checked={aria2.debugLogging} onChange={(event) => updateAria2('debugLogging', event.target.checked)} /></label>
+          <div className="settings-actions"><button className="primary" type="submit">保存日志设置</button>{aria2Status && <span role="status" className={aria2Status.kind}>{aria2Status.message}</span>}</div>
+        </form>
         <form className="privacy-download-settings proxy-settings" onSubmit={(event) => void savePrivacyDownload(event)}>
           <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => void updatePrivacyDownload(event.target.checked)} /></label>
           <fieldset className="privacy-password-fields" disabled={!privacyDownloadEnabled && !privacyPasswordConfigured}>

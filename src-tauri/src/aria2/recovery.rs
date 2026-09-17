@@ -165,6 +165,16 @@ impl DownloadService {
                 continue;
             };
 
+            // A replacement RPC client starts with no in-memory GID mapping.
+            // Restore it during recovery so later status/control faults retain
+            // the task ID in the local diagnostic log.
+            api.record_task_operation(
+                "aria2.recoveryBind",
+                &task.id.to_string(),
+                Some(&status.gid),
+                None,
+            );
+
             if self
                 .apply_status(task.clone(), status.clone(), false)
                 .await

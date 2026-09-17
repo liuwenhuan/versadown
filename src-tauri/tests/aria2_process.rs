@@ -71,6 +71,9 @@ fn launch_arguments_apply_user_configured_rpc_and_transfer_limits() {
         max_concurrent_downloads: 3,
         max_connections_per_server: 4,
         bt_seed_ratio: 1.5,
+        debug_logging: false,
+        overall_download_limit: 0,
+        p2p_upload_limit: 1_048_576,
     };
     let args = build_aria2_args(&config, &RpcSecret::from_token("local-token").unwrap());
 
@@ -83,6 +86,16 @@ fn launch_arguments_apply_user_configured_rpc_and_transfer_limits() {
     ] {
         assert!(args.iter().any(|arg| arg == expected));
     }
+}
+
+#[test]
+fn launch_arguments_enable_detailed_sidecar_logging_only_when_requested() {
+    let mut config = config(std::path::Path::new("fixture"));
+    config.aria2.debug_logging = true;
+    let args = build_aria2_args(&config, &RpcSecret::from_bytes([0xab; 32]));
+
+    assert!(args.contains(&"--log=fixture\\data\\aria2-debug.log".into()));
+    assert!(args.contains(&"--log-level=debug".into()));
 }
 
 #[tokio::test]
@@ -118,6 +131,25 @@ async fn bundled_sidecar_is_authenticated_saves_session_and_exits() {
     let session = std::fs::read_to_string(root.path().join("data/aria2-next.tasks")).unwrap();
     assert!(!session.contains("rpc-secret"));
     assert!(!session.contains("token:"));
+}
+
+#[tokio::test]
+async fn bundled_sidecar_writes_native_and_rpc_debug_logs_when_enabled() {
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = config(root.path());
+    launch.aria2.debug_logging = true;
+    let rpc_token = launch.aria2.rpc_token.clone();
+    let (mut child, client) = Aria2Process::start(launch).await.unwrap();
+
+    assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
+    assert_eq!(client.shutdown().await.unwrap(), "OK");
+    assert!(child.wait_for_exit(Duration::from_secs(5)).await.unwrap());
+
+    let data = root.path().join("data");
+    assert!(data.join("aria2-debug.log").is_file());
+    let rpc_log = std::fs::read_to_string(data.join("aria2-rpc-debug.log")).unwrap();
+    assert!(rpc_log.contains(r#""operation":"aria2.getVersion""#));
+    assert!(!rpc_log.contains(&rpc_token));
 }
 
 #[tokio::test]

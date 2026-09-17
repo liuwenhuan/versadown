@@ -28,7 +28,7 @@ vi.mock('./lib/api', () => ({
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   getPrivacyTaskVisibility: state.privacyVisibility,
   checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
-  defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 } },
+  defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } },
   getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
   moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, setTaskPrivacy: state.setTaskPrivacy, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
@@ -107,7 +107,7 @@ beforeEach(() => {
   state.getCompletedCloudAuthorization.mockReset().mockResolvedValue(null);
   state.completeCloudAuthorization.mockReset();
   state.getSettings.mockReset();
-  state.getSettings.mockResolvedValue({ downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 } });
+  state.getSettings.mockResolvedValue({ downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } });
   state.configurePrivacy.mockReset();
   state.privacyVisibility.mockReset();
   state.privacyVisibility.mockResolvedValue({ enabled: false, unlocked: false });
@@ -137,7 +137,7 @@ it('shows privacy task controls immediately after enabling an existing privacy p
     proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false },
     deleteTransferredShareFilesAfterDownload: true,
     privacyDownloadEnabled: false,
     privacyPasswordConfigured: true,
@@ -678,7 +678,7 @@ it('hides a task and its open details dialog immediately after moving it into pr
     downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
     proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false },
     privacyDownloadEnabled: true,
   });
   state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: false });

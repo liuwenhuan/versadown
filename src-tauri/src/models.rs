@@ -36,6 +36,8 @@ pub struct Aria2Settings {
     pub max_concurrent_downloads: u16,
     pub max_connections_per_server: u8,
     pub bt_seed_ratio: f64,
+    /// Persist detailed aria2 and local RPC diagnostics for troubleshooting.
+    pub debug_logging: bool,
     /// Bytes per second; zero leaves all Aria2 downloads unrestricted.
     pub overall_download_limit: u64,
     /// Bytes per second; shared by all P2P uploads managed by Aria2 Next.
@@ -50,6 +52,7 @@ impl Default for Aria2Settings {
             max_concurrent_downloads: 5,
             max_connections_per_server: 4,
             bt_seed_ratio: 1.5,
+            debug_logging: false,
             overall_download_limit: 0,
             p2p_upload_limit: 1_048_576,
         }

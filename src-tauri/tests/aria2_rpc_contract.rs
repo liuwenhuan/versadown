@@ -1,6 +1,6 @@
 use alldownloader_lib::aria2::{rpc, types};
 use axum::{http::StatusCode, routing::post, Json, Router};
-use rpc::{Aria2Api, Aria2RpcClient};
+use rpc::{Aria2Api, Aria2DebugLogger, Aria2RpcClient};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -92,6 +92,35 @@ async fn escaped_multicall_fault_is_redacted_after_json_decoding() {
         result[0].as_ref().unwrap_err().message,
         "denied token:[REDACTED]"
     );
+}
+
+#[tokio::test]
+async fn debug_log_records_rpc_fault_metadata_without_the_rpc_secret() {
+    let root = tempfile::tempdir().unwrap();
+    let log_path = root.path().join("aria2-rpc-debug.log");
+    let (url, _, handle) = fixture(
+        json!({"jsonrpc":"2.0","id":"1","error":{"code":-32602,"message":"Invalid URI"}}),
+        StatusCode::OK,
+        Duration::ZERO,
+    )
+    .await;
+    let client = Aria2RpcClient::new(url, RpcSecret::from_bytes([0xab; 32]))
+        .unwrap()
+        .with_debug_logger(Some(Aria2DebugLogger::open(&log_path).unwrap()));
+
+    let error = client
+        .add_uri(vec!["https://example.test/file".into()], BTreeMap::new())
+        .await
+        .unwrap_err();
+    client.record_task_operation("aria2.addUri", "task-123", None, Some(&error));
+    handle.abort();
+
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(log.contains(r#""operation":"aria2.addUri""#));
+    assert!(log.contains(r#""task_id":"task-123""#));
+    assert!(log.contains(r#""fault_code":-32602"#));
+    assert!(!log.contains(&"ab".repeat(32)));
+    assert!(!log.contains("https://example.test/file"));
 }
 
 #[tokio::test]

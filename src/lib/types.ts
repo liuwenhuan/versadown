@@ -177,6 +177,7 @@ export interface Aria2Settings {
   maxConcurrentDownloads: number;
   maxConnectionsPerServer: number;
   btSeedRatio: number;
+  debugLogging: boolean;
   overallDownloadLimit: number;
   p2pUploadLimit: number;
 }

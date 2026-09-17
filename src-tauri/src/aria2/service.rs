@@ -211,6 +211,60 @@ impl DownloadService {
         Ok(task)
     }
 
+    async fn add_uri_for_task(
+        &self,
+        task_id: Uuid,
+        uris: Vec<String>,
+        options: Aria2Options,
+    ) -> Result<String, Aria2Error> {
+        let api = self.api();
+        let result = api.add_uri(uris, options).await;
+        let task_id = task_id.to_string();
+        api.record_task_operation(
+            "aria2.addUri",
+            &task_id,
+            result.as_ref().ok().map(String::as_str),
+            result.as_ref().err(),
+        );
+        result
+    }
+
+    async fn add_torrent_for_task(
+        &self,
+        task_id: Uuid,
+        torrent: String,
+        uris: Vec<String>,
+        options: Aria2Options,
+    ) -> Result<String, Aria2Error> {
+        let api = self.api();
+        let result = api.add_torrent(torrent, uris, options).await;
+        let task_id = task_id.to_string();
+        api.record_task_operation(
+            "aria2.addTorrent",
+            &task_id,
+            result.as_ref().ok().map(String::as_str),
+            result.as_ref().err(),
+        );
+        result
+    }
+
+    async fn tell_status_for_task(
+        &self,
+        task_id: Uuid,
+        gid: &str,
+    ) -> Result<Aria2Status, Aria2Error> {
+        let api = self.api();
+        let result = api.tell_status(gid).await;
+        let task_id = task_id.to_string();
+        api.record_task_operation(
+            "aria2.tellStatus",
+            &task_id,
+            Some(gid),
+            result.as_ref().err(),
+        );
+        result
+    }
+
     pub async fn submit_uri(
         &self,
         task_id: Uuid,
@@ -223,7 +277,7 @@ impl DownloadService {
             return Err(DownloadServiceError::AlreadySubmitted);
         }
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
-        let gid = self.api().add_uri(uris, options).await?;
+        let gid = self.add_uri_for_task(task_id, uris, options).await?;
         if let Err(error) = self.store.bind_gid(task_id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
@@ -359,7 +413,7 @@ impl DownloadService {
         let task = self.task_for_uri_submission(task_id)?;
         let mut options = self.prepare_uri_options(&task, &mut uris, options)?;
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
-        let gid = self.api().add_uri(uris, options).await?;
+        let gid = self.add_uri_for_task(task_id, uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
@@ -384,7 +438,7 @@ impl DownloadService {
         self.ensure_accepting()?;
         self.task_for_uri_submission(task_id)?;
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
-        let gid = self.api().add_uri(uris, options).await?;
+        let gid = self.add_uri_for_task(task_id, uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
@@ -420,7 +474,7 @@ impl DownloadService {
         validate_task_source(&current.kind, &current.source)?;
         let mut options = self.prepare_uri_options(&current, &mut uris, options)?;
         let directory = self.prepare_directory_uri(expected.id, &mut options)?;
-        let gid = self.api().add_uri(uris, options).await?;
+        let gid = self.add_uri_for_task(expected.id, uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(expected.id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
@@ -497,10 +551,9 @@ impl DownloadService {
         // hashes before aria2 decides whether they can be resumed or are complete.
         options.insert("check-integrity".into(), "true".into());
         let gid = self
-            .api()
-            .add_torrent(torrent_base64, web_seed_uris, options)
+            .add_torrent_for_task(task_id, torrent_base64, web_seed_uris, options)
             .await?;
-        let status = match self.api().tell_status(&gid).await {
+        let status = match self.tell_status_for_task(task_id, &gid).await {
             Ok(status) => status,
             Err(error) => {
                 return Err(self
@@ -529,7 +582,7 @@ impl DownloadService {
                     .cleanup_rejected_torrent(task_id, &gid, error.into())
                     .await);
             }
-            let paused_status = match self.api().tell_status(&gid).await {
+            let paused_status = match self.tell_status_for_task(task_id, &gid).await {
                 Ok(status) => status,
                 Err(error) => {
                     return Err(self
@@ -818,7 +871,11 @@ impl DownloadService {
             .clone()
             .ok_or(DownloadServiceError::MissingGid(task_id))?;
         let updated = self
-            .apply_status(current.clone(), self.api().tell_status(&gid).await?, false)
+            .apply_status(
+                current.clone(),
+                self.tell_status_for_task(current.id, &gid).await?,
+                false,
+            )
             .await?;
         self.activate_confirmed_magnet_child(&current, updated)
             .await
@@ -849,7 +906,7 @@ impl DownloadService {
             return Ok(updated);
         }
 
-        let status = self.api().tell_status(child_gid).await?;
+        let status = self.tell_status_for_task(previous.id, child_gid).await?;
         if status.gid != child_gid {
             return Err(Aria2Error::MalformedResponse.into());
         }
@@ -879,7 +936,7 @@ impl DownloadService {
         options.insert("select-file".into(), selection);
         self.api().change_option(child_gid, options).await?;
         self.unpause_gid(child_gid).await?;
-        let status = self.api().tell_status(child_gid).await?;
+        let status = self.tell_status_for_task(previous.id, child_gid).await?;
         if status.gid != child_gid {
             return Err(Aria2Error::MalformedResponse.into());
         }
@@ -940,7 +997,9 @@ impl DownloadService {
         // the metadata task so its followed download verifies an existing payload
         // before retrying network pieces.
         aria_options.insert("check-integrity".into(), "true".into());
-        let gid = self.api().add_uri(vec![magnet], aria_options).await?;
+        let gid = self
+            .add_uri_for_task(task_id, vec![magnet], aria_options)
+            .await?;
         let current = match self.store.bind_metadata_gid(task_id, &gid) {
             Ok(task) => task,
             Err(error) => {
@@ -950,7 +1009,11 @@ impl DownloadService {
         };
         self.publish_task(&current)?;
         let prepared = self
-            .apply_status(current, self.api().tell_status(&gid).await?, false)
+            .apply_status(
+                current.clone(),
+                self.tell_status_for_task(current.id, &gid).await?,
+                false,
+            )
             .await?;
         match resume_selection {
             Some(indices) => {
@@ -1100,8 +1163,12 @@ impl DownloadService {
             self.unpause_gid(gid).await?;
         }
         self.store.confirm_selection(task_id)?;
-        self.apply_status(task.clone(), self.api().tell_status(gid).await?, true)
-            .await
+        self.apply_status(
+            task.clone(),
+            self.tell_status_for_task(task.id, gid).await?,
+            true,
+        )
+        .await
     }
 
     pub async fn reconcile_now(&self) -> Result<(), DownloadServiceError> {
@@ -1123,25 +1190,51 @@ impl DownloadService {
                     RpcCall::new("aria2.tellStatus", vec![serde_json::json!(task.aria_gid)])
                 })
                 .collect();
-            let responses = self.api().multicall(calls).await?;
+            let api = self.api();
+            let responses = api.multicall(calls).await?;
             if responses.len() != chunk.len() {
                 return Err(Aria2Error::MalformedResponse.into());
             }
             for (task, response) in chunk.iter().zip(responses) {
+                let task_id = task.id.to_string();
                 let result = match response {
-                    Ok(value) => match serde_json::from_value::<Aria2Status>(value) {
-                        Ok(status) => match self.apply_status(task.clone(), status, false).await {
-                            Ok(updated) => {
-                                match self.activate_confirmed_magnet_child(task, updated).await {
-                                    Ok(updated) => self.sync_discovered_nodes(updated).await,
+                    Ok(value) => {
+                        api.record_task_operation(
+                            "aria2.tellStatus",
+                            &task_id,
+                            task.aria_gid.as_deref(),
+                            None,
+                        );
+                        match serde_json::from_value::<Aria2Status>(value) {
+                            Ok(status) => {
+                                match self.apply_status(task.clone(), status, false).await {
+                                    Ok(updated) => {
+                                        match self
+                                            .activate_confirmed_magnet_child(task, updated)
+                                            .await
+                                        {
+                                            Ok(updated) => {
+                                                self.sync_discovered_nodes(updated).await
+                                            }
+                                            Err(error) => Err(error),
+                                        }
+                                    }
                                     Err(error) => Err(error),
                                 }
                             }
-                            Err(error) => Err(error),
-                        },
-                        Err(_) => Err(Aria2Error::MalformedResponse.into()),
-                    },
-                    Err(fault) => Err(Aria2Error::Rpc(fault).into()),
+                            Err(_) => Err(Aria2Error::MalformedResponse.into()),
+                        }
+                    }
+                    Err(fault) => {
+                        let error = Aria2Error::Rpc(fault);
+                        api.record_task_operation(
+                            "aria2.tellStatus",
+                            &task_id,
+                            task.aria_gid.as_deref(),
+                            Some(&error),
+                        );
+                        Err(error.into())
+                    }
                 };
                 if let Err(error) = result {
                     if first_error.is_none() {
@@ -1242,7 +1335,7 @@ impl DownloadService {
                 }
                 return self.persist_snapshot(current, snapshot);
             };
-            status = self.api().tell_status(&next).await?;
+            status = self.tell_status_for_task(current.id, &next).await?;
             if status.gid != next {
                 return Err(Aria2Error::MalformedResponse.into());
             }

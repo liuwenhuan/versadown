@@ -1,5 +1,5 @@
 use super::{
-    rpc::Aria2RpcClient,
+    rpc::{Aria2DebugLogger, Aria2RpcClient},
     types::{Aria2Error, RpcSecret},
 };
 use std::{
@@ -27,7 +27,7 @@ pub struct Aria2LaunchConfig {
 pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<String> {
     let session = config.data_dir.join("aria2-next.tasks");
     let state_dir = config.data_dir.join("aria2-next-state");
-    vec![
+    let mut args = vec![
         "--no-conf=true".into(),
         "--enable-rpc=true".into(),
         "--rpc-listen-all=false".into(),
@@ -67,7 +67,15 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
         format!("--bt-enable-lpd={}", config.peer_discovery),
         "--summary-interval=0".into(),
         "--console-log-level=error".into(),
-    ]
+    ];
+    if config.aria2.debug_logging {
+        args.push(format!(
+            "--log={}",
+            config.data_dir.join("aria2-debug.log").display()
+        ));
+        args.push("--log-level=debug".into());
+    }
+    args
 }
 
 #[derive(Debug)]
@@ -106,6 +114,11 @@ impl Aria2Process {
             .create(true)
             .append(true)
             .open(config.data_dir.join("aria2-next.tasks"))?;
+        let debug_logger = config
+            .aria2
+            .debug_logging
+            .then(|| Aria2DebugLogger::open(config.data_dir.join("aria2-rpc-debug.log")))
+            .transpose()?;
         let mut last_error = Aria2Error::ReadinessTimeout;
         for _ in 0..3 {
             let secret = RpcSecret::from_token(&config.aria2.rpc_token)?;
@@ -113,7 +126,8 @@ impl Aria2Process {
                 format!("http://127.0.0.1:{}/jsonrpc", config.aria2.rpc_port),
                 secret.clone(),
                 STARTUP_RPC_TIMEOUT,
-            )?;
+            )?
+            .with_debug_logger(debug_logger.clone());
             let mut command = Command::new(&config.binary);
             command
                 .args(build_aria2_args(&config, &secret))
@@ -141,7 +155,8 @@ impl Aria2Process {
                         format!("http://127.0.0.1:{}/jsonrpc", config.aria2.rpc_port),
                         secret,
                         OPERATION_RPC_TIMEOUT,
-                    )?;
+                    )?
+                    .with_debug_logger(debug_logger.clone());
                     process.client = client.clone();
                     return Ok((process, client));
                 }

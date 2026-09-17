@@ -5,16 +5,138 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
+    fs::{File, OpenOptions},
+    io::Write,
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 
 pub type Aria2Options = BTreeMap<String, String>;
+
+/// A local JSON-lines diagnostic log.  It deliberately records RPC metadata
+/// rather than request parameters, which can contain credentials or signed
+/// download URLs.
+#[derive(Clone, Debug)]
+pub struct Aria2DebugLogger {
+    writer: Arc<Mutex<File>>,
+    task_ids: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl Aria2DebugLogger {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Aria2Error> {
+        let writer = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(Aria2Error::Io)?;
+        Ok(Self {
+            writer: Arc::new(Mutex::new(writer)),
+            task_ids: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    pub fn bind_task(&self, task_id: &str, gid: &str) {
+        if let Ok(mut task_ids) = self.task_ids.lock() {
+            task_ids.insert(gid.to_owned(), task_id.to_owned());
+        }
+        self.record("task_bound", Some(task_id), Some(gid), "ok", None);
+    }
+
+    pub fn record_task_operation(
+        &self,
+        operation: &str,
+        task_id: &str,
+        gid: Option<&str>,
+        error: Option<&Aria2Error>,
+    ) {
+        if let Some(gid) = gid {
+            if let Ok(mut task_ids) = self.task_ids.lock() {
+                task_ids.insert(gid.to_owned(), task_id.to_owned());
+            }
+        }
+        self.record(
+            operation,
+            Some(task_id),
+            gid,
+            error.map_or("ok", aria2_error_kind),
+            error.and_then(rpc_fault_code),
+        );
+    }
+
+    fn record_rpc(&self, operation: &str, gid: Option<&str>, error: Option<&Aria2Error>) {
+        let task_id = gid.and_then(|gid| {
+            self.task_ids
+                .lock()
+                .ok()
+                .and_then(|task_ids| task_ids.get(gid).cloned())
+        });
+        self.record(
+            operation,
+            task_id.as_deref(),
+            gid,
+            error.map_or("ok", aria2_error_kind),
+            error.and_then(rpc_fault_code),
+        );
+    }
+
+    fn record(
+        &self,
+        operation: &str,
+        task_id: Option<&str>,
+        gid: Option<&str>,
+        outcome: &str,
+        fault_code: Option<i64>,
+    ) {
+        let timestamp_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let entry = json!({
+            "timestamp_unix_ms": timestamp_unix_ms,
+            "component": "aria2-rpc",
+            "operation": operation,
+            "task_id": task_id,
+            "gid": gid,
+            "outcome": outcome,
+            "fault_code": fault_code,
+        });
+        if let Ok(mut writer) = self.writer.lock() {
+            if serde_json::to_writer(&mut *writer, &entry).is_ok() {
+                let _ = writeln!(writer);
+            }
+        }
+    }
+}
+
+fn aria2_error_kind(error: &Aria2Error) -> &'static str {
+    match error {
+        Aria2Error::Rpc(_) => "rpc_fault",
+        Aria2Error::Timeout => "timeout",
+        Aria2Error::Transport => "transport",
+        Aria2Error::HttpStatus(_) => "http_status",
+        Aria2Error::MismatchedResponseId => "mismatched_response_id",
+        Aria2Error::MalformedResponse => "malformed_response",
+        Aria2Error::InvalidEndpoint => "invalid_endpoint",
+        Aria2Error::InvalidField { .. } => "invalid_field",
+        Aria2Error::UnknownStatus(_) => "unknown_status",
+        Aria2Error::Io(_) => "io",
+        Aria2Error::ReadinessTimeout => "readiness_timeout",
+        Aria2Error::ProcessExited => "process_exited",
+    }
+}
+
+fn rpc_fault_code(error: &Aria2Error) -> Option<i64> {
+    match error {
+        Aria2Error::Rpc(fault) => Some(fault.code),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct RpcCall {
@@ -32,6 +154,16 @@ impl RpcCall {
 
 #[async_trait]
 pub trait Aria2Api: Send + Sync {
+    /// Records application task context alongside an RPC operation when this
+    /// implementation has diagnostic logging enabled.
+    fn record_task_operation(
+        &self,
+        _operation: &str,
+        _task_id: &str,
+        _gid: Option<&str>,
+        _error: Option<&Aria2Error>,
+    ) {
+    }
     async fn add_uri(&self, uris: Vec<String>, options: Aria2Options)
         -> Result<String, Aria2Error>;
     async fn add_torrent(
@@ -77,6 +209,7 @@ pub struct Aria2RpcClient {
     secret: RpcSecret,
     client: reqwest::Client,
     ids: Arc<AtomicU64>,
+    debug_logger: Option<Aria2DebugLogger>,
 }
 
 impl Aria2RpcClient {
@@ -110,7 +243,13 @@ impl Aria2RpcClient {
             secret,
             client,
             ids: Arc::new(AtomicU64::new(1)),
+            debug_logger: None,
         })
+    }
+
+    pub fn with_debug_logger(mut self, debug_logger: Option<Aria2DebugLogger>) -> Self {
+        self.debug_logger = debug_logger;
+        self
     }
     pub fn endpoint(&self) -> &Url {
         &self.endpoint
@@ -127,6 +266,19 @@ impl Aria2RpcClient {
     }
 
     async fn request<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<T, Aria2Error> {
+        let gid = rpc_gid(method, &params);
+        let result = self.request_unlogged(method, params).await;
+        if let Some(logger) = &self.debug_logger {
+            logger.record_rpc(method, gid.as_deref(), result.as_ref().err());
+        }
+        result
+    }
+
+    async fn request_unlogged<T: DeserializeOwned>(
         &self,
         method: &str,
         params: Vec<Value>,
@@ -202,8 +354,32 @@ fn transport_error(error: reqwest::Error) -> Aria2Error {
     }
 }
 
+fn rpc_gid(method: &str, params: &[Value]) -> Option<String> {
+    // `call` inserts the RPC token at index zero. addUri/addTorrent do not
+    // have a GID yet, while system.multicall contains multiple nested calls.
+    if matches!(
+        method,
+        "aria2.addUri" | "aria2.addTorrent" | "system.multicall"
+    ) {
+        return None;
+    }
+    params.get(1).and_then(Value::as_str).map(str::to_owned)
+}
+
 #[async_trait]
 impl Aria2Api for Aria2RpcClient {
+    fn record_task_operation(
+        &self,
+        operation: &str,
+        task_id: &str,
+        gid: Option<&str>,
+        error: Option<&Aria2Error>,
+    ) {
+        if let Some(logger) = &self.debug_logger {
+            logger.record_task_operation(operation, task_id, gid, error);
+        }
+    }
+
     async fn add_uri(
         &self,
         uris: Vec<String>,
