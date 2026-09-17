@@ -132,6 +132,17 @@ impl DownloadOps for QuarkDriver<'_> {
         }
     }
 }
+impl ShareOps for QuarkDriver<'_> {
+    fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> {
+        QuarkClient::new(cookie(&self.store)?, &self.http).create_share(file_ids, options)
+    }
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
+        QuarkClient::new(cookie(&self.store)?, &self.http).list_shares()
+    }
+    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
+        QuarkClient::new(cookie(&self.store)?, &self.http).cancel_shares(share_ids)
+    }
+}
 impl ProviderAuth for QuarkDriver<'_> {
     fn complete_web(&mut self, input: &WebAuthorizationInput) -> Result<CloudAccount, CloudError> {
         let store = &self.store;

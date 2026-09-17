@@ -6,8 +6,9 @@
 //! and response cookies are kept in `UcDownload` for immediate use only.
 use super::{
     types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudDriveUploadProfile,
-    CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
-    CloudStorageCapacity, CloudUploadTransport, QuarkError,
+    CloudFile, CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
+    CloudProvider, CloudShare, CloudShareOptions, CloudSharePassCodeCharacterSet,
+    CloudSharePassCodeConstraint, CloudStorageCapacity, CloudUploadTransport, QuarkError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,6 +16,9 @@ use std::{collections::BTreeMap, fmt, path::Path};
 
 const API: &str = "https://pc-api.uc.cn/1/clouddrive";
 const WEB: &str = "https://drive.uc.cn";
+const UC_SHARE_TASK_MAX_POLLS: usize = 60;
+const UC_SHARE_TRANSIENT_RETRIES: usize = 2;
+const UC_SHARE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 pub const UC_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
 const UC_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
     object_host: "pds.uc.cn",
@@ -22,6 +26,14 @@ const UC_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
 };
 pub(crate) const UC_RECYCLE_BIN_ID: &str = "__all_downloader_uc_recycle_bin__";
 const UC_RECYCLE_BIN_NAME: &str = "回收站";
+
+pub const UC_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
+    CloudSharePassCodeConstraint {
+        min_length: 4,
+        max_length: 4,
+        character_set: CloudSharePassCodeCharacterSet::AsciiAlphanumeric,
+        hint: "提取码必须为 4 位字母或数字",
+    };
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct UcSession {
@@ -131,7 +143,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
 
     fn headers(&self) -> Result<BTreeMap<String, String>, QuarkError> {
         Ok(BTreeMap::from([
+            ("Accept".into(), "application/json, text/plain, */*".into()),
+            ("Accept-Language".into(), "zh-CN,zh;q=0.9".into()),
             ("Cookie".into(), self.cookie()?.to_owned()),
+            ("Content-Type".into(), "application/json;charset=UTF-8".into()),
             ("Origin".into(), WEB.into()),
             ("Referer".into(), format!("{WEB}/")),
             ("User-Agent".into(), UC_DESKTOP_USER_AGENT.into()),
@@ -145,19 +160,35 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         query: &str,
         body: Option<Value>,
     ) -> Result<CloudHttpResponse, QuarkError> {
+        let response = self.send(method, path, query, body)?;
+        uc_json(&response)?;
+        Ok(response)
+    }
+
+    fn send(
+        &self,
+        method: &'static str,
+        path: &str,
+        query: &str,
+        body: Option<Value>,
+    ) -> Result<CloudHttpResponse, QuarkError> {
         let query = if query.is_empty() {
             "pr=UCBrowser&fr=pc".into()
         } else {
             format!("{query}&fr=pc&pr=UCBrowser")
         };
-        let response = self.http.send(CloudHttpRequest {
+        let mut headers = self.headers()?;
+        if matches!(method, "POST" | "PUT" | "PATCH" | "DELETE") {
+            if let Some(csrf) = cookie_value(self.cookie()?, "csrf_token") {
+                headers.insert("x-csrf-token".into(), csrf);
+            }
+        }
+        self.http.send(CloudHttpRequest {
             method,
             url: format!("{API}/{path}?{query}"),
-            headers: self.headers()?,
+            headers,
             body: body.map(|value| value.to_string()),
-        })?;
-        uc_json(&response)?;
-        Ok(response)
+        })
     }
 
     fn request_json(
@@ -169,6 +200,27 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     ) -> Result<Value, QuarkError> {
         let response = self.request(method, path, query, body)?;
         uc_json(&response)
+    }
+
+    /// The create call has already committed before the returned task is
+    /// polled. Retrying only these follow-up reads avoids duplicate shares
+    /// while allowing a transient TLS/socket failure to recover.
+    fn personal_share_follow_up(
+        &self,
+        method: &'static str,
+        path: &str,
+        query: &str,
+        body: Option<Value>,
+    ) -> Result<Value, QuarkError> {
+        for attempt in 0..=UC_SHARE_TRANSIENT_RETRIES {
+            match self.request_json(method, path, query, body.clone()) {
+                Err(QuarkError::Transport(_)) if attempt < UC_SHARE_TRANSIENT_RETRIES => {
+                    std::thread::sleep(UC_SHARE_POLL_INTERVAL);
+                }
+                result => return result,
+            }
+        }
+        unreachable!("retry loop always returns its final request result")
     }
 
     /// Build the account shown immediately after the official browser has
@@ -446,6 +498,103 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         Ok(())
     }
 
+    pub fn create_share(&self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, QuarkError> {
+        if file_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into())); }
+        if options.generate_pass_code {
+            return Err(QuarkError::InvalidInput("UC 网盘需要设置自定义提取码".into()));
+        }
+        let pass_code = options.pass_code.as_deref().filter(|code| !code.trim().is_empty());
+        let mut body = json!({
+            "fid_list": file_ids,
+            "title": options.name,
+            "url_type": if pass_code.is_some() { 2 } else { 1 },
+            "expired_type": uc_share_expiry_type(options.expires_in_days)?,
+            "dl_limit": -1,
+        });
+        if let Some(pass_code) = pass_code {
+            body["passcode"] = json!(pass_code);
+        }
+        let created = self.request_json("POST", "share", "", Some(body))?;
+        let created_data = created.get("data").ok_or(QuarkError::InvalidResponse)?;
+        let mut share_id = uc_share_task_value(created_data, "share_id");
+        let task_id = uc_share_task_value(created_data, "task_id");
+        if share_id.is_none() {
+            let task_id = task_id.ok_or(QuarkError::InvalidResponse)?;
+            for retry in 0..UC_SHARE_TASK_MAX_POLLS {
+                let task = self.personal_share_follow_up("GET", "task", &format!("task_id={}&retry_index={retry}", encoded(&task_id)), None)?;
+                if let Some(id) = task.pointer("/data/share_id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                    share_id = Some(id.to_owned());
+                    break;
+                }
+                match task.pointer("/data/status").and_then(Value::as_i64) {
+                    Some(0 | 1) | None => std::thread::sleep(UC_SHARE_POLL_INTERVAL),
+                    _ => return Err(QuarkError::Provider("UC 分享创建任务失败".into())),
+                }
+            }
+        }
+        let share_id = share_id.ok_or_else(|| QuarkError::Provider("UC 分享链接仍在生成，请稍后重试".into()))?;
+        let details = self.personal_share_follow_up("POST", "share/password", "", Some(json!({"share_id": &share_id})))?;
+        let mut share = uc_share_from_value(details.get("data").unwrap_or(&details), Some(file_ids), pass_code)?;
+        // The password-detail response can expose its own `pwd_id` but not the
+        // created share ID. Keep the task's `share_id`, since UC's management
+        // list and delete endpoints both operate on that identifier.
+        share.id = share_id;
+        Ok(share)
+    }
+
+    pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
+        let mut shares = Vec::new();
+        for page in 1..=10_000 {
+            let value = self.request_json("GET", "share/mypage/detail", &format!("_page={page}&_size=200&_order_field=created_at&_order_type=desc&_fetch_total=1"), None)?;
+            let list = value.pointer("/data/list").and_then(Value::as_array).ok_or(QuarkError::InvalidResponse)?;
+            let count = list.len();
+            shares.extend(list.iter().map(|share| uc_share_from_value(share, None, None)).collect::<Result<Vec<_>, _>>()?);
+            if count < 200 { return Ok(shares); }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
+        let selected_share_ids = share_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|share_id| !share_id.is_empty())
+            .collect::<Vec<_>>();
+        if selected_share_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
+        }
+        let response = self.send(
+            "POST",
+            "share/delete",
+            "",
+            Some(json!({"share_ids": selected_share_ids})),
+        )?;
+        let code = serde_json::from_str::<Value>(&response.body)
+            .ok()
+            .and_then(|value| value.get("code").and_then(Value::as_i64));
+        // A share may already be stopped while UC's list endpoint is still
+        // converging. In that case the follow-up list is the authoritative
+        // cancellation result.
+        if !(response.status == 200 && code == Some(41012)) {
+            uc_json(&response)?;
+        }
+        for attempt in 0..UC_SHARE_TASK_MAX_POLLS {
+            let shares = self.list_shares()?;
+            if !shares
+                .iter()
+                .any(|share| selected_share_ids.contains(&share.id.as_str()))
+            {
+                return Ok(());
+            }
+            if attempt + 1 < UC_SHARE_TASK_MAX_POLLS {
+                std::thread::sleep(UC_SHARE_POLL_INTERVAL);
+            }
+        }
+        Err(QuarkError::Provider(
+            "UC 分享取消状态尚未同步，请稍后刷新".into(),
+        ))
+    }
+
     /// Resolve an immediate, signed URL.  It is intentionally returned rather
     /// than stored; callers must create a stable `cloud://uc/<fid>` task source.
     pub fn download(&self, id: &str) -> Result<UcDownload, QuarkError> {
@@ -479,6 +628,43 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     }
 }
 
+fn uc_share_expiry_type(expires_in_days: Option<u16>) -> Result<i64, QuarkError> {
+    match expires_in_days {
+        None => Ok(1),
+        Some(1) => Ok(2),
+        Some(7) => Ok(3),
+        Some(30) => Ok(4),
+        Some(60) => Ok(5),
+        Some(180) => Ok(7),
+        Some(_) => Err(QuarkError::InvalidInput(
+            "UC 网盘仅支持永久、1 天、7 天、30 天、60 天或 180 天有效期".into(),
+        )),
+    }
+}
+
+fn uc_share_task_value(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .or_else(|| value.pointer(&format!("/task_resp/data/{field}")))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn uc_share_from_value(value: &Value, fallback_file_ids: Option<&[String]>, pass_code: Option<&str>) -> Result<CloudShare, QuarkError> {
+    let id = value.get("share_id").or_else(|| value.get("pwd_id")).and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or(QuarkError::InvalidResponse)?;
+    let source_file_ids = value.get("fid_list").and_then(Value::as_array).map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()).or_else(|| fallback_file_ids.map(|ids| ids.to_vec())).unwrap_or_default();
+    let folder = value.get("file_type").and_then(Value::as_i64) == Some(0) || value.get("dir").and_then(Value::as_bool) == Some(true);
+    Ok(CloudShare {
+        id: id.into(), url: value.get("share_url").or_else(|| value.get("url")).and_then(Value::as_str).filter(|url| !url.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("https://drive.uc.cn/s/{id}")),
+        name: value.get("title").or_else(|| value.get("file_name")).and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("分享文件").into(),
+        kind: if folder { CloudFileKind::Folder } else { CloudFileKind::File }, source_file_ids,
+        pass_code: value.get("passcode").or_else(|| value.get("share_pwd")).and_then(Value::as_str).filter(|code| !code.is_empty()).map(str::to_owned).or_else(|| pass_code.map(str::to_owned)),
+        created_at: value.get("created_at").and_then(Value::as_str).map(str::to_owned),
+        expires_at: value.get("expired_at").or_else(|| value.get("expire_at")).and_then(Value::as_str).filter(|time| !time.is_empty()).map(str::to_owned),
+    })
+}
+
 fn uc_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if response.status == 401 {
         return Err(QuarkError::AuthorizationExpired);
@@ -509,9 +695,24 @@ fn uc_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
         return Err(QuarkError::WebAuthorizationRequired);
     }
     if !(200..300).contains(&response.status) || code != 0 || !matches!(status, 0 | 200) {
-        return Err(QuarkError::Provider("UC网盘拒绝请求".into()));
+        return Err(QuarkError::Provider(uc_rejection_message(
+            response.status,
+            code,
+            status,
+        )));
     }
     Ok(value)
+}
+
+fn uc_rejection_message(http_status: u16, code: i64, status: i64) -> String {
+    let reason = if code != 0 {
+        format!("错误码 {code}")
+    } else if !matches!(status, 0 | 200) {
+        format!("状态码 {status}")
+    } else {
+        format!("HTTP {http_status}")
+    };
+    format!("UC 网盘拒绝请求（{reason}）")
 }
 
 fn parse_file(file: &Value, parent: &str) -> Result<CloudFile, QuarkError> {
@@ -1253,6 +1454,367 @@ mod tests {
             Some("web-csrf")
         );
     }
+
+    #[test]
+    fn uc_personal_share_retries_a_transient_task_poll_transport_failure() {
+        struct RetryHttp {
+            replies: std::sync::Mutex<
+                std::collections::VecDeque<Result<CloudHttpResponse, QuarkError>>,
+            >,
+            requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
+        }
+        impl CloudHttpTransport for RetryHttp {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.requests.lock().unwrap().push(request);
+                self.replies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected HTTP request")
+            }
+        }
+        let response = |body: Value| CloudHttpResponse {
+            status: 200,
+            body: body.to_string(),
+            set_cookies: vec![],
+        };
+        let http = RetryHttp {
+            replies: std::sync::Mutex::new(
+                vec![
+                    Ok(response(json!({"code": 0, "data": {"task_id": "task-1"}}))),
+                    Err(QuarkError::Transport("HTTPS 请求失败".into())),
+                    Ok(response(json!({"code": 0, "data": {"status": 2, "share_id": "share-1"}}))),
+                    Ok(response(json!({"code": 0, "data": {"share_id": "share-1", "share_url": "https://drive.uc.cn/s/share-1", "title": "报告.pdf", "file_type": 1}}))),
+                ]
+                .into(),
+            ),
+            requests: std::sync::Mutex::new(vec![]),
+        };
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        let share = client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "报告.pdf".into(),
+                    pass_code: None,
+                    generate_pass_code: false,
+                    expires_in_days: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(share.id, "share-1");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[1].url.contains("/task?task_id=task-1"));
+        assert!(requests[2].url.contains("/task?task_id=task-1"));
+    }
+
+    #[test]
+    fn uc_personal_share_retries_a_transient_share_link_lookup_transport_failure() {
+        struct RetryHttp {
+            replies: std::sync::Mutex<
+                std::collections::VecDeque<Result<CloudHttpResponse, QuarkError>>,
+            >,
+        }
+        impl CloudHttpTransport for RetryHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.replies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected HTTP request")
+            }
+        }
+        let response = |body: Value| CloudHttpResponse {
+            status: 200,
+            body: body.to_string(),
+            set_cookies: vec![],
+        };
+        let http = RetryHttp {
+            replies: std::sync::Mutex::new(
+                vec![
+                    Ok(response(json!({"code": 0, "data": {"task_id": "task-1"}}))),
+                    Ok(response(json!({"code": 0, "data": {"status": 2, "share_id": "share-1"}}))),
+                    Err(QuarkError::Transport("HTTPS 请求失败".into())),
+                    Ok(response(json!({"code": 0, "data": {"share_id": "share-1", "share_url": "https://drive.uc.cn/s/share-1", "title": "报告.pdf", "file_type": 1}}))),
+                ]
+                .into(),
+            ),
+        };
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        let share = client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "报告.pdf".into(),
+                    pass_code: None,
+                    generate_pass_code: false,
+                    expires_in_days: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(share.url, "https://drive.uc.cn/s/share-1");
+    }
+
+    #[test]
+    fn uc_personal_share_keeps_the_task_share_id_when_password_details_only_expose_pwd_id() {
+        // The create task's `share_id` is the opaque ID required by the list
+        // and delete APIs. `share/password` can return only a different
+        // password-record ID (`pwd_id`), which must not replace it.
+        let http = Http::new(vec![
+            json!({"code": 0, "data": {"share_id": "share-1"}}),
+            json!({"code": 0, "data": {"pwd_id": "pwd-1", "share_url": "https://drive.uc.cn/s/share-1", "title": "报告.pdf", "file_type": 1}}),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        let share = client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "报告.pdf".into(),
+                    pass_code: None,
+                    generate_pass_code: false,
+                    expires_in_days: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(share.id, "share-1");
+        assert_eq!(share.url, "https://drive.uc.cn/s/share-1");
+    }
+
+    #[test]
+    fn uc_personal_share_cancel_waits_for_the_server_list_to_exclude_the_target() {
+        // Break caught: acknowledging `share/delete` before `mypage/detail`
+        // reflects it lets the UI faithfully reload an obsolete server list.
+        let http = Http::new(vec![
+            json!({"code": 0, "data": null}),
+            json!({"code": 0, "data": {"list": [{"share_id": "share-1", "title": "报告.pdf", "file_type": 1}]}}),
+            json!({"code": 0, "data": {"list": []}}),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        client.cancel_shares(&["share-1".into()]).unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].url.contains("/share/delete?"));
+        assert!(requests[1].url.contains("/share/mypage/detail?"));
+        assert!(requests[2].url.contains("/share/mypage/detail?"));
+    }
+
+    #[test]
+    fn uc_personal_share_cancel_confirms_server_removal_when_delete_reports_it_is_already_stopped() {
+        // Break caught: UC can return 41012 for an already-stopped share while
+        // its list endpoint still has not converged. The list is authoritative.
+        let http = Http::new(vec![
+            json!({"code": 41012, "message": "分享已失效或已停止分享"}),
+            json!({"code": 0, "data": {"list": [{"share_id": "share-1", "title": "报告.pdf", "file_type": 1}]}}),
+            json!({"code": 0, "data": {"list": []}}),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        client.cancel_shares(&["share-1".into()]).unwrap();
+
+        assert_eq!(http.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn uc_personal_share_cancel_submits_all_selected_share_ids_in_one_request() {
+        // UC's delete endpoint accepts `share_ids`, not a singular `share_id`.
+        // The latter returns a misleading success response but does not cancel
+        // the selected share on the server.
+        let http = Http::new(vec![
+            json!({"code": 0, "data": null}),
+            json!({"code": 0, "data": {"list": [
+                {"share_id": "share-1", "title": "报告 1.pdf", "file_type": 1},
+                {"share_id": "share-2", "title": "报告 2.pdf", "file_type": 1}
+            ]}}),
+            json!({"code": 0, "data": {"list": []}}),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        client
+            .cancel_shares(&["share-1".into(), "share-2".into()])
+            .unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            serde_json::from_str::<Value>(requests[0].body.as_deref().unwrap()).unwrap(),
+            json!({"share_ids": ["share-1", "share-2"]}),
+        );
+    }
+
+    #[test]
+    fn uc_personal_share_uses_uc_expiry_enum_and_omits_unset_fields() {
+        let http = Http::new(vec![
+            json!({"code": 0, "data": {"task_id": "task-1"}}),
+            json!({"code": 0, "data": {"status": 2, "share_id": "share-1"}}),
+            json!({"code": 0, "data": {"share_id": "share-1", "share_url": "https://drive.uc.cn/s/share-1", "title": "报告.pdf", "file_type": 1}}),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "报告.pdf".into(),
+                    pass_code: None,
+                    generate_pass_code: false,
+                    expires_in_days: Some(7),
+                },
+            )
+            .unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        let body: Value = serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "fid_list": ["file-1"],
+                "title": "报告.pdf",
+                "url_type": 1,
+                "expired_type": 3,
+                "dl_limit": -1,
+            })
+        );
+        assert_eq!(
+            requests[0].headers.get("Accept").map(String::as_str),
+            Some("application/json, text/plain, */*")
+        );
+    }
+
+    #[test]
+    fn uc_personal_share_request_uses_uc_web_client_profile() {
+        let http = Http::new(vec![json!({
+            "code": 41026,
+            "message": "request rejected",
+        })]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        let error = client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "报告.pdf".into(),
+                    pass_code: None,
+                    generate_pass_code: false,
+                    expires_in_days: None,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, QuarkError::Provider(_)));
+        let request = &http.requests.lock().unwrap()[0];
+        assert!(request
+            .url
+            .ends_with("/share?pr=UCBrowser&fr=pc"));
+        assert_eq!(
+            request.headers.get("Accept-Language").map(String::as_str),
+            Some("zh-CN,zh;q=0.9")
+        );
+        assert_eq!(
+            request.headers.get("Content-Type").map(String::as_str),
+            Some("application/json;charset=UTF-8")
+        );
+        assert_eq!(
+            request.headers.get("Referer").map(String::as_str),
+            Some("https://drive.uc.cn/")
+        );
+    }
+
+    #[test]
+    fn uc_personal_share_sends_the_browser_csrf_token_for_its_create_request() {
+        let http = Http::new(vec![json!({
+            "code": 41026,
+            "message": "request rejected",
+        })]);
+        let client = UcClient::new(
+            UcSession::cookie("__puus=session; csrf_token=csrf-for-share"),
+            &http,
+        );
+
+        let _ = client.create_share(
+            &["file-1".into()],
+            &CloudShareOptions {
+                name: "报告.pdf".into(),
+                pass_code: None,
+                generate_pass_code: false,
+                expires_in_days: None,
+            },
+        );
+
+        assert_eq!(
+            http.requests.lock().unwrap()[0]
+                .headers
+                .get("x-csrf-token")
+                .map(String::as_str),
+            Some("csrf-for-share")
+        );
+    }
+
+    #[test]
+    fn uc_personal_share_accepts_task_id_nested_in_task_response() {
+        let http = Http::new(vec![
+            json!({"code": 0, "data": {"task_resp": {"data": {"task_id": "task-1"}}}}),
+            json!({"code": 0, "data": {"status": 2, "share_id": "share-1"}}),
+            json!({"code": 0, "data": {"share_id": "share-1", "share_url": "https://drive.uc.cn/s/share-1", "title": "报告.pdf", "file_type": 1}}),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        let share = client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "报告.pdf".into(),
+                    pass_code: None,
+                    generate_pass_code: false,
+                    expires_in_days: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(share.id, "share-1");
+    }
+
+    #[test]
+    fn uc_rejection_reports_the_provider_code_and_message() {
+        let error = uc_json(&CloudHttpResponse {
+            status: 200,
+            body: json!({"code": 41010, "message": "有效期不受支持"}).to_string(),
+            set_cookies: vec![],
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "网盘请求失败：UC 网盘拒绝请求（错误码 41010）"
+        );
+    }
+
+    #[test]
+    fn uc_share_expiry_types_match_uc_server_enums() {
+        for (days, expected) in [
+            (None, 1),
+            (Some(1), 2),
+            (Some(7), 3),
+            (Some(30), 4),
+            (Some(60), 5),
+            (Some(180), 7),
+        ] {
+            assert_eq!(uc_share_expiry_type(days).unwrap(), expected);
+        }
+        assert!(matches!(
+            uc_share_expiry_type(Some(2)),
+            Err(QuarkError::InvalidInput(_))
+        ));
+    }
+
     fn share_entry() -> CloudShareResolvedEntry {
         entry(CloudSharePlan::new(
             CloudProvider::Uc,

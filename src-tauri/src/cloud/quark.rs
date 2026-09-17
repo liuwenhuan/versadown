@@ -861,6 +861,96 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
         )?;
         Ok(())
     }
+
+    pub fn create_share(
+        &self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, QuarkError> {
+        if file_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
+        }
+        if options.generate_pass_code {
+            return Err(QuarkError::InvalidInput("夸克网盘需要设置自定义提取码".into()));
+        }
+        let pass_code = options.pass_code.as_deref().filter(|code| !code.trim().is_empty());
+        let created = response_json(&self.request(
+            "POST",
+            "share",
+            Some(json!({
+                "fid_list": file_ids,
+                "title": options.name,
+                "url_type": if pass_code.is_some() { 2 } else { 1 },
+                "expired_type": if options.expires_in_days.is_some() { 2 } else { 1 },
+                "expired_days": options.expires_in_days,
+                "passcode": pass_code,
+            })),
+        )?)?;
+        let task_id = required(created.get("data").ok_or(QuarkError::InvalidResponse)?, "task_id")?;
+        let mut share_id = None;
+        for retry in 0..20 {
+            let completed = response_json(&self.request(
+                "GET",
+                &format!("task?task_id={}&retry_index={retry}", encoded(&task_id)),
+                None,
+            )?)?;
+            let data = completed.get("data").ok_or(QuarkError::InvalidResponse)?;
+            if let Some(id) = data.get("share_id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                share_id = Some(id.to_owned());
+                break;
+            }
+            match data.get("status").and_then(Value::as_i64) {
+                Some(0 | 1) | None => std::thread::sleep(std::time::Duration::from_millis(250)),
+                _ => return Err(QuarkError::Provider("夸克分享创建任务失败".into())),
+            }
+        }
+        let share_id = share_id.ok_or_else(|| QuarkError::Provider("夸克分享链接仍在生成，请稍后重试".into()))?;
+        let details = response_json(&self.request("POST", "share/password", Some(json!({"share_id": share_id})))?)?;
+        quark_share_from_value(details.get("data").unwrap_or(&details), Some(file_ids), pass_code)
+    }
+
+    pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
+        let mut shares = Vec::new();
+        for page in 1..=10_000 {
+            let value = response_json(&self.request(
+                "GET",
+                &format!("share/mypage/detail?_page={page}&_size=200&_order_field=created_at&_order_type=desc&_fetch_total=1"),
+                None,
+            )?)?;
+            let list = value.pointer("/data/list").and_then(Value::as_array).ok_or(QuarkError::InvalidResponse)?;
+            let count = list.len();
+            shares.extend(list.iter().map(|share| quark_share_from_value(share, None, None)).collect::<Result<Vec<_>, _>>()?);
+            if count < 200 { return Ok(shares); }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
+        if share_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个分享".into())); }
+        for share_id in share_ids {
+            self.request("POST", "share/delete", Some(json!({"share_id": share_id})))?;
+        }
+        Ok(())
+    }
+}
+
+fn quark_share_from_value(value: &Value, fallback_file_ids: Option<&[String]>, pass_code: Option<&str>) -> Result<CloudShare, QuarkError> {
+    let id = value.get("share_id").or_else(|| value.get("pwd_id")).and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or(QuarkError::InvalidResponse)?;
+    let source_file_ids = value.get("fid_list").and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .or_else(|| fallback_file_ids.map(|ids| ids.to_vec())).unwrap_or_default();
+    let folder = value.get("file_type").and_then(Value::as_i64) == Some(0)
+        || value.get("dir").and_then(Value::as_bool) == Some(true);
+    Ok(CloudShare {
+        id: id.into(),
+        url: value.get("share_url").or_else(|| value.get("url")).and_then(Value::as_str).filter(|url| !url.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("https://pan.quark.cn/s/{id}")),
+        name: value.get("title").or_else(|| value.get("file_name")).and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("分享文件").into(),
+        kind: if folder { CloudFileKind::Folder } else { CloudFileKind::File },
+        source_file_ids,
+        pass_code: value.get("passcode").or_else(|| value.get("share_pwd")).and_then(Value::as_str).filter(|code| !code.is_empty()).map(str::to_owned).or_else(|| pass_code.map(str::to_owned)),
+        created_at: value.get("created_at").and_then(Value::as_str).map(str::to_owned),
+        expires_at: value.get("expired_at").or_else(|| value.get("expire_at")).and_then(Value::as_str).filter(|time| !time.is_empty()).map(str::to_owned),
+    })
 }
 
 fn quark_recycle_file(file: &Value) -> Result<CloudFile, QuarkError> {

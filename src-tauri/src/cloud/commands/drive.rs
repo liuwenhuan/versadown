@@ -1,5 +1,7 @@
 use super::*;
 
+pub const MY_SHARES_DIRECTORY_ID: &str = "__all_downloader_my_shares__";
+
 pub fn restore_account(
     provider: CloudProvider,
     store: &impl CredentialStore,
@@ -117,6 +119,71 @@ pub async fn cloud_list_directory(
 ) -> Result<CloudDirectory, QuarkError> {
     run_session_work(app, provider, SessionWorkKind::Read, move |s, h| {
         list_cloud_directory(provider, &s.store, h, &parent_id)
+    })
+    .await
+}
+
+fn validate_share_options(options: &CloudShareOptions) -> Result<(), QuarkError> {
+    if options.name.trim().is_empty() {
+        return Err(QuarkError::InvalidInput("分享名称不能为空".into()));
+    }
+    if let Some(pass_code) = &options.pass_code {
+        if pass_code.trim().is_empty() || pass_code.chars().count() > 32 {
+            return Err(QuarkError::InvalidInput("提取码格式无效".into()));
+        }
+    }
+    if options.generate_pass_code && options.pass_code.is_some() {
+        return Err(QuarkError::InvalidInput("不能同时指定提取码和自动生成提取码".into()));
+    }
+    if let Some(days) = options.expires_in_days {
+        if days == 0 || days > 365 {
+            return Err(QuarkError::InvalidInput("有效期必须在 1 到 365 天之间".into()));
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cloud_create_share(
+    app: AppHandle,
+    provider: CloudProvider,
+    file_ids: Vec<String>,
+    options: CloudShareOptions,
+) -> Result<CloudShare, QuarkError> {
+    if file_ids.is_empty() {
+        return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
+    }
+    validate_share_options(&options)?;
+    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+        ProviderRegistry::global()
+            .driver(provider, &s.store, h)
+            .create_share(&file_ids, &options)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cloud_list_shares(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<Vec<CloudShare>, QuarkError> {
+    run_session_work(app, provider, SessionWorkKind::Read, move |s, h| {
+        ProviderRegistry::global().driver(provider, &s.store, h).list_shares()
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cloud_cancel_shares(
+    app: AppHandle,
+    provider: CloudProvider,
+    share_ids: Vec<String>,
+) -> Result<(), QuarkError> {
+    if share_ids.is_empty() {
+        return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
+    }
+    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+        ProviderRegistry::global().driver(provider, &s.store, h).cancel_shares(&share_ids)
     })
     .await
 }

@@ -117,6 +117,11 @@ impl DownloadOps for PikpakDriver<'_> {
         }
     }
 }
+impl ShareOps for PikpakDriver<'_> {
+    fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> { PikPakClient::new(&self.http, &self.store).create_share(file_ids, options) }
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> { PikPakClient::new(&self.http, &self.store).list_shares() }
+    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> { PikPakClient::new(&self.http, &self.store).cancel_shares(share_ids) }
+}
 impl ProviderAuth for PikpakDriver<'_> {
     fn refresh_session(&mut self) -> Result<bool, CloudError> {
         if self.store.load("pikpak")?.is_none() {

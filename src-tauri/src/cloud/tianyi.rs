@@ -1,9 +1,10 @@
 use super::{
     tianyi_app::{self, TianyiAppSession},
     types::{encoded, required},
-    CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CloudProvider, CloudStorageCapacity, CloudUploadTransport, QuarkError,
-    UploadHttpRequest, UploadHttpResponse,
+    CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudFileKind, CloudHttpRequest,
+    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShare, CloudShareOptions,
+    CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest,
+    UploadHttpResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -59,6 +60,67 @@ mod tests {
         share::{test_support::*, *},
         CredentialStore, MemoryCredentialStore, ProviderRegistry,
     };
+
+    #[test]
+    fn personal_share_record_normalizes_tianyi_link_and_access_code() {
+        let share = tianyi_share_from_value(
+            &json!({
+                "shareId": 42,
+                "accessURL": "//cloud.189.cn/t/example",
+                "accessCode": "a7b2",
+                "fileId": 9,
+                "fileName": "归档",
+                "isFolder": true,
+                "shareTime": 1_789_000_000_000i64,
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(share.id, "42");
+        assert_eq!(share.url, "https://cloud.189.cn/t/example");
+        assert_eq!(share.name, "归档");
+        assert_eq!(share.kind, CloudFileKind::Folder);
+        assert_eq!(share.source_file_ids, vec!["9"]);
+        assert_eq!(share.pass_code.as_deref(), Some("a7b2"));
+    }
+
+    #[test]
+    fn personal_share_requests_match_the_tianyi_web_protocol() {
+        let http = Http::new(vec![
+            json!({
+                "res_code": 0,
+                "shareLinkList": [{
+                    "shareId": 42,
+                    "accessURL": "//cloud.189.cn/t/example",
+                    "accessCode": "a7b2",
+                    "fileId": "file-1",
+                    "fileName": "归档",
+                    "isFolder": true,
+                    "shareTime": 1_789_000_000_000i64
+                }]
+            }),
+            json!({"res_code": 0, "data": []}),
+            json!({"res_code": 0, "success": true}),
+        ]);
+        let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=user"), &http);
+
+        let share = client.create_share(&["file-1".into()], &CloudShareOptions {
+            name: "归档".into(),
+            pass_code: None,
+            generate_pass_code: true,
+            expires_in_days: Some(7),
+        }).unwrap();
+        assert_eq!(share.url, "https://cloud.189.cn/t/example");
+        assert!(client.list_shares().unwrap().is_empty());
+        client.cancel_shares(&["42".into(), "84".into()]).unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert!(requests[0].url.contains("/api/open/share/createShareLink.action?fileId=file-1&expireTime=7&shareType=3"));
+        assert!(requests[1].url.contains("/api/portal/listShares.action?shareType=1&pageNum=1&pageSize=60"));
+        assert!(requests[2].url.contains("/api/portal/cancelShare.action?shareIdList=42%2C84&ancelType=1"));
+    }
     fn credentials() -> MemoryCredentialStore {
         let store = MemoryCredentialStore::default();
         store
@@ -1010,6 +1072,102 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
         )
         .map(|_| ())
     }
+
+    /// Tianyi's personal-share endpoint creates one link per file or folder,
+    /// and generates the private access code itself. The service only offers
+    /// one-day, seven-day, or permanent expiry modes, so reject unsupported
+    /// generic values rather than silently changing the requested expiry.
+    pub fn create_share(
+        &self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, QuarkError> {
+        if file_ids.len() != 1 {
+            return Err(QuarkError::InvalidInput(
+                "天翼云盘一次只能为一个文件或目录创建分享".into(),
+            ));
+        }
+        if options
+            .pass_code
+            .as_deref()
+            .is_some_and(|code| !code.trim().is_empty())
+        {
+            return Err(QuarkError::InvalidInput(
+                "天翼云盘会自动生成访问码，暂不支持自定义访问码".into(),
+            ));
+        }
+        let expire_time = match options.expires_in_days {
+            None => 2099,
+            Some(1) => 1,
+            Some(7) => 7,
+            Some(_) => {
+                return Err(QuarkError::InvalidInput(
+                    "天翼云盘仅支持永久、1 天或 7 天有效期".into(),
+                ))
+            }
+        };
+        let value = self.request(
+            "GET",
+            "/api/open/share/createShareLink.action",
+            &format!(
+                "fileId={}&expireTime={expire_time}&shareType=3",
+                encoded(&file_ids[0])
+            ),
+            None,
+        )?;
+        let record = value
+            .get("shareLinkList")
+            .and_then(Value::as_array)
+            .and_then(|records| records.first())
+            .ok_or(QuarkError::InvalidResponse)?;
+        let mut share = tianyi_share_from_value(record, Some(file_ids), None)?;
+        share.name = options.name.clone();
+        Ok(share)
+    }
+
+    pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
+        let mut shares = Vec::new();
+        for page in 1..=10_000 {
+            let value = self.request(
+                "GET",
+                "/api/portal/listShares.action",
+                &format!("shareType=1&pageNum={page}&pageSize=60"),
+                None,
+            )?;
+            let records = value
+                .get("data")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            let count = records.len();
+            shares.extend(
+                records
+                    .iter()
+                    .map(|record| tianyi_share_from_value(record, None, None))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            if count < 60 {
+                return Ok(shares);
+            }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
+        if share_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
+        }
+        self.request(
+            "GET",
+            "/api/portal/cancelShare.action",
+            // The deployed personal-drive endpoint names this historical
+            // parameter `ancelType` (without the leading c). Keep the wire
+            // spelling here; `cancelType` is ignored by that endpoint.
+            &format!("shareIdList={}&ancelType=1", encoded(&share_ids.join(","))),
+            None,
+        )?;
+        Ok(())
+    }
+
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
         self.form_request(
             "POST",
@@ -1254,6 +1412,71 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
             .ok_or(QuarkError::InvalidResponse)?;
         Ok(capture)
     }
+}
+
+fn tianyi_share_from_value(
+    value: &Value,
+    fallback_file_ids: Option<&[String]>,
+    pass_code: Option<&str>,
+) -> Result<CloudShare, QuarkError> {
+    let id = value
+        .get("shareId")
+        .or_else(|| value.get("share_id"))
+        .and_then(string_or_number)
+        .filter(|id| !id.is_empty())
+        .ok_or(QuarkError::InvalidResponse)?;
+    let url = value
+        .get("accessURL")
+        .or_else(|| value.get("accessUrl"))
+        .or_else(|| value.get("shortShareUrl"))
+        .or_else(|| value.get("url"))
+        .and_then(Value::as_str)
+        .filter(|url| !url.is_empty())
+        .map(|url| {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                url.to_owned()
+            } else if url.starts_with("//") {
+                format!("https:{url}")
+            } else {
+                format!("https://{url}")
+            }
+        })
+        .ok_or(QuarkError::InvalidResponse)?;
+    let source_file_ids = value
+        .get("fileId")
+        .and_then(string_or_number)
+        .map(|id| vec![id])
+        .or_else(|| fallback_file_ids.map(|ids| ids.to_vec()))
+        .unwrap_or_default();
+    Ok(CloudShare {
+        id,
+        url,
+        name: value
+            .get("fileName")
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("分享文件")
+            .into(),
+        kind: if bool_value(value.get("isFolder").or_else(|| value.get("folder"))) {
+            CloudFileKind::Folder
+        } else {
+            CloudFileKind::File
+        },
+        source_file_ids,
+        pass_code: value
+            .get("accessCode")
+            .or_else(|| value.get("passCode"))
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .map(str::to_owned)
+            .or_else(|| pass_code.map(str::to_owned)),
+        created_at: value
+            .get("shareTime")
+            .or_else(|| value.get("shareDate"))
+            .and_then(string_or_number),
+        expires_at: value.get("expireTime").and_then(string_or_number),
+    })
 }
 
 fn tianyi_upload_response(

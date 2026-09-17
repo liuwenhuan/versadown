@@ -5,7 +5,7 @@ import type { LocalUploadListing } from '../lib/localUpload';
 import { CloudCapacityController, formatCloudCapacity, type CloudCapacityViewState } from '../lib/cloudCapacity';
 import type { CloudUploadAction, CloudUploadProgress } from '../lib/cloudTypes';
 import type { CloudAuthorizationStateEvent, CloudCapacityInvalidated } from '../lib/cloudTypes';
-import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudUploadOutcome } from '../lib/cloudTypes';
+import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareOptions, CloudUploadOutcome, SharePassCodeConstraint } from '../lib/cloudTypes';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
@@ -30,6 +30,9 @@ export interface CloudManagerClient {
   trashCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   deleteCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
   restoreCloudFiles(provider: CloudProvider, fileIds: string[]): Promise<void>;
+  createCloudShare(provider: CloudProvider, fileIds: string[], options: CloudShareOptions): Promise<CloudShare>;
+  listCloudShares(provider: CloudProvider): Promise<readonly CloudShare[]>;
+  cancelCloudShares(provider: CloudProvider, shareIds: string[]): Promise<void>;
   downloadCloudFile(provider: CloudProvider, fileId: string, fileName: string, privateDownload?: boolean): Promise<unknown>;
   downloadCloudDirectory(provider: CloudProvider, directoryId: string, directoryName: string, privateDownload?: boolean): Promise<CloudDirectoryDownloadOutcome>;
   logoutCloud(provider: CloudProvider): Promise<void>;
@@ -70,11 +73,12 @@ type DestinationAction = 'move' | 'copy';
 type OperationState = { kind: 'working' | 'success' | 'error' | 'cancelled'; message: string; operationVerification?: boolean; uploadProgress?: CloudUploadProgress } | null;
 type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
 interface Breadcrumb { id: string; name: string }
-type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'details' | 'delete' | 'create' | 'upload' | 'refresh';
+type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'share' | 'copyShareLink' | 'cancelShare' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
 const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
 const expiredAuthorizationStatus = '授权过期请重新登录';
-type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'details';
+type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'share';
+const MY_SHARES_DIRECTORY_ID = '__all_downloader_my_shares__';
 
 const authorizationWatchdogMs = 10_000;
 
@@ -94,6 +98,9 @@ const unavailableClient: CloudManagerClient = {
   trashCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
   deleteCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
   restoreCloudFiles: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  createCloudShare: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  listCloudShares: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  cancelCloudShares: () => Promise.reject(new Error('网盘连接器尚未接入')),
   downloadCloudFile: () => Promise.reject(new Error('网盘连接器尚未接入')),
   downloadCloudDirectory: () => Promise.reject(new Error('网盘连接器尚未接入')),
   logoutCloud: () => Promise.reject(new Error('网盘连接器尚未接入')),
@@ -225,15 +232,19 @@ function sortedCloudFiles(items: readonly CloudFile[], sort: CloudSort | null) {
   }).map(({ item }) => item);
 }
 
-function CloudFileIcon({ kind }: { kind: CloudFile['kind'] | 'recycle-bin' }) {
+type CloudFileIconKind = CloudFile['kind'] | 'recycle-bin' | 'my-shares';
+
+function CloudFileIcon({ kind }: { kind: CloudFileIconKind }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{kind === 'recycle-bin'
     ? <><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6.5 7l.8 14h9.4l.8-14" /></>
+    : kind === 'my-shares'
+    ? <><circle cx="18" cy="5" r="2.2" /><circle cx="6" cy="12" r="2.2" /><circle cx="18" cy="19" r="2.2" /><path d="m8 11 7.8-4.7M8 13l7.8 4.7" /></>
     : kind === 'folder'
     ? <><path d="M3.5 7.5h6l1.8 2h10.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.1l1.8 2h6.7a2.2 2.2 0 0 1 2.2 2.2v1.8" /></>
     : <><path d="M6 2.8h7l5 5v13.4H6z" /><path d="M13 2.8v5h5M9 13h6M9 16.5h6" /></>}</svg>;
 }
 
-type CloudActionIconType = CloudMenuAction | 'back' | 'clear' | 'pause' | 'resume' | 'cancel';
+type CloudActionIconType = CloudMenuAction | 'details' | 'back' | 'clear' | 'pause' | 'resume' | 'cancel';
 
 function CloudActionIcon({ action }: { action: CloudActionIconType }) {
   const paths: Record<CloudActionIconType, React.ReactNode> = {
@@ -243,6 +254,9 @@ function CloudActionIcon({ action }: { action: CloudActionIconType }) {
     rename: <><path d="m4 17-.7 3.7L7 20l10.8-10.8-3-3z" /><path d="m13.8 7.2 3 3" /></>,
     move: <><path d="M3.5 7.5h6l1.8 2h9.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="m10 14 2-2 2 2m-2-2v5" /></>,
     copy: <><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
+    share: <><circle cx="18" cy="5" r="2.2" /><circle cx="6" cy="12" r="2.2" /><circle cx="18" cy="19" r="2.2" /><path d="m8 11 7.8-4.7M8 13l7.8 4.7" /></>,
+    copyShareLink: <><path d="M10.2 13.8a4 4 0 0 0 5.7.1l2.1-2.1a4 4 0 0 0-5.7-5.7l-1.2 1.2" /><path d="M13.8 10.2a4 4 0 0 0-5.7-.1L6 12.2a4 4 0 0 0 5.7 5.7l1.2-1.2" /></>,
+    cancelShare: <><circle cx="12" cy="12" r="8.5" /><path d="m8.5 8.5 7 7m0-7-7 7" /></>,
     details: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5h.01" /></>,
     delete: <><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6.5 7l.8 14h9.4l.8-14" /></>,
     create: <><path d="M3.5 7.5h6l1.8 2h9.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M12 12v6M9 15h6" /></>,
@@ -257,15 +271,17 @@ function CloudActionIcon({ action }: { action: CloudActionIconType }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
 
-function CloudContextMenu({ state, selectedCount, recycleBin, virtualRecycleBin, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualRecycleBin: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
+function CloudContextMenu({ state, selectedCount, recycleBin, virtualRecycleBin, myShares, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualRecycleBin: boolean; myShares: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudMenuAction; label: string; danger?: boolean; separated?: boolean }> = state.kind === 'background'
-    ? recycleBin ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传' }, { action: 'refresh', label: '刷新', separated: true }]
+    ? recycleBin || myShares ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传' }, { action: 'refresh', label: '刷新', separated: true }]
     : virtualRecycleBin
       ? [{ action: 'open', label: '打开' }]
+      : myShares
+      ? [{ action: 'copyShareLink', label: '复制分享链接' }, { action: 'cancelShare', label: '取消分享', danger: true, separated: true }]
       : recycleBin
       ? [{ action: 'restore', label: '恢复' }, { action: 'delete', label: '永久删除', danger: true, separated: true }]
-      : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, ...(selectedCount === 1 ? [{ action: 'details' as const, label: '文件详情', separated: true }] : []), { action: 'delete', label: '删除', danger: true, separated: true }];
+      : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, { action: 'share', label: '分享', separated: true }, { action: 'delete', label: '删除', danger: true, separated: true }];
   const [menuSize, setMenuSize] = useState({ width: 210, height: items.length * 38 + 24 });
   const left = Math.max(8, Math.min(state.x, window.innerWidth - menuSize.width - 8));
   const top = Math.max(8, Math.min(state.y, window.innerHeight - menuSize.height - 8));
@@ -317,12 +333,12 @@ function CloudSelectionOverflowMenu({ anchor, singleSelection, recycleBin, disab
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudHeaderMenuAction; label: string; separated?: boolean }> = [
     ...(recycleBin
-      ? singleSelection ? [{ action: 'details' as const, label: '文件详情' }] : []
+      ? []
       : [
         ...(singleSelection ? [{ action: 'rename' as const, label: '重命名' }] : []),
         { action: 'move' as const, label: '移动', separated: singleSelection },
         { action: 'copy' as const, label: '复制到' },
-        ...(singleSelection ? [{ action: 'details' as const, label: '文件详情', separated: true }] : [])
+        { action: 'share' as const, label: '分享', separated: true }
       ])
   ];
   const width = 180;
@@ -385,15 +401,54 @@ function useModalFocusTrap(containerRef: React.RefObject<HTMLElement | null>, in
   }, [containerRef, initialFocusRef]);
 }
 
-function CloudFileDetails({ file, path, onClose }: { file: CloudFile; path: string; onClose(): void }) {
-  const dialogRef = useRef<HTMLElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-  useModalFocusTrap(dialogRef, closeRef, onClose);
+async function copyCloudShareLink(value: string) {
+  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    const { writeText } = await import('@tauri-apps/plugin-clipboard-manager');
+    await writeText(value);
+    return;
+  }
+  await navigator.clipboard.writeText(value);
+}
 
-  return createPortal(<div className="cloud-confirm-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
-    <section ref={dialogRef} className="cloud-file-details" role="dialog" aria-modal="true" aria-label="文件详情">
-      <header><span className={`cloud-details-icon ${file.kind}`}><CloudFileIcon kind={file.kind} /></span><div><h3>{file.name}</h3><small>{file.kind === 'folder' ? '文件夹' : '文件'}</small></div><button ref={closeRef} className="cloud-details-close" aria-label="关闭文件详情" onClick={onClose}>×</button></header>
-      <dl><div><dt>位置</dt><dd>{path}</dd></div>{file.kind === 'file' && <div><dt>大小</dt><dd>{readableSize(file.size)}</dd></div>}<div><dt>修改时间</dt><dd>{formatCloudModifiedAt(file.modifiedAt)}</dd></div></dl>
+function sharePassCodeError(passCode: string, constraint?: SharePassCodeConstraint): string | null {
+  const value = passCode.trim();
+  if (!value || !constraint) return null;
+  const hasValidLength = value.length >= constraint.minLength && value.length <= constraint.maxLength;
+  const hasValidCharacters = constraint.characterSet !== 'asciiAlphanumeric' || /^[A-Za-z0-9]+$/.test(value);
+  return hasValidLength && hasValidCharacters ? null : constraint.hint;
+}
+
+function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstraint, onCreate, onCopy, onClose }: { provider: CloudProvider; items: readonly CloudFile[]; share: CloudShare | null; busy: boolean; sharePassCodeConstraint?: SharePassCodeConstraint; onCreate(options: CloudShareOptions): void; onCopy(value: string): void; onClose(): void }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const initialFocusRef = useRef<HTMLInputElement>(null);
+  const [passCode, setPassCode] = useState('');
+  const [generatePassCode, setGeneratePassCode] = useState(false);
+  const [expiresInDays, setExpiresInDays] = useState('');
+  useModalFocusTrap(dialogRef, initialFocusRef, onClose);
+  const title = items.length === 1 ? items[0]?.name ?? '分享文件' : `${items[0]?.name ?? '文件'} 等 ${items.length} 项`;
+  const serverGeneratedPassCode = provider === 'pikpak' || provider === 'xunlei';
+  const alwaysGeneratedPassCode = provider === 'tianyi';
+  const expiryOptions = alwaysGeneratedPassCode ? [['', '永久有效'], ['1', '1 天'], ['7', '7 天']] : [['', '永久有效'], ['1', '1 天'], ['7', '7 天'], ['30', '30 天']];
+  const passCodeError = sharePassCodeError(passCode, sharePassCodeConstraint);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (passCodeError) return;
+    onCreate({ name: title, ...(serverGeneratedPassCode ? (generatePassCode ? { generatePassCode: true } : {}) : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
+  };
+  return createPortal(<div className="cloud-confirm-backdrop">
+    <section ref={dialogRef} className="cloud-share-dialog" role="dialog" aria-modal="true" aria-label={share ? '分享链接已创建' : '创建分享链接'}>
+      {share ? <>
+        <h3>分享链接已创建</h3>
+        <p>{share.name}</p>
+        <form className="cloud-operation-editor"><label>分享链接<input aria-label="分享链接" readOnly value={share.url} /></label></form>
+        {share.passCode && <p>提取码：<b>{share.passCode}</b></p>}
+        <button className="secondary" onClick={() => onCopy(share.url)}>复制分享链接</button><button className="primary" onClick={onClose}>完成</button>
+      </> : <form onSubmit={submit}>
+        <h3>创建分享链接</h3>
+        <p>将分享 {title}。{sharePassCodeConstraint ? `可选设置提取码和有效期，${sharePassCodeConstraint.hint}` : '可选设置提取码和有效期。'}</p>
+        <div className="cloud-share-options">{alwaysGeneratedPassCode ? <label>提取码由天翼云盘自动生成</label> : serverGeneratedPassCode ? <label><input ref={initialFocusRef} aria-label="自动生成提取码" type="checkbox" checked={generatePassCode} onChange={(event) => setGeneratePassCode(event.target.checked)} /> 自动生成提取码</label> : <label>提取码（可选）<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label="提取码" disabled={busy} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}<label>有效期<select aria-label="分享有效期" value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)}>{expiryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
+        <button type="button" className="secondary" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy || Boolean(passCodeError)} type="submit">{busy ? '正在创建…' : '创建分享链接'}</button>
+      </form>}
     </section>
   </div>, document.body);
 }
@@ -528,7 +583,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const latestUploadProgress = useRef<CloudUploadProgress | null>(null);
   const [contextMenu, setContextMenu] = useState<CloudContextMenuState | null>(null);
   const [selectionMenuAnchor, setSelectionMenuAnchor] = useState<{ x: number; y: number } | null>(null);
-  const [detailsFile, setDetailsFile] = useState<CloudFile | null>(null);
+  const [shareItems, setShareItems] = useState<readonly CloudFile[] | null>(null);
+  const [createdShare, setCreatedShare] = useState<CloudShare | null>(null);
   const [destinationAction, setDestinationAction] = useState<DestinationAction | null>(null);
   const authorizationCompletionInFlight = useRef<number | null>(null);
   const webAuthorizationActive = useRef(false);
@@ -547,9 +603,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const currentDirectoryId = directory?.id ?? breadcrumbs.at(-1)?.id ?? rootId;
   const recycleBinId = descriptor.recycleBinDirectoryId;
   const isRecycleBin = currentDirectoryId === recycleBinId;
+  const isMyShares = currentDirectoryId === MY_SHARES_DIRECTORY_ID;
   const isVirtualRecycleBinItem = (item: CloudFile | undefined) => item?.id === recycleBinId;
+  const isVirtualMySharesItem = (item: CloudFile | undefined) => item?.id === MY_SHARES_DIRECTORY_ID;
   const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
-  const selectableItems = sortedItems.filter((item) => !isVirtualRecycleBinItem(item));
+  const selectedVirtualMyShares = selected.some(isVirtualMySharesItem);
+  const selectableItems = sortedItems.filter((item) => !isVirtualRecycleBinItem(item) && !isVirtualMySharesItem(item));
   const operationBusy = operationRunning || operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
   const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
@@ -604,12 +663,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (workspaceVisible) return;
     setContextMenu(null);
     setSelectionMenuAnchor(null);
-    setDetailsFile(null);
     setDestinationAction(null);
     setProviderInfoOpen(false);
     setUploadPickerOpen(false);
     setPendingDownload(null);
     setPendingTrash(false);
+    setShareItems(null);
+    setCreatedShare(null);
     setEditor(null);
   }, [workspaceVisible]);
 
@@ -683,11 +743,26 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     setContextMenu(null);
     selectionAnchor.current = null;
     try {
-      const next = await client.listCloudDirectory(provider, parentId);
+      const next = parentId === MY_SHARES_DIRECTORY_ID
+        ? { id: MY_SHARES_DIRECTORY_ID, items: (await client.listCloudShares(provider)).map((share) => ({
+          id: `__all_downloader_share__:${share.id}`,
+          parentId: MY_SHARES_DIRECTORY_ID,
+          name: share.name,
+          kind: share.kind,
+          modifiedAt: share.createdAt,
+          shareId: share.id,
+          shareUrl: share.url,
+        })) }
+        : await client.listCloudDirectory(provider, parentId);
       const recycleBinId = descriptor.recycleBinDirectoryId;
-      const items = parentId === rootId && !next.items.some((item) => item.id === recycleBinId)
-        ? [...next.items, { id: recycleBinId, parentId: rootId, name: '回收站', kind: 'folder' as const }]
+      const rootItems = parentId === rootId
+        ? [
+          ...next.items,
+          ...(next.items.some((item) => item.id === recycleBinId) ? [] : [{ id: recycleBinId, parentId: rootId, name: '回收站', kind: 'folder' as const }]),
+          ...(next.items.some((item) => item.id === MY_SHARES_DIRECTORY_ID) ? [] : [{ id: MY_SHARES_DIRECTORY_ID, parentId: rootId, name: '我的分享', kind: 'folder' as const }]),
+        ]
         : next.items;
+      const items = rootItems;
       setDirectory({ ...next, items });
       setBreadcrumbs(nextBreadcrumbs);
       setDirectoryState(items.length ? 'ready' : 'empty');
@@ -992,7 +1067,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function openEditor(next: Exclude<Editor, null>) {
-    if (isRecycleBin || selectedVirtualRecycleBin) return;
+    if (isRecycleBin || isMyShares || selectedVirtualRecycleBin || selectedVirtualMyShares) return;
     setContextMenu(null);
     setEditor(next);
     setEditorValue(next === 'rename' ? selected[0]?.name ?? '' : '');
@@ -1007,8 +1082,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (event.shiftKey && anchorIndex >= 0) {
       const from = Math.min(anchorIndex, index);
       const to = Math.max(anchorIndex, index);
-      const range = sortedItems.slice(from, to + 1).filter((entry) => !isVirtualRecycleBinItem(entry)).map((entry) => entry.id);
-      setSelectedIds(event.ctrlKey || event.metaKey ? (current) => Array.from(new Set([...current.filter((id) => id !== recycleBinId), ...range])) : range);
+      const range = sortedItems.slice(from, to + 1).filter((entry) => !isVirtualRecycleBinItem(entry) && !isVirtualMySharesItem(entry)).map((entry) => entry.id);
+      setSelectedIds(event.ctrlKey || event.metaKey ? (current) => Array.from(new Set([...current.filter((id) => id !== recycleBinId && id !== MY_SHARES_DIRECTORY_ID), ...range])) : range);
     } else if (event.ctrlKey || event.metaKey) {
       toggleSelection(item.id);
     } else {
@@ -1018,7 +1093,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function openFolder(item: CloudFile) {
-    if (!activeAccount || isRecycleBin || item.kind !== 'folder' || operationBusy) return;
+    if (!activeAccount || isRecycleBin || isMyShares || item.kind !== 'folder' || operationBusy) return;
     void loadDirectory(activeAccount, item.id, [...breadcrumbs, { id: item.id, name: item.name }]);
   }
 
@@ -1061,7 +1136,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function downloadSelection() {
-    if (!selected.length || selectedVirtualRecycleBin || isRecycleBin) return;
+    if (!selected.length || selectedVirtualRecycleBin || selectedVirtualMyShares || isRecycleBin || isMyShares) return;
     if (privacyDownloadEnabled) {
       setPendingDownload(selected.slice());
       return;
@@ -1076,7 +1151,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function uploadFiles() {
-    if (isRecycleBin || operationBusy) return;
+    if (isRecycleBin || isMyShares || operationBusy) return;
     setUploadPickerOpen(true);
   }
 
@@ -1110,17 +1185,48 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (activeAccount) void loadDirectory(activeAccount, currentDirectoryId, breadcrumbs);
   }
 
+  function openShare(items = selected) {
+    if (!items.length || isRecycleBin || isMyShares || selectedVirtualRecycleBin || selectedVirtualMyShares) return;
+    setCreatedShare(null);
+    setShareItems(items.slice());
+  }
+
+  function submitCloudShare(options: CloudShareOptions) {
+    const items = shareItems;
+    if (!items?.length) return;
+    void runOperation('创建分享', async () => {
+      const share = await client.createCloudShare(provider, items.map((item) => item.id), options);
+      setCreatedShare(share);
+      return share;
+    }, false);
+  }
+
+  function cancelCloudShares(shareIds: readonly string[]) {
+    const targets = [...new Set(shareIds)];
+    if (!targets.length) return;
+    void runOperation('取消分享', () => client.cancelCloudShares(provider, targets), true);
+  }
+
+  function copyShareLink(value: string) {
+    void copyCloudShareLink(value).then(() => setOperation({ kind: 'success', message: '分享链接已复制' })).catch((error) => setOperation({ kind: 'error', message: `复制分享链接失败：${errorMessage(error, '请重试。')}` }));
+  }
+
   function runContextAction(action: CloudMenuAction) {
     const menu = contextMenu;
     setContextMenu(null);
-    if (menu?.kind === 'selection' && isVirtualRecycleBinItem(menu.item) && action !== 'open') return;
+    if (menu?.kind === 'selection' && (isVirtualRecycleBinItem(menu.item) || isVirtualMySharesItem(menu.item)) && action !== 'open') return;
     if (action === 'open' && menu?.kind === 'selection') openFolder(menu.item);
     if (action === 'download') downloadSelection();
     if (action === 'restore' && !selectedVirtualRecycleBin) void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()));
     if (action === 'rename' && !isRecycleBin) openEditor('rename');
     if (action === 'move' && !isRecycleBin) setDestinationAction('move');
     if (action === 'copy' && !isRecycleBin) setDestinationAction('copy');
-    if (action === 'details' && menu?.kind === 'selection') setDetailsFile(menu.item);
+    if (action === 'share') openShare();
+    if (action === 'copyShareLink' && menu?.kind === 'selection' && menu.item.shareUrl) copyShareLink(menu.item.shareUrl);
+    if (action === 'cancelShare' && menu?.kind === 'selection') {
+      const shareIds = selected.map((item) => item.shareId).filter((id): id is string => Boolean(id));
+      cancelCloudShares(shareIds);
+    }
     if (action === 'delete') setPendingTrash(true);
     if (action === 'create' && !isRecycleBin) openEditor('create');
     if (action === 'upload') uploadFiles();
@@ -1136,11 +1242,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   function runSelectionOverflowAction(action: CloudHeaderMenuAction) {
     setSelectionMenuAnchor(null);
     selectionMenuTrigger.current?.focus();
-    if (selectedVirtualRecycleBin) return;
+    if (selectedVirtualRecycleBin || selectedVirtualMyShares) return;
     if (action === 'rename' && !isRecycleBin) openEditor('rename');
     if (action === 'move' && !isRecycleBin) setDestinationAction('move');
     if (action === 'copy' && !isRecycleBin) setDestinationAction('copy');
-    if (action === 'details' && selected.length === 1) setDetailsFile(selected[0]);
+    if (action === 'share') openShare();
   }
 
   function handleFileListKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
@@ -1155,17 +1261,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setEditor(null);
       return;
     }
-    if (event.key === 'Enter' && !isRecycleBin && selected.length === 1 && selected[0].kind === 'folder') {
+    if (event.key === 'Enter' && !isRecycleBin && !isMyShares && selected.length === 1 && selected[0].kind === 'folder') {
       event.preventDefault();
       openFolder(selected[0]);
       return;
     }
-    if (event.key === 'F2' && !isRecycleBin && !selectedVirtualRecycleBin && selected.length === 1) {
+    if (event.key === 'F2' && !isRecycleBin && !isMyShares && !selectedVirtualRecycleBin && !selectedVirtualMyShares && selected.length === 1) {
       event.preventDefault();
       openEditor('rename');
       return;
     }
-    if (event.key === 'Delete' && selected.length && !selectedVirtualRecycleBin) {
+    if (event.key === 'Delete' && selected.length && !selectedVirtualRecycleBin && !selectedVirtualMyShares && !isMyShares) {
       event.preventDefault();
       setPendingTrash(true);
     }
@@ -1173,7 +1279,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   function submitEditor(event: FormEvent) {
     event.preventDefault();
-    if (!activeAccount || isRecycleBin || selectedVirtualRecycleBin || !editorValue.trim()) return;
+    if (!activeAccount || isRecycleBin || isMyShares || selectedVirtualRecycleBin || selectedVirtualMyShares || !editorValue.trim()) return;
     if (editor === 'create') void runOperation('新建目录', () => client.createCloudDirectory(provider, currentDirectoryId, editorValue.trim()).then(() => undefined));
     if (editor === 'rename' && selected[0]) void runOperation('重命名', () => client.renameCloudFile(provider, selected[0].id, editorValue.trim()));
   }
@@ -1302,8 +1408,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         <div className="cloud-breadcrumbs" role="navigation" aria-label="当前目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1} onClick={() => void loadDirectory(activeAccount, crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label="文件操作">
-        {!isRecycleBin && <button aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传</button>}
-        {!isRecycleBin && <button aria-label="新建目录" disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />新建文件夹</button>}
+        {!isRecycleBin && !isMyShares && <button aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传</button>}
+        {!isRecycleBin && !isMyShares && <button aria-label="新建目录" disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />新建文件夹</button>}
         <button className="cloud-icon-button cloud-refresh-button" aria-label="刷新" title="刷新" disabled={operationBusy} onClick={refreshDirectory}><CloudActionIcon action="refresh" /></button>
       </div>
     </div>
@@ -1324,12 +1430,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       onKeyDown={handleFileListKeyDown}
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
-      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin ? <span className="cloud-selection-hint">回收站仅可打开</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />恢复</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />永久删除</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label="按名称排序" aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>名称<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label="按大小排序" aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>大小<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label="按修改时间排序" aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>修改时间<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
-      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? '回收站为空' : '此目录为空'}</b><span>{isRecycleBin ? '没有可恢复或永久删除的项目' : '可在这里上传文件或新建目录'}</span></div> : sortedItems.map((item, index) => {
+      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">特殊文件夹仅可打开</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />恢复</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />永久删除</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl)}><CloudActionIcon action="copyShareLink" />复制链接</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />取消分享</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label="按名称排序" aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>名称<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label="按大小排序" aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>大小<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label="按修改时间排序" aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>修改时间<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
+      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? '回收站为空' : isMyShares ? '暂无分享文件' : '此目录为空'}</b><span>{isRecycleBin ? '没有可恢复或永久删除的项目' : isMyShares ? '在文件或目录的右键菜单中创建分享链接' : '可在这里上传文件或新建目录'}</span></div> : sortedItems.map((item, index) => {
         const isSelected = selectedIds.includes(item.id);
-        const iconKind = isVirtualRecycleBinItem(item) ? 'recycle-bin' : item.kind;
+        const iconKind: CloudFileIconKind = isVirtualRecycleBinItem(item) ? 'recycle-bin' : isVirtualMySharesItem(item) ? 'my-shares' : item.kind;
         return <div
           className={`cloud-row cloud-file-row ${isSelected ? 'selected' : ''}`}
+          data-cloud-virtual-folder={isVirtualMySharesItem(item) ? 'my-shares' : undefined}
           data-cloud-file-row
           role="treeitem"
           aria-selected={isSelected}
@@ -1346,9 +1453,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       })}
     </div>}
     {uploadPickerOpen && <LocalUploadPicker listEntries={client.listLocalUploadEntries ?? unavailableLocalUploadListing} onCancel={() => setUploadPickerOpen(false)} onConfirm={paths => { setUploadPickerOpen(false); void uploadSelectedFiles(paths); }} />}
-    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
+    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} myShares={isMyShares} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
-    {detailsFile && <CloudFileDetails file={detailsFile} path={`/${breadcrumbs.slice(1).map((crumb) => crumb.name).join('/') || ''}`} onClose={() => setDetailsFile(null)} />}
+    {shareItems && <CloudShareDialog provider={provider} items={shareItems} share={createdShare} busy={operationBusy} sharePassCodeConstraint={descriptor.sharePassCodeConstraint} onCreate={submitCloudShare} onCopy={copyShareLink} onClose={() => { setShareItems(null); setCreatedShare(null); }} />}
     {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { const action = destinationAction; setDestinationAction(null); queueAuthorizationContinuation(`选择${action === 'copy' ? '复制' : '移动'}目标`, async () => { setDestinationAction(action); }, errorMessage(error, `读取${action === 'copy' ? '复制' : '移动'}目标目录需要网页验证。`)); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
   </section>;
 }

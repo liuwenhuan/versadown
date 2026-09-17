@@ -7,10 +7,10 @@
 //! printed.
 
 use alldownloader_lib::cloud::{
-    commands::CloudState, CloudDirectory, CloudError, CloudFile, CloudFileKind, CloudHttpRequest,
-    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudUploadTransport, CredentialStore,
-    DpapiCredentialStore, ProviderRegistry, ReqwestTransport, ResolvedCloudDownload,
-    UploadHttpRequest, UploadHttpResponse,
+    commands::CloudState, CloudDirectory, CloudError, CloudFile, CloudFileKind,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShareOptions,
+    CloudUploadTransport, CredentialStore, DpapiCredentialStore, ProviderRegistry,
+    ReqwestTransport, ResolvedCloudDownload, UploadHttpRequest, UploadHttpResponse,
 };
 use std::{
     error::Error,
@@ -164,8 +164,27 @@ impl CloudHttpTransport for LiveTransport {
                 } else {
                     String::new()
                 };
+                let share_list_contract = if endpoint.ends_with("/share/mypage/detail") {
+                    let entries = value
+                        .as_ref()
+                        .and_then(|value| value.pointer("/data/list"))
+                        .and_then(serde_json::Value::as_array);
+                    let count = entries.map_or(0, Vec::len);
+                    let fields = entries
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_object)
+                        .flat_map(|entry| entry.keys().map(String::as_str))
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("; share-list count={count}; item-fields={fields}")
+                } else {
+                    String::new()
+                };
                 self.observations.lock().unwrap().push(format!(
-                    "{method} {endpoint}; HTTP {}; code={code}; status={status}; message={message:?}; data={data_shape}({data_keys}); keys={keys}{upload_contract}",
+                    "{method} {endpoint}; HTTP {}; code={code}; status={status}; message={message:?}; data={data_shape}({data_keys}); keys={keys}{upload_contract}{share_list_contract}",
                     response.status,
                 ));
                 Ok(response)
@@ -363,6 +382,38 @@ fn wait_until_absent(
         thread::sleep(Duration::from_secs(1));
     }
     Err(failure("isolated item remained visible after deletion"))
+}
+
+fn cleanup_abandoned_uc_e2e_shares(
+    state: &CloudState,
+    http: &LiveTransport,
+) -> LiveResult<()> {
+    let provider = CloudProvider::Uc;
+    let shares = ProviderRegistry::global()
+        .driver(provider, &state.store, http)
+        .list_shares()
+        .map_err(|error| {
+            failure(format!(
+                "UC test-share cleanup listing failed: {}",
+                error_kind(&error)
+            ))
+        })?;
+    let ids = shares
+        .into_iter()
+        .filter(|share| share.name.starts_with("AllDownloader-E2E-uc-"))
+        .map(|share| share.id)
+        .collect::<Vec<_>>();
+    for (index, share_id) in ids.into_iter().enumerate() {
+        ProviderRegistry::global()
+            .driver(provider, &state.store, http)
+            .cancel_shares(std::slice::from_ref(&share_id))
+            .map_err(|error| {
+                failure(format!(
+                    "UC abandoned test-share cleanup item #{index} failed: {error}",
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 fn upload_file(
@@ -923,6 +974,157 @@ fn run_uc_requested_upload() -> LiveResult<()> {
     }
 }
 
+fn run_uc_personal_share_lifecycle() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let root_id = ProviderRegistry::global().get(provider).root_directory_id;
+    let credentials_root = session_root()?;
+    let direct_store = DpapiCredentialStore::new(credentials_root.clone())?;
+    direct_store.load(provider.key()).map_err(|error| {
+        failure(format!(
+            "{} credential decrypt failed: {}",
+            provider.key(),
+            error_kind(&error)
+        ))
+    })?;
+    eprintln!("LIVE-E2E {} credential decrypt: PASS", provider.key());
+    let state = CloudState::new(credentials_root)?;
+    if state.store.load(provider.key())?.is_none() {
+        return Err(failure(format!(
+            "{} is not currently authorized",
+            provider.key()
+        )));
+    }
+    let http = LiveTransport::new()?;
+    if let Err(error) = cleanup_abandoned_uc_e2e_shares(&state, &http) {
+        http.report();
+        return Err(error);
+    }
+    let test_name = test_root_name(provider);
+    let test_root = match step(provider, "personal-share create root", || {
+        create_directory(&state, &http, provider, root_id, &test_name)
+    }) {
+        Ok(root) => root,
+        Err(error) => {
+            http.report();
+            if let Ok(created) = wait_for_named(
+                &state,
+                &http,
+                provider,
+                root_id,
+                &test_name,
+                CloudFileKind::Folder,
+            ) {
+                let _ = trash(&state, &http, provider, &created.id);
+                let _ = purge_named_from_recycle(&state, &http, provider, &[&test_name]);
+            }
+            return Err(error);
+        }
+    };
+    let mut created_share_id = None;
+    let result = (|| -> LiveResult<()> {
+        step(provider, "personal-share create child", || {
+            create_directory(&state, &http, provider, &test_root.id, "share-source")
+        })?;
+        let share = step(provider, "personal-share create", || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .create_share(
+                    std::slice::from_ref(&test_root.id),
+                    &CloudShareOptions {
+                        name: test_name.clone(),
+                        pass_code: None,
+                        generate_pass_code: false,
+                        expires_in_days: None,
+                    },
+                )
+        })?;
+        if share.id.is_empty() {
+            return Err(failure("UC personal-share create returned an empty ID"));
+        }
+        let share_url = url::Url::parse(&share.url)
+            .map_err(|_| failure("UC personal-share create returned an invalid URL"))?;
+        if share_url.scheme() != "https" || share_url.host_str().is_none() {
+            return Err(failure(
+                "UC personal-share create did not return an HTTPS URL",
+            ));
+        }
+        created_share_id = Some(share.id.clone());
+        let listed = step(provider, "personal-share list", || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .list_shares()
+        })?;
+        if !listed.iter().any(|candidate| candidate.id == share.id) {
+            return Err(failure("UC personal-share list did not contain the created share"));
+        }
+        step(provider, "personal-share cancel", || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .cancel_shares(std::slice::from_ref(&share.id))
+        })?;
+        let listed_after_cancellation = step(provider, "personal-share list after cancel", || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .list_shares()
+        })?;
+        if listed_after_cancellation
+            .iter()
+            .any(|candidate| candidate.id == share.id)
+        {
+            return Err(failure(
+                "UC personal-share list still contained the cancelled share",
+            ));
+        }
+        created_share_id = None;
+        eprintln!("LIVE-E2E uc personal-share cancellation list confirmation: PASS");
+        Ok(())
+    })();
+    let share_cleanup = match created_share_id.take() {
+        Some(share_id) => ProviderRegistry::global()
+            .driver(provider, &state.store, &http)
+            .cancel_shares(std::slice::from_ref(&share_id))
+            .map_err(|error| {
+                failure(format!(
+                    "UC personal-share cleanup failed: {}",
+                    error_kind(&error)
+                ))
+            }),
+        None => Ok(()),
+    };
+    let directory_cleanup = trash(&state, &http, provider, &test_root.id)
+        .map_err(|error| {
+            failure(format!(
+                "UC personal-share root cleanup failed: {}",
+                error_kind(&error)
+            ))
+        })
+        .and_then(|()| wait_until_absent(&state, &http, provider, root_id, &test_root.id))
+        .and_then(|()| purge_named_from_recycle(&state, &http, provider, &[&test_name]));
+    http.report();
+    match (result, share_cleanup, directory_cleanup) {
+        (Ok(()), Ok(()), Ok(())) => {
+            eprintln!("LIVE-E2E uc personal-share cleanup: PASS");
+            Ok(())
+        }
+        (Err(test), Ok(()), Ok(())) => Err(test),
+        (Ok(()), Err(share_cleanup), Ok(())) => Err(share_cleanup),
+        (Ok(()), Ok(()), Err(directory_cleanup)) => Err(directory_cleanup),
+        (Err(test), Err(share_cleanup), Ok(())) => Err(failure(format!(
+            "personal-share test failed ({test}); share cleanup also failed ({share_cleanup})"
+        ))),
+        (Err(test), Ok(()), Err(directory_cleanup)) => Err(failure(format!(
+            "personal-share test failed ({test}); directory cleanup also failed ({directory_cleanup})"
+        ))),
+        (Ok(()), Err(share_cleanup), Err(directory_cleanup)) => Err(failure(format!(
+            "personal-share share cleanup failed ({share_cleanup}); directory cleanup also failed ({directory_cleanup})"
+        ))),
+        (Err(test), Err(share_cleanup), Err(directory_cleanup)) => Err(failure(format!(
+            "personal-share test failed ({test}); share cleanup failed ({share_cleanup}); directory cleanup failed ({directory_cleanup})"
+        ))),
+    }
+}
+
 #[test]
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
 fn live_aliyun_complete_crud_and_transfer_matrix() -> LiveResult<()> {
@@ -966,6 +1168,12 @@ fn live_uc_folder_operations_matrix() -> LiveResult<()> {
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, ALLDOWNLOADER_LIVE_UC_UPLOAD_PATH and an authorized UC session"]
 fn live_uc_requested_file_upload() -> LiveResult<()> {
     run_uc_requested_upload()
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized UC session; creates, cancels, and cleans up one isolated personal share"]
+fn live_uc_personal_share_lifecycle() -> LiveResult<()> {
+    run_uc_personal_share_lifecycle()
 }
 
 #[test]

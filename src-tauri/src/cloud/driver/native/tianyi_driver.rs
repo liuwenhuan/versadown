@@ -148,6 +148,35 @@ impl DownloadOps for TianyiDriver<'_> {
         }
     }
 }
+impl ShareOps for TianyiDriver<'_> {
+    fn create_share(
+        &mut self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
+        tianyi::TianyiClient::new(
+            load_provider_session(CloudProvider::Tianyi, &self.store)?,
+            &self.http,
+        )
+        .create_share(file_ids, options)
+    }
+
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
+        tianyi::TianyiClient::new(
+            load_provider_session(CloudProvider::Tianyi, &self.store)?,
+            &self.http,
+        )
+        .list_shares()
+    }
+
+    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
+        tianyi::TianyiClient::new(
+            load_provider_session(CloudProvider::Tianyi, &self.store)?,
+            &self.http,
+        )
+        .cancel_shares(share_ids)
+    }
+}
 impl ProviderAuth for TianyiDriver<'_> {
     fn refresh_session(&mut self) -> Result<bool, CloudError> {
         if self.store.load("tianyi")?.is_none() {
