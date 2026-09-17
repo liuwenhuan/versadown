@@ -354,6 +354,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            launcher_input::set_launcher_input_regions,
+            launcher_input::launcher_input_hit_test_for_test,
             app_version_command,
             check_for_app_update,
             local_upload_picker::local_upload_entries,

@@ -251,17 +251,27 @@ async function run() {
 
     const compact = JSON.parse(await evaluate(launcher, `JSON.stringify((() => {
       const button = document.querySelector('.launcher-trigger');
-      const image = button.querySelector('img');
+      const mark = button.querySelector('svg.launcher-mark');
+      const shell = mark?.querySelector('.launcher-mark-shell');
+      const markBounds = shell?.getBBox();
       const rect = button.getBoundingClientRect();
       const style = getComputedStyle(button);
-      return { width: innerWidth, height: innerHeight, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, display: style.display, visibility: style.visibility, opacity: style.opacity, background: style.background, scale: devicePixelRatio, clipPath: getComputedStyle(image).clipPath, imageLoaded: Boolean(image?.complete && image?.naturalWidth > 0) };
+      return { width: innerWidth, height: innerHeight, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, display: style.display, visibility: style.visibility, opacity: style.opacity, background: style.background, scale: devicePixelRatio, markBounds: markBounds && { x: markBounds.x, y: markBounds.y, width: markBounds.width, height: markBounds.height }, markViewBox: mark && { width: mark.viewBox.baseVal.width, height: mark.viewBox.baseVal.height }, iconRendered: Boolean(shell && mark.querySelector('.launcher-mark-chevron') && shell.isPointInFill(new DOMPoint(64, 64)) && !shell.isPointInFill(new DOMPoint(0, 0)) && getComputedStyle(mark).display !== 'none') };
     })())`));
     assert(compact.display !== 'none' && compact.visibility === 'visible' && compact.opacity === '1', 'Compact launcher button is not visible.');
     assert(compact.left >= 0 && compact.top >= 0 && compact.right <= compact.width + 0.5 && compact.bottom <= compact.height + 0.5, `Compact launcher is outside its viewport: ${JSON.stringify(compact)}`);
-    assert(compact.imageLoaded, 'Compact launcher icon image did not load.');
+    assert(compact.iconRendered, 'Compact launcher SVG icon did not render.');
     const outline = JSON.parse(fs.readFileSync(path.join(projectRoot, 'src/assets/launcher/hexagon.json'), 'utf8'));
-    const expectedClip = `polygon(${outline.map(([x, y]) => `${x}% ${y}%`).join(',')})`;
-    assert(compact.clipPath.replaceAll(' ', '') === expectedClip.replaceAll(' ', ''), `Launcher clip differs from native geometry: ${compact.clipPath}`);
+    const nativeOutlineBounds = {
+      x: Math.min(...outline.map(([x]) => x)), y: Math.min(...outline.map(([, y]) => y)),
+      width: Math.max(...outline.map(([x]) => x)) - Math.min(...outline.map(([x]) => x)),
+      height: Math.max(...outline.map(([, y]) => y)) - Math.min(...outline.map(([, y]) => y))
+    };
+    for (const key of ['x', 'y', 'width', 'height']) {
+      const extent = key === 'x' || key === 'width' ? compact.markViewBox.width : compact.markViewBox.height;
+      assert(Math.abs(compact.markBounds[key] / extent * 100 - nativeOutlineBounds[key]) < 0.01,
+        `Launcher SVG ${key} differs from native geometry: ${JSON.stringify(compact.markBounds)}`);
+    }
     assert(!compact.background.includes('linear-gradient'), 'Compact launcher unexpectedly restored the removed rectangular gradient background.');
     assert(!await evaluate(launcher, 'Boolean(document.querySelector(".launcher-live-indicator"))'), 'Zero-speed launcher unexpectedly shows a traffic capsule.');
 
@@ -276,6 +286,35 @@ async function run() {
     assert(nativeCompact.position.x + nativeCompact.size.width <= workArea.position.x + workArea.size.width, `Launcher extends beyond the right edge: ${JSON.stringify(nativeCompact)}`);
     assert(nativeCompact.position.y + nativeCompact.size.height <= workArea.position.y + workArea.size.height, `Launcher extends beyond the bottom edge: ${JSON.stringify(nativeCompact)}`);
 
+    // This is command-path + native message coverage, not OS mouse routing.
+    await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_input_regions', {
+      regions: [{ x: 346, y: 328, width: 64, height: 64 }]
+    })`);
+    const hitPoints = [[378, 360], [20, 20], [400, 20], [20, 650], [400, 650]];
+    const nativeHits = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('launcher_input_hit_test_for_test', { points: ${JSON.stringify(hitPoints)} })`);
+    assert(nativeHits.length > 1, 'Native hit-test smoke did not enumerate the WebView2 child HWNDs.');
+    for (const target of nativeHits.filter((item) => item.sameThread)) {
+      assert(target.installed, `Same-thread launcher HWND has no input subclass: ${JSON.stringify(target)}`);
+      assert(JSON.stringify(target.hits) === JSON.stringify([1, -1, -1, -1, -1]), `Unexpected native WM_NCHITTEST results: ${JSON.stringify(target)}`);
+    }
+    const invalidUpdateRejected = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_input_regions', {
+      regions: [{ x: 0, y: 0, width: -1, height: 64 }]
+    }).then(() => false, () => true)`);
+    assert(invalidUpdateRejected, 'Invalid input-region update was accepted.');
+    const hitsAfterInvalidUpdate = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('launcher_input_hit_test_for_test', { points: ${JSON.stringify(hitPoints)} })`);
+    assert(JSON.stringify(hitsAfterInvalidUpdate) === JSON.stringify(nativeHits), 'Invalid input-region update changed native hit results.');
+    const managerUpdateRejected = await evaluate(manager, `window.__TAURI_INTERNALS__.invoke('set_launcher_input_regions', {
+      regions: [{ x: 0, y: 0, width: 64, height: 64 }]
+    }).then(() => false, () => true)`);
+    assert(managerUpdateRejected, 'Manager window was allowed to change launcher input regions.');
+    const boundsAfterInput = await evaluate(launcher, `(async () => ({
+      position: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_position', { label: 'launcher' }),
+      size: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_size', { label: 'launcher' })
+    }))()`);
+    assert(JSON.stringify(boundsAfterInput.position) === JSON.stringify(nativeCompact.position)
+      && JSON.stringify(boundsAfterInput.size) === JSON.stringify(nativeCompact.size), 'Input-region update changed native launcher bounds.');
+    process.stdout.write(`Launcher input command/native-message smoke passed: ${JSON.stringify(nativeHits)}. DOM events and SendMessage(WM_NCHITTEST) do not prove OS mouse click-through; visible four-quadrant/background-window validation remains required.\n`);
+
     const nativeRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
     assert(nativeRegion && nativeRegion.width === nativeRegion.height && nativeRegion.width > 0, `Windows launcher region is not circular: ${JSON.stringify(nativeRegion)}`);
     assert(nativeRegion.x >= 0 && nativeRegion.y >= 0, `Windows launcher region starts outside its native window: ${JSON.stringify(nativeRegion)}`);
@@ -285,7 +324,7 @@ async function run() {
       `Launcher native/client vertical origins disagree: ${JSON.stringify({ nativeRegion, nativeCompact, compact })}`);
 
     if (process.argv.includes('--geometry-only')) {
-      process.stdout.write(`Launcher geometry smoke passed: ${JSON.stringify({ scale: compact.scale, clipPath: compact.clipPath, nativeRegion, clientPosition: nativeCompact.clientPosition, outerPosition: nativeCompact.position })}\n`);
+      process.stdout.write(`Launcher geometry smoke passed: ${JSON.stringify({ scale: compact.scale, markBounds: compact.markBounds, nativeRegion, clientPosition: nativeCompact.clientPosition, outerPosition: nativeCompact.position })}\n`);
       return;
     }
 
