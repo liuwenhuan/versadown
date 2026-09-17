@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { QueueTask } from '../lib/types';
-import { formatBytes, formatEta, formatSpeed, hasKnownTotal, transferProgress } from '../lib/downloadEvents';
+import { formatBytes } from '../lib/downloadEvents';
 import { buildTaskFileTree, type TaskFileTreeNode } from '../lib/taskFileTree';
+
+type DetailPanel = 'files' | 'post-processing' | null;
 
 function DetailFileTree({ nodes, expanded, depth, onToggle }: { nodes: readonly TaskFileTreeNode[]; expanded: ReadonlySet<string>; depth: number; onToggle(key: string): void }) {
   return <>{nodes.map(node => {
@@ -19,26 +21,41 @@ function DetailFileTree({ nodes, expanded, depth, onToggle }: { nodes: readonly 
 
 export function TaskDetails({ task }: { task: QueueTask | undefined }) {
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(() => new Set());
+  const [expandedPanel, setExpandedPanel] = useState<DetailPanel>('files');
+
+  useEffect(() => {
+    setExpandedFiles(new Set());
+    setExpandedPanel('files');
+  }, [task?.id]);
+
   if (!task) return <aside className="task-details muted"><b>选择一个任务</b><span>查看来源、错误和后处理状态。</span></aside>;
   const fileTree = buildTaskFileTree(task);
+  const hasFiles = fileTree.length > 0;
+  const filesExpanded = hasFiles && expandedPanel === 'files';
+  const postProcessingExpanded = expandedPanel === 'post-processing' || (!hasFiles && expandedPanel === 'files');
+  const postProcessingNote = task.post_processing_note?.trim() || '未设置后处理信息。';
+
+  const togglePanel = (panel: Exclude<DetailPanel, null>) => {
+    setExpandedPanel(current => current === panel ? null : panel);
+  };
+
   return <aside className="task-details">
     <h2 className="task-detail-name">{task.name}</h2>
-    <dl className="task-detail-summary">
-      <div><dt>状态</dt><dd>{task.status}</dd></div>
-      <div><dt>传输进度</dt><dd>{hasKnownTotal(task) ? `${task.progress}% · ${transferProgress(task)}` : transferProgress(task)}</dd></div>
-      <div><dt>下载速度</dt><dd>{formatSpeed(task.download_speed)}</dd></div>
-      <div><dt>连接数</dt><dd>{task.connections ?? '未知'}</dd></div>
-      <div><dt>预计剩余时间</dt><dd>{formatEta(task.eta_seconds)}</dd></div>
-      <div><dt>aria2 GID</dt><dd>{task.aria_gid ?? '未分配'}</dd></div>
-      {task.aria_error_code && <div><dt>aria2 错误码</dt><dd>{task.aria_error_code}</dd></div>}
-      {task.error && <div><dt>错误</dt><dd>{task.error}</dd></div>}
-    </dl>
     <section className="task-detail-source" aria-labelledby="task-source-label">
       <b id="task-source-label">来源</b>
-      <p title={task.source}>{task.source ?? '本地任务'}</p>
+      <p>{task.source ?? '本地任务'}</p>
     </section>
-    {fileTree.length ? <section className="detail-files" aria-label="文件信息"><b>文件信息</b><div className="detail-file-list"><DetailFileTree nodes={fileTree} expanded={expandedFiles} depth={0} onToggle={(key) => setExpandedFiles(current => { const next = new Set(current); next.has(key) ? next.delete(key) : next.add(key); return next; })} /></div></section> : null}
-    {task.post_processing_note?.trim() ? <section className="task-post-processing-note"><b>解压密码和后处理</b><p>{task.post_processing_note}</p></section> : null}
-    <section className="safety-note"><b>安全处理</b><span>仅执行已确认的解压、合并、改名和校验步骤。</span></section>
+    {hasFiles && <section className="detail-files">
+      <button type="button" className="detail-panel-toggle" aria-expanded={filesExpanded} aria-label={`${filesExpanded ? '收起' : '展开'}文件信息`} onClick={() => togglePanel('files')}>
+        <span>文件信息</span><svg className={filesExpanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg>
+      </button>
+      {filesExpanded && <div className="detail-file-list" role="region" aria-label="文件信息"><DetailFileTree nodes={fileTree} expanded={expandedFiles} depth={0} onToggle={(key) => setExpandedFiles(current => { const next = new Set(current); next.has(key) ? next.delete(key) : next.add(key); return next; })} /></div>}
+    </section>}
+    <section className={`task-post-processing-note${postProcessingExpanded ? ' is-expanded' : ''}`}>
+      <button type="button" className="detail-panel-toggle" aria-expanded={postProcessingExpanded} aria-label={`${postProcessingExpanded ? '收起' : '展开'}后处理信息`} onClick={() => togglePanel('post-processing')}>
+        <span>后处理信息</span><svg className={postProcessingExpanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg>
+      </button>
+      <div className="task-post-processing-content"><p>{postProcessingNote}</p></div>
+    </section>
   </aside>;
 }

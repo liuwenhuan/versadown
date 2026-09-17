@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
-import { vi } from 'vitest';
+import { afterEach, vi } from 'vitest';
 import { TaskDetailsDialog } from './TaskDetailsDialog';
 
 const task = {
@@ -12,6 +12,8 @@ const task = {
   status: 'downloading',
   progress: 42,
 } as const;
+
+afterEach(cleanup);
 
 it('shows task details in an independent dialog and closes from its explicit close control', async () => {
   const user = userEvent.setup();
@@ -39,11 +41,13 @@ it('keeps task details open when its backdrop is clicked', () => {
   expect(onClose).toHaveBeenCalledOnce();
 });
 
-it('uses a fixed height with the file list as the only vertically scrollable detail area', () => {
+it('uses fixed, independently scrollable file-list and expanded post-processing panels', () => {
   const styles = readFileSync('src/styles.css', 'utf8');
 
   expect(styles).toContain('.task-details-dialog{position:relative;display:grid;width:min(620px,calc(100vw - 36px));height:min(520px,calc(100vh - 36px));');
   expect(styles).toContain('.task-details-dialog-content{min-height:0;overflow:hidden;');
   expect(styles).toContain('.detail-file-list{min-height:0;overflow-y:auto;');
+  expect(styles).toContain('.task-details .detail-file-list{height:176px;min-height:176px;');
+  expect(styles).toContain('.task-details .task-post-processing-note.is-expanded .task-post-processing-content{height:150px;overflow-y:auto}');
   expect(styles).not.toContain('.task-details-dialog-content{min-height:0;overflow-y:auto;');
 });
