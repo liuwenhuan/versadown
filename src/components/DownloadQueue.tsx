@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { QueueTask, TaskCommand } from '../lib/types';
+import { DownloadFile, QueueTask, TaskCommand } from '../lib/types';
 import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
 import { reorderTaskIds } from '../lib/taskOrder';
 
@@ -43,17 +43,77 @@ function childPathParts(value: string): string[] {
   return /^[a-z]:$/i.test(parts[0] ?? '') ? parts.slice(1) : parts;
 }
 
-function sharedChildRoot(children: readonly QueueTask[]): string | undefined {
-  const paths = children.map((child) => childPathParts(child.name));
-  if (!paths.length || paths.some((parts) => parts.length < 2)) return undefined;
+function btFilePathPrefixLength(files: readonly DownloadFile[], taskName: string): number {
+  const paths = files.map((file) => childPathParts(file.path));
+  if (!paths.length) return 0;
+  const titlePositions = paths.map((parts) => parts.findIndex((part) => part === taskName));
+  if (titlePositions[0] >= 0 && titlePositions.every((position) => position === titlePositions[0])) return titlePositions[0] + 1;
+  if (paths.some((parts) => parts.length < 2)) return 0;
   const root = paths[0][0];
-  return paths.every((parts) => parts[0] === root) ? root : undefined;
+  return paths.every((parts) => parts[0] === root) ? 1 : 0;
 }
 
-function displayChildName(child: QueueTask, root: string | undefined): string {
-  const parts = childPathParts(child.name);
-  const display = root && parts[0] === root ? parts.slice(1) : parts;
-  return display.join('/') || child.name;
+interface BtTreeEntry {
+  file: DownloadFile;
+  parts: string[];
+}
+
+function btFileTask(task: QueueTask, file: DownloadFile, name: string): QueueTask {
+  return {
+    id: `${task.id}-file-${file.index}`,
+    name,
+    kind: 'file',
+    status: task.status,
+    progress: file.length > 0 ? Math.min(100, Math.floor(file.completed_length * 100 / file.length)) : 0,
+    total_length: file.length,
+    completed_length: file.completed_length,
+    file_index: file.index,
+    selected: file.selected,
+  };
+}
+
+function buildBtFileTree(task: QueueTask): readonly QueueTask[] {
+  const files = task.files ?? [];
+  const prefixLength = btFilePathPrefixLength(files, displayTaskName(task));
+  const entries: BtTreeEntry[] = files.map((file) => {
+    const original = childPathParts(file.path);
+    const parts = original.slice(prefixLength);
+    return { file, parts: parts.length ? parts : [original.at(-1) ?? file.path] };
+  });
+  const build = (current: readonly BtTreeEntry[], parentPath: string[]): QueueTask[] => {
+    const directories = new Map<string, BtTreeEntry[]>();
+    const files: QueueTask[] = [];
+    current.forEach((entry) => {
+      if (entry.parts.length <= 1) {
+        files.push(btFileTask(task, entry.file, entry.parts[0]));
+        return;
+      }
+      const [directory, ...rest] = entry.parts;
+      const children = directories.get(directory) ?? [];
+      children.push({ file: entry.file, parts: rest });
+      directories.set(directory, children);
+    });
+    return [
+      ...Array.from(directories, ([name, children]) => {
+        const descendantFiles = children.map((child) => child.file);
+        const totalLength = descendantFiles.reduce((total, file) => total + file.length, 0);
+        const completedLength = descendantFiles.reduce((total, file) => total + file.completed_length, 0);
+        const path = [...parentPath, name];
+        return {
+          id: `${task.id}-directory-${path.join('/')}`,
+          name,
+          kind: 'folder' as const,
+          status: task.status,
+          progress: totalLength > 0 ? Math.min(100, Math.floor(completedLength * 100 / totalLength)) : 0,
+          total_length: totalLength,
+          completed_length: completedLength,
+          children: build(children, path),
+        };
+      }),
+      ...files,
+    ];
+  };
+  return build(entries, []);
 }
 
 const playableMediaExtensions = new Set(['3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'ts', 'webm', 'wmv', 'aac', 'aiff', 'alac', 'ape', 'flac', 'm4a', 'mka', 'mp3', 'oga', 'ogg', 'opus', 'wav', 'wma']);
@@ -138,14 +198,9 @@ function childFileSize(task: QueueTask): string {
 function taskSubtitle(task: QueueTask): string | undefined {
   if (task.error) return task.error;
   if (task.statusMessage) return task.statusMessage;
-  const fileCount = task.children?.length ?? task.files?.length ?? 0;
   const hasTransferData = task.progress > 0 || (task.completed_length ?? 0) > 0 || (task.total_length ?? 0) > 0;
-  if (task.kind === 'magnet') return fileCount
-    ? `磁力任务 · ${fileCount} 个文件`
-    : hasTransferData ? '磁力任务' : '磁力任务 · 正在获取文件信息';
-  if (task.kind === 'torrent') return fileCount
-    ? `BT 种子 · ${fileCount} 个文件`
-    : hasTransferData ? 'BT 种子' : 'BT 种子 · 正在获取文件信息';
+  if (task.kind === 'magnet') return hasTransferData ? '磁力任务' : '磁力任务 · 正在获取文件信息';
+  if (task.kind === 'torrent') return hasTransferData ? 'BT 种子' : 'BT 种子 · 正在获取文件信息';
   if (task.kind === 'ed2k') return 'ED2K 下载';
   if (task.kind === 'ftp') return 'FTP 下载';
   if (task.kind === 'hls') return 'HLS 流媒体下载';
@@ -327,16 +382,15 @@ interface QueueTreeRowsProps {
   parentTaskId: string;
   isBtFileTree: boolean;
   completedRoot: boolean;
-  childRoot?: string;
 }
 
-function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSelection, onFileCancel, parentTaskId, isBtFileTree, completedRoot, childRoot }: QueueTreeRowsProps) {
+function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSelection, onFileCancel, parentTaskId, isBtFileTree, completedRoot }: QueueTreeRowsProps) {
   return <>{nodes.map((node) => {
     const nodeChildren = node.children ?? [];
     const hasChildren = nodeChildren.length > 0;
     const isFolder = node.kind === 'folder';
     const isExpanded = expanded[node.id] ?? false;
-    const nodeName = isBtFileTree ? displayChildName(node, childRoot) : displayTaskName(node);
+    const nodeName = displayTaskName(node);
     const fileIsSelected = node.selected !== false;
     const selectionAction = node.status === 'paused' || !fileIsSelected ? 'resume' as const : 'pause' as const;
     const primaryAction = node.status === 'downloading' ? 'pause' as const
@@ -586,20 +640,10 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
         const isCompleted = task.status === 'completed';
         const hasPersistentChildren = Boolean(task.children?.length);
         const isBtFileTree = !hasPersistentChildren && (task.kind === 'magnet' || task.kind === 'torrent') && Boolean(task.files?.length);
-        const taskChildren = hasPersistentChildren ? task.children : isBtFileTree ? task.files!.map((file) => ({
-          id: `${task.id}-file-${file.index}`,
-          name: file.path,
-          kind: 'file' as const,
-          status: task.status,
-          progress: file.length > 0 ? Math.min(100, Math.floor(file.completed_length * 100 / file.length)) : 0,
-          size: file.length > 0 ? `${formatBytes(file.completed_length)} / ${formatBytes(file.length)}` : undefined,
-          file_index: file.index,
-          selected: file.selected,
-        })) : undefined;
+        const taskChildren = hasPersistentChildren ? task.children : isBtFileTree ? buildBtFileTree(task) : undefined;
         const hasChildren = Boolean(taskChildren?.length)
-          && (task.kind === 'folder' || taskChildren!.length > 1)
+          && (task.kind === 'folder' || taskChildren!.length > 1 || taskChildren!.some((child) => child.kind === 'folder'))
           && (!isCompleted || (task.kind === 'folder' && hasPersistentChildren) || isBtFileTree);
-        const childRoot = taskChildren ? sharedChildRoot(taskChildren) : undefined;
         const taskName = displayTaskName(task);
         const isPaused = task.status === 'paused';
         const speed = !isPaused ? task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed) : undefined;
@@ -635,7 +679,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
               <button className="task-more-button" aria-label={`更多操作 ${taskName}`} title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>
             </div>
           </article>
-          {hasChildren && isExpanded && <div className="children queue-tree"><QueueTreeRows nodes={taskChildren!} depth={0} expanded={expanded} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={task.id} isBtFileTree={isBtFileTree} completedRoot={isCompleted} childRoot={childRoot} /></div>}
+          {hasChildren && isExpanded && <div className="children queue-tree"><QueueTreeRows nodes={taskChildren!} depth={0} expanded={expanded} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={task.id} isBtFileTree={isBtFileTree} completedRoot={isCompleted} /></div>}
         </div>;
       })}
       {contextMenu && <TaskContextMenu state={contextMenu} onClose={closeContextMenu} onCommand={runCommand} />}

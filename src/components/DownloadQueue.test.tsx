@@ -533,6 +533,38 @@ it('uses file operations instead of transfer status for expanded multi-file task
   expect(screen.getByRole('button', { name: '继续 readme.txt' })).toBeVisible();
 });
 
+it('groups multi-level BT file paths into separately expandable directories', async () => {
+  const user = userEvent.setup();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'hierarchical-bt', name: 'Black Myth', kind: 'magnet', status: 'downloading', progress: 12,
+      files: [
+        { index: 1, path: 'D:/Downloads/Black Myth/_extras/readme.txt', length: 10, completed_length: 0, selected: true },
+        { index: 2, path: 'D:/Downloads/Black Myth/Engine/Binaries/game.exe', length: 20, completed_length: 0, selected: true },
+        { index: 3, path: 'D:/Downloads/Black Myth/b1.exe', length: 30, completed_length: 0, selected: true },
+      ],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '展开 Black Myth' }));
+  expect(screen.getByText('_extras')).toBeVisible();
+  expect(screen.getByText('Engine')).toBeVisible();
+  expect(screen.getByText('b1.exe')).toBeVisible();
+  expect(screen.queryByText('readme.txt')).not.toBeInTheDocument();
+  expect(screen.queryByText('Binaries')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '展开 _extras' }));
+  expect(screen.getByText('readme.txt')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '展开 Engine' }));
+  expect(screen.getByText('Binaries')).toBeVisible();
+  expect(screen.queryByText('game.exe')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '展开 Binaries' }));
+  expect(screen.getByText('game.exe')).toBeVisible();
+});
+
 it('shows a continue operation for selected files when their parent task is paused', async () => {
   const user = userEvent.setup();
   render(<DownloadQueue
@@ -586,6 +618,25 @@ it('does not show file-information loading after a magnet transfer has started',
 
   expect(screen.getByText('磁力任务')).toBeVisible();
   expect(screen.queryByText(/正在获取文件信息/)).not.toBeInTheDocument();
+});
+
+it('does not render a changing BT file-count summary after metadata is available', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'magnet-files-ready', name: 'Black Myth', kind: 'magnet', status: 'downloading', progress: 8,
+      completed_length: 42 * 1024 * 1024, total_length: 142.1 * 1024 * 1024 * 1024,
+      files: [
+        { index: 1, path: 'Black Myth/b1.exe', length: 100, completed_length: 42, selected: true },
+        { index: 2, path: 'Black Myth/Engine/game.exe', length: 100, completed_length: 0, selected: true },
+      ],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByText('磁力任务')).toBeVisible();
+  expect(screen.queryByText(/个文件/)).not.toBeInTheDocument();
 });
 
 it('keeps the live magnet metadata stage in the transfer-metrics row', () => {
