@@ -12,7 +12,7 @@ impl CloudDownloadRefreshBudget {
         // or its previous validator may no longer match after it is re-signed.
         // Re-resolve every valid personal-cloud source once, but do not retry
         // unrelated network, disk, or permission errors.
-        if error != Some("22") {
+        if !matches!(error, Some("8" | "22")) {
             return false;
         }
         if super::commands::parse_stable_cloud_source(source).is_err() {
@@ -94,6 +94,11 @@ mod tests {
         let budget = CloudDownloadRefreshBudget::default();
         assert!(!budget.claim("cloud://baidu/file", Some("9")));
         assert!(!budget.claim("https://example.org/file", Some("22")));
+        assert!(budget.claim("cloud://baidu/resume-unsupported", Some("8")));
+        assert!(
+            !budget.claim("cloud://baidu/resume-unsupported", Some("8")),
+            "a non-resumable response still gets only one fresh submission"
+        );
         for provider in [
             "quark", "pikpak", "baidu", "tianyi", "aliyun", "xunlei", "uc",
         ] {

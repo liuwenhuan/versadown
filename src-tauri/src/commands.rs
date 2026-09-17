@@ -2158,10 +2158,12 @@ async fn run_local_task_action(
         if !matches!(current.status, TaskStatus::Failed | TaskStatus::Cancelled) {
             return Err("当前任务不能重新下载".to_string());
         }
-        if let Some(duplicate) =
-            retry_duplicate_state(&state.store, &current).map_err(|error| error.to_string())?
-        {
-            return task_action_outcome(&state.store, current, Some(duplicate));
+        if !cloud_download_requires_restart(&current) {
+            if let Some(duplicate) =
+                retry_duplicate_state(&state.store, &current).map_err(|error| error.to_string())?
+            {
+                return task_action_outcome(&state.store, current, Some(duplicate));
+            }
         }
         let task = resubmit_task(app.clone(), &state, current, Default::default()).await?;
         return task_action_outcome(&state.store, task, None);
@@ -2329,6 +2331,10 @@ pub(crate) async fn resubmit_task(
                     .map(str::to_owned);
             }
         }
+        restart_cloud_download_after_unsupported_resume(
+            &mut options,
+            task.aria_error_code.as_deref(),
+        );
         return crate::cloud::commands::queue_cloud_dispatch(app.clone(), state, task, options)
             .await
             .map_err(|e| e.to_string());
@@ -2392,6 +2398,27 @@ fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::
         .ok_or_else(|| "下载文件已不存在，无法打开所在目录".to_string())
 }
 
+/// aria2 error 8 means the remote server does not support resuming this file.
+/// A new cloud URL is still useful, but its partial payload cannot be trusted
+/// as a checkpoint.  Start the same managed task over rather than repeatedly
+/// submitting an unsupported range request.
+fn restart_cloud_download_after_unsupported_resume(
+    options: &mut UriSubmissionOptions,
+    aria_error_code: Option<&str>,
+) {
+    if aria_error_code != Some("8") {
+        return;
+    }
+    options.allow_overwrite = true;
+    options.continue_download = false;
+    options.native_resume_gid = None;
+}
+
+fn cloud_download_requires_restart(task: &DownloadTask) -> bool {
+    (task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://"))
+        && task.aria_error_code.as_deref() == Some("8")
+}
+
 /// Called after event publication; the task worker never blocks the aria2
 /// synchronization callback. The source gate is released on every return path.
 pub(crate) fn schedule_cloud_download_refresh(app: AppHandle, task: &DownloadTask) {
@@ -2435,7 +2462,9 @@ pub(crate) fn schedule_cloud_download_refresh(app: AppHandle, task: &DownloadTas
         if current.status != TaskStatus::Failed || current.aria_gid != failed.aria_gid {
             return;
         }
-        if !matches!(retry_duplicate_state(&state.store, &current), Ok(None)) {
+        if !cloud_download_requires_restart(&current)
+            && !matches!(retry_duplicate_state(&state.store, &current), Ok(None))
+        {
             return;
         }
         let Ok(options) = download_submission_options(&state) else {
@@ -2460,6 +2489,10 @@ pub(crate) fn schedule_cloud_download_refresh(app: AppHandle, task: &DownloadTas
                 }
             }
         }
+        restart_cloud_download_after_unsupported_resume(
+            &mut options,
+            current.aria_error_code.as_deref(),
+        );
         let _ = crate::cloud::commands::queue_cloud_dispatch(app.clone(), &state, current, options)
             .await;
     });
@@ -5577,6 +5610,51 @@ mod tests {
             .expect("queue cloud dispatch has a stable end")
             .0;
         assert!(queue.contains("prepare_expected_with_retry_intent"));
+    }
+
+    #[test]
+    fn cloud_retry_restarts_when_the_server_cannot_resume() {
+        let mut options = UriSubmissionOptions {
+            continue_download: true,
+            native_resume_gid: Some("old-gid".into()),
+            ..Default::default()
+        };
+        restart_cloud_download_after_unsupported_resume(&mut options, Some("8"));
+        assert!(options.allow_overwrite);
+        assert!(!options.continue_download);
+        assert!(options.native_resume_gid.is_none());
+
+        let mut unchanged = UriSubmissionOptions {
+            continue_download: true,
+            native_resume_gid: Some("old-gid".into()),
+            ..Default::default()
+        };
+        restart_cloud_download_after_unsupported_resume(&mut unchanged, Some("22"));
+        assert!(!unchanged.allow_overwrite);
+        assert!(unchanged.continue_download);
+        assert_eq!(unchanged.native_resume_gid.as_deref(), Some("old-gid"));
+    }
+
+    #[test]
+    fn only_cloud_code_eight_retries_bypass_duplicate_confirmation() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud-share://quark/share/file"))
+            .unwrap();
+        let task = DownloadTask {
+            aria_error_code: Some("8".into()),
+            ..task
+        };
+        assert!(cloud_download_requires_restart(&task));
+
+        assert!(!cloud_download_requires_restart(&DownloadTask {
+            source: "https://example.test/file".into(),
+            ..task.clone()
+        }));
+        assert!(!cloud_download_requires_restart(&DownloadTask {
+            aria_error_code: Some("22".into()),
+            ..task
+        }));
     }
 
     #[tokio::test]

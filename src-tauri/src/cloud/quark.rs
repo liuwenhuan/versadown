@@ -155,6 +155,34 @@ mod tests {
         assert_eq!(download_body["stoken"], "secret-token");
         assert_eq!(download_body["fids_token"], json!(["file-secret"]));
     }
+
+    #[test]
+    fn quark_share_download_rejection_falls_back_to_authorized_drive_transfer() {
+        let credentials = MemoryCredentialStore::default();
+        credentials.save("quark", b"sid=current").unwrap();
+        let mut replies = listing();
+        replies.push(json!({
+            "status": 200,
+            "code": 50001,
+            "message": "temporary share download rejection"
+        }));
+        let http = Http::new(replies);
+        let adapter = provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!("plan required")
+        };
+        let entry = CloudShareResolvedEntry {
+            provider: plan.provider,
+            entry: plan.entries[0].clone(),
+            plan,
+        };
+
+        assert!(matches!(
+            adapter.resolve(&entry),
+            Ok(ShareResolution::TransferRequired(request)) if request.source == entry.plan.source_for("11")
+        ));
+    }
+
     #[test]
     fn quark_share_download_cookie_rotation_persists_for_following_directory_entry() {
         struct CookieHttp(std::sync::Mutex<std::collections::VecDeque<CloudHttpResponse>>);
@@ -1353,7 +1381,22 @@ pub fn resolve_quark_share(
         return Err(QuarkError::InvalidResponse);
     }
     let context = &entry.plan.provider_context;
-    let response = client.share_request("POST", "file/download", Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]})))?;
+    let response = match client.share_request(
+        "POST",
+        "file/download",
+        Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]})),
+    ) {
+        // The share endpoint occasionally rejects a direct link even though
+        // the already-inspected share and the authenticated personal drive are
+        // both valid.  The established transfer path is the safe fallback: it
+        // records the exact copied file before requesting its temporary URL.
+        Err(QuarkError::Provider(_)) => {
+            return Ok(ShareResolution::TransferRequired(TransferRequest {
+                source: entry.plan.source_for(&entry.entry.entry_id),
+            }));
+        }
+        result => result?,
+    };
     persist_quark_download_cookies(credentials, &client.cookie, &response)?;
     let value = response_json(&response)?;
     let files = value["data"]

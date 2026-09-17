@@ -1519,6 +1519,10 @@ fn refresh_budget_ignores_non_share_and_non_http_failures() {
     }
     assert!(budget.claim(&source, Some("22")).unwrap());
     assert!(!budget.claim(&source, Some("22")).unwrap());
+
+    let resume_unsupported = fixture("share").source_for("f2");
+    assert!(budget.claim(&resume_unsupported, Some("8")).unwrap());
+    assert!(!budget.claim(&resume_unsupported, Some("8")).unwrap());
 }
 
 #[test]
