@@ -21,6 +21,32 @@ struct RecordingHttp {
 }
 
 #[test]
+fn baidu_account_uses_baidu_name_when_netdisk_name_is_missing() {
+    let http = RecordingHttp::sequence(&[r#"{"errno":0,"uk":10086,"baidu_name":"登录用户"}"#]);
+
+    let account = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http)
+        .account()
+        .unwrap();
+
+    assert_eq!(account.id, "10086");
+    assert_eq!(account.display_name, "登录用户");
+}
+
+#[test]
+fn baidu_account_uses_baidu_name_when_netdisk_name_is_empty() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"uk":10086,"netdisk_name":"","baidu_name":"登录用户"}"#,
+    ]);
+
+    let account = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http)
+        .account()
+        .unwrap();
+
+    assert_eq!(account.id, "10086");
+    assert_eq!(account.display_name, "登录用户");
+}
+
+#[test]
 fn successful_download_metadata_is_not_a_login_challenge() {
     let file_id = format!(
         "bdr_{}",

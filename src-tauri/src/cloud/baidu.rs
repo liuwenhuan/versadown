@@ -1238,10 +1238,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         Ok(CloudAccount {
             provider: CloudProvider::Baidu,
             id,
-            display_name: user
-                .get("netdisk_name")
-                .or_else(|| user.get("nickname"))
-                .and_then(Value::as_str)
+            display_name: ["netdisk_name", "baidu_name", "nickname"]
+                .into_iter()
+                .filter_map(|name| user.get(name).and_then(Value::as_str))
+                .find(|name| !name.trim().is_empty())
                 .unwrap_or("百度网盘")
                 .into(),
             auth_method: self.session.auth_method,
