@@ -1,37 +1,96 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { FloatingLauncher } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, getLauncherManagerVisible, getLauncherPopupPlacement, launcherDimensions, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging, type LauncherPopupPlacement } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging, type LauncherInputRegion, type LauncherPopupPlacement } from '../lib/launcherWindow';
 import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, updateSettings } from '../lib/api';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
 
-function waitForLauncherTransitionPaint() {
-  return new Promise<void>((resolve) => {
-    if (typeof window.requestAnimationFrame !== 'function') {
-      window.setTimeout(resolve, 0);
-      return;
-    }
-    window.requestAnimationFrame(() => window.setTimeout(resolve, 0));
-  });
-}
+export type LauncherSurfaceMode = 'compact' | 'quick-add' | 'context-menu';
 
 export function LauncherWindow() {
   const [activeCount, setActiveCount] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
-  const [expanded, setExpanded] = useState(false);
-  const [expandedTransitioning, setExpandedTransitioning] = useState(false);
-  const [contextMenuOpen, setContextMenuOpen] = useState(false);
-  const [contextMenuTransitioning, setContextMenuTransitioning] = useState(false);
+  const [mode, setMode] = useState<LauncherSurfaceMode>('compact');
   const [popupPlacement, setPopupPlacement] = useState<LauncherPopupPlacement>('above');
   const [managerVisible, setManagerVisible] = useState(true);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>('always');
   const [settingsReady, setSettingsReady] = useState(false);
   const [anchored, setAnchored] = useState(false);
   const statEventEpoch = useRef(0);
+  const requestedMode = useRef<LauncherSurfaceMode>('compact');
+  const transitionQueue = useRef(Promise.resolve());
+  const inputQueue = useRef(Promise.resolve());
+  const quickAddElement = useRef<HTMLElement | null>(null);
+  const menuElement = useRef<HTMLElement | null>(null);
+  const dragRequested = useRef(false);
+  const [inputReady, setInputReady] = useState(false);
   const hasActiveDownload = activeCount > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
+
+  const captureQuickAdd = useCallback((element: HTMLElement | null) => { quickAddElement.current = element; }, []);
+  const captureMenu = useCallback((element: HTMLElement | null) => { menuElement.current = element; }, []);
+
+  const updateInput = useCallback((regions: LauncherInputRegion[]) => {
+    const update = inputQueue.current.then(() => setLauncherInputRegions(regions));
+    // Recover the queue, but propagate this update's failure to callers such as dragging.
+    inputQueue.current = update.catch(() => undefined);
+    return update;
+  }, []);
+
+  const requestMode = useCallback((next: LauncherSurfaceMode) => {
+    requestedMode.current = next;
+    if (next !== 'compact') dragRequested.current = false;
+    transitionQueue.current = transitionQueue.current.then(async () => {
+      const target = requestedMode.current;
+      const placement = target === 'compact' ? null : await getLauncherPopupPlacement();
+      if (target !== requestedMode.current) return;
+      if (placement) setPopupPlacement(placement);
+      setMode(target);
+    }).catch(() => undefined);
+  }, []);
+
+  async function finishDrag(inputUpdate: Promise<void>) {
+    try {
+      await inputUpdate;
+      if (!dragRequested.current || requestedMode.current !== 'compact') return;
+      dragRequested.current = false;
+      await startLauncherDragging();
+      const placement = await getLauncherPopupPlacement();
+      if (requestedMode.current === 'compact') setPopupPlacement(placement);
+    } catch {
+      dragRequested.current = false;
+      // Keep the previous safe native regions; never replace them with the canvas.
+    }
+  }
+
+  useLayoutEffect(() => {
+    let disposed = false;
+    const element = mode === 'quick-add' ? quickAddElement.current : mode === 'context-menu' ? menuElement.current : null;
+    const syncInput = () => {
+      const rect = element?.getBoundingClientRect();
+      const popup = rect && rect.width > 0 && rect.height > 0
+        ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
+      const update = updateInput(popup ? [launcherIconRegion, popup] : [launcherIconRegion]);
+      void update.then(() => { if (!disposed) setInputReady(true); }).catch(() => undefined);
+      return update;
+    };
+    const update = syncInput();
+    if (mode === 'compact' && dragRequested.current) void finishDrag(update);
+    // Quick-add validation and menu settings can change the actual input rectangle.
+    const observer = element && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncInput) : null;
+    if (element) observer?.observe(element);
+    return () => { disposed = true; observer?.disconnect(); };
+  }, [mode, popupPlacement, updateInput]);
+
+  useEffect(() => {
+    const close = () => requestMode('compact');
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+    window.addEventListener('blur', close);
+    window.addEventListener('keydown', escape);
+    return () => { window.removeEventListener('blur', close); window.removeEventListener('keydown', escape); };
+  }, [requestMode]);
 
   useEffect(() => {
     void anchorLauncherToWorkArea().catch(() => undefined).finally(() => setAnchored(true));
@@ -51,11 +110,9 @@ export function LauncherWindow() {
   }, []);
 
   useEffect(() => {
-    if (!settingsReady || !anchored || expanded || expandedTransitioning || contextMenuOpen || contextMenuTransitioning) return;
-    void setLauncherCompact()
-      .then(() => setLauncherWindowVisible(shouldShowLauncher))
-      .catch(() => undefined);
-  }, [anchored, contextMenuOpen, contextMenuTransitioning, expanded, expandedTransitioning, settingsReady, shouldShowLauncher]);
+    if (!settingsReady || !anchored || !inputReady) return;
+    void setLauncherWindowVisible(shouldShowLauncher).catch(() => undefined);
+  }, [anchored, inputReady, settingsReady, shouldShowLauncher]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -83,53 +140,20 @@ export function LauncherWindow() {
   }, []);
 
   function openContextMenu() {
-    if (expanded || contextMenuOpen || contextMenuTransitioning) return;
-    setContextMenuTransitioning(true);
-    void (async () => {
-      try {
-        const placement = await getLauncherPopupPlacement(launcherDimensions.menu);
-        setPopupPlacement(placement);
-        await waitForLauncherTransitionPaint();
-        await setLauncherContextMenuVisible(true, placement);
-        setContextMenuOpen(true);
-        void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
-        void showLauncherMenu().catch(() => undefined);
-      } catch {
-        // The transparent native viewport was not prepared, so do not render a clipped menu.
-      } finally {
-        setContextMenuTransitioning(false);
-      }
-    })();
+    requestMode('context-menu');
+    void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
+    // Records menu usage only; this command never changes native visibility.
+    void showLauncherMenu().catch(() => undefined);
   }
 
   function closeContextMenu() {
-    if (!contextMenuOpen || contextMenuTransitioning) return;
-    setContextMenuTransitioning(true);
-    setContextMenuOpen(false);
-    void waitForLauncherTransitionPaint()
-      .then(() => setLauncherContextMenuVisible(false, popupPlacement))
-      .catch(() => undefined)
-      .finally(() => setContextMenuTransitioning(false));
+    requestMode('compact');
   }
 
-  function changeExpanded(nextExpanded: boolean) {
-    setContextMenuOpen(false);
-    setExpandedTransitioning(true);
-    void (async () => {
-      try {
-        const placement = nextExpanded
-          ? await getLauncherPopupPlacement(launcherDimensions.expanded)
-          : popupPlacement;
-        setPopupPlacement(placement);
-        setExpanded(nextExpanded);
-        await waitForLauncherTransitionPaint();
-        await setLauncherExpanded(nextExpanded, placement);
-      } catch {
-        // Do not show a popup until its matching native viewport was prepared.
-      } finally {
-        setExpandedTransitioning(false);
-      }
-    })();
+  function beginDrag() {
+    dragRequested.current = true;
+    requestMode('compact');
+    if (mode === 'compact') void finishDrag(updateInput([launcherIconRegion]));
   }
 
   function runContextAction(action: LauncherMenuAction) {
@@ -146,17 +170,19 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${expanded ? 'launcher-expanded' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''} ${expandedTransitioning || contextMenuTransitioning ? 'launcher-viewport-transitioning' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${mode === 'quick-add' ? 'launcher-expanded' : ''} ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
-        expanded={expanded}
+        mode={mode}
+        placement={popupPlacement}
+        onModeChange={requestMode}
+        onQuickAddElement={captureQuickAdd}
         onParse={(input) => { void sendLauncherInput(input); }}
         onScan={scanDownloadInputs}
         onOpenTaskList={() => { void openLauncherManager(); }}
-        onExpandedChange={changeExpanded}
-        onDragStart={() => { void startLauncherDragging(); }}
+        onDragStart={beginDrag}
         onContextMenu={openContextMenu}
       />
-      {contextMenuOpen && <LauncherContextMenu downloadSpeed={formatSpeed(downloadSpeed)} managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}
+      {mode === 'context-menu' && <LauncherContextMenu onElement={captureMenu} downloadSpeed={formatSpeed(downloadSpeed)} managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}
     </main>
   );
 }

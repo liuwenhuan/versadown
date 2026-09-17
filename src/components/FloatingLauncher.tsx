@@ -1,11 +1,17 @@
-import { MouseEvent, useRef, useState, useSyncExternalStore } from 'react';
+import { MouseEvent, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { NewDownloadDialog } from './NewDownloadDialog';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 import type { ScanDownloadResult } from '../lib/types';
+import type { LauncherSurfaceMode } from './LauncherWindow';
+import type { LauncherPopupPlacement } from '../lib/launcherWindow';
 
 interface FloatingLauncherProps {
   onParse(input: string): void | Promise<void>;
   expanded?: boolean;
+  mode?: LauncherSurfaceMode;
+  placement?: LauncherPopupPlacement;
+  onModeChange?(mode: LauncherSurfaceMode): void;
+  onQuickAddElement?(element: HTMLElement | null): void;
   onScan?(input: string): Promise<ScanDownloadResult[]>;
   onOpenTaskList?(): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
@@ -26,15 +32,24 @@ function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
   );
 }
 
-export function FloatingLauncher({ onParse, expanded: expandedProp, onScan, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placement, onModeChange, onQuickAddElement, onScan, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
   const [uncontrolledExpanded, setUncontrolledExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
   const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
-  const expanded = expandedProp ?? uncontrolledExpanded;
+  const expanded = mode ? mode === 'quick-add' : expandedProp ?? uncontrolledExpanded;
+  const intent = useRef<LauncherSurfaceMode>(mode ?? (expanded ? 'quick-add' : 'compact'));
+  const quickAddRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    intent.current = mode ?? (expanded ? 'quick-add' : 'compact');
+    onQuickAddElement?.(quickAddRef.current?.querySelector<HTMLElement>('.launcher-panel') ?? null);
+  }, [mode, expanded, placement, onQuickAddElement]);
 
   function setLauncherExpanded(next: boolean) {
-    if (expandedProp === undefined) setUncontrolledExpanded(next);
+    intent.current = next ? 'quick-add' : 'compact';
+    if (mode === undefined && expandedProp === undefined) setUncontrolledExpanded(next);
+    onModeChange?.(intent.current);
     onExpandedChange?.(next);
   }
 
@@ -49,6 +64,7 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, onScan, onOp
     if (!origin || event.buttons !== 1 || suppressClick.current) return;
     if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < dragThreshold) return;
     suppressClick.current = true;
+    setLauncherExpanded(false);
     onDragStart?.();
   }
 
@@ -58,7 +74,7 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, onScan, onOp
       suppressClick.current = false;
       return;
     }
-    setLauncherExpanded(!expanded);
+    setLauncherExpanded(intent.current !== 'quick-add');
   }
 
   return (
@@ -72,6 +88,7 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, onScan, onOp
         onContextMenu={(event) => {
           event.preventDefault();
           dragOrigin.current = null;
+          intent.current = 'context-menu';
           onContextMenu?.();
         }}
       >
@@ -79,7 +96,7 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, onScan, onOp
           <LauncherMark variant={resolvedTheme} />
         </button>
       </div>
-      {expanded && <NewDownloadDialog open onParse={onParse} onScan={onScan} onClose={() => setLauncherExpanded(false)} onOpenTaskList={() => { void onOpenTaskList?.(); setLauncherExpanded(false); }} />}
+      {expanded && <div ref={quickAddRef} className="launcher-quick-add-container"><NewDownloadDialog open placement="launcher" onParse={onParse} onScan={onScan} onClose={() => setLauncherExpanded(false)} onOpenTaskList={() => { void onOpenTaskList?.(); setLauncherExpanded(false); }} /></div>}
     </>
   );
 }

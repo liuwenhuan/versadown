@@ -10,6 +10,7 @@ const native = vi.hoisted(() => {
     currentMonitor: vi.fn(),
     launcherPosition: vi.fn(),
     launcherSize: vi.fn(),
+    setPosition: vi.fn().mockResolvedValue(undefined),
     mainWindow: {
       unminimize: vi.fn(async () => { calls.push('unminimize'); }),
       show: vi.fn(async () => { calls.push('show'); }),
@@ -23,7 +24,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ emitTo: native.emitTo }));
 vi.mock('@tauri-apps/api/window', () => ({
   currentMonitor: native.currentMonitor,
-  getCurrentWindow: vi.fn(() => ({ label: 'launcher', outerPosition: native.launcherPosition, outerSize: native.launcherSize })),
+  getCurrentWindow: vi.fn(() => ({ label: 'launcher', outerPosition: native.launcherPosition, outerSize: native.launcherSize, setPosition: native.setPosition })),
   LogicalSize: class LogicalSize {
     constructor(public width: number, public height: number) {}
   },
@@ -53,6 +54,38 @@ it('uses one fixed canvas with an invariant hexagon anchor', () => {
     iconTop: 328,
     margin: 24,
   });
+});
+
+it('installs the compact icon input region without changing native bounds', async () => {
+  await launcherWindow.setLauncherInputRegions([{ x: 346, y: 328, width: 64, height: 64 }]);
+  expect(native.invoke).toHaveBeenCalledWith('set_launcher_input_regions', {
+    regions: [{ x: 346, y: 328, width: 64, height: 64 }],
+  });
+  expect(native.invoke).not.toHaveBeenCalledWith('set_launcher_bounds', expect.anything());
+});
+
+it('positions the fixed canvas without consulting a variable native window size', async () => {
+  native.currentMonitor.mockResolvedValueOnce({
+    scaleFactor: 1.5,
+    workArea: { position: { x: 100, y: 50 }, size: { width: 1920, height: 1080 } },
+  });
+  native.launcherSize.mockResolvedValueOnce({ width: 64, height: 64 });
+  await launcherWindow.anchorLauncherToWorkArea();
+  expect(native.setPosition).toHaveBeenCalledWith({ x: 1369, y: 506 });
+  expect(native.launcherSize).not.toHaveBeenCalled();
+});
+
+it.each([
+  [{ x: 100, y: -400 }, 'below'],
+  [{ x: 100, y: 100 }, 'above'],
+] as const)('chooses placement from the invariant icon at %j', async (position, expected) => {
+  native.launcherPosition.mockResolvedValueOnce(position);
+  native.currentMonitor.mockResolvedValueOnce({
+    scaleFactor: 1.5,
+    workArea: { position: { x: 0, y: 0 }, size: { width: 1920, height: 1080 } },
+  });
+  await expect(launcherWindow.getLauncherPopupPlacement()).resolves.toBe(expected);
+  expect(native.launcherSize).not.toHaveBeenCalled();
 });
 
 it('anchors the invariant hexagon to the work-area bottom right', () => {

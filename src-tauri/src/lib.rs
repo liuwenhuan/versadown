@@ -341,9 +341,28 @@ pub fn run() {
                 }
                 if launcher_visibility == LauncherVisibility::Always {
                     if let Some(launcher) = app.get_webview_window("launcher") {
-                        launcher::set_launcher_compact_shape(launcher.clone(), true)
-                            .map_err(std::io::Error::other)?;
-                        launcher.show()?;
+                        // The command installs the HWND subclass on its owner thread.
+                        // Await it outside setup so the UI thread stays available.
+                        tauri::async_runtime::spawn(async move {
+                            let result = launcher_input::set_launcher_input_regions(
+                                launcher.clone(),
+                                vec![launcher_input::LauncherInputRegion {
+                                    x: 346.0,
+                                    y: 328.0,
+                                    width: 64.0,
+                                    height: 64.0,
+                                }],
+                            )
+                            .await;
+                            match result {
+                                Ok(()) => {
+                                    if let Err(error) = launcher.show() {
+                                        eprintln!("无法显示悬浮窗: {error}");
+                                    }
+                                }
+                                Err(error) => eprintln!("无法初始化悬浮窗输入区域: {error}"),
+                            }
+                        });
                     }
                 }
             }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LauncherVisibility } from '../lib/types';
 
 export type LauncherMenuAction = 'hide_manager' | 'new_download' | 'start_all' | 'pause_all' | 'quit';
@@ -10,6 +10,7 @@ interface LauncherContextMenuProps {
   onAction(action: LauncherMenuAction): void;
   onVisibilityChange(visibility: LauncherVisibility): void;
   onClose(): void;
+  onElement(element: HTMLElement | null): void;
 }
 
 function LauncherMenuIcon({ action }: { action: LauncherMenuAction | 'settings' | 'back' | 'always' | 'downloading' | 'hidden' }) {
@@ -34,9 +35,13 @@ const visibilityOptions: Array<{ value: LauncherVisibility; label: string; icon:
   { value: 'hidden', label: '关闭显示', icon: 'hidden' },
 ];
 
-export function LauncherContextMenu({ downloadSpeed, managerVisible, visibility, onAction, onVisibilityChange, onClose }: LauncherContextMenuProps) {
+export function LauncherContextMenu({ downloadSpeed, managerVisible, visibility, onAction, onVisibilityChange, onClose, onElement }: LauncherContextMenuProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const captureMenu = useCallback((element: HTMLDivElement | null) => {
+    menuRef.current = element;
+    onElement(element);
+  }, [onElement]);
 
   useEffect(() => {
     menuRef.current?.querySelector<HTMLButtonElement>('[role^="menuitem"]')?.focus();
@@ -66,7 +71,7 @@ export function LauncherContextMenu({ downloadSpeed, managerVisible, visibility,
   };
 
   return <div className="launcher-menu-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div ref={menuRef} className="task-context-menu launcher-context-menu" role="menu" aria-label={settingsOpen ? '悬浮球显示设置' : '悬浮球菜单'} onKeyDown={moveFocus}>
+    <div ref={captureMenu} className="task-context-menu launcher-context-menu" role="menu" aria-label={settingsOpen ? '悬浮球显示设置' : '悬浮球菜单'} onKeyDown={moveFocus}>
       {settingsOpen ? <>
         <header><b>悬浮球显示</b><button type="button" aria-label="返回悬浮球菜单" onClick={() => setSettingsOpen(false)}><LauncherMenuIcon action="back" /></button></header>
         {visibilityOptions.map((option) => <div key={option.value}><button role="menuitemradio" aria-checked={visibility === option.value} className={visibility === option.value ? 'selected' : undefined} onClick={() => { onVisibilityChange(option.value); onClose(); }}><LauncherMenuIcon action={option.icon} /><span>{option.label}</span>{visibility === option.value && <i aria-hidden="true">✓</i>}</button></div>)}

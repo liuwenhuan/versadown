@@ -331,6 +331,7 @@ mod tests {
 }
 
 #[tauri::command]
+// Compatibility only until the fixed-canvas React state machine lands; Task 7 removes this path.
 pub fn set_launcher_compact_shape(
     window: WebviewWindow,
     compact: bool,
@@ -533,6 +534,7 @@ fn apply_launcher_shape(
 }
 
 #[tauri::command]
+// Compatibility only until the fixed-canvas React state machine lands; Task 7 removes this path.
 pub fn set_launcher_bounds(
     window: WebviewWindow,
     x: i32,

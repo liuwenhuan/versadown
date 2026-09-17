@@ -26,6 +26,19 @@ type WorkArea = { x: number; y: number; width: number; height: number };
 type Rect = { x: number; y: number; width: number; height: number };
 type NativeWindowSize = { width: number; height: number };
 export type LauncherPopupPlacement = 'above' | 'below';
+export type LauncherInputRegion = { x: number; y: number; width: number; height: number };
+
+export const launcherIconRegion: LauncherInputRegion = {
+  x: launcherCanvas.width - launcherCanvas.iconSize,
+  y: launcherCanvas.iconTop,
+  width: launcherCanvas.iconSize,
+  height: launcherCanvas.iconSize,
+};
+
+export async function setLauncherInputRegions(regions: LauncherInputRegion[]) {
+  if (!isTauriRuntime()) return;
+  await invoke('set_launcher_input_regions', { regions });
+}
 
 export function launcherCanvasPosition(workArea: WorkArea, scaleFactor: number) {
   const canvasWidth = Math.round(launcherCanvas.width * scaleFactor);
@@ -165,19 +178,14 @@ function resizeLauncher(
   return operation;
 }
 
-export async function getLauncherPopupPlacement(size: NativeWindowSize): Promise<LauncherPopupPlacement> {
+export async function getLauncherPopupPlacement(): Promise<LauncherPopupPlacement> {
   if (!isTauriRuntime()) return 'above';
   const launcher = getCurrentWindow();
-  const [position, currentSize, monitor] = await Promise.all([launcher.outerPosition(), launcher.outerSize(), currentMonitor()]);
+  const [position, monitor] = await Promise.all([launcher.outerPosition(), currentMonitor()]);
   if (!monitor) return 'above';
-  const nextSize = {
-    width: Math.round(size.width * monitor.scaleFactor),
-    height: Math.round(size.height * monitor.scaleFactor)
-  };
-  return launcherPopupPlacement(
-    position,
-    currentSize,
-    nextSize,
+  return launcherPopupPlacementFromIcon(
+    launcherIconScreenRect(position, monitor.scaleFactor),
+    Math.round(launcherCanvas.popupSlotHeight * monitor.scaleFactor),
     { x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }
   );
 }
@@ -214,10 +222,9 @@ export async function anchorLauncherToWorkArea() {
   const launcher = getCurrentWindow();
   const monitor = await currentMonitor();
   if (!monitor) return;
-  const [windowSize, workArea] = await Promise.all([launcher.outerSize(), Promise.resolve(monitor.workArea)]);
-  const corner = launcherCornerPosition(
+  const workArea = monitor.workArea;
+  const corner = launcherCanvasPosition(
     { x: workArea.position.x, y: workArea.position.y, width: workArea.size.width, height: workArea.size.height },
-    { width: windowSize.width, height: windowSize.height },
     monitor.scaleFactor
   );
   await launcher.setPosition(new PhysicalPosition(corner.x, corner.y));

@@ -1,48 +1,83 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
-  getGlobalStat: vi.fn(),
-  getSettings: vi.fn(),
-  scanDownloadInputs: vi.fn(),
-  updateSettings: vi.fn(),
-  getManagerVisible: vi.fn(),
-  getLauncherPopupPlacement: vi.fn(),
-  onGlobalStat: undefined as undefined | ((stat: { download_speed: number; num_active: number }) => void)
+  getGlobalStat: vi.fn(), getSettings: vi.fn(), scanDownloadInputs: vi.fn(),
+  updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(),
+  setLauncherInputRegions: vi.fn(),
+  onGlobalStat: undefined as undefined | ((stat: { download_speed: number; num_active: number }) => void),
 }));
 
 vi.mock('../lib/api', () => ({
-  isTauriRuntime: () => true,
-  getDownloadGlobalStat: state.getGlobalStat,
-  getSettings: state.getSettings,
-  scanDownloadInputs: state.scanDownloadInputs,
-  updateSettings: state.updateSettings
+  isTauriRuntime: () => true, getDownloadGlobalStat: state.getGlobalStat,
+  getSettings: state.getSettings, scanDownloadInputs: state.scanDownloadInputs, updateSettings: state.updateSettings,
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
 vi.mock('../lib/launcherWindow', () => ({
-  anchorLauncherToWorkArea: vi.fn().mockResolvedValue(undefined), openLauncherManager: vi.fn().mockResolvedValue(undefined), sendLauncherInput: vi.fn().mockResolvedValue(undefined),
-  setLauncherCompactShape: vi.fn().mockResolvedValue(undefined), setLauncherCompact: vi.fn().mockResolvedValue(undefined), setLauncherExpanded: vi.fn().mockResolvedValue(undefined), setLauncherContextMenuVisible: vi.fn().mockResolvedValue(undefined),
+  launcherCanvas: { width: 410, height: 720, popupSlotHeight: 328, iconSize: 64, iconTop: 328, margin: 24 },
+  launcherIconRegion: { x: 346, y: 328, width: 64, height: 64 },
+  setLauncherInputRegions: state.setLauncherInputRegions,
   getLauncherPopupPlacement: state.getLauncherPopupPlacement,
-  launcherDimensions: { compact: { width: 64, height: 64 }, menu: { width: 304, height: 392 }, expanded: { width: 410, height: 364 } },
-  setLauncherWindowVisible: vi.fn().mockResolvedValue(undefined), runLauncherMenuAction: vi.fn().mockResolvedValue(undefined), getLauncherManagerVisible: state.getManagerVisible, showLauncherMenu: vi.fn().mockResolvedValue(undefined), startLauncherDragging: vi.fn().mockResolvedValue(undefined)
+  anchorLauncherToWorkArea: vi.fn().mockResolvedValue(undefined),
+  setLauncherWindowVisible: vi.fn().mockResolvedValue(undefined),
+  runLauncherMenuAction: vi.fn().mockResolvedValue(undefined),
+  getLauncherManagerVisible: state.getManagerVisible,
+  showLauncherMenu: vi.fn().mockResolvedValue(undefined),
+  startLauncherDragging: vi.fn().mockResolvedValue(undefined),
+  openLauncherManager: vi.fn().mockResolvedValue(undefined),
+  sendLauncherInput: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../lib/downloadEvents', () => ({
-  formatSpeed: (value: number | undefined) => value === 524_288 ? '512 KB/s' : `${value ?? '未知'} B/s`,
+  formatSpeed: (value: number) => value === 524_288 ? '512 KB/s' : `${value} B/s`,
   subscribeToDownloadEvents: vi.fn().mockImplementation(({ onGlobalStat }) => {
     state.onGlobalStat = onGlobalStat;
     return Promise.resolve(() => undefined);
-  })
+  }),
 }));
 
 import { LauncherWindow } from './LauncherWindow';
-import { getLauncherPopupPlacement, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
+import { setLauncherInputRegions, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
+
+const icon = { x: 346, y: 328, width: 64, height: 64 };
+const quickAdd = { x: 0, y: 92, width: 410, height: 236 };
+const menu = { x: 114, y: 16, width: 280, height: 296 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => { resolve = yes; });
+  return { promise, resolve };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  state.onGlobalStat = undefined;
+  state.getGlobalStat.mockReset().mockResolvedValue({ download_speed: 524_288, num_active: 2 });
+  state.getSettings.mockReset().mockResolvedValue({ launcherVisibility: 'always' });
+  state.scanDownloadInputs.mockReset();
+  state.updateSettings.mockReset();
+  state.getManagerVisible.mockReset().mockResolvedValue(true);
+  state.getLauncherPopupPlacement.mockReset().mockResolvedValue('above');
+  state.setLauncherInputRegions.mockReset().mockResolvedValue(undefined);
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+    const bounds = this.classList.contains('launcher-panel') ? quickAdd
+      : this.classList.contains('launcher-context-menu') ? menu : { x: 0, y: 0, width: 0, height: 0 };
+    return { ...bounds, left: bounds.x, top: bounds.y, right: bounds.x + bounds.width, bottom: bounds.y + bounds.height, toJSON() {} };
+  });
+});
+
+afterEach(() => vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockRestore());
 
 it('keeps the floating-display menu heading to one row after its helper copy is removed', () => {
-  const styles = readFileSync('src/styles.css', 'utf8');
+  expect(readFileSync('src/styles.css', 'utf8').includes('.launcher-context-menu>header button{grid-column:2;grid-row:1;')).toBe(true);
+});
 
-  expect(styles).toContain('.launcher-context-menu>header button{grid-column:2;grid-row:1;');
+it('keeps the hexagon at the same fixed-canvas coordinate for both popup placements', () => {
+  const styles = readFileSync('src/styles.css', 'utf8');
+  expect(styles.includes('.launcher-shell .launcher-interaction-target{position:absolute;right:0;top:328px;')).toBe(true);
+  expect(styles.includes('.launcher-popup-below .launcher-interaction-target')).toBe(false);
+  expect(styles.includes('launcher-viewport-transitioning')).toBe(false);
 });
 
 it.each(['clear-blue', 'mint', 'warm-gold', 'lavender', 'coral', 'deep-ocean', 'night-violet'])('keeps the launcher viewport transparent with the %s theme', (theme) => {
@@ -50,281 +85,181 @@ it.each(['clear-blue', 'mint', 'warm-gold', 'lavender', 'coral', 'deep-ocean', '
   stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
   const themeCanvas = document.createElement('style');
   themeCanvas.textContent = `:root[data-theme="${theme}"]{background:rgb(1,2,3)!important}`;
-  document.head.appendChild(themeCanvas);
-  document.head.appendChild(stylesheet);
+  document.head.append(themeCanvas, stylesheet);
   document.documentElement.classList.add('launcher-window');
   document.documentElement.dataset.theme = theme;
-
   try {
     expect(getComputedStyle(document.documentElement).backgroundColor).toBe('rgba(0, 0, 0, 0)');
     expect(getComputedStyle(document.body).backgroundColor).toBe('rgba(0, 0, 0, 0)');
   } finally {
     document.documentElement.classList.remove('launcher-window');
     delete document.documentElement.dataset.theme;
-    themeCanvas.remove();
-    stylesheet.remove();
+    themeCanvas.remove(); stylesheet.remove();
   }
 });
 
-beforeEach(() => {
-  vi.clearAllMocks();
-  state.onGlobalStat = undefined;
-  state.getGlobalStat.mockReset();
-  state.getSettings.mockReset();
-  state.scanDownloadInputs.mockReset();
-  state.updateSettings.mockReset();
-  state.getManagerVisible.mockReset();
-  state.getLauncherPopupPlacement.mockReset();
-  state.getSettings.mockResolvedValue({
-    downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
-    proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
-    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 }
-  });
-  state.getManagerVisible.mockResolvedValue(true);
-  state.getLauncherPopupPlacement.mockResolvedValue('above');
-});
-
-it('requests an initial global-stat snapshot after subscribing so startup events cannot be lost', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 2 });
-
+it('requests an initial global-stat snapshot after subscribing and keeps only the hexagon', async () => {
   render(<LauncherWindow />);
-
-  await waitFor(() => expect(setLauncherCompact).toHaveBeenCalled());
-  expect(state.getGlobalStat).toHaveBeenCalledOnce();
+  await waitFor(() => expect(state.getGlobalStat).toHaveBeenCalledOnce());
+  expect(state.onGlobalStat).toBeDefined();
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]);
   expect(screen.queryByLabelText('下载速度 512 KB/s')).not.toBeInTheDocument();
 });
 
-it('keeps only the hexagon when downloads are active', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 2 });
-
+it('installs safe input before applying startup visibility', async () => {
+  const pending = deferred<void>();
+  state.setLauncherInputRegions.mockReturnValueOnce(pending.promise);
   render(<LauncherWindow />);
-
-  await waitFor(() => expect(setLauncherCompact).toHaveBeenLastCalledWith());
-  expect(screen.queryByLabelText('下载速度 512 KB/s')).not.toBeInTheDocument();
-});
-
-it('shows the current total speed above the launcher menu commands', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 2 });
-  render(<LauncherWindow />);
-
-  fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
-
-  const summary = await screen.findByLabelText('当前整体下载速度');
-  expect(summary).toHaveTextContent('512 KB/s');
-  const firstCommand = screen.getByRole('menuitem', { name: '隐藏主界面' });
-  expect(summary.compareDocumentPosition(firstCommand) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  await waitFor(() => expect(state.getGlobalStat).toHaveBeenCalled());
+  expect(setLauncherWindowVisible).not.toHaveBeenCalled();
+  await act(async () => pending.resolve());
+  await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalledWith(true));
 });
 
 it('keeps the compact launcher visible for an active task in download-only mode', async () => {
-  state.getSettings.mockResolvedValueOnce({
-    downloadDirectory: 'C:\\Downloads', launcherVisibility: 'downloading',
-    proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
-    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 }
-  });
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 0, num_active: 1 });
+  state.getSettings.mockResolvedValueOnce({ launcherVisibility: 'downloading' });
   render(<LauncherWindow />);
-
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
-  expect(setLauncherWindowVisible).toHaveBeenLastCalledWith(true);
-  expect(screen.queryByLabelText('下载速度 0 KB/s')).not.toBeInTheDocument();
+  await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenLastCalledWith(true));
 });
 
-it('opens the launcher context menu from the compact hexagon', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  render(<LauncherWindow />);
-
-  const trigger = screen.getByRole('button', { name: '打开下载输入' });
-  fireEvent.contextMenu(trigger);
-
-  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
-  expect(trigger.closest('main')).toHaveClass('launcher-menu-open');
-});
-
-it('waits for the native viewport before rendering the launcher context menu', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  let releaseNativeResize: (() => void) | undefined;
-  vi.mocked(setLauncherContextMenuVisible).mockImplementationOnce(() => new Promise<void>((resolve) => {
-    releaseNativeResize = resolve;
-  }));
-  render(<LauncherWindow />);
-
-  fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
-
-  expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument();
-  await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true, 'above'));
-  await act(async () => { releaseNativeResize?.(); });
-  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
-});
-
-it('keeps the compact launcher visible and screen-aligned while opening its menu viewport', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  let releaseNativeResize: (() => void) | undefined;
-  vi.mocked(setLauncherContextMenuVisible).mockImplementationOnce(() => new Promise<void>((resolve) => {
-    releaseNativeResize = resolve;
-  }));
-  const stylesheet = document.createElement('style');
-  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
-  document.head.appendChild(stylesheet);
-
-  try {
-    render(<LauncherWindow />);
-    const trigger = screen.getByRole('button', { name: '打开下载输入' });
-    const shell = trigger.closest('main')!;
-
-    fireEvent.contextMenu(trigger);
-
-    expect(shell).toHaveClass('launcher-viewport-transitioning');
-    expect(trigger).toBeVisible();
-    await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true, 'above'));
-    await act(async () => { releaseNativeResize?.(); });
-
-    expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
-    const interactionTarget = screen.getByRole('button', { name: '打开下载输入' }).closest('.launcher-interaction-target')!;
-    expect(getComputedStyle(interactionTarget).right).toBe('0px');
-  } finally {
-    stylesheet.remove();
-  }
-});
-
-it('anchors a context menu below the launcher when the upper work area is insufficient', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  state.getLauncherPopupPlacement.mockResolvedValueOnce('below');
-  const stylesheet = document.createElement('style');
-  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
-  document.head.appendChild(stylesheet);
-
-  try {
-    render(<LauncherWindow />);
-    const trigger = screen.getByRole('button', { name: '打开下载输入' });
-    fireEvent.contextMenu(trigger);
-
-    await waitFor(() => expect(getLauncherPopupPlacement).toHaveBeenCalled());
-    await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true, 'below'));
-    expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
-    const shell = trigger.closest('main')!;
-    expect(shell).toHaveClass('launcher-popup-below');
-    const interactionTarget = trigger.closest('.launcher-interaction-target')!;
-    expect(getComputedStyle(interactionTarget).top).toBe('0px');
-    expect(getComputedStyle(interactionTarget).bottom).toBe('auto');
-    expect(getComputedStyle(screen.getByRole('menu', { name: '悬浮球菜单' })).top).toBe('72px');
-  } finally {
-    stylesheet.remove();
-  }
-});
-
-it('anchors quick-add below the launcher when the upper work area is insufficient', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  state.getLauncherPopupPlacement.mockResolvedValueOnce('below');
-  const stylesheet = document.createElement('style');
-  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
-  document.head.appendChild(stylesheet);
-
-  try {
-    render(<LauncherWindow />);
-    const trigger = screen.getByRole('button', { name: '打开下载输入' });
-    fireEvent.click(trigger);
-
-    await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true, 'below'));
-    const dialog = await screen.findByRole('dialog', { name: '新建下载' });
-    expect(trigger.closest('main')).toHaveClass('launcher-popup-below');
-    expect(getComputedStyle(trigger.closest('.launcher-interaction-target')!).top).toBe('0px');
-    expect(getComputedStyle(dialog).top).toBe('64px');
-  } finally {
-    stylesheet.remove();
-  }
-});
-
-it('keeps the quick-add content hidden until its native viewport is ready', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  let releaseNativeResize: (() => void) | undefined;
-  let hiddenWhenNativeResizeStarted = false;
-  vi.mocked(setLauncherExpanded).mockImplementationOnce(() => new Promise<void>((resolve) => {
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新建下载"]');
-    hiddenWhenNativeResizeStarted = document.querySelector('.launcher-viewport-transitioning') !== null
-      && Boolean(dialog && getComputedStyle(dialog).visibility === 'hidden');
-    releaseNativeResize = resolve;
-  }));
-  const stylesheet = document.createElement('style');
-  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
-  document.head.appendChild(stylesheet);
-
-  try {
-    render(<LauncherWindow />);
-    fireEvent.click(screen.getByRole('button', { name: '打开下载输入' }));
-
-    await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true, 'above'));
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新建下载"]')!;
-    expect(dialog.closest('main')).toHaveClass('launcher-viewport-transitioning');
-    expect(dialog).not.toBeVisible();
-    expect(hiddenWhenNativeResizeStarted).toBe(true);
-    await act(async () => { releaseNativeResize?.(); });
-    expect(dialog).toBeVisible();
-  } finally {
-    stylesheet.remove();
-  }
-});
-
-it('waits for native menu collapse before restoring the compact launcher canvas', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  render(<LauncherWindow />);
-
-  fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
-  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
-
-  let releaseNativeResize: (() => void) | undefined;
-  vi.mocked(setLauncherContextMenuVisible).mockImplementationOnce(() => new Promise<void>((resolve) => {
-    releaseNativeResize = resolve;
-  }));
-  vi.mocked(setLauncherCompact).mockClear();
-  fireEvent.keyDown(window, { key: 'Escape' });
-
-  expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument();
-  expect(setLauncherCompact).not.toHaveBeenCalled();
-  await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenLastCalledWith(false, 'above'));
-  await act(async () => { releaseNativeResize?.(); });
-  await waitFor(() => expect(setLauncherCompact).toHaveBeenCalled());
-});
-
-it('opens the download input when clicking the compact launcher', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  render(<LauncherWindow />);
-
-  fireEvent.click(screen.getByRole('button', { name: '打开下载输入' }));
-
-  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
-  await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true, 'above'));
-});
-
-it('starts native dragging from the compact launcher', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
-  render(<LauncherWindow />);
-  await waitFor(() => expect(state.onGlobalStat).toBeDefined());
-
-  const trigger = screen.getByRole('button', { name: '打开下载输入' });
-  await act(async () => {
-    fireEvent.mouseDown(trigger, { button: 0, clientX: 20, clientY: 24 });
-    fireEvent.mouseMove(trigger, { buttons: 1, clientX: 28, clientY: 31 });
-  });
-
-  expect(startLauncherDragging).toHaveBeenCalledOnce();
-});
-
-it('uses the main task-menu visual system and reflects the current main-window visibility', async () => {
-  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 0, num_active: 0 });
-  state.getManagerVisible.mockResolvedValueOnce(false);
+it('keeps the same hexagon node while switching between both popup types', async () => {
   const user = userEvent.setup();
   render(<LauncherWindow />);
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  const mark = trigger.querySelector('.launcher-mark');
+  await user.click(trigger);
+  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, quickAdd]);
+  fireEvent.contextMenu(trigger);
+  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);
+  expect(trigger.querySelector('.launcher-mark')).toBe(mark);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  await user.click(trigger);
+  expect(await screen.findByRole('dialog')).toBeVisible();
+  expect(trigger.querySelector('.launcher-mark')).toBe(mark);
+});
 
+it('never resizes, clips, hides, or shows the native window for popup transitions', async () => {
+  const user = userEvent.setup();
+  render(<LauncherWindow />);
+  await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalledOnce());
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  await user.click(trigger);
+  await screen.findByRole('dialog');
+  fireEvent.contextMenu(trigger);
+  await screen.findByRole('menu');
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]);
+  expect(vi.mocked(setLauncherWindowVisible).mock.calls.slice(1)).toEqual([]);
+});
+
+it('uses the last intent while an earlier placement lookup is pending', async () => {
+  const pending = deferred<'above' | 'below'>();
+  state.getLauncherPopupPlacement.mockReturnValueOnce(pending.promise);
+  render(<LauncherWindow />);
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  fireEvent.contextMenu(trigger);
+  await waitFor(() => expect(state.getLauncherPopupPlacement).toHaveBeenCalledOnce());
+  fireEvent.click(trigger); fireEvent.contextMenu(trigger); fireEvent.click(trigger);
+  await act(async () => pending.resolve('below'));
+  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, quickAdd]);
+});
+
+it('uses the last input when left and right clicks alternate rapidly', async () => {
+  render(<LauncherWindow />);
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  fireEvent.click(trigger); fireEvent.contextMenu(trigger); fireEvent.click(trigger);
+  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
+
+it.each(['Escape', 'blur', 'drag'] as const)('restores icon-only input for %s', async (reason) => {
+  render(<LauncherWindow />);
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  fireEvent.contextMenu(trigger);
+  await screen.findByRole('menu');
+  if (reason === 'Escape') fireEvent.keyDown(window, { key: 'Escape' });
+  if (reason === 'blur') fireEvent.blur(window);
+  if (reason === 'drag') {
+    fireEvent.mouseDown(trigger, { button: 0, clientX: 10, clientY: 10 });
+    fireEvent.mouseMove(trigger, { buttons: 1, clientX: 30, clientY: 30 });
+  }
+  await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
+  await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+});
+
+it('serializes region writes so a slow popup update cannot override compact input', async () => {
+  render(<LauncherWindow />);
+  await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalled());
+  const pending = deferred<void>();
+  state.setLauncherInputRegions.mockReturnValueOnce(pending.promise);
   fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
+  await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]));
+  fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);
+  await act(async () => pending.resolve());
+  await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
+});
 
-  const menu = await screen.findByRole('menu', { name: '悬浮球菜单' });
-  expect(menu).toHaveClass('task-context-menu');
-  expect(screen.getByRole('menuitem', { name: '显示主界面' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '悬浮球显示' })).toBeVisible();
-  expect(screen.queryByRole('menuitem', { name: '本次隐藏悬浮球' })).not.toBeInTheDocument();
+it('awaits icon-only input before native dragging and then refreshes placement once', async () => {
+  render(<LauncherWindow />);
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  fireEvent.contextMenu(trigger);
+  await screen.findByRole('menu');
+  const pending = deferred<void>();
+  state.setLauncherInputRegions.mockReturnValueOnce(pending.promise);
+  state.getLauncherPopupPlacement.mockClear();
+  fireEvent.mouseDown(trigger, { button: 0, clientX: 10, clientY: 10 });
+  fireEvent.mouseMove(trigger, { buttons: 1, clientX: 30, clientY: 30 });
+  await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
+  expect(startLauncherDragging).not.toHaveBeenCalled();
+  await act(async () => pending.resolve());
+  await waitFor(() => expect(startLauncherDragging).toHaveBeenCalledOnce());
+  await waitFor(() => expect(state.getLauncherPopupPlacement).toHaveBeenCalledOnce());
+});
 
+it('retains the previous input on failure and never falls back to the full canvas', async () => {
+  render(<LauncherWindow />);
+  await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalled());
+  state.setLauncherInputRegions.mockRejectedValueOnce(new Error('native update failed'));
+  fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
+  await screen.findByRole('menu');
+  await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]));
+  fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
+  expect(vi.mocked(setLauncherInputRegions).mock.calls.every(([regions]) => regions.length <= 2 && regions[0].width === 64)).toBe(true);
+});
+
+it.each(['context-menu', 'quick-add'] as const)('uses the below slot for %s without moving the icon', async (popup) => {
+  state.getLauncherPopupPlacement.mockResolvedValue('below');
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<LauncherWindow />);
+    const trigger = screen.getByRole('button', { name: '打开下载输入' });
+    if (popup === 'context-menu') fireEvent.contextMenu(trigger); else fireEvent.click(trigger);
+    const surface = await screen.findByRole(popup === 'context-menu' ? 'menu' : 'dialog');
+    expect(trigger.closest('main')).toHaveClass('launcher-popup-below');
+    expect(getComputedStyle(trigger.closest('.launcher-interaction-target')!).top).toBe('328px');
+    expect(getComputedStyle(surface).top).toBe('392px');
+  } finally { stylesheet.remove(); }
+});
+
+it('shows current speed, manager visibility, and the display settings menu', async () => {
+  state.getManagerVisible.mockResolvedValue(false);
+  const user = userEvent.setup();
+  render(<LauncherWindow />);
+  fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
+  const menuElement = await screen.findByRole('menu', { name: '悬浮球菜单' });
+  expect(menuElement).toHaveClass('task-context-menu');
+  expect(screen.getByLabelText('当前整体下载速度')).toHaveTextContent('512 KB/s');
+  expect(await screen.findByRole('menuitem', { name: '显示主界面' })).toBeVisible();
   await user.click(screen.getByRole('menuitem', { name: '悬浮球显示' }));
   expect(await screen.findByRole('menu', { name: '悬浮球显示设置' })).toBeVisible();
   expect(screen.queryByText('选择显示时机')).not.toBeInTheDocument();
