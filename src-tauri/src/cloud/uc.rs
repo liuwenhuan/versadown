@@ -76,6 +76,12 @@ pub fn parse_uc_web_session(cookies: &[String]) -> Result<UcSession, QuarkError>
         "_UP_A4A_11_",
         "__kp",
         "__kps",
+        "__ktd",
+        "b-user-id",
+        // UC issues this cookie from drive.uc.cn alongside the normal login
+        // session. Directory reads work without it, but the server rejects
+        // share creation when it is absent.
+        "UDRIVE_TRANSFER_SESS",
         // Share-download signing requires this browser-issued anti-CSRF
         // value even though directory listing does not.
         "csrf_token",
@@ -251,6 +257,11 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         Ok(cookie_value(cookie, "__uid")
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| format!("uc-{:x}", md5::compute(cookie))))
+    }
+
+    fn has_share_session_cookie(&self) -> Result<bool, QuarkError> {
+        Ok(cookie_value(self.cookie()?, "UDRIVE_TRANSFER_SESS")
+            .is_some_and(|value| !value.is_empty()))
     }
 
     fn saved_display_name(&self, account_id: &str) -> Option<&str> {
@@ -537,7 +548,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         if let Some(pass_code) = pass_code {
             body["passcode"] = json!(pass_code);
         }
-        let created = self.request_json("POST", "share", "", Some(body))?;
+        let response = self.send("POST", "share", "", Some(body))?;
+        let created = match uc_json(&response) {
+            Err(QuarkError::Provider(_))
+                if uc_response_code(&response) == Some(41026)
+                    && !self.has_share_session_cookie()? =>
+            {
+                // Legacy sessions were persisted before UC's share-scoped
+                // browser cookie was retained. Reopen the official page so
+                // the next captured session can make this sensitive request.
+                return Err(QuarkError::WebAuthorizationRequired);
+            }
+            result => result?,
+        };
         let created_data = created.get("data").ok_or(QuarkError::InvalidResponse)?;
         let mut share_id = uc_share_task_value(created_data, "share_id");
         let task_id = uc_share_task_value(created_data, "task_id");
@@ -725,6 +748,13 @@ fn uc_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
         )));
     }
     Ok(value)
+}
+
+fn uc_response_code(response: &CloudHttpResponse) -> Option<i64> {
+    serde_json::from_str::<Value>(&response.body)
+        .ok()?
+        .get("code")?
+        .as_i64()
 }
 
 fn uc_rejection_message(http_status: u16, code: i64, status: i64) -> String {
@@ -1479,6 +1509,46 @@ mod tests {
     }
 
     #[test]
+    fn uc_web_session_retains_the_share_scoped_browser_cookies() {
+        let session = parse_uc_web_session(&[
+            "__puus=web-session".into(),
+            "__ktd=browser-state".into(),
+            "b-user-id=account-id".into(),
+            "UDRIVE_TRANSFER_SESS=share-session".into(),
+            "analytics=never-persisted".into(),
+        ])
+        .expect("the browser session should be accepted");
+
+        assert!(session.cookie.contains("__ktd=browser-state"));
+        assert!(session.cookie.contains("b-user-id=account-id"));
+        assert!(session.cookie.contains("UDRIVE_TRANSFER_SESS=share-session"));
+        assert!(!session.cookie.contains("analytics="));
+    }
+
+    #[test]
+    fn uc_legacy_session_share_rejection_requests_web_reauthorization() {
+        let http = Http::new(vec![json!({
+            "code": 41026,
+            "message": "request rejected",
+        })]);
+        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+
+        let error = client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "报告.pdf".into(),
+                    pass_code: None,
+                    generate_pass_code: false,
+                    expires_in_days: None,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, QuarkError::WebAuthorizationRequired));
+    }
+
+    #[test]
     fn uc_web_account_never_displays_an_opaque_cookie_identifier() {
         // Break caught: __uid is an opaque browser-session identifier, not a
         // user-visible UC account name. Older builds persisted it as the card
@@ -1543,7 +1613,10 @@ mod tests {
             ),
             requests: std::sync::Mutex::new(vec![]),
         };
-        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+        let client = UcClient::new(
+            UcSession::cookie("__puus=session; UDRIVE_TRANSFER_SESS=share-session"),
+            &http,
+        );
 
         let share = client
             .create_share(
@@ -1748,7 +1821,10 @@ mod tests {
             "code": 41026,
             "message": "request rejected",
         })]);
-        let client = UcClient::new(UcSession::cookie("__puus=session"), &http);
+        let client = UcClient::new(
+            UcSession::cookie("__puus=session; UDRIVE_TRANSFER_SESS=share-session"),
+            &http,
+        );
 
         let error = client
             .create_share(
