@@ -136,21 +136,40 @@ impl TauriDownloadEvents {
 
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
-        if matches!(
+        let terminal = matches!(
             task.status,
             TaskStatus::Completed
                 | TaskStatus::Failed
                 | TaskStatus::Cancelled
                 | TaskStatus::Recycled
-        ) && self
+        );
+        let current_task =
+            self.store.find(task.id).ok().filter(|current| {
+                current.status == task.status && current.aria_gid == task.aria_gid
+            });
+        let group = self
             .store
-            .find(task.id)
-            .is_ok_and(|current| current.status == task.status && current.aria_gid == task.aria_gid)
-        {
-            self.cloud_download_dispatch.scheduler.release(task.id);
-            self.cloud_download_dispatch.scheduler.cancel(task.id);
+            .cloud_directory_group_for_task(task.id)
+            .ok()
+            .flatten();
+        if terminal && current_task.is_some() {
+            let directory_finished = group.as_ref().is_some_and(|group| {
+                commands::cloud_directory_group_queue_task(&self.store, group.id).is_ok_and(
+                    |root| {
+                        matches!(
+                            root.status,
+                            TaskStatus::Completed
+                                | TaskStatus::Failed
+                                | TaskStatus::Cancelled
+                                | TaskStatus::Recycled
+                        )
+                    },
+                )
+            });
+            self.cloud_download_dispatch
+                .release_terminal(task.id, directory_finished);
         }
-        if let Ok(Some(group)) = self.store.cloud_directory_group_for_task(task.id) {
+        if let Some(group) = group {
             self.schedule_directory_refresh(group.id);
         } else if let Ok(payload) =
             commands::task_update_payload(&self.store, Some(&self.cloud.share_plans), task.clone())

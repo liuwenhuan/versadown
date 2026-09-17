@@ -175,3 +175,49 @@ async fn aborting_an_enqueue_future_does_not_leave_a_phantom_fifo_head() {
         AdmissionOutcome::Granted
     );
 }
+
+#[tokio::test]
+async fn directory_uses_one_provider_task_slot_but_admits_its_configured_file_parallelism() {
+    let scheduler = CloudDownloadScheduler::new();
+    let directory = Uuid::new_v4();
+    let members: Vec<_> = (0..4).map(|_| Uuid::new_v4()).collect();
+
+    for member in &members {
+        assert_eq!(
+            scheduler
+                .enqueue_directory(CloudProvider::Quark, directory, *member, 4)
+                .await,
+            AdmissionOutcome::Granted
+        );
+    }
+
+    // A fifth directory still fits: the first directory consumes one logical
+    // provider task, rather than four file-task slots.
+    assert_eq!(
+        scheduler
+            .enqueue_directory(CloudProvider::Quark, Uuid::new_v4(), Uuid::new_v4(), 4)
+            .await,
+        AdmissionOutcome::Granted
+    );
+
+    let fifth_member = Uuid::new_v4();
+    let waiter = {
+        let scheduler = scheduler.clone();
+        tokio::spawn(async move {
+            scheduler
+                .enqueue_directory(CloudProvider::Quark, directory, fifth_member, 4)
+                .await
+        })
+    };
+    wait_until_pending(&scheduler, CloudProvider::Quark, 1).await;
+    assert!(!waiter.is_finished());
+
+    assert!(scheduler.release_directory_member(directory, members[0], false));
+    assert_eq!(
+        timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap(),
+        AdmissionOutcome::Granted
+    );
+}

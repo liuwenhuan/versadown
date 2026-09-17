@@ -530,9 +530,28 @@ pub async fn queue_cloud_dispatch(
     configured = state
         .cloud_download_dispatch
         .retry_submission_options(task.id, configured);
+    let directory_id = state
+        .store
+        .cloud_directory_group_for_task(task.id)
+        .map_err(|_| QuarkError::Storage)?
+        .map(|group| group.id);
+    if let Some(directory_id) = directory_id {
+        let max_active_members = state
+            .settings
+            .lock()
+            .map_err(|_| QuarkError::Storage)?
+            .aria2
+            .max_connections_per_server;
+        state.cloud_download_dispatch.configure_directory(
+            task.id,
+            directory_id,
+            max_active_members,
+        );
+    }
     emit_cloud_dispatch_update(&app, state, &queued);
     let id = queued.id;
     let source = queued.source.clone();
+    let directory_member = directory_id.is_some();
     let dispatch = state.cloud_download_dispatch.clone();
     let store = state.store.clone();
     tauri::async_runtime::spawn(async move {
@@ -575,8 +594,14 @@ pub async fn queue_cloud_dispatch(
                         .aria2
                         .max_connections_per_server;
                     configured.proxy = current.proxy;
-                    let configured =
-                        apply_cloud_download_policy(provider, configured_connections, configured);
+                    let configured = if directory_member {
+                        // A directory spends its per-task concurrency on files,
+                        // not HTTP ranges. Each child therefore has one URL
+                        // connection while the root admits several children.
+                        apply_cloud_directory_member_policy(configured)
+                    } else {
+                        apply_cloud_download_policy(provider, configured_connections, configured)
+                    };
                     let (url, options) = share::share_submission_options(resolved, configured)?;
                     service
                         .submit_uri_with_options(id, vec![url], options)
@@ -587,6 +612,27 @@ pub async fn queue_cloud_dispatch(
             .await;
         if let Some(task) = result {
             let state = app.state::<AppState>();
+            if matches!(
+                task.status,
+                TaskStatus::Completed
+                    | TaskStatus::Failed
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Recycled
+            ) {
+                let directory_finished = directory_id.is_some_and(|group_id| {
+                    crate::commands::cloud_directory_group_queue_task(&state.store, group_id)
+                        .is_ok_and(|root| {
+                            matches!(
+                                root.status,
+                                TaskStatus::Completed
+                                    | TaskStatus::Failed
+                                    | TaskStatus::Cancelled
+                                    | TaskStatus::Recycled
+                            )
+                        })
+                });
+                dispatch.release_terminal(task.id, directory_finished);
+            }
             emit_cloud_dispatch_update(&app, &state, &task);
             schedule_cloud_share_cleanup(app.clone(), &task);
         }
@@ -638,6 +684,16 @@ pub fn apply_cloud_download_policy(
         options.max_tries = Some(5);
         options.retry_wait_seconds = Some(3);
     }
+    options
+}
+
+/// Directory parallelism is expressed as several files, never ranges of the
+/// same signed link. Keeping a member to one connection avoids consuming the
+/// directory's file slots on a single large file.
+pub fn apply_cloud_directory_member_policy(
+    mut options: UriSubmissionOptions,
+) -> UriSubmissionOptions {
+    options.max_connections_per_server = Some(1);
     options
 }
 

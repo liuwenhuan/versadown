@@ -23,6 +23,13 @@ struct TaskDispatch {
     job: AsyncMutex<()>,
     changed: Notify,
     retry_intent: Mutex<RetryIntent>,
+    directory: Mutex<Option<DirectoryAdmission>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DirectoryAdmission {
+    id: Uuid,
+    max_active_members: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -42,12 +49,18 @@ pub struct CloudDownloadDispatch {
 struct Slot {
     scheduler: CloudDownloadScheduler,
     id: Uuid,
+    directory: Option<DirectoryAdmission>,
     accepted: bool,
 }
 impl Drop for Slot {
     fn drop(&mut self) {
         if !self.accepted {
-            self.scheduler.release(self.id);
+            if let Some(directory) = self.directory {
+                self.scheduler
+                    .release_directory_member(directory.id, self.id, false);
+            } else {
+                self.scheduler.release(self.id);
+            }
         }
     }
 }
@@ -59,6 +72,32 @@ impl CloudDownloadDispatch {
 
     pub async fn submission_lock(&self, id: Uuid) -> OwnedMutexGuard<()> {
         self.task(id).submission.clone().lock_owned().await
+    }
+
+    /// A directory root is one logical cloud task; this only controls how many
+    /// of its independently-addressed files may be admitted concurrently.
+    pub fn configure_directory(&self, id: Uuid, directory: Uuid, max_active_members: u8) {
+        self.task(id)
+            .directory
+            .lock()
+            .unwrap()
+            .replace(DirectoryAdmission {
+                id: directory,
+                max_active_members: usize::from(max_active_members.max(1)),
+            });
+    }
+
+    /// Terminal children free their file admission. The directory's logical
+    /// task admission survives until the projected directory root is terminal.
+    pub fn release_terminal(&self, id: Uuid, directory_finished: bool) {
+        let directory = *self.task(id).directory.lock().unwrap();
+        if let Some(directory) = directory {
+            self.scheduler
+                .release_directory_member(directory.id, id, directory_finished);
+        } else {
+            self.scheduler.release(id);
+        }
+        self.scheduler.cancel(id);
     }
 
     /// Invalidate before changing local intent. The worker drops a pending
@@ -253,8 +292,17 @@ impl CloudDownloadDispatch {
         if !self.runnable(store, id, version) {
             return None;
         }
+        let directory = *state.directory.lock().unwrap();
         let admission = tokio::select! {
-            admission = self.scheduler.enqueue(provider, id) => admission,
+            admission = async {
+                if let Some(directory) = directory {
+                    self.scheduler
+                        .enqueue_directory(provider, directory.id, id, directory.max_active_members)
+                        .await
+                } else {
+                    self.scheduler.enqueue(provider, id).await
+                }
+            } => admission,
             _ = &mut changed => return None,
         };
         if admission != AdmissionOutcome::Granted {
@@ -263,6 +311,7 @@ impl CloudDownloadDispatch {
         let mut slot = Slot {
             scheduler: self.scheduler.clone(),
             id,
+            directory,
             accepted: false,
         };
         if !self.runnable(store, id, version) {

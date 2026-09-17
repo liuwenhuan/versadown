@@ -6,7 +6,10 @@ use std::{
 
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
-    cloud::{commands::apply_cloud_download_policy, CloudProvider},
+    cloud::{
+        commands::{apply_cloud_directory_member_policy, apply_cloud_download_policy},
+        CloudProvider,
+    },
     prepare_download, DownloadAction, DownloadService, DownloadTask, EventSink, NewTask,
     TaskStatus, TaskStore, UriSubmissionOptions,
 };
@@ -347,6 +350,16 @@ fn cloud_download_connection_policy_retains_user_value_below_provider_cap() {
         apply_cloud_download_policy(CloudProvider::Baidu, 2, UriSubmissionOptions::default());
 
     assert_eq!(options.max_connections_per_server, Some(2));
+}
+
+#[test]
+fn cloud_directory_members_always_use_one_connection() {
+    let options = apply_cloud_directory_member_policy(UriSubmissionOptions {
+        max_connections_per_server: Some(16),
+        ..UriSubmissionOptions::default()
+    });
+
+    assert_eq!(options.max_connections_per_server, Some(1));
 }
 
 #[tokio::test]
