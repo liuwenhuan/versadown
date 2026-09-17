@@ -938,6 +938,79 @@ it('offers real state-aware commands when an active task is right-clicked', asyn
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
 });
 
+it.each([
+  ['下载中', 'downloading' as const],
+  ['已完成', 'completed' as const],
+  ['失败', 'failed' as const],
+  ['回收站', 'recycled' as const],
+])('shows the matching privacy move command for a normal %s task only when privacy downloads are enabled', (label, status) => {
+  const { container, rerender } = render(<DownloadQueue
+    tasks={[{ id: `${status}-normal`, name: `${label}-普通任务`, kind: 'file', status, progress: status === 'completed' || status === 'recycled' ? 100 : 0 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    privacyEnabled={false}
+  />);
+
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-normal"] .task-row`)!);
+  expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入正常下载' })).not.toBeInTheDocument();
+
+  rerender(<DownloadQueue
+    tasks={[{ id: `${status}-normal`, name: `${label}-普通任务`, kind: 'file', status, progress: status === 'completed' || status === 'recycled' ? 100 : 0 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    privacyEnabled
+  />);
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-normal"] .task-row`)!);
+  expect(screen.getByRole('menuitem', { name: '移入隐私下载' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '移入正常下载' })).not.toBeInTheDocument();
+});
+
+it.each([
+  ['下载中', 'downloading' as const],
+  ['已完成', 'completed' as const],
+  ['失败', 'failed' as const],
+  ['回收站', 'recycled' as const],
+])('shows the matching privacy move command for a private %s task only when privacy downloads are enabled', (label, status) => {
+  const task = { id: `${status}-private`, name: `${label}-隐私任务`, kind: 'file' as const, status, progress: status === 'completed' || status === 'recycled' ? 100 : 0, is_private: true };
+  const { container, rerender } = render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} privacyEnabled={false} />);
+
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-private"] .task-row`)!);
+  expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入正常下载' })).not.toBeInTheDocument();
+
+  rerender(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} privacyEnabled />);
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-private"] .task-row`)!);
+  expect(screen.getByRole('menuitem', { name: '移入正常下载' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
+});
+
+it('shows both privacy actions for a mixed multi-selection and forwards the requested target state', () => {
+  const onBatchCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      { id: 'ordinary', name: '普通任务', kind: 'file', status: 'downloading', progress: 10 },
+      { id: 'private', name: '隐私任务', kind: 'file', status: 'completed', progress: 100, is_private: true },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    onBatchCommand={onBatchCommand}
+    privacyEnabled
+  />);
+
+  fireEvent.click(screen.getByText('普通任务'));
+  fireEvent.click(screen.getByText('隐私任务'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('普通任务'));
+  expect(screen.getByRole('menuitem', { name: '移入隐私下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '移入正常下载' })).toBeVisible();
+
+  fireEvent.click(screen.getByRole('menuitem', { name: '移入隐私下载' }));
+  expect(onBatchCommand).toHaveBeenCalledWith(['ordinary', 'private'], 'move_to_private');
+});
+
 it('offers cancellation for an invalid link left unsubmitted in parsing state', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();

@@ -267,4 +267,7 @@ it('shows task details only after the task context-menu command', async () => {
   fireEvent.contextMenu(screen.getByTitle('archive.zip'), { clientX: 320, clientY: 220 });
   await user.click(screen.getByRole('menuitem', { name: '查看任务详情' }));
   expect(screen.getByRole('dialog', { name: '任务详情' })).toBeVisible();
+  expect(search).toBeDisabled();
+  await user.click(screen.getByRole('button', { name: '关闭任务详情' }));
+  expect(search).toBeEnabled();
 });

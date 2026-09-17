@@ -15,7 +15,7 @@ import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusBanner } from './components/EngineStatusBanner';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { reconcileTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
@@ -1047,6 +1047,18 @@ export function App() {
         }
         return;
       }
+      if (command === 'move_to_private' || command === 'move_to_normal') {
+        const updated = await setTaskPrivacy(id, command === 'move_to_private');
+        if (updated) {
+          recordTaskEvent(updated);
+          setTasks((current) => upsertTask(current, updated));
+          if (command === 'move_to_private' && !privacyVisibility.unlocked && isPrivateTask(updated)) {
+            setSelectedTaskId((current) => current === id ? null : current);
+            setDetailsTaskId((current) => current === id ? null : current);
+          }
+        }
+        return;
+      }
       if (command === 'open_directory') {
         await openTaskDirectory(id);
         return;
@@ -1112,7 +1124,12 @@ export function App() {
         return;
       }
 
+      const privacyTarget = command === 'move_to_private' ? true : command === 'move_to_normal' ? false : undefined;
+
       const operations = targets.flatMap((task) => {
+        if (privacyTarget !== undefined) return isPrivateTask(task) === privacyTarget
+          ? []
+          : [{ task, operation: setTaskPrivacy(task.id, privacyTarget) }];
         if (command === 'pause') return task.status === 'downloading'
           ? [{ task, operation: runTaskAction(task.id, 'pause').then((result) => result.queueTask ?? result.task) }]
           : [];
@@ -1128,6 +1145,7 @@ export function App() {
       });
       const results = await Promise.allSettled(operations.map(({ operation }) => operation));
       let failure: unknown;
+      const newlyHiddenIds = new Set<string>();
       results.forEach((result) => {
         if (result.status === 'rejected') {
           failure ??= result.reason;
@@ -1136,8 +1154,13 @@ export function App() {
         if (result.value) {
           recordTaskEvent(result.value);
           setTasks((current) => upsertTask(current, result.value!));
+          if (privacyTarget === true && !privacyVisibility.unlocked && isPrivateTask(result.value)) newlyHiddenIds.add(result.value.id);
         }
       });
+      if (newlyHiddenIds.size) {
+        setSelectedTaskId((current) => current && newlyHiddenIds.has(current) ? null : current);
+        setDetailsTaskId((current) => current && newlyHiddenIds.has(current) ? null : current);
+      }
       if (failure) throw failure;
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
@@ -1412,7 +1435,7 @@ export function App() {
               wrap="off"
               aria-label="搜索任务或粘贴下载链接"
               placeholder="此处可搜索本地任务，粘贴下载链接，拖入bt种子文件"
-              disabled={newDownloadOpen}
+              disabled={newDownloadOpen || Boolean(detailsTask)}
               value={searchInput}
               onChange={(event) => {
                 const next = event.target.value;
@@ -1494,7 +1517,7 @@ export function App() {
             </div>
           </header>
           <section className="queue-area">
-            <DownloadQueue tasks={visibleTasks} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onReorder={(orderedTaskIds) => setTaskOrderPreferences((current) => ({
+            <DownloadQueue tasks={visibleTasks} privacyEnabled={settings.privacyDownloadEnabled === true} selectedTaskId={selectedTaskId} onSelect={setSelectedTaskId} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onReorder={(orderedTaskIds) => setTaskOrderPreferences((current) => ({
               sorts: { ...current.sorts, [downloadTab]: 'manual' },
               orders: {
                 ...current.orders,

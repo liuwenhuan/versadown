@@ -1,7 +1,7 @@
 export type TaskStatus = 'draft' | 'parsing' | 'awaiting_user' | 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'recycled' | 'paused';
 export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'cloud';
 export type DuplicateDownloadState = 'existing_active' | 'resume_available' | 'completed_files_present' | 'completed_files_missing' | 'overwrite_required';
-export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'retry_cleanup' | 'open_directory' | 'open_file' | 'play_videos' | 'copy_link' | 'details' | 'move_to_recycle' | 'remove_record';
+export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'retry_cleanup' | 'open_directory' | 'open_file' | 'play_videos' | 'copy_link' | 'details' | 'move_to_recycle' | 'remove_record' | 'move_to_private' | 'move_to_normal';
 
 export interface QueueTask {
   id: string;

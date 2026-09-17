@@ -1,37 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { FloatingLauncher } from './FloatingLauncher';
-import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, getLauncherManagerVisible, getLauncherPopupPlacement, launcherDimensions, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging, type LauncherPopupPlacement } from '../lib/launcherWindow';
-import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, updateSettings } from '../lib/api';
-import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
+import { anchorLauncherToWorkArea, sendLauncherInput, setLauncherWindowVisible, showLauncherPopup, startLauncherDragging } from '../lib/launcherWindow';
+import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs } from '../lib/api';
+import { subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
-
-function waitForLauncherTransitionPaint() {
-  return new Promise<void>((resolve) => {
-    if (typeof window.requestAnimationFrame !== 'function') {
-      window.setTimeout(resolve, 0);
-      return;
-    }
-    window.requestAnimationFrame(() => window.setTimeout(resolve, 0));
-  });
-}
 
 export function LauncherWindow() {
   const [activeCount, setActiveCount] = useState(0);
-  const [downloadSpeed, setDownloadSpeed] = useState(0);
-  const [expanded, setExpanded] = useState(false);
-  const [expandedTransitioning, setExpandedTransitioning] = useState(false);
-  const [contextMenuOpen, setContextMenuOpen] = useState(false);
-  const [contextMenuTransitioning, setContextMenuTransitioning] = useState(false);
-  const [popupPlacement, setPopupPlacement] = useState<LauncherPopupPlacement>('above');
-  const [managerVisible, setManagerVisible] = useState(true);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>('always');
   const [settingsReady, setSettingsReady] = useState(false);
   const [anchored, setAnchored] = useState(false);
   const statEventEpoch = useRef(0);
-  const hasActiveDownload = activeCount > 0;
-  const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
+  const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && activeCount > 0);
 
   useEffect(() => {
     void anchorLauncherToWorkArea().catch(() => undefined).finally(() => setAnchored(true));
@@ -51,20 +32,15 @@ export function LauncherWindow() {
   }, []);
 
   useEffect(() => {
-    if (!settingsReady || !anchored || expanded || expandedTransitioning || contextMenuOpen || contextMenuTransitioning) return;
-    void setLauncherCompact()
-      .then(() => setLauncherWindowVisible(shouldShowLauncher))
-      .catch(() => undefined);
-  }, [anchored, contextMenuOpen, contextMenuTransitioning, expanded, expandedTransitioning, settingsReady, shouldShowLauncher]);
+    if (!settingsReady || !anchored) return;
+    void setLauncherWindowVisible(shouldShowLauncher).catch(() => undefined);
+  }, [anchored, settingsReady, shouldShowLauncher]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let disposed = false;
     let unlistenDownloads: (() => void) | undefined;
-    const applyStat = (stat: DownloadGlobalStat) => {
-      setActiveCount(stat.num_active);
-      setDownloadSpeed(stat.download_speed);
-    };
+    const applyStat = (stat: DownloadGlobalStat) => setActiveCount(stat.num_active);
     subscribeToDownloadEvents({
       onTask: () => undefined,
       onGlobalStat: (stat) => {
@@ -82,81 +58,15 @@ export function LauncherWindow() {
     return () => { disposed = true; unlistenDownloads?.(); };
   }, []);
 
-  function openContextMenu() {
-    if (expanded || contextMenuOpen || contextMenuTransitioning) return;
-    setContextMenuTransitioning(true);
-    void (async () => {
-      try {
-        const placement = await getLauncherPopupPlacement(launcherDimensions.menu);
-        setPopupPlacement(placement);
-        await waitForLauncherTransitionPaint();
-        await setLauncherContextMenuVisible(true, placement);
-        setContextMenuOpen(true);
-        void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
-        void showLauncherMenu().catch(() => undefined);
-      } catch {
-        // The transparent native viewport was not prepared, so do not render a clipped menu.
-      } finally {
-        setContextMenuTransitioning(false);
-      }
-    })();
-  }
-
-  function closeContextMenu() {
-    if (!contextMenuOpen || contextMenuTransitioning) return;
-    setContextMenuTransitioning(true);
-    setContextMenuOpen(false);
-    void waitForLauncherTransitionPaint()
-      .then(() => setLauncherContextMenuVisible(false, popupPlacement))
-      .catch(() => undefined)
-      .finally(() => setContextMenuTransitioning(false));
-  }
-
-  function changeExpanded(nextExpanded: boolean) {
-    setContextMenuOpen(false);
-    setExpandedTransitioning(true);
-    void (async () => {
-      try {
-        const placement = nextExpanded
-          ? await getLauncherPopupPlacement(launcherDimensions.expanded)
-          : popupPlacement;
-        setPopupPlacement(placement);
-        setExpanded(nextExpanded);
-        await waitForLauncherTransitionPaint();
-        await setLauncherExpanded(nextExpanded, placement);
-      } catch {
-        // Do not show a popup until its matching native viewport was prepared.
-      } finally {
-        setExpandedTransitioning(false);
-      }
-    })();
-  }
-
-  function runContextAction(action: LauncherMenuAction) {
-    void runLauncherMenuAction(`launcher.${action}`).then(async () => {
-      if (action === 'hide_manager') setManagerVisible(await getLauncherManagerVisible().catch(() => managerVisible));
-    }).catch(() => undefined);
-  }
-
-  function updateLauncherVisibility(nextVisibility: LauncherVisibility) {
-    void getSettings()
-      .then((settings) => updateSettings({ ...settings, launcherVisibility: nextVisibility }))
-      .then((settings) => setLauncherVisibility(settings.launcherVisibility))
-      .catch(() => undefined);
-  }
-
   return (
-    <main className={`launcher-shell ${expanded ? 'launcher-expanded' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''} ${expandedTransitioning || contextMenuTransitioning ? 'launcher-viewport-transitioning' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className="launcher-shell" aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
-        expanded={expanded}
         onParse={(input) => { void sendLauncherInput(input); }}
         onScan={scanDownloadInputs}
-        onOpenTaskList={() => { void openLauncherManager(); }}
-        onExpandedChange={changeExpanded}
+        onOpenInput={() => { void showLauncherPopup('input').catch(() => undefined); }}
         onDragStart={() => { void startLauncherDragging(); }}
-        onContextMenu={openContextMenu}
+        onContextMenu={() => { void showLauncherPopup('menu').catch(() => undefined); }}
       />
-      {contextMenuOpen && <LauncherContextMenu downloadSpeed={formatSpeed(downloadSpeed)} managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}
     </main>
   );
 }

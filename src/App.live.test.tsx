@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
   confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
-  moveToRecycle: vi.fn(), purgeTasks: vi.fn(), clipboardWrite: vi.fn(),
+  moveToRecycle: vi.fn(), purgeTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
   getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
@@ -31,7 +31,7 @@ vi.mock('./lib/api', () => ({
   defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 } },
   getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
-  moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
+  moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, setTaskPrivacy: state.setTaskPrivacy, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -97,6 +97,7 @@ beforeEach(() => {
   state.taskAction.mockReset();
   state.moveToRecycle.mockReset();
   state.purgeTasks.mockReset();
+  state.setTaskPrivacy.mockReset();
   state.clipboardWrite.mockReset();
   state.updateAiSettings.mockReset();
   state.listAiModels.mockReset();
@@ -635,6 +636,34 @@ it('does not expose private tasks or visibility options while privacy is locked'
   const queue = screen.getByRole('region', { name: '下载队列' });
   expect(within(queue).getByTitle('ordinary.zip')).toBeVisible();
   expect(within(queue).queryByTitle('private.zip')).not.toBeInTheDocument();
+});
+
+it('hides a task and its open details dialog immediately after moving it into private downloads while locked', async () => {
+  const ordinaryTask: QueueTask = { ...oldTask, id: 'move-private-now', name: '马上隐藏.zip' };
+  state.getSettings.mockResolvedValue({
+    downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
+    proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
+    magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 },
+    privacyDownloadEnabled: true,
+  });
+  state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: false });
+  state.list.mockResolvedValue([ordinaryTask]);
+  state.setTaskPrivacy.mockResolvedValue({ ...ordinaryTask, is_private: true });
+  const user = userEvent.setup();
+  render(<App />);
+
+  await screen.findByRole('button', { name: '解锁隐私任务' });
+  await user.click(screen.getByRole('button', { name: '更多操作 马上隐藏.zip' }));
+  await user.click(screen.getByRole('menuitem', { name: '查看任务详情' }));
+  expect(screen.getByRole('dialog', { name: '任务详情' })).toBeVisible();
+
+  fireEvent.contextMenu(screen.getAllByText('马上隐藏.zip')[0]);
+  await user.click(screen.getByRole('menuitem', { name: '移入隐私下载' }));
+
+  await waitFor(() => expect(state.setTaskPrivacy).toHaveBeenCalledWith('move-private-now', true));
+  await waitFor(() => expect(screen.queryByTitle('马上隐藏.zip')).not.toBeInTheDocument());
+  expect(screen.queryByRole('dialog', { name: '任务详情' })).not.toBeInTheDocument();
 });
 
 it('uses the shared line icon and input treatment when unlocking private tasks', async () => {

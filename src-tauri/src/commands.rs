@@ -126,6 +126,86 @@ pub(crate) fn ensure_private_download_enabled(
     Ok(())
 }
 
+/// Persists a privacy conversion before producing the same queue projection
+/// consumed by the task list. A cloud directory is one durable unit: selecting
+/// either its root or any linked leaf converts the whole group.
+fn set_task_private_with_visibility(
+    store: &TaskStore,
+    task_id: Uuid,
+    is_private: bool,
+    privacy_download_enabled: bool,
+    privacy_unlocked: bool,
+) -> Result<QueueTaskPayload, String> {
+    let ensure_transition = |currently_private: bool| {
+        if currently_private && !privacy_unlocked {
+            return Err("隐私任务已锁定，请先解锁".to_string());
+        }
+        if !currently_private && is_private && !privacy_download_enabled {
+            return Err("请先在设置中开启隐私下载".to_string());
+        }
+        Ok(())
+    };
+
+    if let Some(group) = store
+        .cloud_directory_group(task_id)
+        .map_err(|error| error.to_string())?
+    {
+        ensure_transition(group.is_private)?;
+        store
+            .set_cloud_directory_group_private(group.id, is_private)
+            .map_err(|error| error.to_string())?;
+        return cloud_directory_group_queue_task(store, group.id);
+    }
+
+    let task = store.find(task_id).map_err(|error| error.to_string())?;
+    if let Some(group) = store
+        .cloud_directory_group_for_task(task.id)
+        .map_err(|error| error.to_string())?
+    {
+        ensure_transition(group.is_private)?;
+        store
+            .set_cloud_directory_group_private(group.id, is_private)
+            .map_err(|error| error.to_string())?;
+        return cloud_directory_group_queue_task(store, group.id);
+    }
+
+    ensure_transition(task.is_private)?;
+    let task = store
+        .set_task_private(task.id, is_private)
+        .map_err(|error| error.to_string())?;
+    queue_task_payload_from_task(store, task)
+}
+
+#[tauri::command]
+pub fn set_task_private(
+    task_id: String,
+    is_private: bool,
+    app: AppHandle,
+) -> Result<QueueTaskPayload, String> {
+    let task_id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let state = app.state::<AppState>();
+    let privacy_download_enabled = state
+        .settings
+        .lock()
+        .map_err(|_| "设置锁不可用".to_string())?
+        .privacy_download_enabled;
+    let privacy_unlocked = privacy_task_visibility(&state)?.unlocked;
+    let payload = set_task_private_with_visibility(
+        &state.store,
+        task_id,
+        is_private,
+        privacy_download_enabled,
+        privacy_unlocked,
+    )?;
+
+    // A newly-private projection is never broadcast into a locked session.
+    // The caller still receives the result for its immediate local update.
+    if should_emit_task_update(&state, payload.is_private) {
+        let _ = app.emit("download-task-updated", payload.clone());
+    }
+    Ok(payload)
+}
+
 #[derive(Clone, Serialize)]
 pub struct TaskActionOutcome {
     #[serde(flatten)]
@@ -872,16 +952,6 @@ fn mark_cloud_share_outcomes_private(
             store
                 .set_cloud_directory_group_private(group.id, true)
                 .map_err(|_| crate::cloud::QuarkError::Storage)?;
-            for item in store
-                .cloud_directory_group_items(group.id)
-                .map_err(|_| crate::cloud::QuarkError::Storage)?
-            {
-                if let Some(task_id) = item.task_id {
-                    store
-                        .set_private(task_id, true)
-                        .map_err(|_| crate::cloud::QuarkError::Storage)?;
-                }
-            }
             outcome.payload.task.is_private = true;
             outcome.queue_task = Some(
                 cloud_directory_group_queue_task(store, group.id)
@@ -889,7 +959,7 @@ fn mark_cloud_share_outcomes_private(
             );
         } else {
             let task = store
-                .set_private(id, true)
+                .set_task_private(id, true)
                 .map_err(|_| crate::cloud::QuarkError::Storage)?;
             outcome.payload =
                 task_payload(store, task).map_err(crate::cloud::QuarkError::Transport)?;
@@ -3404,7 +3474,9 @@ pub fn update_launcher_visibility_from_native_menu(
     }
     settings.launcher_visibility = visibility;
     persist_settings(&state.settings_path, &settings)?;
-    let _ = app.emit_to("launcher", "launcher-visibility-updated", visibility);
+    for label in ["launcher", "launcher-popup"] {
+        let _ = app.emit_to(label, "launcher-visibility-updated", visibility);
+    }
     Ok(())
 }
 
@@ -3515,11 +3587,13 @@ pub async fn update_settings(
         .settings
         .lock()
         .map_err(|_| "设置锁不可用".to_string())? = settings.clone();
-    let _ = app.emit_to(
-        "launcher",
-        "launcher-visibility-updated",
-        settings.launcher_visibility,
-    );
+    for label in ["launcher", "launcher-popup"] {
+        let _ = app.emit_to(
+            label,
+            "launcher-visibility-updated",
+            settings.launcher_visibility,
+        );
+    }
     Ok(settings)
 }
 
@@ -3910,6 +3984,29 @@ mod tests {
             false,
             Some("first password")
         ));
+    }
+
+    #[test]
+    fn setting_task_privacy_rejects_disabled_private_downloads_and_locked_private_tasks() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let ordinary = store
+            .create(NewTask::direct("https://example.test/ordinary.zip"))
+            .unwrap();
+        let private = store
+            .create(NewTask::direct("https://example.test/private.zip"))
+            .unwrap();
+        store.set_private(private.id, true).unwrap();
+
+        assert_eq!(
+            set_task_private_with_visibility(&store, ordinary.id, true, false, false)
+                .unwrap_err(),
+            "请先在设置中开启隐私下载"
+        );
+        assert_eq!(
+            set_task_private_with_visibility(&store, private.id, false, true, false)
+                .unwrap_err(),
+            "隐私任务已锁定，请先解锁"
+        );
     }
 
     #[test]

@@ -156,6 +156,11 @@ export async function confirmDownload(taskId: string, selectedIds: string[] = []
   return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), ...(postProcessingNote?.trim() ? { postProcessingNote } : {}) });
 }
 
+export async function setTaskPrivacy(taskId: string, isPrivate: boolean): Promise<QueueTask | undefined> {
+  if (!isTauriRuntime()) return undefined;
+  return invoke<QueueTask>('set_task_private', { taskId, isPrivate });
+}
+
 export type PersistedTaskScope = 'active' | 'terminal';
 
 export async function listPersistedTasks(scope?: PersistedTaskScope): Promise<QueueTask[]> {

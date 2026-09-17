@@ -262,6 +262,14 @@ it('sends the privacy confirmation and private selection flags only when request
   });
 });
 
+it('sends a dedicated privacy-move request with the exact task payload', async () => {
+  native.invoke.mockResolvedValueOnce({ id: 'task-1', is_private: true });
+  const { setTaskPrivacy } = await import('./api');
+
+  await expect(setTaskPrivacy('task-1', true)).resolves.toEqual({ id: 'task-1', is_private: true });
+  expect(native.invoke).toHaveBeenCalledWith('set_task_private', { taskId: 'task-1', isPrivate: true });
+});
+
 it('passes one shared post-processing note to native and cloud confirmations', async () => {
   native.invoke.mockResolvedValueOnce({ id: 'native' });
   native.invoke.mockResolvedValueOnce({ outcomes: [], failures: [] });

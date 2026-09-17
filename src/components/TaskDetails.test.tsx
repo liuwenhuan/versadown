@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { TaskDetails } from './TaskDetails';
 
 it('renders real aria2 transfer fields including GID, bytes, ETA, connections, and error code', () => {
@@ -50,4 +51,20 @@ it('shows a persisted extraction password and post-processing note with its line
 
   expect(screen.getByText('解压密码和后处理')).toBeVisible();
   expect(screen.getByText(/解压密码：88in\s+完成后拼接分卷并改名/)).toBeVisible();
+});
+
+it('keeps nested detail files hidden until their folder is expanded', async () => {
+  const user = userEvent.setup();
+  render(<TaskDetails task={{
+    id: 'task-tree', name: 'release', kind: 'torrent', status: 'downloading', progress: 0,
+    files: [
+      { index: 1, path: 'release/_crack/Win64/patch.dll', length: 8, completed_length: 4, selected: true },
+      { index: 2, path: 'release/readme.txt', length: 2, completed_length: 2, selected: true },
+    ],
+  }} />);
+
+  expect(screen.getByText('_crack')).toBeVisible();
+  expect(screen.queryByText('Win64')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '展开 _crack' }));
+  expect(screen.getByText('Win64')).toBeVisible();
 });

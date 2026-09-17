@@ -1,10 +1,10 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewWindow,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow,
 };
 
 pub const HIDE_MANAGER: &str = "launcher.hide_manager";
@@ -21,6 +21,15 @@ const LAUNCHER_HEXAGON_SIZE: f64 = 64.0;
 const LAUNCHER_LIVE_SPEED_LEFT: f64 = 54.0;
 const LAUNCHER_LIVE_SPEED_TOP: f64 = 20.0;
 const LAUNCHER_LIVE_SPEED_HEIGHT: f64 = 25.0;
+const LAUNCHER_POPUP_LABEL: &str = "launcher-popup";
+const LAUNCHER_POPUP_INPUT_SIZE: LauncherPopupSize = LauncherPopupSize {
+    width: 410,
+    height: 364,
+};
+const LAUNCHER_POPUP_MENU_SIZE: LauncherPopupSize = LauncherPopupSize {
+    width: 304,
+    height: 392,
+};
 // WS_OVERLAPPEDWINDOW: caption, system menu, thick frame and min/max boxes.
 // Leaving any of these bits on a transparent HWND lets Windows draw a caption or pale frame.
 const LAUNCHER_NATIVE_DECORATION_STYLE_BITS: i32 = 0x00CF_0000;
@@ -54,6 +63,106 @@ pub struct LauncherNativeChromePolicy {
     pub disable_transitions: bool,
     pub border_color: u32,
     pub corner_preference: i32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LauncherPopupMode {
+    Input,
+    Menu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LauncherPopupPlacement {
+    Above,
+    Below,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LauncherPopupSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LauncherPopupAnchor {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LauncherWorkArea {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LauncherPopupBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub placement: LauncherPopupPlacement,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LauncherPopupState {
+    pub mode: LauncherPopupMode,
+    pub placement: LauncherPopupPlacement,
+}
+
+pub fn launcher_popup_bounds(
+    mode: LauncherPopupMode,
+    anchor: LauncherPopupAnchor,
+    work_area: LauncherWorkArea,
+) -> LauncherPopupBounds {
+    launcher_popup_bounds_for_size(anchor, launcher_popup_size(mode, 1.0), work_area)
+}
+
+fn launcher_popup_size(mode: LauncherPopupMode, scale_factor: f64) -> LauncherPopupSize {
+    let logical = match mode {
+        LauncherPopupMode::Input => LAUNCHER_POPUP_INPUT_SIZE,
+        LauncherPopupMode::Menu => LAUNCHER_POPUP_MENU_SIZE,
+    };
+    LauncherPopupSize {
+        width: (f64::from(logical.width) * scale_factor).round() as u32,
+        height: (f64::from(logical.height) * scale_factor).round() as u32,
+    }
+}
+
+fn launcher_popup_bounds_for_size(
+    anchor: LauncherPopupAnchor,
+    size: LauncherPopupSize,
+    work_area: LauncherWorkArea,
+) -> LauncherPopupBounds {
+    let max_x = (work_area.x + work_area.width.saturating_sub(size.width) as i32).max(work_area.x);
+    let max_y =
+        (work_area.y + work_area.height.saturating_sub(size.height) as i32).max(work_area.y);
+    let x = (anchor.x + anchor.width as i32 - size.width as i32).clamp(work_area.x, max_x);
+    let above_y = anchor.y - size.height as i32;
+    let placement = if above_y < work_area.y {
+        LauncherPopupPlacement::Below
+    } else {
+        LauncherPopupPlacement::Above
+    };
+    let y = match placement {
+        LauncherPopupPlacement::Above => above_y,
+        LauncherPopupPlacement::Below => anchor.y + anchor.height as i32,
+    }
+    .clamp(work_area.y, max_y);
+    LauncherPopupBounds {
+        x,
+        y,
+        width: size.width,
+        height: size.height,
+        placement,
+    }
 }
 
 pub const fn launcher_native_chrome_policy() -> LauncherNativeChromePolicy {
@@ -313,6 +422,52 @@ pub fn launcher_live_regions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_popup_uses_below_placement_and_clamps_to_the_monitor_work_area() {
+        let bounds = launcher_popup_bounds(
+            LauncherPopupMode::Menu,
+            LauncherPopupAnchor {
+                x: 8,
+                y: 8,
+                width: 64,
+                height: 64,
+            },
+            LauncherWorkArea {
+                x: 0,
+                y: 0,
+                width: 320,
+                height: 500,
+            },
+        );
+
+        assert_eq!(bounds.placement, LauncherPopupPlacement::Below);
+        assert_eq!(bounds.x, 0);
+        assert_eq!(bounds.y, 72);
+    }
+
+    #[test]
+    fn launcher_popup_prefers_above_when_the_work_area_has_room() {
+        let bounds = launcher_popup_bounds(
+            LauncherPopupMode::Menu,
+            LauncherPopupAnchor {
+                x: 1_900,
+                y: 800,
+                width: 64,
+                height: 64,
+            },
+            LauncherWorkArea {
+                x: 0,
+                y: 0,
+                width: 1_920,
+                height: 1_080,
+            },
+        );
+
+        assert_eq!(bounds.placement, LauncherPopupPlacement::Above);
+        assert_eq!(bounds.x, 1_616);
+        assert_eq!(bounds.y, 408);
+    }
 
     #[test]
     fn uses_a_64px_compact_hexagon_region() {
@@ -586,6 +741,74 @@ pub fn set_launcher_bounds(
     }
 }
 
+#[tauri::command]
+pub fn show_launcher_popup(
+    app: AppHandle,
+    window: WebviewWindow,
+    mode: LauncherPopupMode,
+    interaction: State<'_, LauncherInteractionState>,
+) -> Result<(), String> {
+    if window.label() != "launcher" {
+        return Err("只能从悬浮球窗口打开弹窗".to_string());
+    }
+    if mode == LauncherPopupMode::Menu {
+        interaction.record_menu();
+    }
+    let popup = app
+        .get_webview_window(LAUNCHER_POPUP_LABEL)
+        .ok_or_else(|| "悬浮球弹窗不存在".to_string())?;
+    let anchor_position = window.outer_position().map_err(|error| error.to_string())?;
+    let anchor_size = window.outer_size().map_err(|error| error.to_string())?;
+    let monitor = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "无法确定悬浮球所在显示器".to_string())?;
+    let work_area = monitor.work_area();
+    let bounds = launcher_popup_bounds_for_size(
+        LauncherPopupAnchor {
+            x: anchor_position.x,
+            y: anchor_position.y,
+            width: anchor_size.width,
+            height: anchor_size.height,
+        },
+        launcher_popup_size(mode, monitor.scale_factor()),
+        LauncherWorkArea {
+            x: work_area.position.x,
+            y: work_area.position.y,
+            width: work_area.size.width,
+            height: work_area.size.height,
+        },
+    );
+    popup
+        .set_size(PhysicalSize::new(bounds.width, bounds.height))
+        .map_err(|error| error.to_string())?;
+    popup
+        .set_position(PhysicalPosition::new(bounds.x, bounds.y))
+        .map_err(|error| error.to_string())?;
+    app.emit_to(
+        LAUNCHER_POPUP_LABEL,
+        "launcher-popup-state",
+        LauncherPopupState {
+            mode,
+            placement: bounds.placement,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if !interaction.is_background_test() {
+        popup.show().map_err(|error| error.to_string())?;
+        popup.set_focus().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn hide_launcher_popup(window: WebviewWindow) -> Result<(), String> {
+    if window.label() != LAUNCHER_POPUP_LABEL {
+        return Err("只能从悬浮球弹窗窗口关闭弹窗".to_string());
+    }
+    window.hide().map_err(|error| error.to_string())
+}
+
 pub fn should_apply_launcher_window_visibility(
     requested_visible: bool,
     application_exiting: bool,
@@ -619,6 +842,9 @@ pub fn set_launcher_window_visible(
     if visible {
         window.show().map_err(|error| error.to_string())
     } else {
+        if let Some(popup) = window.app_handle().get_webview_window(LAUNCHER_POPUP_LABEL) {
+            let _ = popup.hide();
+        }
         window.hide().map_err(|error| error.to_string())
     }
 }
@@ -653,7 +879,7 @@ pub fn run_launcher_menu_action(
     window: WebviewWindow,
     action: String,
 ) -> Result<(), String> {
-    if window.label() != "launcher" {
+    if window.label() != "launcher" && window.label() != LAUNCHER_POPUP_LABEL {
         return Err("悬浮球菜单动作只能从悬浮窗执行".to_string());
     }
     if !launcher_menu_entries().iter().any(|(id, _)| *id == action) {
@@ -801,7 +1027,7 @@ fn begin_application_exit(app: &AppHandle) {
 }
 
 fn hide_application_windows(app: &AppHandle) {
-    for label in ["main", "launcher"] {
+    for label in ["main", "launcher", LAUNCHER_POPUP_LABEL] {
         if let Some(window) = app.get_webview_window(label) {
             let _ = crate::window_lifecycle::hide_window_immediately(&window);
         }

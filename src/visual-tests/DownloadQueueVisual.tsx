@@ -23,6 +23,6 @@ const tasks: QueueTask[] = [
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <div style={{ width: '100vw', minHeight: '100vh', padding: 40, background: 'var(--surface)' }}>
-    <DownloadQueue tasks={tasks} selectedTaskId="magnet-visual" onSelect={() => {}} onCommand={() => {}} onConfirm={() => {}} />
+    <DownloadQueue tasks={tasks} privacyEnabled={false} selectedTaskId="magnet-visual" onSelect={() => {}} onCommand={() => {}} onConfirm={() => {}} />
   </div>,
 );

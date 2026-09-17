@@ -62,27 +62,33 @@ impl TaskStore {
         &self,
         group: Uuid,
         item: Uuid,
-        new_task: NewTask,
+        mut new_task: NewTask,
         retry_task: Option<Uuid>,
     ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
-        let eligible: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM cloud_directory_groups g
+        let group_is_private: Option<bool> = transaction
+            .query_row(
+            "SELECT g.is_private FROM cloud_directory_groups g
              JOIN cloud_directory_group_items i ON i.group_id = g.id
              WHERE g.id = ?1 AND i.id = ?2
              AND g.status NOT IN ('recycled', 'cancelled', 'completed')
-             AND (i.task_id IS NULL OR i.task_id = ?3))",
+             AND (i.task_id IS NULL OR i.task_id = ?3)",
             params![
                 group.to_string(),
                 item.to_string(),
                 retry_task.map(|id| id.to_string())
             ],
             |row| row.get(0),
-        )?;
-        if !eligible {
+        )
+            .optional()?;
+        let Some(group_is_private) = group_is_private else {
             return Err(StoreError::NotFound(item));
-        }
+        };
+        // The group is the durable privacy authority for every leaf. Reading
+        // it inside this transaction prevents a just-converted directory from
+        // later creating a leaf with the stale caller-provided flag.
+        new_task.is_private = group_is_private;
         let task = if let Some(id) = retry_task {
             let current = find_with_connection(&transaction, id)?;
             let linked_elsewhere: bool = transaction.query_row(
@@ -148,14 +154,17 @@ impl TaskStore {
         item: Uuid,
         provider: CloudProvider,
         account: &str,
-        task: NewTask,
+        mut task: NewTask,
     ) -> Result<Option<DownloadTask>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
-        let eligible: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM cloud_directory_groups g JOIN cloud_directory_group_items i ON i.group_id = g.id WHERE g.id = ?1 AND i.id = ?2 AND g.provider = ?3 AND g.status NOT IN ('recycled', 'cancelled', 'completed') AND i.task_id IS NULL AND NOT EXISTS (SELECT 1 FROM cloud_download_accounts a WHERE a.id = g.id AND (a.provider != ?3 OR a.account_id != ?4)))", params![group.to_string(), item.to_string(), provider.key(), account], |row| row.get(0))?;
-        if !eligible {
+        let group_is_private: Option<bool> = transaction.query_row("SELECT g.is_private FROM cloud_directory_groups g JOIN cloud_directory_group_items i ON i.group_id = g.id WHERE g.id = ?1 AND i.id = ?2 AND g.provider = ?3 AND g.status NOT IN ('recycled', 'cancelled', 'completed') AND i.task_id IS NULL AND NOT EXISTS (SELECT 1 FROM cloud_download_accounts a WHERE a.id = g.id AND (a.provider != ?3 OR a.account_id != ?4))", params![group.to_string(), item.to_string(), provider.key(), account], |row| row.get(0)).optional()?;
+        let Some(group_is_private) = group_is_private else {
             return Ok(None);
-        }
+        };
+        // See the share-leaf path above: unsubmitted leaves inherit the
+        // group's persisted value rather than an outdated submission closure.
+        task.is_private = group_is_private;
         let task = Self::create_with_connection(&transaction, task)?;
         transaction.execute(
             "INSERT INTO cloud_download_accounts (id, provider, account_id) VALUES (?1, ?2, ?3)",
@@ -474,20 +483,33 @@ impl TaskStore {
     ) -> Result<CloudDirectoryGroup, StoreError> {
         validate_uuid(id)?;
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let changed = connection.execute(
+        let transaction = connection.unchecked_transaction()?;
+        let timestamp = current_timestamp();
+        let changed = transaction.execute(
             "UPDATE cloud_directory_groups SET is_private = ?1, updated_at = ?2 WHERE id = ?3",
-            params![is_private, current_timestamp(), id.to_string()],
+            params![is_private, timestamp, id.to_string()],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
-        connection
+        // Keep every already-created leaf in lockstep with the synthetic
+        // group root. Future leaves read the group field when they are claimed.
+        transaction.execute(
+            "UPDATE tasks SET is_private = ?1, updated_at = ?2
+             WHERE id IN (
+                SELECT task_id FROM cloud_directory_group_items
+                WHERE group_id = ?3 AND task_id IS NOT NULL
+             )",
+            params![is_private, timestamp, id.to_string()],
+        )?;
+        let group = transaction
             .query_row(
                 &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
                 [id.to_string()],
                 cloud_directory_group_from_row,
-            )
-            .map_err(StoreError::from)
+            )?;
+        transaction.commit()?;
+        Ok(group)
     }
 
     pub fn set_cloud_directory_group_post_processing_note(
@@ -811,7 +833,11 @@ impl TaskStore {
             .map_err(StoreError::from)
     }
 
-    pub fn set_private(&self, id: Uuid, is_private: bool) -> Result<DownloadTask, StoreError> {
+    pub fn set_task_private(
+        &self,
+        id: Uuid,
+        is_private: bool,
+    ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let changed = connection.execute(
             "UPDATE tasks SET is_private = ?1, updated_at = ?2 WHERE id = ?3",
@@ -821,6 +847,12 @@ impl TaskStore {
             return Err(StoreError::NotFound(id));
         }
         find_with_connection(&connection, id)
+    }
+
+    /// Compatibility wrapper for existing creation and confirmation flows.
+    /// New callers should use the explicit task-scoped name.
+    pub fn set_private(&self, id: Uuid, is_private: bool) -> Result<DownloadTask, StoreError> {
+        self.set_task_private(id, is_private)
     }
 
     pub fn set_post_processing_note(
@@ -2018,6 +2050,40 @@ mod tests {
             .unwrap();
 
         assert!(store.has_private_tasks().unwrap());
+    }
+
+    #[test]
+    fn setting_a_directory_group_private_updates_all_linked_tasks() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "collection",
+                    "Collection",
+                    "C:/downloads",
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new("remote-one", &[] as &[&str], "one.bin", None),
+                    NewCloudDirectoryGroupItem::new("remote-two", &[] as &[&str], "two.bin", None),
+                ],
+            )
+            .unwrap();
+        let first = store.create(NewTask::direct("https://example.test/one.bin")).unwrap();
+        let second = store.create(NewTask::direct("https://example.test/two.bin")).unwrap();
+        let items = store.cloud_directory_group_items(group.id).unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[0].id, first.id)
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, items[1].id, second.id)
+            .unwrap();
+
+        let group = store.set_cloud_directory_group_private(group.id, true).unwrap();
+
+        assert!(group.is_private);
+        assert!(store.find(first.id).unwrap().is_private);
+        assert!(store.find(second.id).unwrap().is_private);
     }
 
     #[test]

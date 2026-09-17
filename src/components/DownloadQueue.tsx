@@ -6,6 +6,7 @@ import { reorderTaskIds } from '../lib/taskOrder';
 
 interface DownloadQueueProps {
   tasks: readonly QueueTask[];
+  privacyEnabled: boolean;
   selectedTaskId: string | null;
   onSelect(id: string): void;
   onCommand(id: string, command: TaskCommand): void;
@@ -16,7 +17,7 @@ interface DownloadQueueProps {
   onConfirm?(task: QueueTask): void;
 }
 
-export type BatchTaskCommand = 'resume' | 'pause' | 'delete' | 'copy_link';
+export type BatchTaskCommand = 'resume' | 'pause' | 'delete' | 'copy_link' | 'move_to_private' | 'move_to_normal';
 
 function magnetName(value: string): string {
   try {
@@ -268,7 +269,11 @@ export function taskContextMenuPosition({ x, y, menuWidth, menuHeight, viewportW
   };
 }
 
-function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> {
+function isPrivateTask(task: QueueTask): boolean {
+  return task.is_private === true || task.isPrivate === true;
+}
+
+function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> {
   const commands: Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
   if (task.status === 'paused') commands.push({ command: 'resume', label: '继续下载' });
@@ -279,17 +284,22 @@ function contextCommands(task: QueueTask): Array<{ command: TaskCommand; label: 
   commands.push({ command: 'open_directory', label: '打开下载目录', separated: commands.length > 0 });
   commands.push({ command: 'details', label: '查看任务详情' });
   if (task.source) commands.push({ command: 'copy_link', label: '复制下载链接' });
+  if (privacyEnabled) commands.push(isPrivateTask(task)
+    ? { command: 'move_to_normal', label: '移入正常下载', separated: commands.length > 0 }
+    : { command: 'move_to_private', label: '移入隐私下载', separated: commands.length > 0 });
   if (['draft', 'parsing', 'awaiting_user', 'queued', 'downloading', 'processing', 'paused'].includes(task.status)) commands.push({ command: 'cancel', label: '取消任务', danger: true, separated: true });
   if (task.status === 'recycled' || task.status === 'cancelled') commands.push({ command: 'remove_record', label: '彻底删除…', danger: true, separated: true });
   if (['completed', 'failed'].includes(task.status)) commands.push({ command: 'move_to_recycle', label: '移入回收站', danger: true, separated: true });
   return commands;
 }
 
-function batchContextCommands(tasks: readonly QueueTask[]): Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> {
+function batchContextCommands(tasks: readonly QueueTask[], privacyEnabled: boolean): Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> {
   const commands: Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (tasks.some((task) => task.status === 'paused' || task.status === 'failed')) commands.push({ command: 'resume', label: '开始下载' });
   if (tasks.some((task) => task.status === 'downloading')) commands.push({ command: 'pause', label: '暂停下载' });
   if (tasks.some((task) => Boolean(task.source))) commands.push({ command: 'copy_link', label: '复制下载链接', separated: commands.length > 0 });
+  if (privacyEnabled && tasks.some((task) => !isPrivateTask(task))) commands.push({ command: 'move_to_private', label: '移入隐私下载', separated: commands.length > 0 });
+  if (privacyEnabled && tasks.some(isPrivateTask)) commands.push({ command: 'move_to_normal', label: '移入正常下载', separated: commands.length > 0 });
   commands.push({ command: 'delete', label: '删除', danger: true, separated: true });
   return commands;
 }
@@ -306,6 +316,8 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
     play_videos: <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>,
     copy_link: <><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
     details: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5M12 8h.01" /></>,
+    move_to_private: <><path d="M6 11V7.5A2.5 2.5 0 0 1 8.5 5h7A2.5 2.5 0 0 1 18 7.5V11" /><rect x="4" y="11" width="16" height="9" rx="1.5" /><path d="m9 15 3 3 3-3M12 12v6" /></>,
+    move_to_normal: <><path d="M6 11V7.5A2.5 2.5 0 0 1 8.5 5h7A2.5 2.5 0 0 1 18 7.5V11" /><rect x="4" y="11" width="16" height="9" rx="1.5" /><path d="m15 16-3-3-3 3M12 19v-6" /></>,
     move_to_recycle: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="M18.5 4.5 20 6" /></>,
     remove_record: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="m7.5 7.5 9 9M16.5 7.5l-9 9" /></>,
     delete: deletePath,
@@ -313,10 +325,10 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[command]}</svg>;
 }
 
-function TaskContextMenu({ state, onClose, onCommand }: { state: ContextMenuState; onClose(): void; onCommand(command: TaskMenuCommand): void }) {
+function TaskContextMenu({ state, privacyEnabled, onClose, onCommand }: { state: ContextMenuState; privacyEnabled: boolean; onClose(): void; onCommand(command: TaskMenuCommand): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const isBatch = state.tasks.length > 1;
-  const commands = isBatch ? batchContextCommands(state.tasks) : contextCommands(state.tasks[0]);
+  const commands = isBatch ? batchContextCommands(state.tasks, privacyEnabled) : contextCommands(state.tasks[0], privacyEnabled);
   const menuTitle = isBatch ? `已选择 ${state.tasks.length} 个任务` : displayTaskName(state.tasks[0]);
   const [menuSize, setMenuSize] = useState({ width: 224, height: commands.length * 38 + 64 });
   const { left, top } = taskContextMenuPosition({
@@ -442,7 +454,7 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
   })}</>;
 }
 
-export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
+export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, onSelect, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
   const selectionAnchor = useRef<string | null>(selectedTaskId);
@@ -682,7 +694,7 @@ export function DownloadQueue({ tasks, selectedTaskId, onSelect, onCommand, onBa
           {hasChildren && isExpanded && <div className="children queue-tree"><QueueTreeRows nodes={taskChildren!} depth={0} expanded={expanded} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={task.id} isBtFileTree={isBtFileTree} completedRoot={isCompleted} /></div>}
         </div>;
       })}
-      {contextMenu && <TaskContextMenu state={contextMenu} onClose={closeContextMenu} onCommand={runCommand} />}
+      {contextMenu && <TaskContextMenu state={contextMenu} privacyEnabled={privacyEnabled} onClose={closeContextMenu} onCommand={runCommand} />}
     </section>
   );
 }

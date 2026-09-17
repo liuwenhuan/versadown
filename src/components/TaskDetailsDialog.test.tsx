@@ -39,10 +39,11 @@ it('keeps task details open when its backdrop is clicked', () => {
   expect(onClose).toHaveBeenCalledOnce();
 });
 
-it('uses the new-task fixed height and a single scrollable details body', () => {
+it('uses a fixed height with the file list as the only vertically scrollable detail area', () => {
   const styles = readFileSync('src/styles.css', 'utf8');
 
   expect(styles).toContain('.task-details-dialog{position:relative;display:grid;width:min(620px,calc(100vw - 36px));height:min(520px,calc(100vh - 36px));');
-  expect(styles).toContain('.task-details-dialog-content{min-height:0;overflow-y:auto;');
-  expect(styles).toContain('.detail-files{display:grid;');
+  expect(styles).toContain('.task-details-dialog-content{min-height:0;overflow:hidden;');
+  expect(styles).toContain('.detail-file-list{min-height:0;overflow-y:auto;');
+  expect(styles).not.toContain('.task-details-dialog-content{min-height:0;overflow-y:auto;');
 });
