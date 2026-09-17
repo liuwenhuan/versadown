@@ -110,6 +110,31 @@ mod tests {
         assert_eq!(shares[0].url, "https://pan.baidu.com/s/1share-code");
     }
 
+    #[test]
+    fn personal_share_list_accepts_camel_case_record_fields() {
+        let http = Http::new(vec![json!({
+            "errno": 0,
+            "list": [{
+                "shareId": 42,
+                "shortlink": "1share-code",
+                "typicalPath": "/归档",
+                "fsIds": [9],
+                "passwd": "a7b2",
+            }],
+        })]);
+
+        let shares = BaiduClient::new(BaiduSession::cookie("BDUSS=current"), &http)
+            .list_shares()
+            .unwrap();
+
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].id, "42");
+        assert_eq!(shares[0].url, "https://pan.baidu.com/s/1share-code");
+        assert_eq!(shares[0].name, "/归档");
+        assert_eq!(shares[0].source_file_ids, vec!["9"]);
+        assert_eq!(shares[0].pass_code.as_deref(), Some("a7b2"));
+    }
+
     fn baidu_capacity_entry() -> CloudShareResolvedEntry {
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
@@ -2443,10 +2468,11 @@ fn baidu_share_from_value(
     let id = value
         .get("shareid")
         .or_else(|| value.get("share_id"))
+        .or_else(|| value.get("shareId"))
         .and_then(string_or_number)
         .filter(|id| !id.is_empty())
         .ok_or(QuarkError::InvalidResponse)?;
-    let short_url = ["link", "shorturl", "short_url"]
+    let short_url = ["link", "shorturl", "short_url", "shortlink"]
         .into_iter()
         .filter_map(|name| value.get(name).and_then(Value::as_str))
         .map(str::trim)
@@ -2455,12 +2481,13 @@ fn baidu_share_from_value(
             if url.starts_with("http://") || url.starts_with("https://") {
                 url.to_owned()
             } else {
-                format!("{PAN}/s/1{url}")
+                format!("{PAN}/s/1{}", url.strip_prefix('1').unwrap_or(url))
             }
         })
         .ok_or(QuarkError::InvalidResponse)?;
     let source_file_ids = value
         .get("fid_list")
+        .or_else(|| value.get("fsIds"))
         .and_then(Value::as_array)
         .map(|ids| {
             ids.iter()
@@ -2483,6 +2510,7 @@ fn baidu_share_from_value(
             .get("filename")
             .or_else(|| value.get("title"))
             .or_else(|| value.get("name"))
+            .or_else(|| value.get("typicalPath"))
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())
             .unwrap_or("分享文件")
@@ -2496,6 +2524,7 @@ fn baidu_share_from_value(
         pass_code: value
             .get("pwd")
             .or_else(|| value.get("share_pwd"))
+            .or_else(|| value.get("passwd"))
             .and_then(Value::as_str)
             .filter(|code| !code.is_empty())
             .map(str::to_owned)
