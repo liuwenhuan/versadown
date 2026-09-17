@@ -130,9 +130,30 @@ mod tests {
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].id, "42");
         assert_eq!(shares[0].url, "https://pan.baidu.com/s/1share-code");
-        assert_eq!(shares[0].name, "/归档");
+        assert_eq!(shares[0].name, "归档");
         assert_eq!(shares[0].source_file_ids, vec!["9"]);
         assert_eq!(shares[0].pass_code.as_deref(), Some("a7b2"));
+    }
+
+    #[test]
+    fn personal_share_list_uses_typical_path_when_filename_is_placeholder() {
+        let http = Http::new(vec![json!({
+            "errno": 0,
+            "list": [{
+                "shareId": 42,
+                "shortlink": "1share-code",
+                "filename": "0",
+                "typicalPath": "/资料/下载说明.pdf",
+                "fsIds": [9],
+            }],
+        })]);
+
+        let shares = BaiduClient::new(BaiduSession::cookie("BDUSS=current"), &http)
+            .list_shares()
+            .unwrap();
+
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].name, "下载说明.pdf");
     }
 
     fn baidu_capacity_entry() -> CloudShareResolvedEntry {
@@ -2503,18 +2524,24 @@ fn baidu_share_from_value(
         })
         .or_else(|| fallback_file_ids.map(|ids| ids.to_vec()))
         .unwrap_or_default();
+    let record_name = ["filename", "title", "name"]
+        .into_iter()
+        .filter_map(|name| value.get(name).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|name| !name.is_empty());
+    let name = value
+        .get("typicalPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty() && *path != "0")
+        .and_then(|path| path.rsplit('/').find(|part| !part.is_empty()))
+        .or_else(|| record_name.filter(|name| *name != "0"))
+        .or(record_name)
+        .unwrap_or("分享文件");
     Ok(CloudShare {
         id,
         url: short_url,
-        name: value
-            .get("filename")
-            .or_else(|| value.get("title"))
-            .or_else(|| value.get("name"))
-            .or_else(|| value.get("typicalPath"))
-            .and_then(Value::as_str)
-            .filter(|name| !name.is_empty())
-            .unwrap_or("分享文件")
-            .into(),
+        name: name.into(),
         kind: if value.get("isdir").and_then(Value::as_i64) == Some(1) {
             CloudFileKind::Folder
         } else {
