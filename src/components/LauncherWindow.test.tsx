@@ -7,6 +7,9 @@ const state = vi.hoisted(() => ({
   getGlobalStat: vi.fn(), getSettings: vi.fn(), scanDownloadInputs: vi.fn(),
   updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(),
   setLauncherInputRegions: vi.fn(),
+  onMoved: vi.fn(), onScaleChanged: vi.fn(),
+  movedHandler: undefined as undefined | (() => void),
+  scaleChangedHandler: undefined as undefined | (() => void),
   onGlobalStat: undefined as undefined | ((stat: { download_speed: number; num_active: number }) => void),
 }));
 
@@ -15,6 +18,12 @@ vi.mock('../lib/api', () => ({
   getSettings: state.getSettings, scanDownloadInputs: state.scanDownloadInputs, updateSettings: state.updateSettings,
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({
+    onMoved: state.onMoved,
+    onScaleChanged: state.onScaleChanged,
+  }),
+}));
 vi.mock('../lib/launcherWindow', () => ({
   launcherCanvas: { width: 410, height: 720, popupSlotHeight: 328, iconSize: 64, iconTop: 328, margin: 24 },
   launcherIconRegion: { x: 346, y: 328, width: 64, height: 64 },
@@ -60,6 +69,16 @@ beforeEach(() => {
   state.getManagerVisible.mockReset().mockResolvedValue(true);
   state.getLauncherPopupPlacement.mockReset().mockResolvedValue('above');
   state.setLauncherInputRegions.mockReset().mockResolvedValue(undefined);
+  state.movedHandler = undefined;
+  state.scaleChangedHandler = undefined;
+  state.onMoved.mockReset().mockImplementation((handler) => {
+    state.movedHandler = handler;
+    return Promise.resolve(() => { state.movedHandler = undefined; });
+  });
+  state.onScaleChanged.mockReset().mockImplementation((handler) => {
+    state.scaleChangedHandler = handler;
+    return Promise.resolve(() => { state.scaleChangedHandler = undefined; });
+  });
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
     const bounds = this.classList.contains('launcher-panel') ? quickAdd
       : this.classList.contains('launcher-context-menu') ? menu : { x: 0, y: 0, width: 0, height: 0 };
@@ -156,9 +175,11 @@ it('never resizes, clips, hides, or shows the native window for popup transition
 });
 
 it('uses the last intent while an earlier placement lookup is pending', async () => {
+  render(<LauncherWindow />);
+  await waitFor(() => expect(state.getLauncherPopupPlacement).toHaveBeenCalled());
+  state.getLauncherPopupPlacement.mockClear();
   const pending = deferred<'above' | 'below'>();
   state.getLauncherPopupPlacement.mockReturnValueOnce(pending.promise);
-  render(<LauncherWindow />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   fireEvent.contextMenu(trigger);
   await waitFor(() => expect(state.getLauncherPopupPlacement).toHaveBeenCalledOnce());
@@ -233,6 +254,43 @@ it('retains the previous input on failure and never falls back to the full canva
   fireEvent.keyDown(window, { key: 'Escape' });
   await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
   expect(vi.mocked(setLauncherInputRegions).mock.calls.every(([regions]) => regions.length <= 2 && regions[0].width === 64)).toBe(true);
+});
+
+it('keeps the previous native input region when a later update fails', async () => {
+  state.setLauncherInputRegions
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error('native failure'));
+  render(<LauncherWindow />);
+  const trigger = await screen.findByRole('button', { name: '打开下载输入' });
+  fireEvent.contextMenu(trigger);
+  await waitFor(() => expect(setLauncherInputRegions).toHaveBeenCalledTimes(2));
+  expect(setLauncherInputRegions).not.toHaveBeenCalledWith([
+    { x: 0, y: 0, width: 410, height: 720 },
+  ]);
+});
+
+it('changes native visibility only for the visibility policy, not popup state', async () => {
+  render(<LauncherWindow />);
+  await screen.findByRole('button', { name: '打开下载输入' });
+  await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalled());
+  vi.mocked(setLauncherWindowVisible).mockClear();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: '打开下载输入' }));
+    fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
+  });
+  await screen.findByRole('menu', { name: '悬浮球菜单' });
+  expect(setLauncherWindowVisible).not.toHaveBeenCalled();
+});
+
+it('recomputes placement and reapplies the safe input region after the launcher moves', async () => {
+  render(<LauncherWindow />);
+  const trigger = await screen.findByRole('button', { name: '打开下载输入' });
+  fireEvent.contextMenu(trigger);
+  await screen.findByRole('menu', { name: '悬浮球菜单' });
+  state.getLauncherPopupPlacement.mockResolvedValue('below');
+  await act(async () => state.movedHandler?.());
+  await waitFor(() => expect(trigger.closest('main')).toHaveClass('launcher-popup-below'));
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);
 });
 
 it.each(['context-menu', 'quick-add'] as const)('uses the below slot for %s without moving the icon', async (popup) => {

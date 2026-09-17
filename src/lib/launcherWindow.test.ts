@@ -73,6 +73,13 @@ it('installs the compact icon input region without changing native bounds', asyn
   expect(native.invoke).not.toHaveBeenCalledWith('set_launcher_bounds', expect.anything());
 });
 
+it('rejects malformed logical input regions before invoking the native adapter', async () => {
+  await expect(launcherWindow.setLauncherInputRegions([
+    { x: 346, y: 328, width: Number.NaN, height: 64 },
+  ])).rejects.toThrow('悬浮窗输入区域无效');
+  expect(native.invoke).not.toHaveBeenCalledWith('set_launcher_input_regions', expect.anything());
+});
+
 it('positions the fixed canvas without consulting a variable native window size', async () => {
   native.currentMonitor.mockResolvedValueOnce({
     scaleFactor: 1.5,

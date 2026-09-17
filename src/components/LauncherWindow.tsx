@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { FloatingLauncher } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
 import { anchorLauncherToWorkArea, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging, type LauncherInputRegion, type LauncherPopupPlacement } from '../lib/launcherWindow';
@@ -14,6 +15,7 @@ export function LauncherWindow() {
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [mode, setMode] = useState<LauncherSurfaceMode>('compact');
   const [popupPlacement, setPopupPlacement] = useState<LauncherPopupPlacement>('above');
+  const popupPlacementRef = useRef<LauncherPopupPlacement>('above');
   const [managerVisible, setManagerVisible] = useState(true);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>('always');
   const [settingsReady, setSettingsReady] = useState(false);
@@ -21,49 +23,53 @@ export function LauncherWindow() {
   const statEventEpoch = useRef(0);
   const requestedMode = useRef<LauncherSurfaceMode>('compact');
   const transitionQueue = useRef(Promise.resolve());
-  const inputQueue = useRef(Promise.resolve());
+  const regionQueue = useRef(Promise.resolve());
+  const lastValidRegions = useRef<LauncherInputRegion[]>([launcherIconRegion]);
+  const disposed = useRef(false);
   const quickAddElement = useRef<HTMLElement | null>(null);
   const menuElement = useRef<HTMLElement | null>(null);
-  const dragRequested = useRef(false);
   const [inputReady, setInputReady] = useState(false);
+  popupPlacementRef.current = popupPlacement;
   const hasActiveDownload = activeCount > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
 
   const captureQuickAdd = useCallback((element: HTMLElement | null) => { quickAddElement.current = element; }, []);
   const captureMenu = useCallback((element: HTMLElement | null) => { menuElement.current = element; }, []);
 
-  const updateInput = useCallback((regions: LauncherInputRegion[]) => {
-    const update = inputQueue.current.then(() => setLauncherInputRegions(regions));
-    // Recover the queue, but propagate this update's failure to callers such as dragging.
-    inputQueue.current = update.catch(() => undefined);
+  const applyRegions = useCallback((regions: LauncherInputRegion[]) => {
+    const update = regionQueue.current.then(async () => {
+      if (disposed.current) return;
+      await setLauncherInputRegions(regions);
+      lastValidRegions.current = regions;
+    });
+    // Recover the queue, while propagating this request's failure to native dragging.
+    regionQueue.current = update.catch(() => undefined);
     return update;
   }, []);
 
   const requestMode = useCallback((next: LauncherSurfaceMode) => {
+    if (disposed.current) return;
     requestedMode.current = next;
-    if (next !== 'compact') dragRequested.current = false;
     transitionQueue.current = transitionQueue.current.then(async () => {
+      if (disposed.current) return;
       const target = requestedMode.current;
       const placement = target === 'compact' ? null : await getLauncherPopupPlacement();
-      if (target !== requestedMode.current) return;
+      if (disposed.current || target !== requestedMode.current) return;
       if (placement) setPopupPlacement(placement);
       setMode(target);
     }).catch(() => undefined);
   }, []);
 
-  async function finishDrag(inputUpdate: Promise<void>) {
+  const refreshLauncherGeometry = useCallback(async () => {
+    const regions = lastValidRegions.current;
     try {
-      await inputUpdate;
-      if (!dragRequested.current || requestedMode.current !== 'compact') return;
-      dragRequested.current = false;
-      await startLauncherDragging();
-      const placement = await getLauncherPopupPlacement();
-      if (requestedMode.current === 'compact') setPopupPlacement(placement);
+      await applyRegions(regions);
     } catch {
-      dragRequested.current = false;
-      // Keep the previous safe native regions; never replace them with the canvas.
+      // The native adapter retains the previous safe regions on failure.
     }
-  }
+    const placement = await getLauncherPopupPlacement().catch(() => popupPlacementRef.current);
+    if (!disposed.current) setPopupPlacement(placement);
+  }, [applyRegions]);
 
   useLayoutEffect(() => {
     let disposed = false;
@@ -72,17 +78,21 @@ export function LauncherWindow() {
       const rect = element?.getBoundingClientRect();
       const popup = rect && rect.width > 0 && rect.height > 0
         ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
-      const update = updateInput(popup ? [launcherIconRegion, popup] : [launcherIconRegion]);
+      const update = applyRegions(popup ? [launcherIconRegion, popup] : [launcherIconRegion]);
       void update.then(() => { if (!disposed) setInputReady(true); }).catch(() => undefined);
       return update;
     };
     const update = syncInput();
-    if (mode === 'compact' && dragRequested.current) void finishDrag(update);
     // Quick-add validation and menu settings can change the actual input rectangle.
     const observer = element && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncInput) : null;
     if (element) observer?.observe(element);
     return () => { disposed = true; observer?.disconnect(); };
-  }, [mode, popupPlacement, updateInput]);
+  }, [applyRegions, mode, popupPlacement]);
+
+  useEffect(() => {
+    disposed.current = false;
+    return () => { disposed.current = true; };
+  }, []);
 
   useEffect(() => {
     const close = () => requestMode('compact');
@@ -93,8 +103,29 @@ export function LauncherWindow() {
   }, [requestMode]);
 
   useEffect(() => {
-    void anchorLauncherToWorkArea().catch(() => undefined).finally(() => setAnchored(true));
-  }, []);
+    void anchorLauncherToWorkArea()
+      .then(async () => { if (!disposed.current) await refreshLauncherGeometry(); })
+      .catch(() => undefined)
+      .finally(() => { if (!disposed.current) setAnchored(true); });
+  }, [refreshLauncherGeometry]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cleanedUp = false;
+    const unlisten: (() => void)[] = [];
+    const refresh = () => { void refreshLauncherGeometry(); };
+    const launcher = getCurrentWindow();
+    void launcher.onMoved(refresh).then((stop) => {
+      if (cleanedUp) stop(); else unlisten.push(stop);
+    }).catch(() => undefined);
+    void launcher.onScaleChanged(refresh).then((stop) => {
+      if (cleanedUp) stop(); else unlisten.push(stop);
+    }).catch(() => undefined);
+    return () => {
+      cleanedUp = true;
+      unlisten.forEach((stop) => stop());
+    };
+  }, [refreshLauncherGeometry]);
 
   useEffect(() => {
     if (!isTauriRuntime()) { setSettingsReady(true); return; }
@@ -150,10 +181,19 @@ export function LauncherWindow() {
     requestMode('compact');
   }
 
-  function beginDrag() {
-    dragRequested.current = true;
-    requestMode('compact');
-    if (mode === 'compact') void finishDrag(updateInput([launcherIconRegion]));
+  async function beginLauncherDrag() {
+    if (disposed.current) return;
+    requestedMode.current = 'compact';
+    setMode('compact');
+    try {
+      await applyRegions([launcherIconRegion]);
+      if (disposed.current) return;
+      await startLauncherDragging();
+      const placement = await getLauncherPopupPlacement().catch(() => popupPlacementRef.current);
+      if (!disposed.current) setPopupPlacement(placement);
+    } catch {
+      // Never begin native dragging after the compact-region update fails.
+    }
   }
 
   function runContextAction(action: LauncherMenuAction) {
@@ -179,7 +219,7 @@ export function LauncherWindow() {
         onParse={(input) => { void sendLauncherInput(input); }}
         onScan={scanDownloadInputs}
         onOpenTaskList={() => { void openLauncherManager(); }}
-        onDragStart={beginDrag}
+        onDragStart={() => { void beginLauncherDrag(); }}
         onContextMenu={openContextMenu}
       />
       {mode === 'context-menu' && <LauncherContextMenu onElement={captureMenu} downloadSpeed={formatSpeed(downloadSpeed)} managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}

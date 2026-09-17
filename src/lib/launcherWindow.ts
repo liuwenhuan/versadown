@@ -27,6 +27,16 @@ export const launcherIconRegion: LauncherInputRegion = {
 
 export async function setLauncherInputRegions(regions: LauncherInputRegion[]) {
   if (!isTauriRuntime()) return;
+  if (regions.length === 0 || regions.some((region) => (
+    !Number.isFinite(region.x)
+    || !Number.isFinite(region.y)
+    || !Number.isFinite(region.width)
+    || !Number.isFinite(region.height)
+    || region.width <= 0
+    || region.height <= 0
+  ))) {
+    throw new Error('悬浮窗输入区域无效');
+  }
   await invoke('set_launcher_input_regions', { regions });
 }
 

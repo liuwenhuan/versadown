@@ -18,6 +18,18 @@ struct PhysicalLauncherRegion {
     bottom: i32,
 }
 
+fn physical_coordinate(value: f64, scale_factor: f64) -> Result<i32, String> {
+    let scaled = value * scale_factor;
+    if !scaled.is_finite() {
+        return Err("悬浮窗输入区域无效".to_string());
+    }
+    let rounded = scaled.round();
+    if rounded < i32::MIN as f64 || rounded > i32::MAX as f64 {
+        return Err("悬浮窗输入区域无效".to_string());
+    }
+    Ok(rounded as i32)
+}
+
 fn physical_regions(
     regions: &[LauncherInputRegion],
     scale_factor: f64,
@@ -37,10 +49,13 @@ fn physical_regions(
             {
                 return Err("悬浮窗输入区域无效".to_string());
             }
-            let left = (region.x * scale_factor).round() as i32;
-            let top = (region.y * scale_factor).round() as i32;
-            let right = ((region.x + region.width) * scale_factor).round() as i32;
-            let bottom = ((region.y + region.height) * scale_factor).round() as i32;
+            let left = physical_coordinate(region.x, scale_factor)?;
+            let top = physical_coordinate(region.y, scale_factor)?;
+            let right = physical_coordinate(region.x + region.width, scale_factor)?;
+            let bottom = physical_coordinate(region.y + region.height, scale_factor)?;
+            if right <= left || bottom <= top {
+                return Err("悬浮窗输入区域无效".to_string());
+            }
             Ok(PhysicalLauncherRegion {
                 left,
                 top,
@@ -406,6 +421,21 @@ mod tests {
                 height: 64.0,
             }],
             1.0,
+        )
+        .unwrap_err();
+        assert_eq!(error, "悬浮窗输入区域无效");
+    }
+
+    #[test]
+    fn rejects_regions_that_overflow_at_high_dpi() {
+        let error = physical_regions(
+            &[LauncherInputRegion {
+                x: 2_000_000_000.0,
+                y: 328.0,
+                width: 64.0,
+                height: 64.0,
+            }],
+            2.0,
         )
         .unwrap_err();
         assert_eq!(error, "悬浮窗输入区域无效");
