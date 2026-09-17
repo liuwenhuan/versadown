@@ -3,6 +3,7 @@ use super::{
     types::{Aria2Error, RpcSecret},
 };
 use std::{
+    io::{Read, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::Duration,
@@ -11,6 +12,7 @@ use tokio::time::{timeout_at, Instant};
 
 const STARTUP_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const OPERATION_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_STARTUP_STDERR_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Aria2LaunchConfig {
@@ -82,6 +84,9 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
 pub struct Aria2Process {
     child: Child,
     client: Aria2RpcClient,
+    startup_stderr: Option<std::process::ChildStderr>,
+    startup_stderr_log: Option<PathBuf>,
+    rpc_secret: RpcSecret,
 }
 
 impl Aria2Process {
@@ -114,6 +119,7 @@ impl Aria2Process {
             .create(true)
             .append(true)
             .open(config.data_dir.join("aria2-next.tasks"))?;
+        ensure_rpc_port_available(config.aria2.rpc_port)?;
         let debug_logger = config
             .aria2
             .debug_logging
@@ -133,16 +139,27 @@ impl Aria2Process {
                 .args(build_aria2_args(&config, &secret))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                // Keep early sidecar failures in a private pipe until the
+                // process exits. They are redacted before being persisted.
+                .stderr(if debug_logger.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                });
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
                 command.creation_flags(0x08000000); // CREATE_NO_WINDOW
             }
-            let child = command.spawn()?;
+            let mut child = command.spawn()?;
             let mut process = Self {
+                startup_stderr: child.stderr.take(),
                 child,
                 client: client.clone(),
+                startup_stderr_log: debug_logger
+                    .as_ref()
+                    .map(|_| config.data_dir.join("aria2-startup-debug.log")),
+                rpc_secret: secret.clone(),
             };
             match process.wait_ready(Duration::from_secs(5)).await {
                 Ok(()) => {
@@ -183,8 +200,17 @@ impl Aria2Process {
             }
             match timeout_at(deadline, self.client.get_version()).await {
                 Ok(Ok(_)) => return Ok(()),
-                Err(_) => return Err(Aria2Error::ReadinessTimeout),
+                Err(_) => {
+                    return if self.is_running()? {
+                        Err(Aria2Error::ReadinessTimeout)
+                    } else {
+                        Err(Aria2Error::ProcessExited)
+                    }
+                }
                 _ => {}
+            }
+            if !self.is_running()? {
+                return Err(Aria2Error::ProcessExited);
             }
             if Instant::now() >= deadline {
                 return Err(Aria2Error::ReadinessTimeout);
@@ -213,7 +239,46 @@ impl Aria2Process {
             self.child.kill()?;
         }
         self.child.wait()?;
+        self.persist_startup_stderr();
         Ok(())
+    }
+
+    fn persist_startup_stderr(&mut self) {
+        let (Some(stderr), Some(path)) =
+            (self.startup_stderr.take(), self.startup_stderr_log.take())
+        else {
+            return;
+        };
+        let mut bytes = Vec::new();
+        if stderr
+            .take(MAX_STARTUP_STDERR_BYTES)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.is_empty()
+        {
+            return;
+        }
+        let output = self.rpc_secret.redact(&String::from_utf8_lossy(&bytes));
+        if let Ok(mut log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(log, "{output}");
+        }
+    }
+}
+
+fn ensure_rpc_port_available(port: u16) -> Result<(), Aria2Error> {
+    match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            Err(Aria2Error::RpcPortInUse(port))
+        }
+        Err(error) => Err(Aria2Error::Io(error)),
     }
 }
 impl Drop for Aria2Process {

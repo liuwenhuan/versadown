@@ -67,6 +67,8 @@ pub enum Aria2Error {
     Rpc(RpcFault),
     #[error("aria2 process I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("aria2 RPC port {0} is already in use")]
+    RpcPortInUse(u16),
     #[error("aria2 RPC readiness timed out")]
     ReadinessTimeout,
     #[error("aria2 process exited before becoming ready")]

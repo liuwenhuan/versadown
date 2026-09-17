@@ -134,6 +134,22 @@ async fn bundled_sidecar_is_authenticated_saves_session_and_exits() {
 }
 
 #[tokio::test]
+async fn startup_reports_a_busy_rpc_port_without_waiting_for_readiness() {
+    let root = tempfile::tempdir().unwrap();
+    let port_guard = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = port_guard.local_addr().unwrap().port();
+    let mut launch = config(root.path());
+    launch.aria2.rpc_port = port;
+
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        Aria2Process::start(launch).await,
+        Err(Aria2Error::RpcPortInUse(actual)) if actual == port
+    ));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
 async fn bundled_sidecar_writes_native_and_rpc_debug_logs_when_enabled() {
     let root = tempfile::tempdir().unwrap();
     let mut launch = config(root.path());

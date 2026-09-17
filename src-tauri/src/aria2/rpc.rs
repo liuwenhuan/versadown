@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Seek, SeekFrom, Write},
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -18,6 +18,11 @@ use std::{
 use url::Url;
 
 pub type Aria2Options = BTreeMap<String, String>;
+
+// The logger is intentionally bounded. A large queue performs many status
+// polls per minute, and an unbounded debug file can itself become an I/O
+// problem while investigating an engine failure.
+const MAX_DEBUG_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
 /// A local JSON-lines diagnostic log.  It deliberately records RPC metadata
 /// rather than request parameters, which can contain credentials or signed
@@ -55,6 +60,9 @@ impl Aria2DebugLogger {
         gid: Option<&str>,
         error: Option<&Aria2Error>,
     ) {
+        if error.is_none() && is_high_frequency_poll(operation) {
+            return;
+        }
         if let Some(gid) = gid {
             if let Ok(mut task_ids) = self.task_ids.lock() {
                 task_ids.insert(gid.to_owned(), task_id.to_owned());
@@ -70,6 +78,9 @@ impl Aria2DebugLogger {
     }
 
     fn record_rpc(&self, operation: &str, gid: Option<&str>, error: Option<&Aria2Error>) {
+        if error.is_none() && is_high_frequency_poll(operation) {
+            return;
+        }
         let task_id = gid.and_then(|gid| {
             self.task_ids
                 .lock()
@@ -107,11 +118,31 @@ impl Aria2DebugLogger {
             "fault_code": fault_code,
         });
         if let Ok(mut writer) = self.writer.lock() {
+            let should_truncate = writer
+                .metadata()
+                .map(|metadata| metadata.len() >= MAX_DEBUG_LOG_BYTES)
+                .unwrap_or(false);
+            if should_truncate {
+                let _ = writer.set_len(0);
+                let _ = writer.seek(SeekFrom::Start(0));
+            }
             if serde_json::to_writer(&mut *writer, &entry).is_ok() {
                 let _ = writeln!(writer);
             }
         }
     }
+}
+
+fn is_high_frequency_poll(operation: &str) -> bool {
+    matches!(
+        operation,
+        "aria2.tellStatus"
+            | "aria2.tellActive"
+            | "aria2.tellWaiting"
+            | "aria2.tellStopped"
+            | "aria2.getGlobalStat"
+            | "system.multicall"
+    )
 }
 
 fn aria2_error_kind(error: &Aria2Error) -> &'static str {
@@ -126,6 +157,7 @@ fn aria2_error_kind(error: &Aria2Error) -> &'static str {
         Aria2Error::InvalidField { .. } => "invalid_field",
         Aria2Error::UnknownStatus(_) => "unknown_status",
         Aria2Error::Io(_) => "io",
+        Aria2Error::RpcPortInUse(_) => "rpc_port_in_use",
         Aria2Error::ReadinessTimeout => "readiness_timeout",
         Aria2Error::ProcessExited => "process_exited",
     }

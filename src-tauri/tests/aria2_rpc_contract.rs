@@ -123,6 +123,22 @@ async fn debug_log_records_rpc_fault_metadata_without_the_rpc_secret() {
     assert!(!log.contains("https://example.test/file"));
 }
 
+#[test]
+fn debug_log_keeps_control_operations_but_skips_successful_status_polls() {
+    let root = tempfile::tempdir().unwrap();
+    let log_path = root.path().join("aria2-rpc-debug.log");
+    let logger = Aria2DebugLogger::open(&log_path).unwrap();
+
+    logger.record_task_operation("aria2.tellStatus", "task-123", Some("gid-123"), None);
+    logger.record_task_operation("aria2.pause", "task-123", Some("gid-123"), None);
+
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(!log.contains(r#""operation":"aria2.tellStatus""#));
+    assert!(log.contains(r#""operation":"aria2.pause""#));
+    assert!(log.contains(r#""task_id":"task-123""#));
+    assert!(log.contains(r#""gid":"gid-123""#));
+}
+
 #[tokio::test]
 async fn escaped_multicall_result_redacts_nested_arrays_values_and_object_keys() {
     let escaped = r"\u0061\u0062".repeat(32);
