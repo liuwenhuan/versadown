@@ -142,20 +142,25 @@ pub(crate) async fn submit_cloud_share_file_internal(
 ) -> Result<CloudShareFileSubmission, QuarkError> {
     share::parse_stable_cloud_share_source(&source)?;
     let _source_submission = state.cloud_download_sources.acquire(&source).await?;
-    if let Some(existing) = state
-        .store
-        .find_by_source(&source)
-        .map_err(|_| QuarkError::Storage)?
-        .filter(|task| task.status != TaskStatus::Recycled)
-    {
-        ensure_private_task_access(state, &existing).map_err(QuarkError::InvalidInput)?;
-        if !is_retryable_cloud_share_prepare(&existing) {
-            let duplicate =
-                duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
-            return Ok(CloudShareFileSubmission::Duplicate(
-                task_action_outcome(&state.store, existing, Some(duplicate))
-                    .map_err(QuarkError::Transport)?,
-            ));
+    // Directory leaves have their own persisted output path below the chosen
+    // directory root. They must not be de-duplicated against a prior
+    // standalone selection of the same shared file.
+    if super::download::source_duplicate_blocks_submission(directory_context) {
+        if let Some(existing) = state
+            .store
+            .find_by_source(&source)
+            .map_err(|_| QuarkError::Storage)?
+            .filter(|task| task.status != TaskStatus::Recycled)
+        {
+            ensure_private_task_access(state, &existing).map_err(QuarkError::InvalidInput)?;
+            if !is_retryable_cloud_share_prepare(&existing) {
+                let duplicate =
+                    duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
+                return Ok(CloudShareFileSubmission::Duplicate(
+                    task_action_outcome(&state.store, existing, Some(duplicate))
+                        .map_err(QuarkError::Transport)?,
+                ));
+            }
         }
     }
     let cloud = app

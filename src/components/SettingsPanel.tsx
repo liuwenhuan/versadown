@@ -234,6 +234,19 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     setAria2((current) => ({ ...current, [key]: value }));
   }
 
+  async function updateDebugLogging(enabled: boolean) {
+    const previous = aria2;
+    const next = { ...aria2, debugLogging: enabled };
+    setAria2(next);
+    setAria2Status(null);
+    try {
+      await onChange(currentSettings({ aria2: next }));
+    } catch (error) {
+      setAria2(previous);
+      setAria2Status({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async function saveAria2(event: FormEvent) {
     event.preventDefault();
     const savedAria2 = { ...aria2, rpcToken: aria2.rpcToken.trim() };
@@ -356,10 +369,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
       </form>
       </>}
       {activeTab === 'advanced' && <>
-        <form className="aria2-debug-settings proxy-settings" onSubmit={saveAria2}>
-          <label className="setting-row"><span><b>打开日志调试</b><small>保存 aria2 引擎和本地 RPC 调试日志，用于排查下载问题；日志可能包含下载地址，仅在需要排障时开启。</small></span><input aria-label="打开日志调试" type="checkbox" checked={aria2.debugLogging} onChange={(event) => updateAria2('debugLogging', event.target.checked)} /></label>
-          <div className="settings-actions"><button className="primary" type="submit">保存日志设置</button>{aria2Status && <span role="status" className={aria2Status.kind}>{aria2Status.message}</span>}</div>
-        </form>
+        <section className="aria2-debug-settings proxy-settings">
+          <label className="setting-row"><span><b>打开日志调试</b><small>保存 aria2 引擎和本地 RPC 调试日志，用于排查下载问题；日志可能包含下载地址，仅在需要排障时开启。</small></span><input aria-label="打开日志调试" type="checkbox" checked={aria2.debugLogging} onChange={(event) => void updateDebugLogging(event.target.checked)} /></label>
+          {aria2Status?.kind === 'error' && <div className="settings-actions"><span role="status" className="error">{aria2Status.message}</span></div>}
+        </section>
         <form className="privacy-download-settings proxy-settings" onSubmit={(event) => void savePrivacyDownload(event)}>
           <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => void updatePrivacyDownload(event.target.checked)} /></label>
           <fieldset className="privacy-password-fields" disabled={!privacyDownloadEnabled && !privacyPasswordConfigured}>

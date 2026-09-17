@@ -384,6 +384,12 @@ pub(crate) enum CloudFileSubmission {
     Duplicate(TaskActionOutcome),
 }
 
+pub(crate) fn source_duplicate_blocks_submission(
+    directory_context: Option<DirectoryLeafContext>,
+) -> bool {
+    directory_context.is_none()
+}
+
 pub(crate) fn require_download_account(
     app: &AppHandle,
     provider: CloudProvider,
@@ -436,19 +442,27 @@ pub(crate) async fn submit_cloud_file(
         crate::cloud::types::encoded(&file_id)
     );
     let _source_submission = state.cloud_download_sources.acquire(&stable_source).await?;
-    if let Some(existing) = state
-        .store
-        .find_by_source(&stable_source)
-        .map_err(|_| QuarkError::Storage)?
-        .filter(|task| task.status != TaskStatus::Recycled)
-    {
-        ensure_private_task_access(state, &existing).map_err(QuarkError::InvalidInput)?;
-        let duplicate =
-            duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
-        return Ok(CloudFileSubmission::Duplicate(
-            task_action_outcome(&state.store, existing, Some(duplicate))
-                .map_err(QuarkError::Transport)?,
-        ));
+    // A directory leaf has a different concrete target from an ordinary task
+    // for the same cloud file: the directory root and its nested components
+    // are part of its output path. Do not let a prior standalone download
+    // suppress that leaf merely because their stable cloud sources match.
+    // The group's item journal still prevents that leaf itself from queuing
+    // twice, while standalone downloads retain source-level de-duplication.
+    if source_duplicate_blocks_submission(directory_context) {
+        if let Some(existing) = state
+            .store
+            .find_by_source(&stable_source)
+            .map_err(|_| QuarkError::Storage)?
+            .filter(|task| task.status != TaskStatus::Recycled)
+        {
+            ensure_private_task_access(state, &existing).map_err(QuarkError::InvalidInput)?;
+            let duplicate =
+                duplicate_state(&state.store, &existing).map_err(|_| QuarkError::Storage)?;
+            return Ok(CloudFileSubmission::Duplicate(
+                task_action_outcome(&state.store, existing, Some(duplicate))
+                    .map_err(QuarkError::Transport)?,
+            ));
+        }
     }
 
     let account_id = download_account(app.clone(), provider).await?;
@@ -1519,6 +1533,20 @@ impl ResolvedCloudDownload {
             headers: self.headers,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_leaf_source_matches_do_not_block_distinct_output_paths() {
+        assert!(source_duplicate_blocks_submission(None));
+        assert!(!source_duplicate_blocks_submission(Some(DirectoryLeafContext {
+            group_id: uuid::Uuid::new_v4(),
+            item_id: uuid::Uuid::new_v4(),
+        })));
     }
 }
 

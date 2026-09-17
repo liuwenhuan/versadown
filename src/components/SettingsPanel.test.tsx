@@ -375,19 +375,19 @@ it('saves aria2 RPC and engine settings from the network settings', async () => 
   });
 });
 
-it('saves aria2 debug logging from advanced settings', async () => {
+it('saves aria2 debug logging immediately from advanced settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} />);
 
   await user.click(screen.getByRole('tab', { name: '高级' }));
   await user.click(screen.getByRole('checkbox', { name: '打开日志调试' }));
-  await user.click(screen.getByRole('button', { name: '保存日志设置' }));
 
   expect(onChange).toHaveBeenLastCalledWith({
     ...initial,
     aria2: { ...initial.aria2, debugLogging: true }
   });
+  expect(screen.queryByRole('button', { name: '保存日志设置' })).not.toBeInTheDocument();
 });
 
 it('saves the standalone rate limits in bytes per second', async () => {

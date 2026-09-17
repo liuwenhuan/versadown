@@ -1068,7 +1068,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         return;
       }
       if (refresh && !await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs)) return;
-      const message = name === '上传' && Array.isArray(result) ? `已上传 ${result.length} 个文件` : `${name}成功`;
+      const message = name === '下载'
+        ? '已经提交下载任务'
+        : name === '上传' && Array.isArray(result)
+          ? `已上传 ${result.length} 个文件`
+          : `${name}成功`;
       setOperation({ kind: 'success', message });
       setEditor(null);
       setEditorValue('');
