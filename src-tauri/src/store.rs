@@ -56,6 +56,12 @@ pub struct TaskStore {
 }
 
 impl TaskStore {
+    pub(crate) fn native_stream_state_path(&self) -> Option<std::path::PathBuf> {
+        let connection = self.connection.lock().ok()?;
+        let path = Path::new(connection.path()?);
+        Some(path.parent()?.join("aria2-next-state/stream/state.db"))
+    }
+
     /// Publish a share leaf only together with its durable directory membership.
     /// Share resolution has not selected an account yet, so this does not bind one.
     pub(crate) fn prepare_cloud_share_directory_leaf_task(

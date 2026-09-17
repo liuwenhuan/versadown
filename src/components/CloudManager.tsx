@@ -561,7 +561,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const passwordFieldsEdited = useRef(false);
   const passwordInputVersion = useRef(0);
   const effectiveAuthorizationCapabilities = descriptor.authorization;
-  const supportsDirectPasswordLogin = effectiveAuthorizationCapabilities.password && effectiveAuthorizationCapabilities.passwordLoginMode === 'rustDirect';
+  const supportsPasswordLogin = effectiveAuthorizationCapabilities.password;
   const [authorizationStatus, setAuthorizationStatus] = useState(recoveryFailed ? expiredAuthorizationStatus : initialAuthorizationStatus);
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
   const [openingOperationVerification, setOpeningOperationVerification] = useState(false);
@@ -687,7 +687,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }, [initialAccount, operationBusy]);
 
   useEffect(() => {
-    if (!supportsDirectPasswordLogin) {
+    if (!supportsPasswordLogin) {
       setUsername('');
       setPassword('');
       return;
@@ -699,7 +699,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setSavedUsername(credentials.hasSavedPassword ? credentials.username : null);
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [client, provider, supportsDirectPasswordLogin, activeAccount?.id]);
+  }, [client, provider, supportsPasswordLogin, activeAccount?.id]);
 
   useEffect(() => {
     if (recoveryFailed && !activeAccount) setAuthorizationStatus(expiredAuthorizationStatus);
@@ -849,7 +849,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   async function submitPasswordLogin(event: FormEvent) {
     event.preventDefault();
-    if (!supportsDirectPasswordLogin || passwordLoginInFlight.current) return;
+    if (!supportsPasswordLogin || passwordLoginInFlight.current) return;
     if (!username.trim() || (!password && !useSavedPassword)) {
       setAuthorizationStatus('请输入账号和密码后再登录。');
       return;
@@ -1290,7 +1290,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={`${label}账号授权`}>
       <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{label}网盘</h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <><form className="cloud-login-form" onSubmit={submitPasswordLogin}>
-        {supportsDirectPasswordLogin && <>
+        {supportsPasswordLogin && <>
           <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
           <input aria-label="密码" placeholder={useSavedPassword ? "***" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
           <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? '正在自动登录…' : '登录'}</button>

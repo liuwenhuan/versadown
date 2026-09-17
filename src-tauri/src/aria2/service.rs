@@ -35,6 +35,10 @@ pub struct UriSubmissionOptions {
     pub headers: Vec<(String, String)>,
     pub proxy: Option<String>,
     pub max_connections_per_server: Option<u8>,
+    pub max_tries: Option<u8>,
+    pub retry_wait_seconds: Option<u16>,
+    /// Checkpoint identity retained while cloud admission clears its old GID.
+    pub native_resume_gid: Option<String>,
     pub allow_overwrite: bool,
     pub continue_download: bool,
 }
@@ -76,6 +80,15 @@ impl UriSubmissionOptions {
             let value = max_connections_per_server.to_string();
             options.insert("split".into(), value.clone());
             options.insert("max-connection-per-server".into(), value);
+        }
+        if let Some(max_tries) = self.max_tries {
+            if max_tries == 0 {
+                return Err(DownloadServiceError::InvalidUriOption("max tries"));
+            }
+            options.insert("max-tries".into(), max_tries.to_string());
+        }
+        if let Some(retry_wait) = self.retry_wait_seconds {
+            options.insert("retry-wait".into(), retry_wait.to_string());
         }
         if self.allow_overwrite {
             options.insert("allow-overwrite".into(), "true".into());
@@ -120,6 +133,8 @@ pub enum DownloadServiceError {
     AlreadySubmitted,
     #[error("invalid aria2 URI option: {0}")]
     InvalidUriOption(&'static str),
+    #[error("原生下载断点已失效，已保留原文件；请重新检查任务后选择重试或覆盖")]
+    InvalidNativeCheckpoint,
     #[error("磁力元数据仍在获取，请稍后重试确认")]
     MetadataTimeout,
     #[error("种子文件未包含可下载文件")]
@@ -258,11 +273,60 @@ impl DownloadService {
     pub async fn submit_uri_with_options(
         &self,
         task_id: Uuid,
-        uris: Vec<String>,
+        mut uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
-        self.submit_uri(task_id, uris, options.into_aria2_options()?)
-            .await
+        let task = self.store.find(task_id)?;
+        let options = self.prepare_uri_options(&task, &mut uris, options)?;
+        self.submit_uri(task_id, uris, options).await
+    }
+
+    fn prepare_uri_options(
+        &self,
+        task: &DownloadTask,
+        uris: &mut Vec<String>,
+        mut options: UriSubmissionOptions,
+    ) -> Result<Aria2Options, DownloadServiceError> {
+        let checkpoint = if options.continue_download && !options.allow_overwrite {
+            let gid = options
+                .native_resume_gid
+                .as_deref()
+                .or(task.aria_gid.as_deref());
+            let checkpoint =
+                gid.and_then(|gid| super::native_resume::checkpoint(&self.store, task, gid));
+            if checkpoint.is_none()
+                && (options.native_resume_gid.is_some()
+                    || (gid.is_some()
+                        && !super::native_resume::has_legacy_control(&self.store, task)))
+            {
+                return Err(DownloadServiceError::InvalidNativeCheckpoint);
+            }
+            checkpoint
+        } else {
+            None
+        };
+        if let Some(checkpoint) = &checkpoint {
+            options.directory = checkpoint.path.parent().map(Path::to_path_buf);
+            options.output_name = checkpoint
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            if !uris.contains(&checkpoint.uri) {
+                // Next matches its stored URI before restoring ranges. It may
+                // start with this old URI, then rotate to the refreshed mirror.
+                uris.push(checkpoint.uri.clone());
+            }
+        }
+        let mut result = options.into_aria2_options()?;
+        if checkpoint.is_some() {
+            // Native checkpoints restore independently of `continue`. Never
+            // fall back to treating a preallocated file's length as progress.
+            result.insert("continue".into(), "false".into());
+            result.insert("allow-overwrite".into(), "false".into());
+            result.insert("auto-file-renaming".into(), "false".into());
+        }
+        Ok(result)
     }
 
     pub async fn submit_native_media_with_options(
@@ -287,13 +351,13 @@ impl DownloadService {
     pub async fn resubmit_uri_with_options(
         &self,
         task_id: Uuid,
-        uris: Vec<String>,
+        mut uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
-        let mut options = options.into_aria2_options()?;
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        self.task_for_uri_submission(task_id)?;
+        let task = self.task_for_uri_submission(task_id)?;
+        let mut options = self.prepare_uri_options(&task, &mut uris, options)?;
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
@@ -335,10 +399,9 @@ impl DownloadService {
     pub async fn compare_and_resubmit_uri_with_options(
         &self,
         expected: &DownloadTask,
-        uris: Vec<String>,
+        mut uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<Option<DownloadTask>, DownloadServiceError> {
-        let mut options = options.into_aria2_options()?;
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         let current = self.store.find(expected.id)?;
@@ -355,6 +418,7 @@ impl DownloadService {
             return Ok(None);
         }
         validate_task_source(&current.kind, &current.source)?;
+        let mut options = self.prepare_uri_options(&current, &mut uris, options)?;
         let directory = self.prepare_directory_uri(expected.id, &mut options)?;
         let gid = self.api().add_uri(uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(expected.id, &gid) {

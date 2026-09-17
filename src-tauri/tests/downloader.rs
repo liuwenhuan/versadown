@@ -206,6 +206,141 @@ fn cloud_download_connection_policy_caps_xunlei_user_value_of_eight_to_one() {
     assert_eq!(options.max_connections_per_server, Some(1));
 }
 
+fn native_resume_fixture() -> (tempfile::TempDir, Arc<TaskStore>, DownloadTask) {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/old"))
+        .unwrap();
+    let task = store.bind_gid(task.id, "0123456789abcdef").unwrap();
+    let task = store
+        .apply_transfer_snapshot(DownloadTask {
+            status: TaskStatus::Failed,
+            total_length: Some(128),
+            completed_length: 7,
+            ..task
+        })
+        .unwrap();
+    let payload = root.path().join("native.bin");
+    std::fs::File::create(&payload)
+        .unwrap()
+        .set_len(128)
+        .unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(0, payload.to_string_lossy().into_owned(), 128, 7, true)],
+        )
+        .unwrap();
+    let directory = root.path().join("aria2-next-state/stream");
+    std::fs::create_dir_all(&directory).unwrap();
+    let db = rusqlite::Connection::open(directory.join("state.db")).unwrap();
+    db.execute_batch("CREATE TABLE downloads (gid TEXT PRIMARY KEY, uri TEXT, path TEXT, total_length INTEGER, completed_length INTEGER, completed_ranges TEXT);").unwrap();
+    db.execute(
+        "INSERT INTO downloads VALUES (?1, ?2, ?3, 128, 7, '0-7')",
+        rusqlite::params![
+            "0123456789abcdef",
+            "https://example.test/old",
+            payload.to_string_lossy()
+        ],
+    )
+    .unwrap();
+    (root, store, task)
+}
+
+#[tokio::test]
+async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallback() {
+    let (root, store, task) = native_resume_fixture();
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+    service
+        .resubmit_uri_with_options(
+            task.id,
+            vec!["https://example.test/fresh".into()],
+            UriSubmissionOptions {
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let options = api.added_options();
+    assert_eq!(
+        options[0].get("continue").map(String::as_str),
+        Some("false")
+    );
+    assert_eq!(
+        options[0].get("allow-overwrite").map(String::as_str),
+        Some("false")
+    );
+    assert_eq!(
+        options[0].get("auto-file-renaming").map(String::as_str),
+        Some("false")
+    );
+    assert_eq!(
+        options[0].get("out").map(String::as_str),
+        Some("native.bin")
+    );
+    assert_eq!(
+        options[0].get("dir"),
+        Some(&root.path().to_string_lossy().into_owned())
+    );
+    assert_eq!(
+        api.uris.lock().unwrap()[0],
+        vec!["https://example.test/fresh", "https://example.test/old"]
+    );
+}
+
+#[tokio::test]
+async fn native_resume_rejects_disappeared_checkpoint_without_submitting_or_touching_payload() {
+    let (root, store, task) = native_resume_fixture();
+    std::fs::remove_file(root.path().join("aria2-next-state/stream/state.db")).unwrap();
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    for native_resume_gid in [task.aria_gid.clone(), None] {
+        let result = service
+            .resubmit_uri_with_options(
+                task.id,
+                vec!["https://example.test/fresh".into()],
+                UriSubmissionOptions {
+                    continue_download: true,
+                    native_resume_gid,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(result.is_err());
+    }
+    assert!(api.calls().is_empty());
+    assert_eq!(
+        std::fs::metadata(root.path().join("native.bin"))
+            .unwrap()
+            .len(),
+        128
+    );
+    assert_eq!(store.find(task.id).unwrap().aria_gid, task.aria_gid);
+}
+
+#[tokio::test]
+async fn native_resume_identity_survives_cloud_admission_pause() {
+    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    let (_root, store, task) = native_resume_fixture();
+    let dispatch = CloudDownloadDispatch::default();
+    dispatch
+        .prepare_expected_with_retry_intent(&store, &task, false, true)
+        .await
+        .unwrap();
+    let queued = store.find(task.id).unwrap();
+    assert!(queued.aria_gid.is_none());
+    dispatch
+        .control_unsubmitted(&store, task.id, DownloadAction::Pause)
+        .await
+        .unwrap();
+    let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
+    assert_eq!(options.native_resume_gid, task.aria_gid);
+    assert!(options.continue_download);
+}
+
 #[test]
 fn cloud_download_connection_policy_retains_user_value_below_provider_cap() {
     let options =
@@ -215,7 +350,7 @@ fn cloud_download_connection_policy_retains_user_value_below_provider_cap() {
 }
 
 #[tokio::test]
-async fn cloud_download_connection_policy_sets_both_aria2_keys_to_the_same_literal() {
+async fn cloud_download_policy_sends_capped_connections_and_spaced_bounded_retries() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = prepare_download("https://example.test/cloud-file.bin", &store)
         .unwrap()
@@ -234,6 +369,8 @@ async fn cloud_download_connection_policy_sets_both_aria2_keys_to_the_same_liter
         api.added_options(),
         vec![BTreeMap::from([
             ("max-connection-per-server".into(), "1".into()),
+            ("max-tries".into(), "5".into()),
+            ("retry-wait".into(), "3".into()),
             ("split".into(), "1".into()),
         ])]
     );
@@ -1181,6 +1318,7 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
                 max_connections_per_server: None,
                 allow_overwrite: true,
                 continue_download: false,
+                ..Default::default()
             },
         )
         .await
@@ -1205,7 +1343,7 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
 }
 
 #[tokio::test]
-async fn resumed_submission_keeps_one_task_and_sets_aria2_continue() {
+async fn legacy_resumed_submission_keeps_one_task_and_sets_aria2_continue() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = prepare_download("https://example.test/fixture.bin", &store)
         .unwrap()
@@ -1217,6 +1355,20 @@ async fn resumed_submission_keeps_one_task_and_sets_aria2_continue() {
         .await
         .unwrap();
     store.fail(task.id, "connection interrupted").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let payload = root.path().join("fixture.bin");
+    std::fs::write(&payload, vec![0; 250]).unwrap();
+    std::fs::write(
+        root.path().join("fixture.bin.aria2"),
+        b"legacy control fixture",
+    )
+    .unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(0, payload.to_string_lossy().into_owned(), 1000, 250, true)],
+        )
+        .unwrap();
 
     let retried = service
         .resubmit_uri_with_options(

@@ -576,6 +576,23 @@ it('submits provided credentials once while automatic password login is pending'
   expect(screen.queryByRole('button', { name: '正在自动登录…' })).not.toBeInTheDocument();
 });
 
+it('submits Xunlei credentials through the official WebView path and retains webpage authorization', async () => {
+  const client = createCloudFake();
+  const user = userEvent.setup();
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly />);
+
+  expect(screen.getByRole('button', { name: '使用网页授权' })).toBeVisible();
+  await user.type(screen.getByLabelText('账号'), 'xunlei-user');
+  await user.type(screen.getByLabelText('密码'), 'xunlei-password');
+  await user.click(screen.getByRole('button', { name: '登录' }));
+
+  expect(client.loginCloudWithPassword).toHaveBeenCalledWith('xunlei', {
+    username: 'xunlei-user', password: 'xunlei-password'
+  });
+  expect(screen.queryByLabelText('账号')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '已经登录' })).toBeVisible();
+});
+
 it('refills saved credentials after manual logout and logs in only when clicked', async () => {
   const client = createCloudFake({ getSavedCloudCredentials: vi.fn().mockResolvedValue({ username: 'saved-user', hasSavedPassword: true }) });
   const user = userEvent.setup();
@@ -708,7 +725,7 @@ it('keeps the unauthenticated provider card focused on the available sign-in act
 
 it.each([
   ['quark', '夸克', false], ['pikpak', 'PikPak', true], ['baidu', '百度', true], ['tianyi', '天翼', true],
-  ['aliyun', '阿里', false], ['xunlei', '迅雷', false], ['uc', 'UC', false]
+  ['aliyun', '阿里', false], ['xunlei', '迅雷', true], ['uc', 'UC', false]
 ] as const)('keeps the %s login card concise while prioritizing its supported login method', async (provider, label, supportsPasswordLogin) => {
   const client = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockReturnValue(new Promise<never>(() => undefined)) });
   render(<CloudManager provider={provider} client={client} authorizationOnly />);

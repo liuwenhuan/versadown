@@ -28,6 +28,7 @@ struct TaskDispatch {
 #[derive(Clone, Debug, Default)]
 struct RetryIntent {
     original_gid: Option<String>,
+    native_resume_gid: Option<String>,
     allow_overwrite: bool,
     continue_download: bool,
 }
@@ -131,6 +132,15 @@ impl CloudDownloadDispatch {
             if let Some((allow_overwrite, continue_download)) = retry_options {
                 intent.allow_overwrite = allow_overwrite;
                 intent.continue_download = continue_download && !allow_overwrite;
+                if !intent.continue_download {
+                    intent.native_resume_gid = None;
+                } else if let Some(gid) = task.aria_gid.as_deref() {
+                    // Retain identity even if the native database is momentarily
+                    // unavailable; submission must fail closed, never guess length.
+                    intent.native_resume_gid =
+                        (!crate::aria2::native_resume::has_legacy_control(store, &task))
+                            .then(|| gid.to_owned());
+                }
             }
         }
         self.invalidate(id);
@@ -159,6 +169,7 @@ impl CloudDownloadDispatch {
             options.continue_download = false;
         } else if intent.continue_download {
             options.continue_download = true;
+            options.native_resume_gid = intent.native_resume_gid;
         }
         options
     }

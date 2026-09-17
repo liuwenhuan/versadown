@@ -47,6 +47,10 @@ pub struct ProviderDescriptor {
     pub authorization_url: &'static str,
     pub password_login_hosts: &'static [&'static str],
     #[serde(skip)]
+    pub(crate) web_initialization_script: Option<&'static str>,
+    #[serde(skip)]
+    pub(crate) password_login_script: Option<&'static str>,
+    #[serde(skip)]
     pub web_session_cookie_urls: &'static [&'static str],
     #[serde(skip)]
     pub(crate) browser_context: bool,
@@ -306,6 +310,12 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             &["/s/"],
         ),
     };
+    let password_login_hosts: &'static [&'static str] = match provider {
+        Baidu => &["pan.baidu.com", "passport.baidu.com"],
+        Tianyi => &["cloud.189.cn", "open.e.189.cn"],
+        Xunlei => &["pan.xunlei.com", "i.xunlei.com"],
+        _ => &[],
+    };
     ProviderDescriptor {
         provider,
         browser_context: provider == Tianyi,
@@ -342,11 +352,11 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷云盘分享目录",
             Uc => "UC网盘分享目录",
         },
-        password_login_hosts: match provider {
-            Baidu => &["pan.baidu.com", "passport.baidu.com"],
-            Tianyi => &["cloud.189.cn", "open.e.189.cn"],
-            _ => &[],
-        },
+        password_login_hosts,
+        web_initialization_script: (provider == Xunlei)
+            .then_some(super::driver::native::xunlei_auth::INITIALIZE),
+        password_login_script: (provider == Xunlei)
+            .then_some(super::driver::native::xunlei_auth::PASSWORD),
         web_session_cookie_urls: match provider {
             Tianyi => &["https://cloud.189.cn"],
             Quark => &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
@@ -366,7 +376,8 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         authorization: CloudAuthorizationCapabilities {
             provider,
             web: true,
-            password: password_login_mode == RustDirect,
+            password: password_login_mode == RustDirect
+                || (password_login_mode == OfficialWebView && !password_login_hosts.is_empty()),
             password_login_mode,
         },
         capabilities: ProviderCapabilities {

@@ -53,6 +53,7 @@ mod tianyi_driver;
 use tianyi_driver::TianyiDriver;
 mod aliyun_driver;
 use aliyun_driver::AliyunDriver;
+pub(crate) mod xunlei_auth;
 mod xunlei_driver;
 use xunlei_driver::XunleiDriver;
 mod uc_driver;

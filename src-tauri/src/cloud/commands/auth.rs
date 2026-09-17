@@ -288,6 +288,10 @@ pub async fn cloud_begin_authorization(
         let url = crate::cloud::ProviderRegistry::global()
             .get(provider)
             .authorization_url;
+        let background_ui_test = std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+            .ok()
+            .as_deref()
+            == Some("1");
         let mut builder = WebviewWindowBuilder::new(
             &app,
             &label,
@@ -295,6 +299,7 @@ pub async fn cloud_begin_authorization(
         )
         .title(format!("{} 网页授权", provider.key()))
         .inner_size(1024.0, 760.0)
+        .visible(!background_ui_test)
         .incognito(false)
         .data_directory(authorization_profile_directory(&app, provider)?)
         .on_new_window(|url, _features| {
@@ -314,10 +319,6 @@ pub async fn cloud_begin_authorization(
                 {
                     let _ = window.eval(baidu::BAIDU_AUTO_OPEN_LOGIN_JS);
                 }
-                let app = window.app_handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = cloud_complete_authorization(app, provider).await;
-                });
             }
         });
         if browser_login::supports_browser_password(provider) {
@@ -326,9 +327,39 @@ pub async fn cloud_begin_authorization(
         if ProviderRegistry::global().get(provider).browser_context {
             builder = builder.initialization_script(include_str!("../tianyi-browser-context.js"));
         }
+        if let Some(script) = ProviderRegistry::global()
+            .get(provider)
+            .web_initialization_script
+        {
+            builder = builder.initialization_script(script);
+        }
         builder
             .build()
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        // Xunlei's current SSO can establish a logged-in SPA state without a
+        // top-level navigation after this first load. A page-load-only attempt
+        // then misses the new credentials and leaves an already logged-in
+        // authorization window open. Poll the existing window for this short,
+        // user-initiated authorization only; success still requires the normal
+        // root-directory validation before the window is closed.
+        let completion_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            for _ in 0..180 {
+                if completion_app
+                    .get_webview_window(&format!("cloud-auth-{}", provider.key()))
+                    .is_none()
+                {
+                    return;
+                }
+                if cloud_complete_authorization(completion_app.clone(), provider)
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
     }
     Ok(CloudAuthorization {
         provider,
@@ -641,9 +672,6 @@ pub async fn cloud_complete_authorization(
         let input = crate::cloud::driver::WebAuthorizationInput {
             cookies: browser_cookies(&window, web_session_cookie_urls(provider))?,
             storage: match recipe.token_script {
-                Some(script) if recipe.asynchronous_tokens => {
-                    asynchronous_web_tokens(&window, script)?
-                }
                 Some(script) => web_storage_tokens(&window, script)?,
                 None => serde_json::Value::Null,
             },
@@ -652,6 +680,7 @@ pub async fn cloud_complete_authorization(
             } else {
                 None
             },
+            auth_method: CloudAuthMethod::Web,
         };
         let account = if recipe.browser_context {
             let validation_http = TianyiBrowserValidationTransport {
@@ -762,6 +791,7 @@ pub async fn cloud_login_password(
     let browser_app = app.clone();
     let account = run(app.clone(), provider, move |state, http| {
         let (username, password) = resolve_password_login(&state.store, request)?;
+        save_password_login_draft(&state.store, provider, &username, &password)?;
         let reset_baidu_profile = ProviderRegistry::global()
             .get(provider)
             .browser_profile_owner

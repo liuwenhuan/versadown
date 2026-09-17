@@ -66,7 +66,10 @@ pub(super) fn password_script(
     );
     Ok(Zeroizing::new(format!(
         "{}(...{});",
-        include_str!("password-login.js"),
+        super::ProviderRegistry::global()
+            .get(provider)
+            .password_login_script
+            .unwrap_or(include_str!("password-login.js")),
         args.as_str()
     )))
 }

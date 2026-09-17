@@ -3,7 +3,7 @@ use super::commands::CloudState;
 use super::*;
 use std::path::Path;
 
-mod native;
+pub(crate) mod native;
 pub use native::NativeDriverFactory;
 
 pub trait DriveOps {
@@ -72,12 +72,12 @@ pub struct WebAuthorizationInput {
     pub cookies: Vec<String>,
     pub storage: serde_json::Value,
     pub browser_context: Option<serde_json::Value>,
+    pub auth_method: CloudAuthMethod,
 }
 
 #[derive(Clone, Copy, Default)]
 pub struct WebAuthorizationRecipe {
     pub token_script: Option<&'static str>,
-    pub asynchronous_tokens: bool,
     pub browser_context: bool,
 }
 
