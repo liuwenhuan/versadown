@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { render } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 import { expect, it } from 'vitest';
 import { DownloadQueue } from './DownloadQueue';
 
@@ -56,6 +56,41 @@ it('uses text-like batch actions and a denser uninterrupted task list', () => {
     expect(getComputedStyle(action!).minHeight).toBe('32px');
     expect(getComputedStyle(title!).fontSize).toBe('13px');
     expect(getComputedStyle(secondTaskGroup!).borderTopWidth).toBe('0px');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('encloses an expanded task row and its file list in one rounded task card', () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const { container, getByRole } = render(
+      <DownloadQueue
+        tasks={[{
+          id: 'directory', name: '目录任务', kind: 'folder', status: 'downloading', progress: 25,
+          children: [{ id: 'child', name: 'file.zip', kind: 'file', status: 'downloading', progress: 25 }],
+        }]}
+        selectedTaskId={null}
+        onSelect={() => {}}
+        onCommand={() => {}}
+      />,
+    );
+
+    fireEvent.click(getByRole('button', { name: '展开 目录任务' }));
+
+    const group = container.querySelector('.task-group.is-expanded');
+    const children = group?.querySelector('.children');
+    const row = group?.querySelector('.task-row');
+    expect(group).not.toBeNull();
+    expect(children).not.toBeNull();
+    expect(row).not.toBeNull();
+
+    const styles = readFileSync('src/styles.css', 'utf8');
+    expect(styles).toContain('.task-group.is-expanded{margin-bottom:10px;overflow:hidden;border:1px solid var(--border);border-radius:12px;');
+    expect(styles).toContain('.task-group.is-expanded>.task-row{border-radius:11px 11px 0 0}');
+    expect(styles).toContain('.task-group.is-expanded>.children{margin:0;border:0;border-top:1px solid var(--border);border-radius:0}');
   } finally {
     stylesheet.remove();
   }
