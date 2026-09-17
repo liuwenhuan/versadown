@@ -105,6 +105,12 @@ it('uses the share management command contract for creating, listing, and cancel
   expect(native.invoke).toHaveBeenNthCalledWith(3, 'cloud_cancel_shares', { provider: 'quark', shareIds: ['share-1'] });
 });
 
+it('updates the extraction code of an existing share without recreating it', async () => {
+  const api = await import('./cloudApi');
+  await api.updateCloudSharePassCode('pikpak', 'share-existing', 'a1B2');
+  expect(native.invoke).toHaveBeenLastCalledWith('cloud_update_share_pass_code', { provider: 'pikpak', shareId: 'share-existing', passCode: 'a1B2' });
+});
+
 it('maps one directory parent task with its authoritative group root while preserving the queued count and redacted failures', async () => {
   native.invoke.mockResolvedValueOnce({
     task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0, queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'queued', progress: 0, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }] } },

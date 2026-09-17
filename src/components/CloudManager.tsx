@@ -33,6 +33,7 @@ export interface CloudManagerClient {
   createCloudShare(provider: CloudProvider, fileIds: string[], options: CloudShareOptions): Promise<CloudShare>;
   listCloudShares(provider: CloudProvider): Promise<readonly CloudShare[]>;
   cancelCloudShares(provider: CloudProvider, shareIds: string[]): Promise<void>;
+  updateCloudSharePassCode?(provider: CloudProvider, shareId: string, passCode: string): Promise<void>;
   downloadCloudFile(provider: CloudProvider, fileId: string, fileName: string, privateDownload?: boolean): Promise<unknown>;
   downloadCloudDirectory(provider: CloudProvider, directoryId: string, directoryName: string, privateDownload?: boolean): Promise<CloudDirectoryDownloadOutcome>;
   logoutCloud(provider: CloudProvider): Promise<void>;
@@ -73,7 +74,7 @@ type DestinationAction = 'move' | 'copy';
 type OperationState = { kind: 'working' | 'success' | 'error' | 'cancelled'; message: string; operationVerification?: boolean; uploadProgress?: CloudUploadProgress } | null;
 type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
 interface Breadcrumb { id: string; name: string }
-type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'share' | 'copyShareLink' | 'cancelShare' | 'delete' | 'create' | 'upload' | 'refresh';
+type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'share' | 'copyShareLink' | 'updateSharePassCode' | 'cancelShare' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
 const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
 const expiredAuthorizationStatus = '授权过期请重新登录';
@@ -101,6 +102,7 @@ const unavailableClient: CloudManagerClient = {
   createCloudShare: () => Promise.reject(new Error('网盘连接器尚未接入')),
   listCloudShares: () => Promise.reject(new Error('网盘连接器尚未接入')),
   cancelCloudShares: () => Promise.reject(new Error('网盘连接器尚未接入')),
+  updateCloudSharePassCode: () => Promise.reject(new Error('网盘连接器尚未接入')),
   downloadCloudFile: () => Promise.reject(new Error('网盘连接器尚未接入')),
   downloadCloudDirectory: () => Promise.reject(new Error('网盘连接器尚未接入')),
   logoutCloud: () => Promise.reject(new Error('网盘连接器尚未接入')),
@@ -257,6 +259,7 @@ function CloudActionIcon({ action }: { action: CloudActionIconType }) {
     share: <><circle cx="18" cy="5" r="2.2" /><circle cx="6" cy="12" r="2.2" /><circle cx="18" cy="19" r="2.2" /><path d="m8 11 7.8-4.7M8 13l7.8 4.7" /></>,
     copyShareLink: <><path d="M10.2 13.8a4 4 0 0 0 5.7.1l2.1-2.1a4 4 0 0 0-5.7-5.7l-1.2 1.2" /><path d="M13.8 10.2a4 4 0 0 0-5.7-.1L6 12.2a4 4 0 0 0 5.7 5.7l1.2-1.2" /></>,
     cancelShare: <><circle cx="12" cy="12" r="8.5" /><path d="m8.5 8.5 7 7m0-7-7 7" /></>,
+    updateSharePassCode: <><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3" /></>,
     details: <><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5h.01" /></>,
     delete: <><path d="M5 7h14M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6.5 7l.8 14h9.4l.8-14" /></>,
     create: <><path d="M3.5 7.5h6l1.8 2h9.2v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M12 12v6M9 15h6" /></>,
@@ -271,14 +274,14 @@ function CloudActionIcon({ action }: { action: CloudActionIconType }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
 
-function CloudContextMenu({ state, selectedCount, recycleBin, virtualRecycleBin, myShares, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualRecycleBin: boolean; myShares: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
+function CloudContextMenu({ state, selectedCount, recycleBin, virtualRecycleBin, myShares, canUpdateSharePassCode, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualRecycleBin: boolean; myShares: boolean; canUpdateSharePassCode: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudMenuAction; label: string; danger?: boolean; separated?: boolean }> = state.kind === 'background'
     ? recycleBin || myShares ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传' }, { action: 'refresh', label: '刷新', separated: true }]
     : virtualRecycleBin
       ? [{ action: 'open', label: '打开' }]
       : myShares
-      ? [{ action: 'copyShareLink', label: '复制分享链接' }, { action: 'cancelShare', label: '取消分享', danger: true, separated: true }]
+      ? [{ action: 'copyShareLink', label: '复制分享链接' }, ...(canUpdateSharePassCode && selectedCount === 1 ? [{ action: 'updateSharePassCode' as const, label: '修改提取码' }] : []), { action: 'cancelShare', label: '取消分享', danger: true, separated: true }]
       : recycleBin
       ? [{ action: 'restore', label: '恢复' }, { action: 'delete', label: '永久删除', danger: true, separated: true }]
       : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, { action: 'share', label: '分享', separated: true }, { action: 'delete', label: '删除', danger: true, separated: true }];
@@ -418,13 +421,30 @@ function sharePassCodeError(passCode: string, constraint?: SharePassCodeConstrai
   return hasValidLength && hasValidCharacters ? null : constraint.hint;
 }
 
-function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstraint, onCreate, onCopy, onClose }: { provider: CloudProvider; items: readonly CloudFile[]; share: CloudShare | null; busy: boolean; sharePassCodeConstraint?: SharePassCodeConstraint; onCreate(options: CloudShareOptions): void; onCopy(value: string): void; onClose(): void }) {
+function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstraint, onCreate, onCopy, onClose, onUpdatePassCode }: { provider: CloudProvider; items: readonly CloudFile[]; share: CloudShare | null; busy: boolean; sharePassCodeConstraint?: SharePassCodeConstraint; onCreate(options: CloudShareOptions): void; onCopy(value: string): void; onClose(): void; onUpdatePassCode?(passCode: string): Promise<void> }) {
   const dialogRef = useRef<HTMLElement>(null);
   const initialFocusRef = useRef<HTMLInputElement>(null);
   const [passCode, setPassCode] = useState('');
   const [generatePassCode, setGeneratePassCode] = useState(false);
   const [expiresInDays, setExpiresInDays] = useState('');
-  useModalFocusTrap(dialogRef, initialFocusRef, onClose);
+  const [updatedPassCode, setUpdatedPassCode] = useState(share?.passCode ?? '');
+  const [savingPassCode, setSavingPassCode] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<{ error: boolean; message: string } | null>(null);
+  useEffect(() => { setUpdatedPassCode(share?.passCode ?? ''); setUpdateNotice(null); }, [share?.id]);
+  useModalFocusTrap(dialogRef, initialFocusRef, () => { if (!savingPassCode) onClose(); });
+  const updatedPassCodeError = sharePassCodeError(updatedPassCode, sharePassCodeConstraint);
+  const updatePassCode = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!onUpdatePassCode || !updatedPassCode.trim() || updatedPassCodeError || savingPassCode || busy) return;
+    setSavingPassCode(true);
+    setUpdateNotice(null);
+    try {
+      await onUpdatePassCode(updatedPassCode.trim());
+      setUpdateNotice({ error: false, message: '提取码已更新' });
+    } catch (error) {
+      setUpdateNotice({ error: true, message: `修改提取码失败：${errorMessage(error, '请重试。')}` });
+    } finally { setSavingPassCode(false); }
+  };
   const title = items.length === 1 ? items[0]?.name ?? '分享文件' : `${items[0]?.name ?? '文件'} 等 ${items.length} 项`;
   const serverGeneratedPassCode = provider === 'pikpak' || provider === 'xunlei';
   const alwaysGeneratedPassCode = provider === 'tianyi';
@@ -442,11 +462,24 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
         <p>{share.name}</p>
         <form className="cloud-operation-editor"><label>分享链接<input aria-label="分享链接" readOnly value={share.url} /></label></form>
         {share.passCode && <p>提取码：<b>{share.passCode}</b></p>}
-        <button className="secondary" onClick={() => onCopy(share.url)}>复制分享链接</button><button className="primary" onClick={onClose}>完成</button>
+        {onUpdatePassCode && <form className="cloud-operation-editor" onSubmit={updatePassCode}>
+          <label>修改提取码<input aria-label="新提取码" aria-invalid={Boolean(updatedPassCodeError)} disabled={savingPassCode || busy} value={updatedPassCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => { setUpdatedPassCode(event.target.value); setUpdateNotice(null); }} /></label>
+          {updatedPassCodeError && <p role="alert">{updatedPassCodeError}</p>}
+          <button type="submit" className="secondary" disabled={savingPassCode || busy || !updatedPassCode.trim() || Boolean(updatedPassCodeError) || updatedPassCode.trim() === share.passCode}>{savingPassCode ? '正在保存…' : '保存提取码'}</button>
+          {updateNotice && <p role={updateNotice.error ? 'alert' : 'status'}>{updateNotice.message}</p>}
+        </form>}
+        <button className="secondary" onClick={() => onCopy(share.url)}>复制分享链接</button><button className="primary" disabled={savingPassCode} onClick={onClose}>完成</button>
       </> : <form onSubmit={submit}>
         <h3>创建分享链接</h3>
         <p>将分享 {title}。{sharePassCodeConstraint ? `可选设置提取码和有效期，${sharePassCodeConstraint.hint}` : '可选设置提取码和有效期。'}</p>
-        <div className="cloud-share-options">{alwaysGeneratedPassCode ? <label>提取码由天翼云盘自动生成</label> : serverGeneratedPassCode ? <label><input ref={initialFocusRef} aria-label="自动生成提取码" type="checkbox" checked={generatePassCode} onChange={(event) => setGeneratePassCode(event.target.checked)} /> 自动生成提取码</label> : <label>提取码（可选）<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label="提取码" disabled={busy} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}<label>有效期<select aria-label="分享有效期" value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)}>{expiryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>
+        {serverGeneratedPassCode && onUpdatePassCode && <p>提取码先由网盘随机生成，分享创建后可修改。</p>}
+        <div className="cloud-share-options">
+          {alwaysGeneratedPassCode ? <label>提取码由天翼云盘自动生成</label> : serverGeneratedPassCode ? <div className="cloud-share-code-field">
+            <span>提取码</span>
+            <label className="cloud-share-checkbox"><input ref={initialFocusRef} aria-label="自动生成" type="checkbox" checked={generatePassCode} onChange={(event) => setGeneratePassCode(event.target.checked)} /><span>自动生成</span></label>
+          </div> : <label>提取码（可选）<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label="提取码" disabled={busy} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}
+          <label>有效期<select aria-label="分享有效期" value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)}>{expiryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        </div>
         <button type="button" className="secondary" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy || Boolean(passCodeError)} type="submit">{busy ? '正在创建…' : '创建分享链接'}</button>
       </form>}
     </section>
@@ -752,6 +785,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           modifiedAt: share.createdAt,
           shareId: share.id,
           shareUrl: share.url,
+          sharePassCode: share.passCode,
         })) }
         : await client.listCloudDirectory(provider, parentId);
       const recycleBinId = descriptor.recycleBinDirectoryId;
@@ -1191,6 +1225,20 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     setShareItems(items.slice());
   }
 
+  function openSharePassCodeEditor(item = selected[0]) {
+    if (!isMyShares || !descriptor.capabilities.shareUpdatePassCode || !item?.shareId || !item.shareUrl || operationBusy) return;
+    setShareItems([item]);
+    setCreatedShare({ id: item.shareId, url: item.shareUrl, name: item.name, kind: item.kind, sourceFileIds: [], passCode: item.sharePassCode });
+  }
+
+  async function updateSharePassCode(passCode: string) {
+    const share = createdShare;
+    if (!share || !descriptor.capabilities.shareUpdatePassCode || !client.updateCloudSharePassCode) throw new Error('此网盘暂不支持修改提取码');
+    await client.updateCloudSharePassCode(provider, share.id, passCode);
+    setCreatedShare((current) => current?.id === share.id ? { ...current, passCode } : current);
+    setDirectory((current) => current ? { ...current, items: current.items.map(item => item.shareId === share.id ? { ...item, sharePassCode: passCode } : item) } : current);
+  }
+
   function submitCloudShare(options: CloudShareOptions) {
     const items = shareItems;
     if (!items?.length) return;
@@ -1222,6 +1270,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (action === 'move' && !isRecycleBin) setDestinationAction('move');
     if (action === 'copy' && !isRecycleBin) setDestinationAction('copy');
     if (action === 'share') openShare();
+    if (action === 'updateSharePassCode' && selected.length === 1) openSharePassCodeEditor();
     if (action === 'copyShareLink' && menu?.kind === 'selection' && menu.item.shareUrl) copyShareLink(menu.item.shareUrl);
     if (action === 'cancelShare' && menu?.kind === 'selection') {
       const shareIds = selected.map((item) => item.shareId).filter((id): id is string => Boolean(id));
@@ -1410,6 +1459,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label="文件操作">
         {!isRecycleBin && !isMyShares && <button aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传</button>}
         {!isRecycleBin && !isMyShares && <button aria-label="新建目录" disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />新建文件夹</button>}
+        {isMyShares && descriptor.capabilities.shareUpdatePassCode && selected.length === 1 && <button disabled={operationBusy} onClick={() => openSharePassCodeEditor()}><CloudActionIcon action="updateSharePassCode" />修改提取码</button>}
         <button className="cloud-icon-button cloud-refresh-button" aria-label="刷新" title="刷新" disabled={operationBusy} onClick={refreshDirectory}><CloudActionIcon action="refresh" /></button>
       </div>
     </div>
@@ -1453,9 +1503,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       })}
     </div>}
     {uploadPickerOpen && <LocalUploadPicker listEntries={client.listLocalUploadEntries ?? unavailableLocalUploadListing} onCancel={() => setUploadPickerOpen(false)} onConfirm={paths => { setUploadPickerOpen(false); void uploadSelectedFiles(paths); }} />}
-    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} myShares={isMyShares} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
+    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualRecycleBin={contextMenu.kind === 'selection' && isVirtualRecycleBinItem(contextMenu.item)} myShares={isMyShares} canUpdateSharePassCode={Boolean(descriptor.capabilities.shareUpdatePassCode)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
-    {shareItems && <CloudShareDialog provider={provider} items={shareItems} share={createdShare} busy={operationBusy} sharePassCodeConstraint={descriptor.sharePassCodeConstraint} onCreate={submitCloudShare} onCopy={copyShareLink} onClose={() => { setShareItems(null); setCreatedShare(null); }} />}
+    {shareItems && <CloudShareDialog provider={provider} items={shareItems} share={createdShare} busy={operationBusy} sharePassCodeConstraint={descriptor.sharePassCodeConstraint} onUpdatePassCode={descriptor.capabilities.shareUpdatePassCode ? updateSharePassCode : undefined} onCreate={submitCloudShare} onCopy={copyShareLink} onClose={() => { setShareItems(null); setCreatedShare(null); }} />}
     {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { const action = destinationAction; setDestinationAction(null); queueAuthorizationContinuation(`选择${action === 'copy' ? '复制' : '移动'}目标`, async () => { setDestinationAction(action); }, errorMessage(error, `读取${action === 'copy' ? '复制' : '移动'}目标目录需要网页验证。`)); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
   </section>;
 }

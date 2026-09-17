@@ -193,6 +193,84 @@ mod tests {
         assert!(requests[0].url.ends_with("/drive/v1/about"));
     }
     #[test]
+    fn pikpak_share_pass_code_update_patches_existing_share() {
+        let store = credentials();
+        let http = Http::new(vec![
+            json!({}),
+            json!({"data":[{"share_id":"existing-share", "pass_code":"a7B2"}]}),
+        ]);
+        ProviderRegistry::global()
+            .driver(CloudProvider::Pikpak, &store, &http)
+            .update_share_pass_code("existing-share", "a7B2")
+            .unwrap();
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "PATCH");
+        assert!(requests[0].url.ends_with("/drive/v1/share"));
+        assert_eq!(
+            serde_json::from_str::<Value>(requests[0].body.as_deref().unwrap()).unwrap(),
+            json!({"share_id":"existing-share", "share_to":"encryptedlink", "pass_code_option":"REQUIRED", "custom_pass_code":"a7B2"})
+        );
+    }
+    #[test]
+    fn pikpak_share_pass_code_rejects_invalid_input_without_http() {
+        let store = credentials();
+        let http = Http::new(vec![]);
+        let client = PikPakClient::new(&http, &store);
+        for code in ["", "123", "12345", "a 12", "测试代码", "a!23"] {
+            assert!(matches!(
+                client.update_share_pass_code("s", code),
+                Err(QuarkError::InvalidInput(_))
+            ));
+        }
+        assert!(client.update_share_pass_code("", "a7B2").is_err());
+        assert!(http.requests.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn pikpak_share_update_does_not_report_success_when_provider_ignores_code() {
+        let store = credentials();
+        let http = Http::new(vec![
+            json!({}),
+            json!({"data":[{"share_id":"s", "pass_code":"old1"}]}),
+        ]);
+        assert!(PikPakClient::new(&http, &store)
+            .update_share_pass_code("s", "a7B2")
+            .is_err());
+    }
+    #[test]
+    fn pikpak_creation_does_not_silently_replace_a_custom_code() {
+        let store = credentials();
+        let http = Http::new(vec![]);
+        let options = CloudShareOptions {
+            name: "test".into(),
+            pass_code: Some("a7B2".into()),
+            generate_pass_code: false,
+            expires_in_days: Some(1),
+        };
+        assert!(PikPakClient::new(&http, &store)
+            .create_share(&["f".into()], &options)
+            .is_err());
+        assert!(http.requests.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn pikpak_share_list_reads_actual_provider_metadata() {
+        let value = json!({"share_id":"share-1", "title":"照片合集", "params":{"name":"照片合集"},
+            "file_id":"folder-1", "file_kind":"drive#folder", "file_num":"1", "file_size":"123",
+            "create_time":"2026-09-18T10:00:00Z", "expiration_at":"2026-09-19T10:00:00Z"});
+        let share = pikpak_share_from_value(&value, None, None).unwrap();
+        assert_eq!(share.name, "照片合集");
+        assert_eq!(share.kind, CloudFileKind::Folder);
+        assert_eq!(share.source_file_ids, vec!["folder-1"]);
+        assert_eq!(share.created_at.as_deref(), Some("2026-09-18T10:00:00Z"));
+        assert_eq!(share.expires_at.as_deref(), Some("2026-09-19T10:00:00Z"));
+    }
+    #[test]
+    fn pikpak_share_name_falls_back_past_empty_fields() {
+        let share = pikpak_share_from_value(&json!({"share_id":"s", "share_name":"", "name":"", "title":"", "params":{"name":"报告.pdf"}}), None, None).unwrap();
+        assert_eq!(share.name, "报告.pdf");
+        assert_eq!(share.kind, CloudFileKind::File);
+    }
+    #[test]
     fn pikpak_personal_shares_use_the_dedicated_share_management_protocol() {
         let store = credentials();
         let http = Http::new(vec![
@@ -220,7 +298,10 @@ mod tests {
         assert_eq!(created["expiration_days"], 7);
         assert!(requests[1].url.contains("/drive/v1/share/list?"));
         assert!(requests[2].url.ends_with("/drive/v1/share:batchDelete"));
-        assert_eq!(serde_json::from_str::<Value>(requests[2].body.as_deref().unwrap()).unwrap()["ids"], json!(["created"]));
+        assert_eq!(
+            serde_json::from_str::<Value>(requests[2].body.as_deref().unwrap()).unwrap()["ids"],
+            json!(["created"])
+        );
     }
     #[test]
     fn pikpak_share_rotation_does_not_relabel_share_ticket_as_recycle_permission() {
@@ -1278,22 +1359,73 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         })
     }
 
-    pub fn create_share(&self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, QuarkError> {
-        if file_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into())); }
-        // PikPak's share endpoint deliberately creates the access code itself.
-        // `pass_code` in the shared contract therefore means "require an access
-        // code" for this provider; the generated code returned by PikPak is
-        // surfaced to the caller instead of pretending the typed value was used.
-        let needs_pass_code = options.generate_pass_code || options.pass_code.as_deref().is_some_and(|code| !code.trim().is_empty());
-        let value = self.request("POST", format!("{DRIVE}/drive/v1/share"), Some(json!({
-            "file_ids": file_ids,
-            "share_to": if needs_pass_code { "encryptedlink" } else { "publiclink" },
-            "expiration_days": options.expires_in_days.map(i64::from).unwrap_or(-1),
-            "pass_code_option": if needs_pass_code { "REQUIRED" } else { "NOT_REQUIRED" },
-        })))?;
+    pub fn create_share(
+        &self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, QuarkError> {
+        if file_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
+        }
+        // Creation generates the code; editing is a separate provider operation.
+        // Never silently discard a caller's explicit custom code.
+        if options
+            .pass_code
+            .as_deref()
+            .is_some_and(|code| !code.is_empty())
+        {
+            return Err(QuarkError::InvalidInput(
+                "PikPak 请先生成分享，再修改提取码".into(),
+            ));
+        }
+        let needs_pass_code = options.generate_pass_code;
+        let value = self.request(
+            "POST",
+            format!("{DRIVE}/drive/v1/share"),
+            Some(json!({
+                "file_ids": file_ids,
+                "share_to": if needs_pass_code { "encryptedlink" } else { "publiclink" },
+                "expiration_days": options.expires_in_days.map(i64::from).unwrap_or(-1),
+                "pass_code_option": if needs_pass_code { "REQUIRED" } else { "NOT_REQUIRED" },
+            })),
+        )?;
         let mut share = pikpak_share_from_value(&value, Some(file_ids), None)?;
         share.name = options.name.clone();
         Ok(share)
+    }
+
+    pub fn update_share_pass_code(
+        &self,
+        share_id: &str,
+        pass_code: &str,
+    ) -> Result<(), QuarkError> {
+        if share_id.trim().is_empty() || share_id.chars().any(char::is_control) {
+            return Err(QuarkError::InvalidInput("分享 ID 无效".into()));
+        }
+        if pass_code.len() != 4 || !pass_code.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(QuarkError::InvalidInput(
+                "提取码必须为 4 位字母或数字".into(),
+            ));
+        }
+        self.request(
+            "PATCH",
+            format!("{DRIVE}/drive/v1/share"),
+            Some(json!({"share_id":share_id,"share_to":"encryptedlink",
+                "pass_code_option":"REQUIRED","custom_pass_code":pass_code})),
+        )?;
+        // The provider may acknowledge a PATCH while ignoring unsupported
+        // fields. Do not let the UI claim the code changed without readback.
+        if self
+            .list_shares()?
+            .iter()
+            .any(|share| share.id == share_id && share.pass_code.as_deref() == Some(pass_code))
+        {
+            Ok(())
+        } else {
+            Err(QuarkError::Provider(
+                "网盘暂未确认新提取码，请刷新分享列表核对后重试".into(),
+            ))
+        }
     }
 
     pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
@@ -1301,19 +1433,47 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         let mut page_token = String::new();
         let mut seen_tokens = HashSet::new();
         for _ in 0..10_000 {
-            let value = self.request("GET", format!("{DRIVE}/drive/v1/share/list?limit=100&thumbnail_size=SIZE_SMALL&page_token={}", encoded(&page_token)), None)?;
-            let list = value.get("data").and_then(Value::as_array).ok_or(QuarkError::InvalidResponse)?;
-            shares.extend(list.iter().map(|share| pikpak_share_from_value(share, None, None)).collect::<Result<Vec<_>, _>>()?);
-            page_token = value.get("next_page_token").and_then(Value::as_str).unwrap_or_default().to_owned();
-            if page_token.is_empty() { return Ok(shares); }
-            if !seen_tokens.insert(page_token.clone()) { return Err(QuarkError::InvalidResponse); }
+            let value = self.request(
+                "GET",
+                format!(
+                    "{DRIVE}/drive/v1/share/list?limit=100&thumbnail_size=SIZE_SMALL&page_token={}",
+                    encoded(&page_token)
+                ),
+                None,
+            )?;
+            let list = value
+                .get("data")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            shares.extend(
+                list.iter()
+                    .map(|share| pikpak_share_from_value(share, None, None))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            page_token = value
+                .get("next_page_token")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if page_token.is_empty() {
+                return Ok(shares);
+            }
+            if !seen_tokens.insert(page_token.clone()) {
+                return Err(QuarkError::InvalidResponse);
+            }
         }
         Err(QuarkError::InvalidResponse)
     }
 
     pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
-        if share_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个分享".into())); }
-        self.request("POST", format!("{DRIVE}/drive/v1/share:batchDelete"), Some(json!({"ids": share_ids})))?;
+        if share_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
+        }
+        self.request(
+            "POST",
+            format!("{DRIVE}/drive/v1/share:batchDelete"),
+            Some(json!({"ids": share_ids})),
+        )?;
         Ok(())
     }
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<CloudFile, QuarkError> {
@@ -1428,15 +1588,70 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
     }
 }
 
-fn pikpak_share_from_value(value: &Value, fallback_file_ids: Option<&[String]>, pass_code: Option<&str>) -> Result<CloudShare, QuarkError> {
+fn pikpak_share_from_value(
+    value: &Value,
+    fallback_file_ids: Option<&[String]>,
+    pass_code: Option<&str>,
+) -> Result<CloudShare, QuarkError> {
     let id = required(value, "share_id")?;
+    // The management list uses title/params.name, not the creation response's
+    // share_name. Skip empty fields so they do not mask a valid fallback.
+    let text = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|key| {
+            value
+                .get(*key)
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_owned)
+        })
+    };
     Ok(CloudShare {
-        id: id.clone(), url: value.get("share_url").or_else(|| value.get("url")).and_then(Value::as_str).filter(|url| !url.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("https://mypikpak.com/s/{id}")),
-        name: value.get("share_name").or_else(|| value.get("name")).and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("分享文件").into(),
-        kind: if value.get("file_type").and_then(Value::as_str) == Some("folder") { CloudFileKind::Folder } else { CloudFileKind::File },
-        source_file_ids: value.get("file_ids").and_then(Value::as_array).map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()).or_else(|| fallback_file_ids.map(|ids| ids.to_vec())).unwrap_or_default(),
-        pass_code: value.get("pass_code").and_then(Value::as_str).filter(|code| !code.is_empty()).map(str::to_owned).or_else(|| pass_code.map(str::to_owned)),
-        created_at: value.get("created_at").and_then(Value::as_str).map(str::to_owned), expires_at: value.get("expiration").or_else(|| value.get("expire_at")).and_then(Value::as_str).filter(|time| !time.is_empty()).map(str::to_owned),
+        id: id.clone(),
+        url: value
+            .get("share_url")
+            .or_else(|| value.get("url"))
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("https://mypikpak.com/s/{id}")),
+        name: text(&["title", "share_name", "name"])
+            .or_else(|| {
+                value
+                    .pointer("/params/name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "分享文件".into()),
+        kind: if matches!(
+            text(&["file_kind", "file_type"]).as_deref(),
+            Some("drive#folder" | "folder")
+        ) {
+            CloudFileKind::Folder
+        } else {
+            CloudFileKind::File
+        },
+        source_file_ids: value
+            .get("file_ids")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .filter(|ids: &Vec<String>| !ids.is_empty())
+            .or_else(|| text(&["file_id"]).map(|id| vec![id]))
+            .or_else(|| fallback_file_ids.map(|ids| ids.to_vec()))
+            .unwrap_or_default(),
+        pass_code: value
+            .get("pass_code")
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .map(str::to_owned)
+            .or_else(|| pass_code.map(str::to_owned)),
+        created_at: text(&["create_time", "created_at"]),
+        expires_at: text(&["expiration_at", "expiration", "expire_at"]),
     })
 }
 

@@ -443,6 +443,7 @@ pub fn run() {
             cloud::commands::cloud_create_share,
             cloud::commands::cloud_list_shares,
             cloud::commands::cloud_cancel_shares,
+            cloud::commands::cloud_update_share_pass_code,
             cloud::commands::cloud_create_directory,
             cloud::commands::cloud_rename,
             cloud::commands::cloud_move,

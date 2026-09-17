@@ -274,6 +274,11 @@ button,input,textarea{font:inherit}button{color:inherit}
 .task-context-menu{max-height:calc(100vh - 16px);overflow-y:auto}
 .cloud-login-form>button:only-child{grid-column:1/-1}.cloud-provider-auths .cloud-login-form>button{grid-column:auto}.cloud-provider-auths .cloud-login-form>button:only-child{grid-column:1/-1}
 
+.cloud-share-options .cloud-share-code-field{display:grid;min-width:0;gap:6px;color:var(--muted);font-size:11px}
+.cloud-share-options label.cloud-share-checkbox{display:flex;align-items:center;gap:8px;min-height:38px;white-space:nowrap;cursor:pointer}
+.cloud-share-options label.cloud-share-checkbox,.cloud-share-options select{font-size:13px}
+.cloud-share-options .cloud-share-checkbox input[type="checkbox"]{flex:0 0 auto;margin:0}
+
 /* Typography stays regular by default; hierarchy comes from size, color, and spacing. */
 body *{font-weight:400!important}
 .brand h1,.speed-summary strong,.transfer-live .transfer-speed{font-weight:700!important}

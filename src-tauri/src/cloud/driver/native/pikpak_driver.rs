@@ -118,9 +118,22 @@ impl DownloadOps for PikpakDriver<'_> {
     }
 }
 impl ShareOps for PikpakDriver<'_> {
-    fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> { PikPakClient::new(&self.http, &self.store).create_share(file_ids, options) }
-    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> { PikPakClient::new(&self.http, &self.store).list_shares() }
-    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> { PikPakClient::new(&self.http, &self.store).cancel_shares(share_ids) }
+    fn create_share(
+        &mut self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
+        PikPakClient::new(&self.http, &self.store).create_share(file_ids, options)
+    }
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
+        PikPakClient::new(&self.http, &self.store).list_shares()
+    }
+    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
+        PikPakClient::new(&self.http, &self.store).cancel_shares(share_ids)
+    }
+    fn update_share_pass_code(&mut self, share_id: &str, pass_code: &str) -> Result<(), CloudError> {
+        PikPakClient::new(&self.http, &self.store).update_share_pass_code(share_id, pass_code)
+    }
 }
 impl ProviderAuth for PikpakDriver<'_> {
     fn refresh_session(&mut self) -> Result<bool, CloudError> {

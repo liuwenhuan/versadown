@@ -407,6 +407,106 @@ it('uses a share-specific vertical dialog layout', async () => {
   expect(dialog).not.toHaveClass('cloud-trash-confirm');
 });
 
+function shareCodeDescriptor(provider: CloudProvider = 'pikpak', enabled = true) {
+  const base = cloudCatalog.find(item => item.provider === provider)!;
+  return { ...base, capabilities: { ...base.capabilities, shareUpdatePassCode: enabled }, sharePassCodeConstraint: { minLength: 4, maxLength: 4, characterSet: 'asciiAlphanumeric' as const, hint: '提取码必须为 4 位字母或数字' } };
+}
+
+it('creates PikPak with a server-generated code then validates and saves a custom code', async () => {
+  const user = userEvent.setup();
+  const updateCloudSharePassCode = vi.fn().mockResolvedValue(undefined);
+  const client = createCloudFake({ updateCloudSharePassCode, createCloudShare: vi.fn().mockResolvedValue({ id: 'share-p', url: 'https://pan.example/s/share-p', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'], passCode: 'old1' }) });
+  render(<NativeCloudManager descriptor={shareCodeDescriptor()} provider="pikpak" client={client} initialAccount={{ id: 'p', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const create = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(within(create).queryByRole('textbox', { name: '提取码' })).not.toBeInTheDocument();
+  const autoGenerate = within(create).getByRole('checkbox', { name: '自动生成' });
+  const codeField = within(create).getByText('提取码').parentElement!;
+  expect(codeField).toHaveClass('cloud-share-code-field');
+  expect(codeField.parentElement).toHaveClass('cloud-share-options');
+  expect(codeField.parentElement).toContainElement(within(create).getByText('有效期'));
+  expect(autoGenerate.closest('label')).toHaveClass('cloud-share-checkbox');
+  expect(autoGenerate.closest('label')).toContainElement(within(create).getByText('自动生成'));
+  expect(within(create).queryByText('自动生成提取码')).not.toBeInTheDocument();
+  await user.click(autoGenerate);
+  await user.click(within(create).getByRole('button', { name: '创建分享链接' }));
+  expect(client.createCloudShare).toHaveBeenCalledWith('pikpak', ['file-1'], { name: '报告.pdf', generatePassCode: true });
+  const result = await screen.findByRole('dialog', { name: '分享链接已创建' });
+  const code = within(result).getByRole('textbox', { name: '新提取码' });
+  expect(code).toHaveValue('old1');
+  await user.clear(code);
+  await user.type(code, 'ab!');
+  expect(within(result).getByRole('button', { name: '保存提取码' })).toBeDisabled();
+  expect(within(result).getByRole('alert')).toHaveTextContent('提取码必须为 4 位字母或数字');
+  await user.clear(code);
+  await user.type(code, 'a1B2');
+  await user.click(within(result).getByRole('button', { name: '保存提取码' }));
+  await within(result).findByText('提取码已更新');
+  expect(updateCloudSharePassCode).toHaveBeenCalledWith('pikpak', 'share-p', 'a1B2');
+  expect(within(result).getByText('a1B2', { selector: 'b' })).toBeVisible();
+  expect(client.createCloudShare).toHaveBeenCalledTimes(1);
+});
+
+it('preserves the old share code on failure and reopens my shares with the successfully updated code', async () => {
+  const user = userEvent.setup();
+  const updateCloudSharePassCode = vi.fn().mockRejectedValueOnce(new Error('服务器拒绝')).mockResolvedValue(undefined);
+  const client = createCloudFake({ updateCloudSharePassCode, listCloudShares: vi.fn().mockResolvedValue([{ id: 'share-p', url: 'https://pan.example/s/share-p', name: '已有分享.pdf', kind: 'file', sourceFileIds: ['file-1'], passCode: 'old1' }]) });
+  render(<NativeCloudManager descriptor={shareCodeDescriptor()} provider="pikpak" client={client} initialAccount={{ id: 'p', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('我的分享'));
+  fireEvent.contextMenu(await screen.findByText('已有分享.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '修改提取码' }));
+  let result = await screen.findByRole('dialog', { name: '分享链接已创建' });
+  const code = within(result).getByRole('textbox', { name: '新提取码' });
+  await user.clear(code);
+  await user.type(code, 'new2');
+  await user.click(within(result).getByRole('button', { name: '保存提取码' }));
+  expect(await within(result).findByRole('alert')).toHaveTextContent('修改提取码失败：服务器拒绝');
+  expect(within(result).getByText('old1', { selector: 'b' })).toBeVisible();
+  await user.click(within(result).getByRole('button', { name: '保存提取码' }));
+  await within(result).findByText('提取码已更新');
+  await user.click(within(result).getByRole('button', { name: '完成' }));
+  await user.click(screen.getByRole('button', { name: '修改提取码' }));
+  result = await screen.findByRole('dialog', { name: '分享链接已创建' });
+  expect(within(result).getByRole('textbox', { name: '新提取码' })).toHaveValue('new2');
+  expect(within(result).getByText('new2', { selector: 'b' })).toBeVisible();
+});
+
+it('does not expose share-code updates when the provider capability is absent', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ listCloudShares: vi.fn().mockResolvedValue([{ id: 'share-q', url: 'https://pan.example/s/share-q', name: '已有分享.pdf', kind: 'file', sourceFileIds: ['file-1'], passCode: 'old1' }]) });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('我的分享'));
+  fireEvent.contextMenu(await screen.findByText('已有分享.pdf'));
+  expect(screen.queryByRole('button', { name: '修改提取码' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '修改提取码' })).not.toBeInTheDocument();
+});
+
+it('keeps share-code editing pending until the server confirms and allows adding a code', async () => {
+  const user = userEvent.setup();
+  let resolveUpdate!: () => void;
+  const updateCloudSharePassCode = vi.fn(() => new Promise<void>(resolve => { resolveUpdate = resolve; }));
+  const client = createCloudFake({ updateCloudSharePassCode, listCloudShares: vi.fn().mockResolvedValue([{ id: 'share-p', url: 'https://pan.example/s/share-p', name: '无提取码.pdf', kind: 'file', sourceFileIds: ['file-1'] }]) });
+  render(<NativeCloudManager descriptor={shareCodeDescriptor()} provider="pikpak" client={client} initialAccount={{ id: 'p', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('我的分享'));
+  await user.click(await screen.findByText('无提取码.pdf'));
+  await user.click(screen.getByRole('button', { name: '修改提取码' }));
+  const result = await screen.findByRole('dialog', { name: '分享链接已创建' });
+  const code = within(result).getByRole('textbox', { name: '新提取码' });
+  expect(within(result).getByRole('button', { name: '保存提取码' })).toBeDisabled();
+  await user.type(code, 'a1B2');
+  await user.click(within(result).getByRole('button', { name: '保存提取码' }));
+  expect(within(result).getByRole('button', { name: '正在保存…' })).toBeDisabled();
+  expect(within(result).getByRole('button', { name: '完成' })).toBeDisabled();
+  expect(code).toBeDisabled();
+  await user.keyboard('{Escape}');
+  expect(result).toBeVisible();
+  expect(within(result).queryByText('a1B2', { selector: 'b' })).not.toBeInTheDocument();
+  await act(async () => resolveUpdate());
+  expect(await within(result).findByText('a1B2', { selector: 'b' })).toBeVisible();
+  expect(updateCloudSharePassCode).toHaveBeenCalledTimes(1);
+});
+
 it('uses a provider-declared UC share-code constraint while the user types', async () => {
   // Break caught: removing the shared dialog's constraint handling would let
   // an invalid UC code reach the provider as a generic share-create failure.

@@ -133,11 +133,15 @@ fn validate_share_options(options: &CloudShareOptions) -> Result<(), QuarkError>
         }
     }
     if options.generate_pass_code && options.pass_code.is_some() {
-        return Err(QuarkError::InvalidInput("不能同时指定提取码和自动生成提取码".into()));
+        return Err(QuarkError::InvalidInput(
+            "不能同时指定提取码和自动生成提取码".into(),
+        ));
     }
     if let Some(days) = options.expires_in_days {
         if days == 0 || days > 365 {
-            return Err(QuarkError::InvalidInput("有效期必须在 1 到 365 天之间".into()));
+            return Err(QuarkError::InvalidInput(
+                "有效期必须在 1 到 365 天之间".into(),
+            ));
         }
     }
     Ok(())
@@ -168,7 +172,27 @@ pub async fn cloud_list_shares(
     provider: CloudProvider,
 ) -> Result<Vec<CloudShare>, QuarkError> {
     run_session_work(app, provider, SessionWorkKind::Read, move |s, h| {
-        ProviderRegistry::global().driver(provider, &s.store, h).list_shares()
+        ProviderRegistry::global()
+            .driver(provider, &s.store, h)
+            .list_shares()
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cloud_update_share_pass_code(
+    app: AppHandle,
+    provider: CloudProvider,
+    share_id: String,
+    pass_code: String,
+) -> Result<(), QuarkError> {
+    if share_id.trim().is_empty() || pass_code.trim().is_empty() {
+        return Err(QuarkError::InvalidInput("分享 ID 和提取码不能为空".into()));
+    }
+    run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
+        ProviderRegistry::global()
+            .driver(provider, &s.store, h)
+            .update_share_pass_code(&share_id, &pass_code)
     })
     .await
 }
@@ -183,7 +207,9 @@ pub async fn cloud_cancel_shares(
         return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
     }
     run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
-        ProviderRegistry::global().driver(provider, &s.store, h).cancel_shares(&share_ids)
+        ProviderRegistry::global()
+            .driver(provider, &s.store, h)
+            .cancel_shares(&share_ids)
     })
     .await
 }

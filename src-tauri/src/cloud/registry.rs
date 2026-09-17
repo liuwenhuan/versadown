@@ -24,6 +24,7 @@ pub struct ProviderCapabilities {
     pub share_create: bool,
     pub share_list: bool,
     pub share_cancel: bool,
+    pub share_update_pass_code: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -397,6 +398,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             share_create: true,
             share_list: true,
             share_cancel: true,
+            share_update_pass_code: provider == Pikpak,
         },
         share_hosts,
         share_patterns,
@@ -421,6 +423,12 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         },
         share_pass_code_constraint: match provider {
             Uc => Some(super::uc::UC_SHARE_PASS_CODE_CONSTRAINT),
+            Pikpak => Some(CloudSharePassCodeConstraint {
+                min_length: 4,
+                max_length: 4,
+                character_set: super::CloudSharePassCodeCharacterSet::AsciiAlphanumeric,
+                hint: "提取码必须为 4 位字母或数字",
+            }),
             _ => Option::None,
         },
     }
@@ -431,7 +439,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uc_catalog_exposes_its_personal_share_code_constraint_without_applying_it_to_other_providers() {
+    fn only_pikpak_advertises_share_pass_code_updates() {
+        for descriptor in ProviderRegistry::global().catalog() {
+            assert_eq!(descriptor.capabilities.share_update_pass_code, descriptor.provider == CloudProvider::Pikpak);
+        }
+    }
+
+    #[test]
+    fn uc_catalog_exposes_its_personal_share_code_constraint_without_applying_it_to_other_providers(
+    ) {
         // Break caught: the shared UI needs the UC plugin's constraint from
         // the catalog, but a UC-only rule must not restrict other providers.
         let catalog = ProviderRegistry::global().catalog();

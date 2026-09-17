@@ -88,6 +88,7 @@ export const restoreCloudFiles = (provider: CloudProvider, fileIds: string[]) =>
 export const createCloudShare = (provider: CloudProvider, fileIds: string[], options: CloudShareOptions) => invoke<CloudShare>('cloud_create_share', { provider, fileIds, options });
 export const listCloudShares = (provider: CloudProvider) => invoke<CloudShare[]>('cloud_list_shares', { provider });
 export const cancelCloudShares = (provider: CloudProvider, shareIds: string[]) => invoke<void>('cloud_cancel_shares', { provider, shareIds });
+export const updateCloudSharePassCode = (provider: CloudProvider, shareId: string, passCode: string) => invoke<void>('cloud_update_share_pass_code', { provider, shareId, passCode });
 type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState; queueTask?: QueueTask };
 type NativeCloudDirectoryDownload = {
   task: NativeCloudDownload;

@@ -65,6 +65,9 @@ pub trait ShareOps {
     fn cancel_shares(&mut self, _share_ids: &[String]) -> Result<(), CloudError> {
         Err(CloudError::ProviderUnsupported)
     }
+    fn update_share_pass_code(&mut self, _share_id: &str, _pass_code: &str) -> Result<(), CloudError> {
+        Err(CloudError::ProviderUnsupported)
+    }
 }
 
 #[derive(Default)]
@@ -233,7 +236,11 @@ impl<'a> ProviderDriver<'a> {
         require(self.capabilities.download)?;
         self.backend.resolve_download(file)
     }
-    pub fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> {
+    pub fn create_share(
+        &mut self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
         require(self.capabilities.share_create)?;
         self.backend.create_share(file_ids, options)
     }
@@ -244,6 +251,10 @@ impl<'a> ProviderDriver<'a> {
     pub fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
         require(self.capabilities.share_cancel)?;
         self.backend.cancel_shares(share_ids)
+    }
+    pub fn update_share_pass_code(&mut self, share_id: &str, pass_code: &str) -> Result<(), CloudError> {
+        require(self.capabilities.share_update_pass_code)?;
+        self.backend.update_share_pass_code(share_id, pass_code)
     }
     pub fn upload(
         &mut self,
