@@ -1,4 +1,5 @@
 const { spawn } = require('node:child_process');
+const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
 const net = require('node:net');
@@ -15,6 +16,8 @@ const executable = targetRoot
   : path.join(projectRoot, 'artifacts', 'alldownloader.exe');
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+// DOMRect values from fractional Windows DPI can differ by a few float ULPs.
+const geometryEpsilon = 0.01;
 
 async function availablePort() {
   return await new Promise((resolve, reject) => {
@@ -53,27 +56,186 @@ async function waitForTargets(port, child) {
 }
 
 async function evaluate(target, expression) {
+  const result = await devtoolsCommand(target, 'Runtime.evaluate', {
+    expression, awaitPromise: true, returnByValue: true
+  });
+  if (result.exceptionDetails) {
+    const details = result.exceptionDetails;
+    const description = details.exception?.description ?? details.exception?.value ?? JSON.stringify(details);
+    throw new Error(`${details.text}: ${description}`);
+  }
+  return result.result.value;
+}
+
+async function devtoolsCommand(target, method, params = {}) {
   return await new Promise((resolve, reject) => {
     const socket = new WebSocket(target.webSocketDebuggerUrl);
-    socket.on('open', () => socket.send(JSON.stringify({
-      id: 1,
-      method: 'Runtime.evaluate',
-      params: { expression, awaitPromise: true, returnByValue: true }
-    })));
-    socket.on('error', reject);
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error(`DevTools ${method} timed out.`));
+    }, 10_000);
+    socket.on('open', () => socket.send(JSON.stringify({ id: 1, method, params })));
+    socket.on('error', (error) => { clearTimeout(timeout); reject(error); });
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString());
       if (message.id !== 1) return;
+      clearTimeout(timeout);
       socket.close();
       if (message.error) reject(new Error(JSON.stringify(message.error)));
-      else if (message.result.exceptionDetails) {
-        const details = message.result.exceptionDetails;
-        const description = details.exception?.description ?? details.exception?.value ?? JSON.stringify(details);
-        reject(new Error(`${details.text}: ${description}`));
-      }
-      else resolve(message.result.result.value);
+      else resolve(message.result);
     });
   });
+}
+
+async function captureLauncherIcon(target) {
+  const { data } = await devtoolsCommand(target, 'Page.captureScreenshot', {
+    format: 'png', fromSurface: true,
+    clip: { x: 346, y: 328, width: 64, height: 64, scale: 1 }
+  });
+  return Buffer.from(data, 'base64');
+}
+
+async function launcherBounds(target) {
+  return evaluate(target, `(async () => ({
+    position: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_position', { label: 'launcher' }),
+    size: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_size', { label: 'launcher' })
+  }))()`);
+}
+
+async function launcherSnapshot(target) {
+  return evaluate(target, `window.__TAURI_INTERNALS__.invoke('launcher_interaction_snapshot')`);
+}
+
+async function assertSvgOutline(target) {
+  // This retained outline fixture describes the original native hexagon. The
+  // fixed canvas no longer applies a native visual region or clips its WebView.
+  const outline = JSON.parse(fs.readFileSync(path.join(projectRoot, 'src/assets/launcher/hexagon.json'), 'utf8'));
+  const result = await evaluate(target, `(() => {
+    const outline = ${JSON.stringify(outline)};
+    const svg = document.querySelector('svg.launcher-mark');
+    const shell = svg.querySelector('.launcher-mark-shell');
+    const box = svg.viewBox.baseVal;
+    const edges = outline.map((a, i) => [a, outline[(i + 1) % outline.length]]);
+    const distance = ([x, y], [[ax, ay], [bx, by]]) => {
+      const dx = bx - ax, dy = by - ay;
+      const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)));
+      return Math.hypot(x - ax - t * dx, y - ay - t * dy);
+    };
+    const perimeter = edges.reduce((sum, [[ax, ay], [bx, by]]) => sum + Math.hypot(bx - ax, by - ay), 0);
+    const length = shell.getTotalLength();
+    let maxBoundaryError = 0;
+    for (let i = 0; i <= 1024; i += 1) {
+      const p = shell.getPointAtLength(length * i / 1024);
+      const normalized = [(p.x - box.x) / box.width * 100, (p.y - box.y) / box.height * 100];
+      maxBoundaryError = Math.max(maxBoundaryError, Math.min(...edges.map((edge) => distance(normalized, edge))));
+    }
+    let fillSamples = 0;
+    const mismatches = [];
+    for (let y = 0.5; y < 100; y += 1) for (let x = 0.5; x < 100; x += 1) {
+      if (edges.some((edge) => distance([x, y], edge) < 0.03)) continue;
+      let expected = false;
+      for (const [[ax, ay], [bx, by]] of edges) {
+        if ((ay > y) !== (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax) expected = !expected;
+      }
+      const actual = shell.isPointInFill(new DOMPoint(box.x + x * box.width / 100, box.y + y * box.height / 100));
+      fillSamples += 1;
+      if (actual !== expected && mismatches.length < 10) mismatches.push({ x, y, expected, actual });
+    }
+    return { maxBoundaryError, fillSamples, mismatches, perimeterError: Math.abs(length / box.width * 100 - perimeter) };
+  })()`);
+  assert(result.fillSamples > 9900 && result.mismatches.length === 0,
+    `SVG fill differs from the native hexagon outline: ${JSON.stringify(result)}`);
+  assert(result.maxBoundaryError < 0.02 && result.perimeterError < 0.02,
+    `SVG boundary differs from the native hexagon outline: ${JSON.stringify(result)}`);
+  return result;
+}
+
+async function runPopupCycles(target) {
+  const closed = '!document.querySelector(".launcher-panel, .launcher-context-menu")';
+  await waitForEvaluation(target, closed, Boolean);
+  const before = await launcherBounds(target);
+  const beforeSnapshot = await launcherSnapshot(target);
+  const iconBefore = await captureLauncherIcon(target);
+  // Equal blank captures would not establish icon stability. Check two solid
+  // pixels against the SVG's current theme colors before comparing PNG bytes.
+  const iconPixels = await evaluate(target, `(async () => {
+    const image = new Image();
+    image.src = ${JSON.stringify(`data:image/png;base64,${iconBefore.toString('base64')}`)};
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d');
+    context.drawImage(image, 0, 0);
+    return [['shell', 15], ['chevron', 34]].map(([part, y]) => ({
+      part,
+      actual: Array.from(context.getImageData(Math.floor(canvas.width / 2), Math.floor(y * canvas.height / 64), 1, 1).data),
+      expected: [...getComputedStyle(document.querySelector('.launcher-mark-' + part)).fill.match(/\\d+/g).map(Number).slice(0, 3), 255]
+    }));
+  })()`);
+  for (const pixel of iconPixels) assert.deepEqual(pixel.actual, pixel.expected, `Icon screenshot did not capture its ${pixel.part} pixels.`);
+  let lastSnapshot = beforeSnapshot;
+  for (let cycle = 0; cycle < 50; cycle += 1) {
+    const quickAdd = cycle % 2 === 0;
+    const selector = quickAdd ? '.launcher-panel' : '.launcher-context-menu';
+    await evaluate(target, quickAdd
+      ? `document.querySelector('.launcher-trigger').click()`
+      : `document.querySelector('.launcher-trigger').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 }))`);
+    const popup = await waitForEvaluation(target, `(() => {
+      const popup = document.querySelector('${selector}');
+      const rect = popup?.getBoundingClientRect();
+      return { width: innerWidth, height: innerHeight,
+        count: document.querySelectorAll('.launcher-panel, .launcher-context-menu').length,
+        rect: rect && { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+    })()`, (value) => Boolean(value.rect));
+    assert.equal(popup.count, 1, `Cycle ${cycle}: more than one popup is visible.`);
+    assert.deepEqual([popup.width, popup.height], [410, 720], `Cycle ${cycle}: viewport changed.`);
+    assert(popup.rect.x >= -geometryEpsilon && popup.rect.x + popup.rect.width <= 410 + geometryEpsilon
+      && popup.rect.y >= -geometryEpsilon && popup.rect.y + popup.rect.height <= 720 + geometryEpsilon
+      && (popup.rect.y + popup.rect.height <= 328 + geometryEpsilon || popup.rect.y >= 392 - geometryEpsilon),
+    `Cycle ${cycle}: popup escapes its slot: ${JSON.stringify(popup.rect)}`);
+    await waitForEvaluation(target, `window.__TAURI_INTERNALS__.invoke('launcher_interaction_snapshot')`,
+      (value) => value.inputRegionUpdateRequests > lastSnapshot.inputRegionUpdateRequests);
+    const points = [[378, 360], [Math.round(popup.rect.x + popup.rect.width / 2), Math.round(popup.rect.y + popup.rect.height / 2)]];
+    await waitForEvaluation(target,
+      `window.__TAURI_INTERNALS__.invoke('launcher_input_hit_test_for_test', { points: ${JSON.stringify(points)} })`,
+      (hits) => hits.some((item) => item.sameThread)
+        && hits.filter((item) => item.sameThread).every((item) => item.installed && item.hits.every((hit) => hit === 1)));
+    assert.deepEqual(await launcherBounds(target), before, `Cycle ${cycle}: popup changed native bounds.`);
+    if (quickAdd) {
+      // Exercise the mounted input and verify focus without submitting a download.
+      const inputWorked = await evaluate(target, `(() => {
+        const input = document.querySelector('.launcher-panel textarea');
+        input.focus();
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'cycle-${cycle}');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return document.activeElement === input && input.value === 'cycle-${cycle}';
+      })()`);
+      assert(inputWorked, `Cycle ${cycle}: quick-add input did not accept focus/text.`);
+    }
+    const openSnapshot = await launcherSnapshot(target);
+    await evaluate(target, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await waitForEvaluation(target, closed, Boolean);
+    lastSnapshot = await waitForEvaluation(target, `window.__TAURI_INTERNALS__.invoke('launcher_interaction_snapshot')`,
+      (value) => value.inputRegionUpdateRequests > openSnapshot.inputRegionUpdateRequests);
+    await waitForEvaluation(target,
+      `window.__TAURI_INTERNALS__.invoke('launcher_input_hit_test_for_test', { points: ${JSON.stringify(points)} })`,
+      (hits) => hits.some((item) => item.sameThread)
+        && hits.filter((item) => item.sameThread).every((item) => item.installed && item.hits[0] === 1 && item.hits[1] === -1));
+    assert.deepEqual(await launcherBounds(target), before, `Cycle ${cycle}: closing changed native bounds.`);
+  }
+  const after = await launcherBounds(target);
+  const snapshot = await launcherSnapshot(target);
+  const iconAfter = await captureLauncherIcon(target);
+  assert.deepEqual(after.position, before.position);
+  assert.deepEqual(after.size, before.size);
+  assert.equal(snapshot.boundsUpdateRequests, 0);
+  assert(snapshot.menuRequests - beforeSnapshot.menuRequests >= 25);
+  assert(snapshot.inputRegionUpdateRequests - beforeSnapshot.inputRegionUpdateRequests >= 100);
+  assert(iconBefore.equals(iconAfter), 'The 64x64 icon PNG changed across popup cycles.');
+  return { before, after, snapshot, menuRequests: snapshot.menuRequests - beforeSnapshot.menuRequests,
+    inputRegionUpdates: snapshot.inputRegionUpdateRequests - beforeSnapshot.inputRegionUpdateRequests,
+    iconPngBytes: iconBefore.length, iconPixels, svgOutline: await assertSvgOutline(target) };
 }
 
 async function waitForEvaluation(target, expression, predicate) {
@@ -84,10 +246,6 @@ async function waitForEvaluation(target, expression, predicate) {
     await delay(100);
   }
   throw new Error(`Timed out waiting for renderer state. Last value: ${JSON.stringify(value)}`);
-}
-
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
 }
 
 async function waitForChildExit(child, timeoutMs) {
@@ -259,19 +417,11 @@ async function run() {
       return { width: innerWidth, height: innerHeight, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, display: style.display, visibility: style.visibility, opacity: style.opacity, background: style.background, scale: devicePixelRatio, markBounds: markBounds && { x: markBounds.x, y: markBounds.y, width: markBounds.width, height: markBounds.height }, markViewBox: mark && { width: mark.viewBox.baseVal.width, height: mark.viewBox.baseVal.height }, iconRendered: Boolean(shell && mark.querySelector('.launcher-mark-chevron') && shell.isPointInFill(new DOMPoint(64, 64)) && !shell.isPointInFill(new DOMPoint(0, 0)) && getComputedStyle(mark).display !== 'none') };
     })())`));
     assert(compact.display !== 'none' && compact.visibility === 'visible' && compact.opacity === '1', 'Compact launcher button is not visible.');
-    assert(compact.left >= 0 && compact.top >= 0 && compact.right <= compact.width + 0.5 && compact.bottom <= compact.height + 0.5, `Compact launcher is outside its viewport: ${JSON.stringify(compact)}`);
+    assert.equal(compact.width, 410);
+    assert.equal(compact.height, 720);
+    assert.deepEqual([compact.left, compact.top, compact.right, compact.bottom], [346, 328, 410, 392]);
     assert(compact.iconRendered, 'Compact launcher SVG icon did not render.');
-    const outline = JSON.parse(fs.readFileSync(path.join(projectRoot, 'src/assets/launcher/hexagon.json'), 'utf8'));
-    const nativeOutlineBounds = {
-      x: Math.min(...outline.map(([x]) => x)), y: Math.min(...outline.map(([, y]) => y)),
-      width: Math.max(...outline.map(([x]) => x)) - Math.min(...outline.map(([x]) => x)),
-      height: Math.max(...outline.map(([, y]) => y)) - Math.min(...outline.map(([, y]) => y))
-    };
-    for (const key of ['x', 'y', 'width', 'height']) {
-      const extent = key === 'x' || key === 'width' ? compact.markViewBox.width : compact.markViewBox.height;
-      assert(Math.abs(compact.markBounds[key] / extent * 100 - nativeOutlineBounds[key]) < 0.01,
-        `Launcher SVG ${key} differs from native geometry: ${JSON.stringify(compact.markBounds)}`);
-    }
+    const svgOutline = await assertSvgOutline(launcher);
     assert(!compact.background.includes('linear-gradient'), 'Compact launcher unexpectedly restored the removed rectangular gradient background.');
     assert(!await evaluate(launcher, 'Boolean(document.querySelector(".launcher-live-indicator"))'), 'Zero-speed launcher unexpectedly shows a traffic capsule.');
 
@@ -282,14 +432,29 @@ async function run() {
       monitor: await window.__TAURI_INTERNALS__.invoke('plugin:window|current_monitor')
     }))()`));
     const workArea = nativeCompact.monitor.workArea;
-    assert(nativeCompact.position.x >= workArea.position.x && nativeCompact.position.y >= workArea.position.y, `Launcher starts before the monitor work area: ${JSON.stringify(nativeCompact)}`);
-    assert(nativeCompact.position.x + nativeCompact.size.width <= workArea.position.x + workArea.size.width, `Launcher extends beyond the right edge: ${JSON.stringify(nativeCompact)}`);
-    assert(nativeCompact.position.y + nativeCompact.size.height <= workArea.position.y + workArea.size.height, `Launcher extends beyond the bottom edge: ${JSON.stringify(nativeCompact)}`);
+    const iconScreen = {
+      left: nativeCompact.clientPosition.x + Math.round(346 * compact.scale),
+      top: nativeCompact.clientPosition.y + Math.round(328 * compact.scale),
+      right: nativeCompact.clientPosition.x + Math.round(410 * compact.scale),
+      bottom: nativeCompact.clientPosition.y + Math.round(392 * compact.scale)
+    };
+    assert(iconScreen.left >= workArea.position.x && iconScreen.top >= workArea.position.y
+      && iconScreen.right <= workArea.position.x + workArea.size.width
+      && iconScreen.bottom <= workArea.position.y + workArea.size.height,
+    `Launcher icon extends outside the work area: ${JSON.stringify({ iconScreen, workArea })}`);
+    assert.deepEqual(nativeCompact.size, {
+      width: Math.round(410 * compact.scale), height: Math.round(720 * compact.scale)
+    });
 
     // This is command-path + native message coverage, not OS mouse routing.
+    const beforeInputUpdate = await launcherSnapshot(launcher);
     await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_input_regions', {
       regions: [{ x: 346, y: 328, width: 64, height: 64 }]
     })`);
+    const afterInputUpdate = await launcherSnapshot(launcher);
+    assert.equal(afterInputUpdate.inputRegionUpdateRequests, beforeInputUpdate.inputRegionUpdateRequests + 1,
+      'A successfully applied native input-region update must be counted.');
+    assert.equal(afterInputUpdate.boundsUpdateRequests, 0, 'Fixed-canvas bounds sentinel must remain zero.');
     const hitPoints = [[378, 360], [20, 20], [400, 20], [20, 650], [400, 650]];
     const nativeHits = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('launcher_input_hit_test_for_test', { points: ${JSON.stringify(hitPoints)} })`);
     assert(nativeHits.length > 1, 'Native hit-test smoke did not enumerate the WebView2 child HWNDs.');
@@ -307,6 +472,8 @@ async function run() {
       regions: [{ x: 0, y: 0, width: 64, height: 64 }]
     }).then(() => false, () => true)`);
     assert(managerUpdateRejected, 'Manager window was allowed to change launcher input regions.');
+    assert.equal((await launcherSnapshot(launcher)).inputRegionUpdateRequests, afterInputUpdate.inputRegionUpdateRequests,
+      'Rejected invalid/caller input-region updates must not increment diagnostics.');
     const boundsAfterInput = await evaluate(launcher, `(async () => ({
       position: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_position', { label: 'launcher' }),
       size: await window.__TAURI_INTERNALS__.invoke('plugin:window|outer_size', { label: 'launcher' })
@@ -315,16 +482,8 @@ async function run() {
       && JSON.stringify(boundsAfterInput.size) === JSON.stringify(nativeCompact.size), 'Input-region update changed native launcher bounds.');
     process.stdout.write(`Launcher input command/native-message smoke passed: ${JSON.stringify(nativeHits)}. DOM events and SendMessage(WM_NCHITTEST) do not prove OS mouse click-through; visible four-quadrant/background-window validation remains required.\n`);
 
-    const nativeRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
-    assert(nativeRegion && nativeRegion.width === nativeRegion.height && nativeRegion.width > 0, `Windows launcher region is not circular: ${JSON.stringify(nativeRegion)}`);
-    assert(nativeRegion.x >= 0 && nativeRegion.y >= 0, `Windows launcher region starts outside its native window: ${JSON.stringify(nativeRegion)}`);
-    assert(Math.abs(nativeRegion.x - (nativeCompact.clientPosition.x - nativeCompact.position.x + compact.left * compact.scale)) <= 1,
-      `Launcher native/client horizontal origins disagree: ${JSON.stringify({ nativeRegion, nativeCompact, compact })}`);
-    assert(Math.abs(nativeRegion.y - (nativeCompact.clientPosition.y - nativeCompact.position.y + compact.top * compact.scale)) <= 1,
-      `Launcher native/client vertical origins disagree: ${JSON.stringify({ nativeRegion, nativeCompact, compact })}`);
-
     if (process.argv.includes('--geometry-only')) {
-      process.stdout.write(`Launcher geometry smoke passed: ${JSON.stringify({ scale: compact.scale, markBounds: compact.markBounds, nativeRegion, clientPosition: nativeCompact.clientPosition, outerPosition: nativeCompact.position })}\n`);
+      process.stdout.write(`Launcher geometry smoke passed: ${JSON.stringify({ scale: compact.scale, svgOutline, iconScreen, size: nativeCompact.size })}\n`);
       return;
     }
 
@@ -334,9 +493,9 @@ async function run() {
       for (const type of ['mousedown', 'mousemove', 'mouseup', 'click', 'contextmenu']) {
         button.addEventListener(type, (event) => window.__launcherSmokeEvents.push({ type, button: event.button, buttons: event.buttons, clientX: event.clientX, clientY: event.clientY }), { capture: true, once: true });
       }
-      button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1, clientX: 10, clientY: 10 }));
-      button.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, button: 0, buttons: 1, clientX: 20, clientY: 18 }));
-      button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, buttons: 0, clientX: 20, clientY: 18 }));
+      button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1, clientX: 378, clientY: 360 }));
+      button.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, button: 0, buttons: 1, clientX: 388, clientY: 368 }));
+      button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0, buttons: 0, clientX: 388, clientY: 368 }));
       button.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
       button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 }));
     })()`);
@@ -361,11 +520,11 @@ async function run() {
       return { width: innerWidth, height: innerHeight, left: menu.left, top: menu.top, right: menu.right, bottom: menu.bottom };
     })())`));
     assert(
-      menuGeometry.width >= 304 && menuGeometry.height >= 392
-        && menuGeometry.left >= 47 && menuGeometry.top >= 47
-        && menuGeometry.right <= menuGeometry.width - 31
-        && menuGeometry.bottom <= menuGeometry.height - 71,
-      `Launcher context menu does not leave a shadow-safe viewport: ${JSON.stringify(menuGeometry)}`
+      menuGeometry.width === 410 && menuGeometry.height === 720
+        && menuGeometry.left >= 16 - geometryEpsilon && menuGeometry.top >= 16 - geometryEpsilon
+        && menuGeometry.right <= 394 + geometryEpsilon && menuGeometry.bottom <= 704 + geometryEpsilon
+        && (menuGeometry.bottom <= 312 + geometryEpsilon || menuGeometry.top >= 408 - geometryEpsilon),
+      `Launcher context menu must fit its fixed popup slot with a 16px shadow gutter: ${JSON.stringify(menuGeometry)}`
     );
 
     await evaluate(launcher, `document.querySelector('.launcher-context-menu [aria-haspopup="menu"]').click()`);
@@ -382,7 +541,7 @@ async function run() {
     await evaluate(launcher, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
     const menuCollapsed = await waitForEvaluation(
       launcher,
-      '!document.querySelector(".launcher-context-menu") && innerWidth < 200 && innerHeight < 100',
+      '!document.querySelector(".launcher-context-menu") && innerWidth === 410 && innerHeight === 720',
       Boolean
     );
     assert(menuCollapsed, 'Launcher did not return to compact mode after closing its context menu.');
@@ -469,22 +628,22 @@ async function run() {
       'JSON.stringify({ width: innerWidth, height: innerHeight, panel: Boolean(document.querySelector(".launcher-panel")), action: document.querySelector(".launcher-panel .primary")?.textContent })',
       (value) => {
         const state = JSON.parse(value);
-        return state.panel && state.width >= 400 && state.height >= 299;
+        return state.panel;
       }
     ));
-    assert(expanded.width >= 400 && expanded.height >= 299, `Launcher did not expand to the input panel: ${JSON.stringify(expanded)}`);
+    assert(expanded.width === 410 && expanded.height === 720, `Launcher quick-add changed the fixed viewport: ${JSON.stringify(expanded)}`);
     assert(expanded.action === '开始解析下载', 'Expanded launcher action label is incorrect.');
 
     await evaluate(launcher, 'document.querySelector("button[aria-label=\\"收起下载输入\\"]").click()');
     const collapsed = await waitForEvaluation(
       launcher,
-      'Boolean(document.querySelector(".launcher-trigger")) && !document.querySelector(".launcher-panel") && innerWidth < 200 && innerHeight < 100',
+      'Boolean(document.querySelector(".launcher-trigger")) && !document.querySelector(".launcher-panel") && innerWidth === 410 && innerHeight === 720',
       Boolean
     );
     assert(collapsed, 'Launcher did not collapse back to the floating button.');
 
-    const restoredRegion = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('set_launcher_compact_shape', { compact: true })`);
-    assert(restoredRegion && restoredRegion.width === restoredRegion.height, `Compact region was not restored after collapse: ${JSON.stringify(restoredRegion)}`);
+    const cycles = await runPopupCycles(launcher);
+    process.stdout.write(`Launcher 50-cycle smoke passed: ${JSON.stringify(cycles)}; native position/size and icon PNG bytes unchanged.\n`);
 
     const parsedTask = await evaluate(launcher, `window.__TAURI_INTERNALS__.invoke('parse_download', { input: ${JSON.stringify(downloadFixture.url)} })`);
     assert(parsedTask && parsedTask.task && parsedTask.task.aria_gid, `Local fixture was not submitted to aria2: ${JSON.stringify(parsedTask)}`);
@@ -498,7 +657,7 @@ async function run() {
     assert(exitCode === 0, `Application quit returned exit code ${exitCode}.`);
     await waitForProcessesToStop(ownedSidecarPids, 2000);
 
-    const sessionPath = path.join(testDataDir, 'aria2.session');
+    const sessionPath = path.join(testDataDir, 'aria2-next.tasks');
     assert(fs.existsSync(sessionPath), 'aria2 session was not written before application exit.');
     const session = fs.readFileSync(sessionPath, 'utf8');
     assert(session.includes(downloadFixture.url), `Saved aria2 session does not contain the active fixture URL: ${JSON.stringify(session)}`);

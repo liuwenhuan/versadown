@@ -350,6 +350,7 @@ pub fn run() {
                                     width: 64.0,
                                     height: 64.0,
                                 }],
+                                launcher.state::<launcher::LauncherInteractionState>(),
                             )
                             .await;
                             match result {

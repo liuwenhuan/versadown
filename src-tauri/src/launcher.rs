@@ -23,6 +23,8 @@ const TRAY_ID: &str = "manager-tray";
 pub struct LauncherInteractionSnapshot {
     pub drag_requests: usize,
     pub menu_requests: usize,
+    pub bounds_update_requests: usize,
+    pub input_region_update_requests: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -44,6 +46,9 @@ pub struct LauncherInteractionState {
     background_test: bool,
     drag_requests: AtomicUsize,
     menu_requests: AtomicUsize,
+    // Regression sentinel: popup transitions must never update native bounds.
+    bounds_update_requests: AtomicUsize,
+    input_region_update_requests: AtomicUsize,
 }
 
 pub struct TrayMenuState {
@@ -56,6 +61,8 @@ impl LauncherInteractionState {
             background_test,
             drag_requests: AtomicUsize::new(0),
             menu_requests: AtomicUsize::new(0),
+            bounds_update_requests: AtomicUsize::new(0),
+            input_region_update_requests: AtomicUsize::new(0),
         }
     }
 
@@ -71,10 +78,16 @@ impl LauncherInteractionState {
         self.menu_requests.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_input_region_update(&self) {
+        self.input_region_update_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> LauncherInteractionSnapshot {
         LauncherInteractionSnapshot {
             drag_requests: self.drag_requests.load(Ordering::Relaxed),
             menu_requests: self.menu_requests.load(Ordering::Relaxed),
+            bounds_update_requests: self.bounds_update_requests.load(Ordering::Relaxed),
+            input_region_update_requests: self.input_region_update_requests.load(Ordering::Relaxed),
         }
     }
 }

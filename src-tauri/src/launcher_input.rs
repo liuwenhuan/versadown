@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use tauri::WebviewWindow;
+use tauri::{State, WebviewWindow};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +90,7 @@ fn launcher_hit_result(point: (i32, i32), regions: &[PhysicalLauncherRegion]) ->
 pub async fn set_launcher_input_regions(
     window: WebviewWindow,
     regions: Vec<LauncherInputRegion>,
+    interaction: State<'_, crate::launcher::LauncherInteractionState>,
 ) -> Result<(), String> {
     if window.label() != "launcher" {
         return Err("只能设置悬浮球窗口的输入区域".to_string());
@@ -110,11 +111,13 @@ pub async fn set_launcher_input_regions(
                 let _ = sender.send(result);
             })
             .map_err(|error| error.to_string())?;
-        receiver.await.map_err(|error| error.to_string())?
+        receiver.await.map_err(|error| error.to_string())??;
+        interaction.record_input_region_update();
+        Ok(())
     }
     #[cfg(not(windows))]
     {
-        let _ = (window, physical);
+        let _ = (window, physical, interaction);
         Err("当前平台尚未安装悬浮窗输入区域适配器".to_string())
     }
 }
