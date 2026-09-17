@@ -146,6 +146,35 @@ impl DownloadOps for BaiduDriver<'_> {
         }
     }
 }
+impl ShareOps for BaiduDriver<'_> {
+    fn create_share(
+        &mut self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
+        baidu::BaiduClient::new(
+            load_provider_session(CloudProvider::Baidu, &self.store)?,
+            &self.http,
+        )
+        .create_share(file_ids, options)
+    }
+
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
+        baidu::BaiduClient::new(
+            load_provider_session(CloudProvider::Baidu, &self.store)?,
+            &self.http,
+        )
+        .list_shares()
+    }
+
+    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
+        baidu::BaiduClient::new(
+            load_provider_session(CloudProvider::Baidu, &self.store)?,
+            &self.http,
+        )
+        .cancel_shares(share_ids)
+    }
+}
 impl ProviderAuth for BaiduDriver<'_> {
     fn complete_web(&mut self, input: &WebAuthorizationInput) -> Result<CloudAccount, CloudError> {
         let store = &self.store;

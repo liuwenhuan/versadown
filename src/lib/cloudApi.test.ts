@@ -87,6 +87,24 @@ it('permanently deletes only the selected cloud recycle-bin files', async () => 
   });
 });
 
+it('uses the share management command contract for creating, listing, and cancelling links', async () => {
+  native.invoke.mockClear();
+  native.invoke
+    .mockResolvedValueOnce({ id: 'share-1', url: 'https://pan.example/s/share-1', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'] })
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce(undefined);
+  const api = await import('./cloudApi');
+  const options = { name: '报告.pdf', passCode: 'a7b2', expiresInDays: 7 };
+
+  await api.createCloudShare('quark', ['file-1'], options);
+  await api.listCloudShares('quark');
+  await api.cancelCloudShares('quark', ['share-1']);
+
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'cloud_create_share', { provider: 'quark', fileIds: ['file-1'], options });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_list_shares', { provider: 'quark' });
+  expect(native.invoke).toHaveBeenNthCalledWith(3, 'cloud_cancel_shares', { provider: 'quark', shareIds: ['share-1'] });
+});
+
 it('maps one directory parent task with its authoritative group root while preserving the queued count and redacted failures', async () => {
   native.invoke.mockResolvedValueOnce({
     task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0, queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'queued', progress: 0, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }] } },

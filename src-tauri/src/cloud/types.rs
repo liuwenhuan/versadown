@@ -212,6 +212,52 @@ pub struct CloudDirectory {
     pub items: Vec<CloudFile>,
 }
 
+/// Provider-neutral sharing settings. Provider drivers translate these values
+/// to their own wire protocol instead of exposing provider-specific fields to
+/// the command or UI layer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudShareOptions {
+    pub name: String,
+    pub pass_code: Option<String>,
+    #[serde(default)]
+    pub generate_pass_code: bool,
+    pub expires_in_days: Option<u16>,
+}
+
+/// A provider-declared constraint for a user-entered share pass code.
+///
+/// The shared UI consumes this metadata while each provider plugin owns its
+/// own requirements.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSharePassCodeConstraint {
+    pub min_length: u8,
+    pub max_length: u8,
+    pub character_set: CloudSharePassCodeCharacterSet,
+    pub hint: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CloudSharePassCodeCharacterSet {
+    Any,
+    AsciiAlphanumeric,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudShare {
+    pub id: String,
+    pub url: String,
+    pub name: String,
+    pub kind: CloudFileKind,
+    pub source_file_ids: Vec<String>,
+    pub pass_code: Option<String>,
+    pub created_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CloudFileKind {

@@ -48,6 +48,25 @@ pub trait DownloadOps {
     }
 }
 
+/// Managing links created by the current account. This intentionally stays
+/// separate from the existing share adapters, which consume links owned by
+/// somebody else.
+pub trait ShareOps {
+    fn create_share(
+        &mut self,
+        _file_ids: &[String],
+        _options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
+        Err(CloudError::ProviderUnsupported)
+    }
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
+        Err(CloudError::ProviderUnsupported)
+    }
+    fn cancel_shares(&mut self, _share_ids: &[String]) -> Result<(), CloudError> {
+        Err(CloudError::ProviderUnsupported)
+    }
+}
+
 #[derive(Default)]
 pub struct WebAuthorizationInput {
     pub cookies: Vec<String>,
@@ -142,7 +161,7 @@ pub trait UploadOps {
     }
 }
 
-pub trait ProviderBackend: DriveOps + DownloadOps + ProviderAuth + UploadOps {}
+pub trait ProviderBackend: DriveOps + DownloadOps + ShareOps + ProviderAuth + UploadOps {}
 
 pub trait ProviderDriverFactory: Send + Sync {
     fn create<'a>(
@@ -213,6 +232,18 @@ impl<'a> ProviderDriver<'a> {
     pub fn resolve_download(&mut self, file: &str) -> Result<ResolvedCloudDownload, CloudError> {
         require(self.capabilities.download)?;
         self.backend.resolve_download(file)
+    }
+    pub fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> {
+        require(self.capabilities.share_create)?;
+        self.backend.create_share(file_ids, options)
+    }
+    pub fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
+        require(self.capabilities.share_list)?;
+        self.backend.list_shares()
+    }
+    pub fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
+        require(self.capabilities.share_cancel)?;
+        self.backend.cancel_shares(share_ids)
     }
     pub fn upload(
         &mut self,
@@ -305,6 +336,7 @@ mod capacity_tests {
         }
     }
     impl DownloadOps for CapacityBackend {}
+    impl ShareOps for CapacityBackend {}
     impl ProviderAuth for CapacityBackend {}
     impl UploadOps for CapacityBackend {}
     impl ProviderBackend for CapacityBackend {}

@@ -357,6 +357,9 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     trashCloudFiles: vi.fn().mockResolvedValue(undefined),
     deleteCloudFiles: vi.fn().mockResolvedValue(undefined),
     restoreCloudFiles: vi.fn().mockResolvedValue(undefined),
+    createCloudShare: vi.fn().mockResolvedValue({ id: 'share-1', url: 'https://pan.example/s/share-1', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'], createdAt: '2026-09-17 10:00:00' }),
+    listCloudShares: vi.fn().mockResolvedValue([]),
+    cancelCloudShares: vi.fn().mockResolvedValue(undefined),
     logoutCloud: vi.fn().mockResolvedValue(undefined),
     getCloudAuthorizationCapabilities: vi.fn().mockImplementation((provider: string) => Promise.resolve({
       provider,
@@ -371,6 +374,113 @@ function createCloudFake(overrides: Record<string, unknown> = {}) {
     ...overrides
   };
 }
+
+it('replaces file details with a sharing dialog that submits the selected files and options', async () => {
+  const user = userEvent.setup();
+  const createCloudShare = vi.fn().mockResolvedValue({ id: 'share-7', url: 'https://pan.example/s/share-7', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'], passCode: 'a7b2', createdAt: '2026-09-17 10:00:00' });
+  const client = createCloudFake({ createCloudShare });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  const file = await screen.findByText('报告.pdf');
+
+  fireEvent.contextMenu(file);
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  await user.type(within(dialog).getByRole('textbox', { name: '提取码' }), 'a7b2');
+  await user.selectOptions(within(dialog).getByRole('combobox', { name: '分享有效期' }), '7');
+  await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
+
+  expect(createCloudShare).toHaveBeenCalledWith('quark', ['file-1'], { name: '报告.pdf', passCode: 'a7b2', expiresInDays: 7 });
+  expect(within(await screen.findByRole('dialog', { name: '分享链接已创建' })).getByRole('textbox', { name: '分享链接' })).toHaveValue('https://pan.example/s/share-7');
+  expect(screen.queryByRole('menuitem', { name: '文件详情' })).not.toBeInTheDocument();
+});
+
+it('uses a share-specific vertical dialog layout', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="uc" client={client} initialAccount={{ id: 'uc', displayName: 'alice', provider: 'uc', authMethod: 'web' }} restoreOnMount={false} />);
+
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(dialog).toHaveClass('cloud-share-dialog');
+  expect(dialog).not.toHaveClass('cloud-trash-confirm');
+});
+
+it('uses a provider-declared UC share-code constraint while the user types', async () => {
+  // Break caught: removing the shared dialog's constraint handling would let
+  // an invalid UC code reach the provider as a generic share-create failure.
+  const user = userEvent.setup();
+  const createCloudShare = vi.fn().mockResolvedValue({ id: 'share-uc', url: 'https://drive.uc.cn/s/share-uc', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'] });
+  const descriptor = {
+    ...cloudCatalog.find(item => item.provider === 'uc')!,
+    sharePassCodeConstraint: {
+      minLength: 4,
+      maxLength: 4,
+      characterSet: 'asciiAlphanumeric' as const,
+      hint: '提取码必须为 4 位字母或数字',
+    },
+  };
+  render(<NativeCloudManager descriptor={descriptor} provider="uc" client={createCloudFake({ createCloudShare })} initialAccount={{ id: 'uc', displayName: 'alice', provider: 'uc', authMethod: 'web' }} restoreOnMount={false} />);
+
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  const passCode = within(dialog).getByRole('textbox', { name: '提取码' });
+  expect(within(dialog).getByText('将分享 报告.pdf。可选设置提取码和有效期，提取码必须为 4 位字母或数字')).toBeVisible();
+
+  await user.type(passCode, 'a7!');
+  expect(within(dialog).queryByText('UC 提取码需为 4 位字母或数字')).not.toBeInTheDocument();
+  expect(within(dialog).getByRole('button', { name: '创建分享链接' })).toBeDisabled();
+
+  await user.clear(passCode);
+  await user.type(passCode, 'a7b2');
+  await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
+  expect(createCloudShare).toHaveBeenCalledWith('uc', ['file-1'], { name: '报告.pdf', passCode: 'a7b2' });
+});
+
+it('refreshes my shares from the provider after cancelling a share', async () => {
+  // Break caught: skipping the follow-up list leaves the virtual directory
+  // disconnected from the server state after a successful cancellation.
+  const user = userEvent.setup();
+  const cancelCloudShares = vi.fn().mockResolvedValue(undefined);
+  const listCloudShares = vi.fn()
+    .mockResolvedValueOnce([{ id: 'share-9', url: 'https://pan.example/s/share-9', name: '共享目录', kind: 'folder', sourceFileIds: ['folder-1'], createdAt: '2026-09-17 10:00:00' }])
+    .mockResolvedValueOnce([]);
+  const client = createCloudFake({ listCloudShares, cancelCloudShares });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await user.dblClick(await screen.findByText('我的分享'));
+  expect(await screen.findByText('共享目录')).toBeVisible();
+  expect(listCloudShares).toHaveBeenCalledWith('quark');
+  fireEvent.contextMenu(screen.getByText('共享目录'));
+  expect(screen.getByRole('menuitem', { name: '复制分享链接' })).toBeVisible();
+  await user.click(screen.getByRole('menuitem', { name: '取消分享' }));
+  await waitFor(() => expect(cancelCloudShares).toHaveBeenCalledWith('quark', ['share-9']));
+  await waitFor(() => expect(screen.queryByText('共享目录')).not.toBeInTheDocument());
+  expect(screen.getByText('暂无分享文件')).toBeVisible();
+  expect(listCloudShares).toHaveBeenCalledTimes(2);
+});
+
+it('keeps my-shares visually distinct from a same-named folder and read-only', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({
+    id: '0',
+    items: [{ id: 'ordinary-my-shares', parentId: '0', name: '我的分享', kind: 'folder' }]
+  }) });
+  const { container } = render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await waitFor(() => expect(container.querySelector('[data-cloud-virtual-folder="my-shares"]')).toBeTruthy());
+  const virtualFolder = container.querySelector<HTMLElement>('[data-cloud-virtual-folder="my-shares"]');
+  expect(virtualFolder).toBeTruthy();
+  expect(virtualFolder?.querySelector('i.my-shares')).toBeTruthy();
+  expect(container.querySelector('[data-cloud-file-row]:not([data-cloud-virtual-folder]) i.folder')).toBeTruthy();
+
+  await user.dblClick(virtualFolder!);
+  await screen.findByText('暂无分享文件');
+  expect(screen.queryByRole('button', { name: '上传', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '新建目录', exact: true })).not.toBeInTheDocument();
+});
 
 it('shows loading then limited capacity on an authorized account card', async () => {
   let resolveCapacity!: (value: any) => void;
@@ -944,7 +1054,7 @@ it('keeps only download and delete visible in the selected-file header', async (
   expect(within(menu).getByRole('menuitem', { name: '重命名' })).toBeVisible();
   expect(within(menu).getByRole('menuitem', { name: '移动' })).toBeVisible();
   expect(within(menu).getByRole('menuitem', { name: '复制到' })).toBeVisible();
-  expect(within(menu).getByRole('menuitem', { name: '文件详情' })).toBeVisible();
+  expect(within(menu).getByRole('menuitem', { name: '分享' })).toBeVisible();
 });
 
 it('formats large cloud files in practical size units', async () => {
@@ -968,7 +1078,7 @@ it('sorts cloud files by name, size, and modified time from their column headers
   const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
   const listedNames = () => Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"] b[title]'))
     .map((name) => name.getAttribute('title'))
-    .filter((name): name is string => name !== null && name !== '回收站');
+    .filter((name): name is string => name !== null && name !== '回收站' && name !== '我的分享');
 
   await user.click(screen.getByRole('button', { name: '按名称排序' }));
   expect(listedNames()).toEqual(['alpha.txt', 'beta.txt', 'middle.txt', 'zeta.txt']);
@@ -1000,7 +1110,7 @@ it('keeps unavailable cloud file sizes after known sizes in either sort directio
   const tree = await screen.findByRole('tree', { name: '夸克网盘文件' });
   const listedNames = () => Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"] b[title]'))
     .map((name) => name.getAttribute('title'))
-    .filter((name): name is string => name !== null && name !== '回收站');
+    .filter((name): name is string => name !== null && name !== '回收站' && name !== '我的分享');
 
   await user.click(screen.getByRole('button', { name: '按大小排序' }));
   expect(listedNames()).toEqual(['small.txt', 'large.txt', 'null-size.txt', 'negative-size.txt', 'missing-size.txt']);
@@ -1087,9 +1197,9 @@ it('shows normal file commands in the row context menu and opens a folder from i
   expect(screen.getByRole('menuitem', { name: '重命名' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '移动' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '复制到' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '文件详情' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '分享' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '删除' })).toBeVisible();
-  expect(screen.queryByRole('menuitem', { name: '分享' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '文件详情' })).not.toBeInTheDocument();
   expect(screen.queryByRole('menuitem', { name: '移入超级保险箱' })).not.toBeInTheDocument();
   expect(menu).toBeVisible();
 
@@ -1251,7 +1361,7 @@ it('closes the destination picker and requires official web authorization when i
   expect(await screen.findByRole('dialog', { name: '选择移动位置' })).toBeVisible();
 });
 
-it('normalizes provider modified times in the list and details while preserving valid Tianyi timestamps', async () => {
+it('normalizes provider modified times in the list while preserving valid Tianyi timestamps', async () => {
   const user = userEvent.setup();
   const timestamp = 1_735_787_045_000;
   const date = new Date(timestamp);
@@ -1290,52 +1400,6 @@ it('normalizes provider modified times in the list and details while preserving 
   expect(within(tree).getByText('unknown.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
   expect(within(tree).getByText('missing.txt').closest('[role="treeitem"]')).toHaveTextContent('—');
 
-  async function openDetails(name: string) {
-    await user.click(within(tree).getByText(name));
-    await user.click(screen.getByRole('button', { name: '更多文件操作' }));
-    await user.click(within(screen.getByRole('menu', { name: '更多文件操作' })).getByRole('menuitem', { name: '文件详情' }));
-    return screen.getByRole('dialog', { name: '文件详情' });
-  }
-
-  expect(await openDetails('seconds.txt')).toHaveTextContent(localTimestamp);
-  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
-  expect(await openDetails('milliseconds.txt')).toHaveTextContent(localTimestamp);
-  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
-  expect(await openDetails('date-only.txt')).toHaveTextContent('2025-06-07 00:00:00');
-  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
-  expect(await openDetails('invalid-canonical.txt')).toHaveTextContent('—');
-  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
-  expect(await openDetails('missing.txt')).toHaveTextContent('—');
-  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
-  expect(await openDetails('tianyi.txt')).toHaveTextContent('2025-06-07 08:09:10');
-  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
-  expect(await openDetails('dst-canonical.txt')).toHaveTextContent('2025-03-09 02:30:00');
-});
-
-it('shows concise file details in a separate dialog', async () => {
-  const user = userEvent.setup();
-  render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
-
-  await screen.findByText('报告.pdf');
-  await user.click(screen.getByText('报告.pdf'));
-  const moreTrigger = screen.getByRole('button', { name: '更多文件操作' });
-  await user.click(moreTrigger);
-  const trigger = within(screen.getByRole('menu', { name: '更多文件操作' })).getByRole('menuitem', { name: '文件详情' });
-  await user.click(trigger);
-
-  const dialog = screen.getByRole('dialog', { name: '文件详情' });
-  expect(dialog).toHaveTextContent('报告.pdf');
-  expect(dialog).toHaveTextContent('1.9 MB');
-  expect(dialog).toHaveTextContent('2025-06-07 08:09:10');
-  expect(dialog).not.toHaveTextContent('file-1');
-  expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
-  fireEvent.mouseDown(document.querySelector('.cloud-confirm-backdrop')!);
-  expect(screen.getByRole('dialog', { name: '文件详情' })).toBeVisible();
-  await user.tab();
-  expect(screen.getByRole('button', { name: '关闭文件详情' })).toHaveFocus();
-  await user.click(screen.getByRole('button', { name: '关闭文件详情' }));
-  expect(screen.queryByRole('dialog', { name: '文件详情' })).not.toBeInTheDocument();
-  expect(moreTrigger).toHaveFocus();
 });
 
 it('keeps multi-selection context actions valid for every selected item', async () => {

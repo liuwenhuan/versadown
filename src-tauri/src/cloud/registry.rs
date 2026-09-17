@@ -1,4 +1,6 @@
-use super::{CloudAuthorizationCapabilities, CloudProvider, PasswordLoginMode};
+use super::{
+    CloudAuthorizationCapabilities, CloudProvider, CloudSharePassCodeConstraint, PasswordLoginMode,
+};
 use serde::Serialize;
 use std::sync::{Arc, OnceLock};
 use url::Url;
@@ -19,6 +21,9 @@ pub struct ProviderCapabilities {
     pub share_inspect: bool,
     pub share_transfer: bool,
     pub recorded_transfer_resolve: bool,
+    pub share_create: bool,
+    pub share_list: bool,
+    pub share_cancel: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -59,6 +64,8 @@ pub struct ProviderDescriptor {
     candidate_aliases: &'static [(&'static str, &'static str)],
     pub max_upload_concurrency: usize,
     pub download_concurrency: DownloadConcurrencyPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_pass_code_constraint: Option<CloudSharePassCodeConstraint>,
 }
 
 pub type ProviderDescriptorDto = ProviderDescriptor;
@@ -376,6 +383,9 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             share_inspect: true,
             share_transfer: matches!(provider, Quark | Baidu | Aliyun | Uc | Xunlei),
             recorded_transfer_resolve: matches!(provider, Quark | Baidu | Aliyun | Uc | Xunlei),
+            share_create: true,
+            share_list: true,
+            share_cancel: true,
         },
         share_hosts,
         share_patterns,
@@ -398,5 +408,42 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
                 max_concurrent_tasks: 4,
             },
         },
+        share_pass_code_constraint: match provider {
+            Uc => Some(super::uc::UC_SHARE_PASS_CODE_CONSTRAINT),
+            _ => Option::None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uc_catalog_exposes_its_personal_share_code_constraint_without_applying_it_to_other_providers() {
+        // Break caught: the shared UI needs the UC plugin's constraint from
+        // the catalog, but a UC-only rule must not restrict other providers.
+        let catalog = ProviderRegistry::global().catalog();
+        let uc = catalog
+            .iter()
+            .find(|descriptor| descriptor.provider == CloudProvider::Uc)
+            .expect("UC must be present in the catalog");
+        assert_eq!(
+            serde_json::to_value(uc).unwrap()["sharePassCodeConstraint"],
+            serde_json::json!({
+                "minLength": 4,
+                "maxLength": 4,
+                "characterSet": "asciiAlphanumeric",
+                "hint": "提取码必须为 4 位字母或数字",
+            })
+        );
+        let quark = catalog
+            .iter()
+            .find(|descriptor| descriptor.provider == CloudProvider::Quark)
+            .expect("Quark must be present in the catalog");
+        assert!(serde_json::to_value(quark)
+            .unwrap()
+            .get("sharePassCodeConstraint")
+            .is_none());
     }
 }

@@ -433,6 +433,7 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
             })
         }
     }
+    impl ShareOps for RecordingDriver {}
     impl ProviderAuth for RecordingDriver {
         fn recover_password(
             &mut self,

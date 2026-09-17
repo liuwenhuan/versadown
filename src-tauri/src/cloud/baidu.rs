@@ -1,8 +1,9 @@
 use super::{
     types::{encoded, required},
-    CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CloudProvider, CloudStorageCapacity, CloudUploadTransport, QuarkError,
-    UploadHttpRequest, UploadHttpResponse,
+    CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudFileKind, CloudHttpRequest,
+    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShare, CloudShareOptions,
+    CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest,
+    UploadHttpResponse,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -59,6 +60,32 @@ mod tests {
             // Existing listing fixtures represent public/already accessible shares.
             access_code: None,
         }
+    }
+
+    #[test]
+    fn personal_share_record_keeps_baidu_link_and_expiry_fields() {
+        let share = baidu_share_from_value(
+            &json!({
+                "shareid": 42,
+                "shorturl": "share-code",
+                "filename": "归档",
+                "isdir": 1,
+                "fs_id": 9,
+                "pwd": "a7b2",
+                "ctime": 1_789_000_000,
+                "expire_time": 1_790_000_000,
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(share.id, "42");
+        assert_eq!(share.url, "https://pan.baidu.com/s/1share-code");
+        assert_eq!(share.name, "归档");
+        assert_eq!(share.kind, CloudFileKind::Folder);
+        assert_eq!(share.source_file_ids, vec!["9"]);
+        assert_eq!(share.pass_code.as_deref(), Some("a7b2"));
     }
 
     fn baidu_capacity_entry() -> CloudShareResolvedEntry {
@@ -1400,6 +1427,91 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         self.recycle_operation("delete", ids)
     }
 
+    /// Creates a personal Baidu Netdisk share through the same web endpoint
+    /// used by the official share dialog. File IDs in the drive layer are
+    /// opaque references, so unwrap their numeric `fsid` only at this adapter
+    /// boundary.
+    pub fn create_share(
+        &self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, QuarkError> {
+        if file_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
+        }
+        if options.generate_pass_code {
+            return Err(QuarkError::InvalidInput("百度网盘需要设置自定义提取码".into()));
+        }
+        let fsids = file_ids
+            .iter()
+            .map(|id| {
+                parse_file_reference(id)?
+                    .fsid
+                    .parse::<u64>()
+                    .map_err(|_| QuarkError::InvalidInput("百度网盘文件标识无效".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let token = self.web_token()?;
+        let pass_code = options
+            .pass_code
+            .as_deref()
+            .filter(|code| !code.trim().is_empty());
+        let value = self.web_form(
+            "/share/set",
+            &write_query(&token, "channel=chunlei"),
+            form(&[
+                ("fid_list", json!(fsids).to_string()),
+                ("schannel", if pass_code.is_some() { "4" } else { "0" }.into()),
+                ("channel_list", "[]".into()),
+                ("period", options.expires_in_days.unwrap_or(0).to_string()),
+                ("pwd", pass_code.unwrap_or_default().into()),
+                ("eflag_disable", "true".into()),
+            ]),
+        )?;
+        baidu_share_from_value(&value, Some(file_ids), pass_code)
+    }
+
+    pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
+        let mut shares = Vec::new();
+        for page in 1..=10_000 {
+            let value = self.web_request(
+                "GET",
+                format!(
+                    "{PAN}/share/record?channel=chunlei&clienttype=0&app_id=250528&web=1&page={page}&num=100&order=time&desc=1"
+                ),
+                None,
+            )?;
+            let records = value
+                .get("list")
+                .or_else(|| value.pointer("/data/list"))
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            let count = records.len();
+            shares.extend(
+                records
+                    .iter()
+                    .map(|record| baidu_share_from_value(record, None, None))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            if count < 100 {
+                return Ok(shares);
+            }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
+
+    pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
+        if share_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
+        }
+        self.web_form(
+            "/share/cancel",
+            "channel=chunlei&clienttype=0&app_id=250528&web=1",
+            form(&[("shareid_list", json!(share_ids).to_string())]),
+        )?;
+        Ok(())
+    }
+
     pub fn mkdir(&self, parent: &str, name: &str) -> Result<(), QuarkError> {
         let parent = parse_parent_reference(parent)?;
         let path = join_path(&parent.path, name)?;
@@ -2299,6 +2411,83 @@ fn form(fields: &[(&str, String)]) -> String {
         serializer.append_pair(name, value);
     }
     serializer.finish()
+}
+
+fn baidu_share_from_value(
+    value: &Value,
+    fallback_file_ids: Option<&[String]>,
+    pass_code: Option<&str>,
+) -> Result<CloudShare, QuarkError> {
+    let id = value
+        .get("shareid")
+        .or_else(|| value.get("share_id"))
+        .and_then(string_or_number)
+        .filter(|id| !id.is_empty())
+        .ok_or(QuarkError::InvalidResponse)?;
+    let short_url = value
+        .get("link")
+        .or_else(|| value.get("shorturl"))
+        .or_else(|| value.get("short_url"))
+        .and_then(Value::as_str)
+        .filter(|url| !url.is_empty())
+        .map(|url| {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                url.to_owned()
+            } else {
+                format!("{PAN}/s/1{url}")
+            }
+        })
+        .ok_or(QuarkError::InvalidResponse)?;
+    let source_file_ids = value
+        .get("fid_list")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(string_or_number)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            value
+                .get("fs_id")
+                .or_else(|| value.get("fsid"))
+                .and_then(string_or_number)
+                .map(|id| vec![id])
+        })
+        .or_else(|| fallback_file_ids.map(|ids| ids.to_vec()))
+        .unwrap_or_default();
+    Ok(CloudShare {
+        id,
+        url: short_url,
+        name: value
+            .get("filename")
+            .or_else(|| value.get("title"))
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("分享文件")
+            .into(),
+        kind: if value.get("isdir").and_then(Value::as_i64) == Some(1) {
+            CloudFileKind::Folder
+        } else {
+            CloudFileKind::File
+        },
+        source_file_ids,
+        pass_code: value
+            .get("pwd")
+            .or_else(|| value.get("share_pwd"))
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .map(str::to_owned)
+            .or_else(|| pass_code.map(str::to_owned)),
+        created_at: value
+            .get("ctime")
+            .or_else(|| value.get("create_time"))
+            .and_then(string_or_number),
+        expires_at: value
+            .get("expire_time")
+            .or_else(|| value.get("expired_time"))
+            .and_then(string_or_number),
+    })
 }
 
 fn write_query(token: &str, operation: &str) -> String {

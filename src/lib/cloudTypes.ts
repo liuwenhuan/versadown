@@ -7,10 +7,18 @@ export interface ProviderCapabilities {
   list: boolean; createDirectory: boolean; rename: boolean; move: boolean; copy: boolean;
   trash: boolean; delete: boolean; restore: boolean; download: boolean; upload: boolean;
   shareInspect: boolean; shareTransfer: boolean; recordedTransferResolve: boolean;
+  shareCreate: boolean; shareList: boolean; shareCancel: boolean;
 }
 export interface DownloadConcurrencyPolicy {
   maxConnectionsPerFile: number;
   maxConcurrentTasks: number;
+}
+export type SharePassCodeCharacterSet = 'any' | 'asciiAlphanumeric';
+export interface SharePassCodeConstraint {
+  minLength: number;
+  maxLength: number;
+  characterSet: SharePassCodeCharacterSet;
+  hint: string;
 }
 export interface ProviderDescriptor {
   provider: CloudProvider;
@@ -28,6 +36,7 @@ export interface ProviderDescriptor {
   sharePatterns: readonly string[];
   maxUploadConcurrency: number;
   downloadConcurrency: DownloadConcurrencyPolicy;
+  sharePassCodeConstraint?: SharePassCodeConstraint;
 }
 
 export interface CloudAccount { provider: CloudProvider; id: string; displayName: string; authMethod: CloudAuthMethod; expiresAt?: string; }
@@ -47,8 +56,10 @@ export interface CloudCapacityInvalidated {
   reason: CloudCapacityChangeReason;
 }
 export interface CloudAuthorizationStateEvent { provider: CloudProvider; state: 'Disconnected' | 'Restoring' | 'Ready' | 'Refreshing' | 'NeedsSilentRelogin' | 'NeedsInteractiveAuth' | 'RiskBlocked'; account: CloudAccount | null; }
-export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; }
+export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; shareId?: string; shareUrl?: string; }
 export interface CloudDirectory { id: string; items: CloudFile[]; }
+export interface CloudShareOptions { name: string; passCode?: string; generatePassCode?: boolean; expiresInDays?: number; }
+export interface CloudShare { id: string; url: string; name: string; kind: 'file' | 'folder'; sourceFileIds: readonly string[]; passCode?: string; createdAt?: string; expiresAt?: string; }
 export interface CloudUploadFailure { inputIndex?: number; itemName: string; code: string; message: string; }
 export interface CloudUploadOutcome {
   uploaded: readonly CloudFile[];

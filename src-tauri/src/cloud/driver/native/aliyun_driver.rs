@@ -105,6 +105,11 @@ impl DownloadOps for AliyunDriver<'_> {
         }
     }
 }
+impl ShareOps for AliyunDriver<'_> {
+    fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> { aliyun::AliyunClient::new(&self.store, &self.http).create_share(file_ids, options) }
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> { aliyun::AliyunClient::new(&self.store, &self.http).list_shares() }
+    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> { aliyun::AliyunClient::new(&self.store, &self.http).cancel_shares(share_ids) }
+}
 impl ProviderAuth for AliyunDriver<'_> {
     fn refresh_session(&mut self) -> Result<bool, CloudError> {
         if self.store.load("aliyun")?.is_none() {
