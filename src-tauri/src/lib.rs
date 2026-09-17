@@ -13,6 +13,7 @@ mod duplicates;
 mod engine_runtime;
 mod ftp;
 mod launcher;
+mod launcher_input;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
