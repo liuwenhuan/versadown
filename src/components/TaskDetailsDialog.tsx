@@ -19,8 +19,8 @@ export function TaskDetailsDialog({ task, onClose }: TaskDetailsDialogProps) {
 
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
     <section className="task-details-dialog" role="dialog" aria-modal="true" aria-label="任务详情">
-      <button ref={closeRef} className="dialog-close" aria-label="关闭任务详情" onClick={onClose}>×</button>
-      <TaskDetails task={task} />
+      <header><h2>任务详情</h2><button ref={closeRef} className="dialog-close" aria-label="关闭任务详情" onClick={onClose}>×</button></header>
+      <div className="task-details-dialog-content"><TaskDetails task={task} /></div>
     </section>
   </div>;
 }

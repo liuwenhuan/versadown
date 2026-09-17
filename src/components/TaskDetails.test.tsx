@@ -28,6 +28,20 @@ it('shows downloaded bytes instead of a synthetic percent for an unknown total',
   expect(screen.queryByText('0%')).not.toBeInTheDocument();
 });
 
+it('renders the source on its own row before the file information', () => {
+  render(<TaskDetails task={{
+    id: 'task-source', name: 'collection', source: 'magnet:?xt=urn:btih:collection', kind: 'magnet', status: 'downloading', progress: 10,
+    files: [{ index: 1, path: 'collection/video.mkv', length: 1_024, completed_length: 0, selected: true }]
+  }} />);
+
+  const source = screen.getByText('magnet:?xt=urn:btih:collection');
+  const sourceSection = source.closest('.task-detail-source');
+  const files = screen.getByRole('region', { name: '文件信息' });
+  expect(screen.getByText('任务名称')).toBeVisible();
+  expect(sourceSection).not.toBeNull();
+  expect(sourceSection!.compareDocumentPosition(files) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+});
+
 it('shows a persisted extraction password and post-processing note with its line breaks', () => {
   render(<TaskDetails task={{
     id: 'task-note', name: 'archive.zip', kind: 'file', status: 'completed', progress: 100,

@@ -70,6 +70,31 @@ it('resizes around the launcher bottom-right corner and clamps it to the work ar
   expect(resized).toEqual({ x: 414, y: 373 });
 });
 
+it('keeps the launcher fixed and opens its popup below when there is no room above it', () => {
+  const helpers = launcherWindow as unknown as {
+    launcherPopupPlacement(
+      position: { x: number; y: number },
+      currentSize: { width: number; height: number },
+      nextSize: { width: number; height: number },
+      workArea: { x: number; y: number; width: number; height: number }
+    ): 'above' | 'below';
+    launcherResizedPosition(
+      position: { x: number; y: number },
+      currentSize: { width: number; height: number },
+      nextSize: { width: number; height: number },
+      workArea: { x: number; y: number; width: number; height: number },
+      placement: 'above' | 'below'
+    ): { x: number; y: number };
+  };
+  const position = { x: 1000, y: 12 };
+  const currentSize = { width: 64, height: 64 };
+  const nextSize = { width: 304, height: 392 };
+  const workArea = { x: 0, y: 0, width: 1920, height: 1080 };
+
+  expect(helpers.launcherPopupPlacement(position, currentSize, nextSize, workArea)).toBe('below');
+  expect(helpers.launcherResizedPosition(position, currentSize, nextSize, workArea, 'below')).toEqual({ x: 760, y: 12 });
+});
+
 it('uses the hexagon as the complete compact launcher viewport', () => {
   expect(launcherWindow.launcherCompactSize()).toEqual({ width: 64, height: 64 });
 });

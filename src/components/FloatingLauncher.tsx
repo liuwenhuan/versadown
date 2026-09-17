@@ -5,6 +5,7 @@ import type { ScanDownloadResult } from '../lib/types';
 
 interface FloatingLauncherProps {
   onParse(input: string): void | Promise<void>;
+  expanded?: boolean;
   onScan?(input: string): Promise<ScanDownloadResult[]>;
   onOpenTaskList?(): void | Promise<void>;
   onExpandedChange?(expanded: boolean): void;
@@ -25,14 +26,15 @@ function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
   );
 }
 
-export function FloatingLauncher({ onParse, onScan, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
-  const [expanded, setExpanded] = useState(false);
+export function FloatingLauncher({ onParse, expanded: expandedProp, onScan, onOpenTaskList, onExpandedChange, onDragStart, onContextMenu }: FloatingLauncherProps) {
+  const [uncontrolledExpanded, setUncontrolledExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const suppressClick = useRef(false);
   const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
+  const expanded = expandedProp ?? uncontrolledExpanded;
 
   function setLauncherExpanded(next: boolean) {
-    setExpanded(next);
+    if (expandedProp === undefined) setUncontrolledExpanded(next);
     onExpandedChange?.(next);
   }
 

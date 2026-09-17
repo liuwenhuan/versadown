@@ -184,13 +184,15 @@ it('keeps the custom window controls pinned to the header trailing edge', async 
   await waitFor(() => expect(document.querySelector('.cloud-workspace-recovering')).not.toBeInTheDocument());
 });
 
-it('uses a one-line download link to open the header download panel', async () => {
+it('uses a one-line download link to open the unified new-task dialog', async () => {
   const user = userEvent.setup();
   render(<App />);
 
   expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument();
   await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), 'https://example.com/archive.zip{Enter}');
-  expect(screen.getByRole('dialog', { name: '新建下载' })).toHaveClass('header-download-dialog');
+  const dialog = screen.getByRole('dialog', { name: '新建下载' });
+  expect(dialog).toHaveClass('batch-download-dialog', 'modal');
+  expect(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' })).toBeDisabled();
 });
 
 it('opens the cloud management workspace and restores each provider once', async () => {
@@ -253,7 +255,9 @@ it('shows task details only after the task context-menu command', async () => {
   const search = screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' });
 
   await user.type(search, 'https://example.com/archive.zip{Enter}');
-  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  const newTaskDialog = screen.getByRole('dialog', { name: '新建下载' });
+  await screen.findByText('archive.zip');
+  await user.click(within(newTaskDialog).getByRole('button', { name: '新建任务' }));
   expect(await screen.findByTitle('archive.zip')).toBeVisible();
   expect(screen.queryByRole('dialog', { name: '任务详情' })).not.toBeInTheDocument();
 

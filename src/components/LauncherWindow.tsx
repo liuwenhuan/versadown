@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { FloatingLauncher } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, getLauncherManagerVisible, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, getLauncherManagerVisible, getLauncherPopupPlacement, launcherDimensions, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, showLauncherMenu, startLauncherDragging, type LauncherPopupPlacement } from '../lib/launcherWindow';
 import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, updateSettings } from '../lib/api';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
@@ -24,6 +24,7 @@ export function LauncherWindow() {
   const [expandedTransitioning, setExpandedTransitioning] = useState(false);
   const [contextMenuOpen, setContextMenuOpen] = useState(false);
   const [contextMenuTransitioning, setContextMenuTransitioning] = useState(false);
+  const [popupPlacement, setPopupPlacement] = useState<LauncherPopupPlacement>('above');
   const [managerVisible, setManagerVisible] = useState(true);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>('always');
   const [settingsReady, setSettingsReady] = useState(false);
@@ -86,8 +87,10 @@ export function LauncherWindow() {
     setContextMenuTransitioning(true);
     void (async () => {
       try {
+        const placement = await getLauncherPopupPlacement(launcherDimensions.menu);
+        setPopupPlacement(placement);
         await waitForLauncherTransitionPaint();
-        await setLauncherContextMenuVisible(true);
+        await setLauncherContextMenuVisible(true, placement);
         setContextMenuOpen(true);
         void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
         void showLauncherMenu().catch(() => undefined);
@@ -104,19 +107,29 @@ export function LauncherWindow() {
     setContextMenuTransitioning(true);
     setContextMenuOpen(false);
     void waitForLauncherTransitionPaint()
-      .then(() => setLauncherContextMenuVisible(false))
+      .then(() => setLauncherContextMenuVisible(false, popupPlacement))
       .catch(() => undefined)
       .finally(() => setContextMenuTransitioning(false));
   }
 
   function changeExpanded(nextExpanded: boolean) {
     setContextMenuOpen(false);
-    setExpanded(nextExpanded);
     setExpandedTransitioning(true);
-    void waitForLauncherTransitionPaint()
-      .then(() => setLauncherExpanded(nextExpanded))
-      .catch(() => undefined)
-      .finally(() => setExpandedTransitioning(false));
+    void (async () => {
+      try {
+        const placement = nextExpanded
+          ? await getLauncherPopupPlacement(launcherDimensions.expanded)
+          : popupPlacement;
+        setPopupPlacement(placement);
+        setExpanded(nextExpanded);
+        await waitForLauncherTransitionPaint();
+        await setLauncherExpanded(nextExpanded, placement);
+      } catch {
+        // Do not show a popup until its matching native viewport was prepared.
+      } finally {
+        setExpandedTransitioning(false);
+      }
+    })();
   }
 
   function runContextAction(action: LauncherMenuAction) {
@@ -133,8 +146,9 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${expanded ? 'launcher-expanded' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''} ${expandedTransitioning || contextMenuTransitioning ? 'launcher-viewport-transitioning' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${expanded ? 'launcher-expanded' : ''} ${contextMenuOpen ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''} ${expandedTransitioning || contextMenuTransitioning ? 'launcher-viewport-transitioning' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
+        expanded={expanded}
         onParse={(input) => { void sendLauncherInput(input); }}
         onScan={scanDownloadInputs}
         onOpenTaskList={() => { void openLauncherManager(); }}

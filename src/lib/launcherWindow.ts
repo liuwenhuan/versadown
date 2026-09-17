@@ -15,6 +15,7 @@ let launcherResizeQueue: Promise<void> = Promise.resolve();
 
 type WorkArea = { x: number; y: number; width: number; height: number };
 type NativeWindowSize = { width: number; height: number };
+export type LauncherPopupPlacement = 'above' | 'below';
 
 export function launcherCornerPosition(workArea: WorkArea, windowSize: NativeWindowSize, scaleFactor: number) {
   const margin = launcherMargin * scaleFactor;
@@ -28,14 +29,27 @@ export function launcherResizedPosition(
   position: { x: number; y: number },
   currentSize: NativeWindowSize,
   nextSize: NativeWindowSize,
-  workArea: WorkArea
+  workArea: WorkArea,
+  placement: LauncherPopupPlacement = 'above'
 ) {
   const desiredX = position.x + currentSize.width - nextSize.width;
-  const desiredY = position.y + currentSize.height - nextSize.height;
+  const desiredY = placement === 'below'
+    ? position.y
+    : position.y + currentSize.height - nextSize.height;
   return {
     x: Math.min(Math.max(desiredX, workArea.x), workArea.x + workArea.width - nextSize.width),
     y: Math.min(Math.max(desiredY, workArea.y), workArea.y + workArea.height - nextSize.height)
   };
+}
+
+export function launcherPopupPlacement(
+  position: { x: number; y: number },
+  currentSize: NativeWindowSize,
+  nextSize: NativeWindowSize,
+  workArea: WorkArea
+): LauncherPopupPlacement {
+  const popupWouldStartAboveWorkArea = position.y + currentSize.height - nextSize.height < workArea.y;
+  return nextSize.height > currentSize.height && popupWouldStartAboveWorkArea ? 'below' : 'above';
 }
 
 export function isLauncherWindow() {
@@ -46,8 +60,14 @@ export function launcherCompactSize() {
   return launcherDimensions.compact;
 }
 
-async function resizeLauncherNow(size: NativeWindowSize, useCompactShape: boolean, logicalPositionOffset: number) {
-  if (!isTauriRuntime()) return;
+async function resizeLauncherNow(
+  size: NativeWindowSize,
+  useCompactShape: boolean,
+  logicalPositionOffset: number,
+  requestedPlacement?: LauncherPopupPlacement
+): Promise<LauncherPopupPlacement> {
+  const fallbackPlacement = requestedPlacement ?? 'above';
+  if (!isTauriRuntime()) return fallbackPlacement;
   const launcher = getCurrentWindow();
   const [position, currentSize, monitor] = await Promise.all([launcher.outerPosition(), launcher.outerSize(), currentMonitor()]);
   if (monitor) {
@@ -59,11 +79,18 @@ async function resizeLauncherNow(size: NativeWindowSize, useCompactShape: boolea
     };
     const sizeChanged = currentSize.width !== nextSize.width || currentSize.height !== nextSize.height;
     const offset = sizeChanged ? Math.round(logicalPositionOffset * scaleFactor) : 0;
-    const resizedPosition = launcherResizedPosition(
+    const placement = requestedPlacement ?? launcherPopupPlacement(
       position,
       currentSize,
       nextSize,
       { x: workArea.position.x, y: workArea.position.y, width: workArea.size.width, height: workArea.size.height }
+    );
+    const resizedPosition = launcherResizedPosition(
+      position,
+      currentSize,
+      nextSize,
+      { x: workArea.position.x, y: workArea.position.y, width: workArea.size.width, height: workArea.size.height },
+      placement
     );
     const nextPosition = {
       x: Math.min(Math.max(resizedPosition.x + offset, workArea.position.x), workArea.position.x + workArea.size.width - nextSize.width),
@@ -77,23 +104,48 @@ async function resizeLauncherNow(size: NativeWindowSize, useCompactShape: boolea
       compact: useCompactShape,
       live: false
     });
-    return;
+    return placement;
   }
   if (!useCompactShape) await setLauncherCompactShape(false);
   await launcher.setSize(new LogicalSize(size.width, size.height));
   if (useCompactShape) await setLauncherCompactShape(true);
+  return fallbackPlacement;
 }
 
-function resizeLauncher(size: NativeWindowSize, useCompactShape: boolean, logicalPositionOffset = 0) {
-  const operation = launcherResizeQueue.then(() => resizeLauncherNow(size, useCompactShape, logicalPositionOffset));
-  launcherResizeQueue = operation.catch(() => undefined);
+function resizeLauncher(
+  size: NativeWindowSize,
+  useCompactShape: boolean,
+  logicalPositionOffset = 0,
+  requestedPlacement?: LauncherPopupPlacement
+) {
+  const operation = launcherResizeQueue.then(() => resizeLauncherNow(size, useCompactShape, logicalPositionOffset, requestedPlacement));
+  launcherResizeQueue = operation.then(() => undefined, () => undefined);
   return operation;
 }
 
-export async function setLauncherExpanded(expanded: boolean) {
-  await resizeLauncher(
+export async function getLauncherPopupPlacement(size: NativeWindowSize): Promise<LauncherPopupPlacement> {
+  if (!isTauriRuntime()) return 'above';
+  const launcher = getCurrentWindow();
+  const [position, currentSize, monitor] = await Promise.all([launcher.outerPosition(), launcher.outerSize(), currentMonitor()]);
+  if (!monitor) return 'above';
+  const nextSize = {
+    width: Math.round(size.width * monitor.scaleFactor),
+    height: Math.round(size.height * monitor.scaleFactor)
+  };
+  return launcherPopupPlacement(
+    position,
+    currentSize,
+    nextSize,
+    { x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }
+  );
+}
+
+export async function setLauncherExpanded(expanded: boolean, placement?: LauncherPopupPlacement) {
+  return resizeLauncher(
     expanded ? launcherDimensions.expanded : launcherCompactSize(),
-    !expanded
+    !expanded,
+    0,
+    placement
   );
 }
 
@@ -101,10 +153,12 @@ export async function setLauncherCompact() {
   await resizeLauncher(launcherCompactSize(), true);
 }
 
-export async function setLauncherContextMenuVisible(visible: boolean) {
-  await resizeLauncher(
+export async function setLauncherContextMenuVisible(visible: boolean, placement?: LauncherPopupPlacement) {
+  return resizeLauncher(
     visible ? launcherDimensions.menu : launcherCompactSize(),
-    !visible
+    !visible,
+    0,
+    placement
   );
 }
 

@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   scanDownloadInputs: vi.fn(),
   updateSettings: vi.fn(),
   getManagerVisible: vi.fn(),
+  getLauncherPopupPlacement: vi.fn(),
   onGlobalStat: undefined as undefined | ((stat: { download_speed: number; num_active: number }) => void)
 }));
 
@@ -23,6 +24,8 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() =
 vi.mock('../lib/launcherWindow', () => ({
   anchorLauncherToWorkArea: vi.fn().mockResolvedValue(undefined), openLauncherManager: vi.fn().mockResolvedValue(undefined), sendLauncherInput: vi.fn().mockResolvedValue(undefined),
   setLauncherCompactShape: vi.fn().mockResolvedValue(undefined), setLauncherCompact: vi.fn().mockResolvedValue(undefined), setLauncherExpanded: vi.fn().mockResolvedValue(undefined), setLauncherContextMenuVisible: vi.fn().mockResolvedValue(undefined),
+  getLauncherPopupPlacement: state.getLauncherPopupPlacement,
+  launcherDimensions: { compact: { width: 64, height: 64 }, menu: { width: 304, height: 392 }, expanded: { width: 410, height: 364 } },
   setLauncherWindowVisible: vi.fn().mockResolvedValue(undefined), runLauncherMenuAction: vi.fn().mockResolvedValue(undefined), getLauncherManagerVisible: state.getManagerVisible, showLauncherMenu: vi.fn().mockResolvedValue(undefined), startLauncherDragging: vi.fn().mockResolvedValue(undefined)
 }));
 vi.mock('../lib/downloadEvents', () => ({
@@ -34,7 +37,7 @@ vi.mock('../lib/downloadEvents', () => ({
 }));
 
 import { LauncherWindow } from './LauncherWindow';
-import { setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
+import { getLauncherPopupPlacement, setLauncherCompact, setLauncherContextMenuVisible, setLauncherExpanded, setLauncherWindowVisible, startLauncherDragging } from '../lib/launcherWindow';
 
 it('keeps the floating-display menu heading to one row after its helper copy is removed', () => {
   const styles = readFileSync('src/styles.css', 'utf8');
@@ -71,6 +74,7 @@ beforeEach(() => {
   state.scanDownloadInputs.mockReset();
   state.updateSettings.mockReset();
   state.getManagerVisible.mockReset();
+  state.getLauncherPopupPlacement.mockReset();
   state.getSettings.mockResolvedValue({
     downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
     proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
@@ -78,6 +82,7 @@ beforeEach(() => {
     aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5 }
   });
   state.getManagerVisible.mockResolvedValue(true);
+  state.getLauncherPopupPlacement.mockResolvedValue('above');
 });
 
 it('requests an initial global-stat snapshot after subscribing so startup events cannot be lost', async () => {
@@ -148,12 +153,12 @@ it('waits for the native viewport before rendering the launcher context menu', a
   fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
 
   expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument();
-  await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true));
+  await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true, 'above'));
   await act(async () => { releaseNativeResize?.(); });
   expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
 });
 
-it('keeps the compact launcher hidden and screen-aligned while opening its menu viewport', async () => {
+it('keeps the compact launcher visible and screen-aligned while opening its menu viewport', async () => {
   state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
   let releaseNativeResize: (() => void) | undefined;
   vi.mocked(setLauncherContextMenuVisible).mockImplementationOnce(() => new Promise<void>((resolve) => {
@@ -171,13 +176,61 @@ it('keeps the compact launcher hidden and screen-aligned while opening its menu 
     fireEvent.contextMenu(trigger);
 
     expect(shell).toHaveClass('launcher-viewport-transitioning');
-    expect(trigger).not.toBeVisible();
-    await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true));
+    expect(trigger).toBeVisible();
+    await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true, 'above'));
     await act(async () => { releaseNativeResize?.(); });
 
     expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
     const interactionTarget = screen.getByRole('button', { name: '打开下载输入' }).closest('.launcher-interaction-target')!;
     expect(getComputedStyle(interactionTarget).right).toBe('0px');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('anchors a context menu below the launcher when the upper work area is insufficient', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
+  state.getLauncherPopupPlacement.mockResolvedValueOnce('below');
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+
+  try {
+    render(<LauncherWindow />);
+    const trigger = screen.getByRole('button', { name: '打开下载输入' });
+    fireEvent.contextMenu(trigger);
+
+    await waitFor(() => expect(getLauncherPopupPlacement).toHaveBeenCalled());
+    await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenCalledWith(true, 'below'));
+    expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
+    const shell = trigger.closest('main')!;
+    expect(shell).toHaveClass('launcher-popup-below');
+    const interactionTarget = trigger.closest('.launcher-interaction-target')!;
+    expect(getComputedStyle(interactionTarget).top).toBe('0px');
+    expect(getComputedStyle(interactionTarget).bottom).toBe('auto');
+    expect(getComputedStyle(screen.getByRole('menu', { name: '悬浮球菜单' })).top).toBe('72px');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('anchors quick-add below the launcher when the upper work area is insufficient', async () => {
+  state.getGlobalStat.mockResolvedValueOnce({ download_speed: 524_288, num_active: 1 });
+  state.getLauncherPopupPlacement.mockResolvedValueOnce('below');
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+
+  try {
+    render(<LauncherWindow />);
+    const trigger = screen.getByRole('button', { name: '打开下载输入' });
+    fireEvent.click(trigger);
+
+    await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true, 'below'));
+    const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+    expect(trigger.closest('main')).toHaveClass('launcher-popup-below');
+    expect(getComputedStyle(trigger.closest('.launcher-interaction-target')!).top).toBe('0px');
+    expect(getComputedStyle(dialog).top).toBe('64px');
   } finally {
     stylesheet.remove();
   }
@@ -201,10 +254,10 @@ it('keeps the quick-add content hidden until its native viewport is ready', asyn
     render(<LauncherWindow />);
     fireEvent.click(screen.getByRole('button', { name: '打开下载输入' }));
 
+    await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true, 'above'));
     const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="新建下载"]')!;
     expect(dialog.closest('main')).toHaveClass('launcher-viewport-transitioning');
     expect(dialog).not.toBeVisible();
-    await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true));
     expect(hiddenWhenNativeResizeStarted).toBe(true);
     await act(async () => { releaseNativeResize?.(); });
     expect(dialog).toBeVisible();
@@ -229,7 +282,7 @@ it('waits for native menu collapse before restoring the compact launcher canvas'
 
   expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument();
   expect(setLauncherCompact).not.toHaveBeenCalled();
-  await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenLastCalledWith(false));
+  await waitFor(() => expect(setLauncherContextMenuVisible).toHaveBeenLastCalledWith(false, 'above'));
   await act(async () => { releaseNativeResize?.(); });
   await waitFor(() => expect(setLauncherCompact).toHaveBeenCalled());
 });
@@ -241,7 +294,7 @@ it('opens the download input when clicking the compact launcher', async () => {
   fireEvent.click(screen.getByRole('button', { name: '打开下载输入' }));
 
   expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
-  await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true));
+  await waitFor(() => expect(setLauncherExpanded).toHaveBeenCalledWith(true, 'above'));
 });
 
 it('starts native dragging from the compact launcher', async () => {
