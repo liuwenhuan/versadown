@@ -238,14 +238,25 @@ async function runPopupCycles(target) {
     iconPngBytes: iconBefore.length, iconPixels, svgOutline: await assertSvgOutline(target) };
 }
 
-async function waitForEvaluation(target, expression, predicate) {
+async function waitForEvaluation(target, expression, predicate, attempts = 40) {
   let value;
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     value = await evaluate(target, expression);
     if (predicate(value)) return value;
     await delay(100);
   }
   throw new Error(`Timed out waiting for renderer state. Last value: ${JSON.stringify(value)}`);
+}
+
+async function waitForDownloadEngine(target) {
+  return await waitForEvaluation(
+    target,
+    `window.__TAURI_INTERNALS__.invoke('get_download_engine_state')`,
+    (state) => Boolean(state?.available),
+    // The child process can exist while aria2 is still completing its RPC
+    // readiness handshake (up to three five-second startup attempts).
+    200
+  );
 }
 
 async function waitForChildExit(child, timeoutMs) {
@@ -368,6 +379,7 @@ async function run() {
     assert(launcher, 'Launcher WebView2 target did not render.');
     assert(manager, 'Download manager WebView2 target did not render.');
     ownedSidecarPids = await waitForOwnedSidecar(child.pid);
+    await waitForDownloadEngine(launcher);
 
     const managerViewport = JSON.parse(await evaluate(manager, 'JSON.stringify({ width: innerWidth, height: innerHeight })'));
     assert(
