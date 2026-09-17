@@ -35,6 +35,7 @@ pub const UC_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
         character_set: CloudSharePassCodeCharacterSet::AsciiAlphanumeric,
         hint: "提取码必须为 4 位字母或数字",
     };
+pub(crate) const UC_WEB_PROFILE_JS: &str = include_str!("uc-web-profile.js");
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct UcSession {
@@ -108,6 +109,24 @@ pub fn parse_uc_web_session(cookies: &[String]) -> Result<UcSession, QuarkError>
             .collect::<Vec<_>>()
             .join("; "),
     ))
+}
+
+/// The official UC page keeps the visible nickname in its in-memory store.
+/// The page script deliberately returns only this presentation field; browser
+/// cookies and any other store state stay in the WebView.
+pub fn parse_uc_web_authorization(
+    cookies: &[String],
+    browser_profile: &Value,
+) -> Result<UcSession, QuarkError> {
+    let mut session = parse_uc_web_session(cookies)?;
+    session.display_name = browser_profile
+        .get("nickname")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter(|name| name.chars().count() <= 256 && !name.chars().any(char::is_control))
+        .map(str::to_owned);
+    Ok(session)
 }
 
 #[derive(Clone, Debug)]
@@ -252,32 +271,9 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             .is_some())
     }
 
-    fn web_profile_display_name(&self) -> Result<Option<String>, QuarkError> {
-        let response = self.http.send(CloudHttpRequest {
-            method: "GET",
-            url: format!("{WEB}/account/info"),
-            headers: self.headers()?,
-            body: None,
-        })?;
-        if response.status == 401 {
-            return Err(QuarkError::AuthorizationExpired);
-        }
-        let value: Value =
-            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        if !(200..300).contains(&response.status) || value.get("success") != Some(&Value::Bool(true))
-        {
-            return Err(QuarkError::InvalidResponse);
-        }
-        Ok(value
-            .pointer("/data/nickname")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned))
-    }
-
-    /// Build the account shown from a browser-issued UC session. A nickname
-    /// fetched from UC's official web profile is retained with the encrypted
-    /// session, so the card can be restored without another profile request.
+    /// Build the account shown from a browser-issued UC session. The official
+    /// page's visible nickname is retained with the encrypted session, so the
+    /// card can be restored without replaying opaque browser context.
     pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
         let id = self.account_id()?;
         Ok(CloudAccount {
@@ -291,19 +287,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         })
     }
 
-    /// UC's official web profile endpoint owns the account nickname shown by
-    /// the UC Drive page. `__uid` remains only an internal account key.
+    /// A UC browser session restores the account captured at authorization.
+    /// `__uid` remains only an internal account key, never a display name.
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
-        let id = self.account_id()?;
-        let display_name = self
-            .web_profile_display_name()?
-            .unwrap_or_else(|| UC_CARD_DISPLAY_NAME.to_owned());
-        Ok(CloudAccount {
-            provider: CloudProvider::Uc,
-            id,
-            display_name,
-            auth_method: self.session.auth_method,
-        })
+        self.web_account()
     }
 
     pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
@@ -1508,90 +1495,17 @@ mod tests {
     }
 
     #[test]
-    fn uc_account_reads_nickname_from_the_official_web_profile() {
-        let http = Http::new(vec![json!({
-            "success": true,
-            "data": {"nickname": "云端小橙"}
-        })]);
-        let client = UcClient::new(
-            UcSession::cookie("__uid=AAR/opaque-id; __puus=session"),
-            &http,
-        );
+    fn uc_account_restores_the_nickname_captured_from_the_browser() {
+        let mut session = UcSession::cookie("__uid=AAR/opaque-id; __puus=session");
+        session.display_name = Some("云端小橙".into());
+        let http = Http::new(vec![]);
+        let client = UcClient::new(session, &http);
 
-        let account = client.account().expect("the UC profile should load");
+        let account = client.account().expect("the saved card profile should load");
 
         assert_eq!(account.id, "AAR/opaque-id");
         assert_eq!(account.display_name, "云端小橙");
-        assert_eq!(
-            http.requests.lock().unwrap()[0].url,
-            "https://drive.uc.cn/account/info"
-        );
-    }
-
-    #[test]
-    #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized UC session"]
-    fn live_uc_official_web_profile_returns_a_visible_nickname() -> Result<(), QuarkError> {
-        if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
-            return Ok(());
-        }
-        let app_data = std::env::var_os("APPDATA").ok_or(QuarkError::Storage)?;
-        let sessions = crate::cloud::DpapiCredentialStore::new(
-            std::path::PathBuf::from(app_data)
-                .join("com.alldownloader.desktop")
-                .join("cloud-sessions"),
-        )?;
-        let session: UcSession = serde_json::from_slice(
-            &sessions
-                .load("uc")?
-                .ok_or(QuarkError::AuthorizationExpired)?,
-        )
-        .map_err(|_| QuarkError::Storage)?;
-        let transport = crate::cloud::ReqwestTransport::new()?;
-        let response = transport.send(CloudHttpRequest {
-            method: "GET",
-            url: format!("{WEB}/account/info"),
-            headers: BTreeMap::from([
-                ("Accept".into(), "application/json, text/plain, */*".into()),
-                ("Accept-Language".into(), "zh-CN,zh;q=0.9".into()),
-                ("Cookie".into(), session.cookie.clone()),
-                ("Content-Type".into(), "application/json;charset=UTF-8".into()),
-                ("Origin".into(), WEB.into()),
-                ("Referer".into(), format!("{WEB}/")),
-                ("User-Agent".into(), UC_DESKTOP_USER_AGENT.into()),
-            ]),
-            body: None,
-        })?;
-        let value: Value = serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        let keys = value
-            .as_object()
-            .map(|object| object.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let data_keys = value
-            .get("data")
-            .and_then(Value::as_object)
-            .map(|object| object.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let success_kind = value
-            .get("success")
-            .map(|field| match field {
-                Value::Bool(_) => "boolean",
-                Value::String(_) => "string",
-                Value::Number(_) => "number",
-                Value::Null => "null",
-                Value::Array(_) => "array",
-                Value::Object(_) => "object",
-            })
-            .unwrap_or("missing");
-        eprintln!(
-            "UC official profile response metadata: status={}, success_type={}, keys={keys:?}, data_keys={data_keys:?}",
-            response.status, success_kind
-        );
-        let account = UcClient::new(session, &transport).account()?;
-        if account.display_name == UC_CARD_DISPLAY_NAME {
-            return Err(QuarkError::InvalidResponse);
-        }
-        eprintln!("UC official web profile returned a visible nickname");
-        Ok(())
+        assert!(http.requests.lock().unwrap().is_empty());
     }
 
     #[test]

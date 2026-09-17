@@ -2340,7 +2340,6 @@ fn uc_web_authorization_does_not_display_or_persist_an_opaque_cookie_identifier(
     let credentials = MemoryCredentialStore::default();
     let transport = SequenceTransport(Mutex::new(VecDeque::from([
         r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
-        r#"{"success":true,"data":{}}"#,
     ])));
 
     let account = super::finalize_uc_web_authorization(
@@ -2360,21 +2359,27 @@ fn uc_web_authorization_does_not_display_or_persist_an_opaque_cookie_identifier(
 
 #[test]
 fn uc_web_authorization_uses_the_official_web_profile_nickname_on_the_cloud_card() {
-    // Break caught: UC's drive member endpoint returns capacity and membership
-    // data, while the official web profile endpoint owns the visible nickname.
+    // Break caught: UC's visible nickname exists in the authenticated page
+    // state, not in the drive API response or the opaque __uid cookie.
     let credentials = MemoryCredentialStore::default();
     let transport = SequenceTransport(Mutex::new(VecDeque::from([
         r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
-        r#"{"success":true,"data":{"nickname":"云端小橙"}}"#,
     ])));
 
-    let account = super::finalize_uc_web_authorization(
-        crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
-        UcSession::cookie("__uid=new-user; __pus=new-identity; __puus=new-session"),
-        &credentials,
-        &transport,
-    )
-    .expect("a verified UC login should return the signed-in nickname");
+    let input = crate::cloud::driver::WebAuthorizationInput {
+        cookies: vec![
+            "__uid=new-user".into(),
+            "__pus=new-identity".into(),
+            "__puus=new-session".into(),
+        ],
+        storage: serde_json::json!({"nickname": "云端小橙"}),
+        browser_context: None,
+    };
+    let account = crate::cloud::ProviderRegistry::global()
+        .driver(CloudProvider::Uc, &credentials, &transport)
+        .auth()
+        .complete_web(&input)
+        .expect("a verified UC login should retain the browser-captured nickname");
 
     assert_eq!(account.id, "new-user");
     assert_eq!(account.display_name, "云端小橙");

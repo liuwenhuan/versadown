@@ -194,10 +194,9 @@ pub(crate) fn finalize_uc_web_authorization(
     // Verify the exact first read the workspace needs before replacing the
     // stored account and closing the official authorization window.
     authorization_result(client.directory(descriptor.root_directory_id))?;
-    // UC's official web profile endpoint exposes the nickname displayed by
-    // the card, but it is not the authorization proof. It may be unavailable
-    // while the root directory remains usable, so preserve the verified login
-    // and fall back to the provider label in that case.
+    // The official UC page captures the nickname before this call, but the
+    // directory read remains the authorization proof. A page which has not
+    // populated its profile yet must still preserve a verified login.
     let account = match client.account() {
         Ok(account) => account,
         Err(_) => client.web_account()?,

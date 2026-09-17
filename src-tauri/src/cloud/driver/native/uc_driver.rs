@@ -18,10 +18,10 @@ impl DriveOps for UcDriver<'_> {
             if client.has_saved_display_name()? {
                 return client.web_account();
             }
-            // Upgrade legacy sessions whose saved label is missing, generic,
-            // or an old opaque __uid value. A profile lookup is optional: it
-            // must never hide an otherwise restorable browser session from
-            // the card.
+            // Legacy sessions have no browser-captured nickname (or contain
+            // an old opaque __uid value). Keep the card usable with its
+            // provider label until the next web authorization captures the
+            // real UC nickname.
             match client.account() {
                 Ok(account) => {
                     session.display_name = (account.display_name != uc::UC_CARD_DISPLAY_NAME)
@@ -173,11 +173,18 @@ impl ShareOps for UcDriver<'_> {
     }
 }
 impl ProviderAuth for UcDriver<'_> {
+    fn web_authorization_recipe(&self) -> WebAuthorizationRecipe {
+        WebAuthorizationRecipe {
+            token_script: Some(uc::UC_WEB_PROFILE_JS),
+            ..Default::default()
+        }
+    }
+
     fn complete_web(&mut self, input: &WebAuthorizationInput) -> Result<CloudAccount, CloudError> {
         let store = &self.store;
         let http = &self.http;
         {
-            let session = uc::parse_uc_web_session(&input.cookies)?;
+            let session = uc::parse_uc_web_authorization(&input.cookies, &input.storage)?;
             let account = finalize_uc_web_authorization(
                 crate::cloud::ProviderRegistry::global().get(CloudProvider::Uc),
                 session,
@@ -191,9 +198,8 @@ impl ProviderAuth for UcDriver<'_> {
         &mut self,
         input: &WebAuthorizationInput,
     ) -> Result<Option<Vec<u8>>, CloudError> {
-        let cookies = &input.cookies;
         Ok(Some(
-            serde_json::to_vec(&uc::parse_uc_web_session(&cookies)?)
+            serde_json::to_vec(&uc::parse_uc_web_authorization(&input.cookies, &input.storage)?)
                 .map_err(|_| QuarkError::Storage)?,
         ))
     }
