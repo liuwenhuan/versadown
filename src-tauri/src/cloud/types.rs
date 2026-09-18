@@ -353,6 +353,8 @@ pub enum CloudError {
     PikpakRegionalMembershipRestricted,
     #[error("正在等待网页登录，请在授权窗口完成登录")]
     AuthorizationPending,
+    #[error("网盘中的源文件已不存在，请刷新网盘列表后重新创建下载")]
+    SourceFileMissing,
     #[error("云盘响应无效，请刷新后重试")]
     InvalidResponse,
     #[error("安全凭据存储不可用")]
@@ -383,6 +385,7 @@ impl Serialize for CloudError {
             }
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
+            Self::SourceFileMissing => "source_file_missing",
             Self::Storage => "credential_storage_error",
             Self::InvalidResponse => "invalid_response",
             Self::Transport(_) => "network_error",
@@ -392,6 +395,19 @@ impl Serialize for CloudError {
             Self::ProviderUnsupported => "provider_unsupported",
         };
         serde_json::json!({"code":code,"message":self.to_string()}).serialize(s)
+    }
+}
+
+/// Maps the generic HTTP 404 text produced by the shared JSON transport only
+/// when a provider is resolving a concrete file download endpoint. A 404 on
+/// other endpoints (such as a stale share token) has provider-specific
+/// meaning and must not be treated as a deleted source file.
+pub(crate) fn download_source_missing_from_http_404(error: QuarkError) -> QuarkError {
+    match error {
+        QuarkError::Provider(message) if message.to_ascii_lowercase().contains("http 404") => {
+            QuarkError::SourceFileMissing
+        }
+        error => error,
     }
 }
 pub(crate) fn required(v: &serde_json::Value, key: &str) -> Result<String, QuarkError> {
@@ -479,6 +495,29 @@ mod capacity_tests {
         assert_eq!(
             value,
             json!({"provider":"quark","accountId":"account-1","reason":"upload"})
+        );
+    }
+
+    #[test]
+    fn file_download_http_404_is_a_typed_missing_source_only_at_download_boundary() {
+        assert!(matches!(
+            download_source_missing_from_http_404(QuarkError::Provider(
+                "HTTP 404 / code 0 / not_found".into()
+            )),
+            QuarkError::SourceFileMissing
+        ));
+        assert!(matches!(
+            download_source_missing_from_http_404(QuarkError::Provider(
+                "HTTP 403 / code 0 / forbidden".into()
+            )),
+            QuarkError::Provider(_)
+        ));
+        assert_eq!(
+            serde_json::to_value(QuarkError::SourceFileMissing).unwrap(),
+            json!({
+                "code":"source_file_missing",
+                "message":"网盘中的源文件已不存在，请刷新网盘列表后重新创建下载"
+            })
         );
     }
 }

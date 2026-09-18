@@ -21,6 +21,9 @@ const UC_SHARE_TASK_MAX_POLLS: usize = 60;
 const UC_SHARE_TRANSIENT_RETRIES: usize = 2;
 const UC_SHARE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 pub const UC_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
+// The download CDN rejects the legacy desktop-client profile used by UC's
+// JSON API. Use the current browser profile only for the signed file request.
+const UC_DOWNLOAD_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
 const UC_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
     object_host: "pds.uc.cn",
     object_store_user_agent: "aliyun-sdk-js/6.6.1",
@@ -696,11 +699,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             .pointer("/data/0")
             .ok_or(QuarkError::InvalidResponse)?;
         let url = https_download_url(&required(file, "download_url")?)?;
+        let cookie = cookie_for_download(self.cookie()?, &response.set_cookies);
         let mut headers = self.headers()?;
-        headers.insert(
-            "Cookie".into(),
-            cookie_for_download(self.cookie()?, &response.set_cookies),
-        );
+        // This is a GET to UC's file CDN rather than a JSON API call. Sending
+        // the API Content-Type makes UC reject an otherwise valid signed URL.
+        headers.remove("Content-Type");
+        headers.insert("User-Agent".into(), UC_DOWNLOAD_USER_AGENT.into());
+        headers.insert("Cookie".into(), cookie.clone());
+        // UC validates the browser anti-CSRF token on the signed download
+        // request too. Keep the value that was actually sent to the CDN: a
+        // download-signing response is allowed to rotate the cookie first.
+        if let Some(csrf) = cookie_value(&cookie, "csrf_token") {
+            headers.insert("x-csrf-token".into(), csrf);
+        }
         Ok(UcDownload {
             url,
             name: file
@@ -831,6 +842,9 @@ fn uc_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
         .any(|needle| normalized_message.contains(&needle.to_ascii_lowercase()))
     {
         return Err(QuarkError::WebAuthorizationRequired);
+    }
+    if code == 21001 && normalized_message.contains("file not found") {
+        return Err(QuarkError::SourceFileMissing);
     }
     if !(200..300).contains(&response.status) || code != 0 || !matches!(status, 0 | 200) {
         return Err(QuarkError::Provider(uc_rejection_message(
@@ -1570,6 +1584,55 @@ mod tests {
             )
             .unwrap();
         credentials
+    }
+
+    #[test]
+    fn uc_personal_download_reports_a_missing_server_file() {
+        let http = Http::new(vec![json!({
+            "code": 21001,
+            "status": 404,
+            "message": "file not found [stale-file]",
+        })]);
+        let error = UcClient::new(UcSession::cookie("__puus=session"), &http)
+            .download("stale-file")
+            .unwrap_err();
+
+        assert!(matches!(error, QuarkError::SourceFileMissing));
+    }
+
+    #[test]
+    fn uc_personal_download_replays_the_rotated_csrf_cookie_to_the_cdn() {
+        let http = ShareReplies::new(vec![(
+            json!({"code":0,"data":[{"fid":"file-1","file_name":"fixture.txt","download_url":"https://cdn.example/fixture"}]}),
+            vec![
+                "csrf_token=fresh-csrf; Path=/; Secure",
+                "UC_DOWNLOAD_SESSION=issued; Path=/; Secure",
+            ],
+        )]);
+        let direct = UcClient::new(
+            UcSession::cookie("__puus=session; csrf_token=stale-csrf"),
+            &http,
+        )
+        .download("file-1")
+        .unwrap();
+
+        assert!(direct
+            .headers
+            .get("Cookie")
+            .is_some_and(|cookie| cookie.contains("csrf_token=fresh-csrf")));
+        assert!(direct
+            .headers
+            .get("Cookie")
+            .is_some_and(|cookie| cookie.contains("UC_DOWNLOAD_SESSION=issued")));
+        assert_eq!(
+            direct.headers.get("x-csrf-token").map(String::as_str),
+            Some("fresh-csrf")
+        );
+        assert_eq!(
+            direct.headers.get("User-Agent").map(String::as_str),
+            Some(UC_DOWNLOAD_USER_AGENT)
+        );
+        assert!(!direct.headers.contains_key("Content-Type"));
     }
 
     #[test]

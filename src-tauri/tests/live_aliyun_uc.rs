@@ -274,6 +274,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
         CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
         CloudError::AuthorizationPending => "authorization-pending",
+        CloudError::SourceFileMissing => "source-file-missing",
         CloudError::InvalidResponse => "invalid-response",
         CloudError::Storage => "storage",
         CloudError::Transport(_) => "transport",
@@ -1349,6 +1350,47 @@ fn live_aliyun_trash_already_absent_file_is_idempotent() -> LiveResult<()> {
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized UC session"]
 fn live_uc_complete_crud_and_transfer_matrix() -> LiveResult<()> {
     run_provider(CloudProvider::Uc)
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing file in the current user's UC root directory; read-only direct-download verification"]
+fn live_uc_existing_file_download() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let credentials_root = session_root()?;
+    let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
+        failure(format!("UC credential store initialization failed: {}", error_kind(&error)))
+    })?;
+    if credentials.load(provider.key()).map_err(|error| {
+        failure(format!("UC credential decrypt failed: {}", error_kind(&error)))
+    })?.is_none() {
+        return Err(failure("UC is not currently authorized"));
+    }
+    let state = CloudState::new(credentials_root)
+        .map_err(|error| failure(format!("UC state initialization failed: {}", error_kind(&error))))?;
+    let http = LiveTransport::new()?;
+    let directory = step(provider, "list root for existing-file download", || {
+        driver_list(
+            &state,
+            &http,
+            provider,
+            ProviderRegistry::global().get(provider).root_directory_id,
+        )
+    })?;
+    let file = directory
+        .items
+        .into_iter()
+        .filter(|item| {
+            item.kind == CloudFileKind::File && item.size.is_some_and(|size| size <= 1024 * 1024)
+        })
+        .min_by_key(|item| item.size)
+        .ok_or_else(|| failure("UC root has no small file available for read-only download testing"))?;
+    let result = step(provider, "resolve existing-file download", || {
+        resolve_download(&state, &http, provider, &file.id)
+    })
+    .and_then(download_bytes);
+    http.report();
+    result.map(|_| ())
 }
 
 #[test]
