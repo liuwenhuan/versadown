@@ -157,8 +157,17 @@ impl CloudDownloadDispatch {
         let native_resume = retry_options.is_some_and(|(_, continue_download)| continue_download)
             && task.status == TaskStatus::Paused
             && crate::xunlei_native::is_native_gid(task.aria_gid.as_deref());
+        // A restored cloud task owns an aria2 GID whose URL is deliberately
+        // short-lived. Re-enter dispatch to replace that URL instead of
+        // resuming the persisted session directly after application startup.
+        let refreshing_paused_cloud = retry_options
+            .is_some_and(|(_, continue_download)| continue_download)
+            && task.status == TaskStatus::Paused
+            && task.aria_gid.is_some()
+            && (task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://"));
         if task.status == TaskStatus::Recycled
             || (!native_resume
+                && !refreshing_paused_cloud
                 && task.aria_gid.is_some()
                 && matches!(
                     task.status,
@@ -400,10 +409,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paused_aria_task_cannot_reenter_dispatch_while_it_owns_a_gid() {
+    async fn paused_direct_aria_task_cannot_reenter_dispatch_while_it_owns_a_gid() {
         let store = TaskStore::open_in_memory().unwrap();
         let mut task = store
-            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .create(NewTask::direct("https://example.test/file"))
             .unwrap();
         task.status = TaskStatus::Paused;
         task.aria_gid = Some("0123456789abcdef".into());
@@ -413,5 +422,30 @@ mod tests {
             .prepare_expected_with_retry_intent(&store, &task, false, true)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn paused_cloud_aria_task_reenters_dispatch_to_refresh_its_url() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://aliyun/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Paused;
+        task.aria_gid = Some("0123456789abcdef".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+
+        let (queued, _) = dispatch
+            .prepare_expected_with_retry_intent(&store, &task, false, true)
+            .await
+            .unwrap();
+
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert!(queued.aria_gid.is_none());
+        assert!(
+            dispatch
+                .retry_submission_options(task.id, UriSubmissionOptions::default())
+                .continue_download
+        );
     }
 }

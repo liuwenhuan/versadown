@@ -553,9 +553,7 @@ pub async fn resume_reauthorized_provider_tasks(
         {
             continue;
         }
-        let resumed = if waiting_for_startup_authorization
-            && crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
-        {
+        let resumed = if waiting_for_startup_authorization {
             crate::commands::resubmit_task(
                 app.clone(),
                 &state,
@@ -567,15 +565,6 @@ pub async fn resume_reauthorized_provider_tasks(
             )
             .await
             .map_err(QuarkError::Transport)
-        } else if waiting_for_startup_authorization && task.aria_gid.is_some() {
-            state
-                .runtime
-                .service()
-                .await
-                .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?
-                .control(task.id, crate::DownloadAction::Resume)
-                .await
-                .map_err(|_| QuarkError::Transport("恢复网盘下载任务失败".into()))
         } else {
             crate::commands::resubmit_task(app.clone(), &state, task, Default::default())
                 .await
