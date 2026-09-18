@@ -456,8 +456,10 @@ export function App() {
   }
 
   function dismissConfirmation() {
+    const prepared = confirmation;
     confirmationGeneration.current += 1;
     setConfirmation(null);
+    if (prepared && !prepared.taskId.startsWith('cloud-share://')) void discardPreparedDownload(prepared.taskId).catch(() => undefined);
   }
 
   function showHeaderConfirmation(next: ParseResult) {
@@ -466,8 +468,10 @@ export function App() {
   }
 
   function dismissHeaderConfirmation() {
+    const prepared = headerConfirmation;
     headerConfirmationGeneration.current += 1;
     setHeaderConfirmation(null);
+    if (prepared && !prepared.taskId.startsWith('cloud-share://')) void discardPreparedDownload(prepared.taskId).catch(() => undefined);
   }
 
   function dismissDuplicate(taskId: string) {
@@ -1106,23 +1110,6 @@ export function App() {
     addNewDownloadTask(confirmed); setSelectedTaskId(confirmed.id); setActiveConfirmation(null);
   }
 
-  function reopenTaskConfirmation(task: QueueTask) {
-    if (task.status !== 'awaiting_user' || (task.kind !== 'magnet' && task.kind !== 'torrent')) return;
-    showConfirmation({
-      taskId: task.id,
-      requiresConfirmation: true,
-      resources: (task.files ?? []).map((file) => ({
-        id: String(file.index),
-        index: file.index,
-        name: file.path,
-        size: `${file.completed_length} B / ${file.length} B`,
-        selected: file.selected,
-      })),
-      processing: ['文件选择确认后调用本地 aria2 下载'],
-      isBitTorrent: true,
-    });
-  }
-
   async function taskCommand(id: string, command: TaskCommand) {
     const task = findQueueTask(tasks, id);
     if (!task) return;
@@ -1655,7 +1642,7 @@ export function App() {
                   orderedTaskIds,
                 ),
               },
-            }))} onFileSelection={selectTaskFile} onFileCancel={cancelTaskFile} onConfirm={reopenTaskConfirmation} />
+            }))} onFileSelection={selectTaskFile} onFileCancel={cancelTaskFile} />
           </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>

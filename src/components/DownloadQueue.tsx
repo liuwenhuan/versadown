@@ -16,7 +16,6 @@ interface DownloadQueueProps {
   onReorder?(orderedTaskIds: readonly string[]): void;
   onFileSelection?(taskId: string, fileIndex: number, selected: boolean): void;
   onFileCancel?(taskId: string, fileIndex: number): void;
-  onConfirm?(task: QueueTask): void;
 }
 
 export type BatchTaskCommand = 'resume' | 'pause' | 'delete' | 'copy_link' | 'move_to_private' | 'move_to_normal';
@@ -479,7 +478,7 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
   })}</>;
 }
 
-export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedTaskIds: controlledSelectedTaskIds, onSelect, onSelectionChange, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel, onConfirm }: DownloadQueueProps) {
+export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedTaskIds: controlledSelectedTaskIds, onSelect, onSelectionChange, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel }: DownloadQueueProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [localSelectedTaskIds, setLocalSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
   const selectedTaskIds = controlledSelectedTaskIds ?? localSelectedTaskIds;
@@ -754,7 +753,6 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasPlayableMedia ? `播放 ${taskName}` : completedFileType ? `${associatedFileLabels[completedFileType]} ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasPlayableMedia ? '播放视频或音频' : completedFileType ? '使用系统默认应用打开' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasPlayableMedia ? 'play_videos' : completedFileType ? 'open_file' : 'open_directory'); }}><ActionIcon action={completedHasPlayableMedia ? 'play' : completedFileType ?? 'folder'} /></button>}
-              {task.status === 'awaiting_user' && (task.kind === 'magnet' || task.kind === 'torrent') && onConfirm && <button aria-label={`确认下载 ${taskName}`} title="确认下载内容" onClick={(event) => { event.stopPropagation(); onConfirm(task); }}>确认</button>}
               {task.status === 'queued'
                 ? <button className="queued-action" aria-label={`${taskName} 排队中`} aria-haspopup="menu" title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}>排队中</button>
                 : primaryAction && <button className={primaryAction === 'reauthorize' ? 'reauthorize-action' : undefined} aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} />{primaryAction === 'reauthorize' && <span>重新授权</span>}</button>}

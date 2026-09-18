@@ -1839,24 +1839,17 @@ it('replaces a virtual failed directory leaf from its retry root without adding 
   expect(screen.getByText('unavailable.mkv')).toBeVisible();
 });
 
-it('reopens awaiting magnet file confirmation and confirms only through the dialog', async () => {
-  const user = userEvent.setup();
+it('does not expose the obsolete queue confirmation shortcut for an awaiting magnet', async () => {
   const awaitingTask: QueueTask = {
     id: 'magnet-awaiting', name: 'collection', kind: 'magnet', status: 'awaiting_user', progress: 0,
     files: [{ index: 1, path: 'episode.mkv', length: 1024, completed_length: 0, selected: true }]
   };
   state.list.mockResolvedValueOnce([awaitingTask]);
-  state.confirm.mockResolvedValueOnce({ ...awaitingTask, status: 'queued' });
   render(<App />);
-  await screen.findByRole('button', { name: '确认下载 collection' });
-  await user.click(screen.getByRole('button', { name: '确认下载 collection' }));
 
-  expect(screen.getByRole('dialog', { name: '确认下载内容' })).toBeVisible();
-  expect(screen.getByText('episode.mkv')).toBeVisible();
-  expect(state.selectFiles).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('button', { name: /立即下载 1/ }));
-
-  expect(state.confirm).toHaveBeenCalledWith('magnet-awaiting', ['1'], undefined, false);
+  await screen.findByText('collection');
+  expect(screen.queryByRole('button', { name: '确认下载 collection' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: '确认下载内容' })).not.toBeInTheDocument();
   expect(state.selectFiles).not.toHaveBeenCalled();
 });
 
@@ -1896,6 +1889,22 @@ it('polls a pending magnet confirmation when a metadata event is missed', async 
 
   await waitFor(() => expect(screen.getByText('episode.mkv')).toBeVisible(), { timeout: 1200 });
   expect(screen.queryByText('正在获取文件信息…')).not.toBeInTheDocument();
+});
+
+it('discards a closed magnet confirmation instead of leaving a queue recovery action', async () => {
+  const user = userEvent.setup();
+  state.list.mockResolvedValueOnce([]);
+  state.parse.mockResolvedValueOnce({
+    confirmation: { taskId: 'magnet-dismissed', requiresConfirmation: true, resources: [], processing: [], isBitTorrent: true }
+  });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'magnet:?xt=urn:btih:dismissed' }); });
+
+  await user.click(screen.getByRole('button', { name: '关闭确认窗口' }));
+
+  await waitFor(() => expect(state.discardPrepared).toHaveBeenCalledWith('magnet-dismissed'));
+  expect(screen.queryByRole('dialog', { name: '确认下载内容' })).not.toBeInTheDocument();
 });
 
 it('preserves a user deselection when later magnet metadata refreshes the file', async () => {
