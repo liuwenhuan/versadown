@@ -12,7 +12,7 @@ impl CloudDownloadRefreshBudget {
         // or its previous validator may no longer match after it is re-signed.
         // Re-resolve every valid personal-cloud source once, but do not retry
         // unrelated network, disk, or permission errors.
-        if !matches!(error, Some("8" | "22")) {
+        if !matches!(error, Some("8" | "22" | "24")) {
             return false;
         }
         if super::commands::parse_stable_cloud_source(source).is_err() {
@@ -98,6 +98,11 @@ mod tests {
         assert!(
             !budget.claim("cloud://baidu/resume-unsupported", Some("8")),
             "a non-resumable response still gets only one fresh submission"
+        );
+        assert!(budget.claim("cloud://baidu/http-forbidden", Some("24")));
+        assert!(
+            !budget.claim("cloud://baidu/http-forbidden", Some("24")),
+            "an HTTP rejection still gets only one fresh submission"
         );
         for provider in [
             "quark", "pikpak", "baidu", "tianyi", "aliyun", "xunlei", "uc",

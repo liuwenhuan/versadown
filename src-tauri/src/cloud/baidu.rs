@@ -1674,9 +1674,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 return Ok(file.id);
             }
         }
-        Err(QuarkError::Provider(
-            "转存文件已移动或不存在，无法继续下载；请重新选择分享文件".into(),
-        ))
+        Err(QuarkError::SourceFileMissing)
     }
 
     fn file_manager_operation(
@@ -1858,9 +1856,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .into_iter()
             .find(|current| current.fsid == file.fsid)
             .ok_or_else(|| {
-                QuarkError::Provider(
-                    "原文件已移动、删除或身份不一致，请刷新网盘后重新选择下载".into(),
-                )
+                QuarkError::SourceFileMissing
             })?;
         let file = &current;
         let timestamp = std::time::SystemTime::now()

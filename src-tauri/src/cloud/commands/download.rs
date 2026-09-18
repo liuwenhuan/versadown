@@ -834,6 +834,10 @@ pub(crate) fn directory_download_failure_fields(
             "pikpak_operation_verification_required",
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试",
         ),
+        QuarkError::SourceFileMissing => (
+            "source_file_missing",
+            "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载",
+        ),
         QuarkError::Transport(_) => ("network_error", "网络或下载引擎错误"),
         QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
         QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),

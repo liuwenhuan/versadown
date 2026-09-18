@@ -1,9 +1,7 @@
 # aria2-next sidecar
 
-`aria2-next-x86_64-pc-windows-msvc.exe` is built from
-[`AnInsomniacy/aria2-next`](https://github.com/AnInsomniacy/aria2-next) commit
-`2521bb0cebbe2feedd096879c54a73efd818fa43`.
+`aria2-next-x86_64-pc-windows-msvc.exe` is the official Windows x86_64 asset
+from [`AnInsomniacy/aria2-next` v2.8.0](https://github.com/AnInsomniacy/aria2-next/releases/tag/v2.8.0).
 
-The bundled build enables the native HLS/DASH implementation introduced after
-the 2.7.5 release. Its SHA-256 digest is
-`AD5159A68B3132D83444D4BB8285D750F5C3579FE581FC14211426B30BD39D35`.
+The bundled build includes native HLS/DASH support. Its SHA-256 digest is
+`74183154FA993A96FFD8C21B971B4783E05F0B2EC189E134A3B6F92292865758`.

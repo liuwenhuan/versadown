@@ -32,13 +32,26 @@ npm install
 npm run test:run
 npm run build
 
-# 桌面开发模式 / Windows 安装包
+# 桌面开发模式
 npm run tauri:dev
-npm run tauri:build
 
-# 验证包已产出
+# 快速构建：适合日常本机验证；独立目标目录，不覆盖正式发布文件
+pnpm run build:windows:quick
+
+# 正式发布：生产前端构建 + Release + Thin LTO + 符号剥离
+pnpm run build:windows:release
+
+# 正式安装包（MSI / NSIS）
+pnpm run build:windows:installer
+
+# 验证正式发布包已产出
 powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
 ```
+
+快速构建输出到 `artifacts/quick/`，用于本机验证；正式主程序输出到
+`artifacts/alldownloader.exe`，安装包位于
+`.tools/release-target/release/bundle/`。`build:windows` 继续等同于
+`build:windows:release`，以保持旧自动化命令兼容。
 
 默认下载目录为当前 Windows 用户的 `Downloads`。任务数据库位于 Windows 应用数据目录中的 `AllDownloader/tasks.sqlite`；不要手动复制其中可能关联授权会话的信息。
 

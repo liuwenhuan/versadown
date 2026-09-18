@@ -489,6 +489,10 @@ fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secret
             QuarkError::Transport(crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.into()),
             crate::xunlei_native::PLUGIN_UPDATE_MESSAGE,
         ),
+        (
+            QuarkError::SourceFileMissing,
+            "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载",
+        ),
     ];
     for (error, expected) in typed {
         assert_eq!(super::share_resolution_failure_message(&error), expected);
@@ -837,7 +841,7 @@ fn quark_download_persists_rotated_cookie_for_the_next_file() {
 
     assert_eq!(
         cookie,
-        Some("sid=web-session; __puus=fresh-download-session")
+        Some("__puus=fresh-download-session; sid=web-session")
     );
     assert_eq!(
         credentials.load("quark").unwrap().as_deref(),
@@ -867,7 +871,7 @@ fn quark_download_passes_the_response_session_cookie_to_aria2() {
 
     assert_eq!(
         cookie.map(String::as_str),
-        Some("sid=web-session; __puus=fresh-download-session")
+        Some("__puus=fresh-download-session; sid=web-session")
     );
 }
 
@@ -893,10 +897,13 @@ fn resolved_quark_download_keeps_fresh_cookie_when_building_aria2_options() {
         vec![
             (
                 "Cookie".into(),
-                "sid=web-session; __puus=fresh-download-session".into()
+                "__puus=fresh-download-session; sid=web-session".into()
             ),
-            ("Referer".into(), "https://pan.quark.cn/".into()),
             ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
+            ("Referer".into(), "https://pan.quark.cn/".into()),
+            ("Origin".into(), "https://pan.quark.cn".into()),
+            ("Accept".into(), "application/json, text/plain, */*".into()),
+            ("Accept-Language".into(), "zh-CN,zh;q=0.9".into()),
         ]
     );
 }

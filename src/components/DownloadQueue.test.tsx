@@ -697,13 +697,20 @@ it('keeps the live magnet metadata stage in the transfer-metrics row', () => {
   expect(metadata.closest('.transfer-metrics')).not.toBeNull();
 });
 
-it('labels ed2k ftp hls and dash tasks without exposing raw protocol links', () => {
+it('labels protocol and cloud-provider tasks without exposing raw protocol links', () => {
   render(<DownloadQueue
     tasks={[
       { id: 'ed2k-1', name: 'Example.zip', source: 'ed2k://|file|Example.zip|42|0123456789ABCDEF0123456789ABCDEF|/', kind: 'ed2k', status: 'downloading', progress: 1 },
       { id: 'ftp-1', name: 'file.iso', source: 'ftp://demo:secret@example.test/file.iso', kind: 'ftp', status: 'downloading', progress: 2 },
       { id: 'hls-1', name: 'master.m3u8', source: 'https://media.test/master.m3u8', kind: 'hls', status: 'downloading', progress: 3 },
       { id: 'dash-1', name: 'manifest.mpd', source: 'https://media.test/manifest.mpd', kind: 'dash', status: 'downloading', progress: 4 },
+      { id: 'quark-1', name: 'quark.zip', source: 'cloud://quark/file-1', kind: 'cloud', status: 'downloading', progress: 5 },
+      { id: 'pikpak-1', name: 'pikpak.zip', source: 'cloud-share://pikpak/share/file-1', kind: 'cloud', status: 'downloading', progress: 6 },
+      { id: 'baidu-1', name: 'baidu-folder', source: 'cloud-directory://baidu/group-1', kind: 'folder', status: 'downloading', progress: 7 },
+      { id: 'tianyi-1', name: 'tianyi.zip', source: 'cloud://tianyi/file-1', kind: 'cloud', status: 'downloading', progress: 8 },
+      { id: 'aliyun-1', name: 'aliyun.zip', source: 'cloud://aliyun/file-1', kind: 'cloud', status: 'downloading', progress: 9 },
+      { id: 'xunlei-1', name: 'xunlei.zip', source: 'cloud://xunlei/file-1', kind: 'cloud', status: 'downloading', progress: 10 },
+      { id: 'uc-1', name: 'uc.zip', source: 'cloud-directory-item://uc/group-1/file-1', kind: 'cloud', status: 'downloading', progress: 11 },
     ]}
     selectedTaskId={null}
     onSelect={() => {}}
@@ -714,7 +721,15 @@ it('labels ed2k ftp hls and dash tasks without exposing raw protocol links', () 
   expect(screen.getByText('FTP 下载')).toBeVisible();
   expect(screen.getByText('HLS 流媒体下载')).toBeVisible();
   expect(screen.getByText('MPEG-DASH 流媒体下载')).toBeVisible();
+  expect(screen.getByText('夸克网盘任务')).toBeVisible();
+  expect(screen.getByText('PikPak网盘任务')).toBeVisible();
+  expect(screen.getByText('百度网盘任务')).toBeVisible();
+  expect(screen.getByText('天翼云盘任务')).toBeVisible();
+  expect(screen.getByText('阿里云盘任务')).toBeVisible();
+  expect(screen.getByText('迅雷网盘任务')).toBeVisible();
+  expect(screen.getByText('UC网盘任务')).toBeVisible();
   expect(screen.queryByText(/demo:secret/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/cloud-directory:|cloud-share:/)).not.toBeInTheDocument();
 });
 
 it('shows transferred bytes, live speed and ETA without exposing peer-count noise', () => {

@@ -81,6 +81,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
         CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
         CloudError::AuthorizationPending => "authorization-pending",
+        CloudError::SourceFileMissing => "source-file-missing",
         CloudError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         CloudError::InvalidResponse => "invalid-response",
         CloudError::Storage => "storage",

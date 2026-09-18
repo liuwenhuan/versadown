@@ -50,6 +50,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::WebAuthorizationRequired => "web-authorization-required",
         CloudError::CaptchaRequired => "captcha-required",
         CloudError::AuthorizationPending => "authorization-pending",
+        CloudError::SourceFileMissing => "source-file-missing",
         CloudError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         CloudError::InvalidResponse => "invalid-response",
         CloudError::Storage => "storage",

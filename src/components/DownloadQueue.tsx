@@ -198,6 +198,22 @@ function childFileSize(task: QueueTask): string {
   return task.size || '—';
 }
 
+const cloudProviderTaskLabels: Record<string, string> = {
+  quark: '夸克网盘',
+  pikpak: 'PikPak网盘',
+  baidu: '百度网盘',
+  tianyi: '天翼云盘',
+  aliyun: '阿里云盘',
+  xunlei: '迅雷网盘',
+  uc: 'UC网盘',
+};
+
+function cloudTaskSubtitle(source: string | undefined): string | undefined {
+  const provider = source?.match(/^cloud(?:-share|-directory|-directory-item)?:\/\/([^/]+)/i)?.[1]?.toLowerCase();
+  const label = provider && cloudProviderTaskLabels[provider];
+  return label ? `${label}任务` : undefined;
+}
+
 function taskSubtitle(task: QueueTask): string | undefined {
   if (task.error) return task.error;
   if (task.statusMessage) return task.statusMessage;
@@ -208,7 +224,7 @@ function taskSubtitle(task: QueueTask): string | undefined {
   if (task.kind === 'ftp') return 'FTP 下载';
   if (task.kind === 'hls') return 'HLS 流媒体下载';
   if (task.kind === 'dash') return 'MPEG-DASH 流媒体下载';
-  return undefined;
+  return cloudTaskSubtitle(task.source);
 }
 
 function isFetchingTaskMetadata(task: QueueTask, subtitle: string | undefined): boolean {

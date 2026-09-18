@@ -350,7 +350,7 @@ impl LiveAria2Fixture {
             aria2,
         };
         let (process, client) = Aria2Process::start(config.clone()).await.unwrap();
-        assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
+        assert_eq!(client.get_version().await.unwrap().version, "2.8.0");
         Self {
             process: Some(process),
             client,
@@ -618,7 +618,7 @@ async fn bundled_aria2_downloads_pauses_resumes_and_stops() {
         "unpause must exercise an actual HTTP Range continuation"
     );
     fixture.save_and_shutdown().await;
-    println!("Aria2 Next 2.7.5: real progress, pause, Range resume, SHA-256, session save and owned-child shutdown passed");
+    println!("Aria2 Next 2.8.0: real progress, pause, Range resume, SHA-256, session save and owned-child shutdown passed");
 }
 
 #[tokio::test]
@@ -722,5 +722,5 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
     .expect("cancelled GID remained in the engine queue");
     assert_eq!(std::fs::read(path).unwrap(), partial);
     fixture.terminate_for_cleanup();
-    println!("Aria2 Next 2.7.5: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial files passed");
+    println!("Aria2 Next 2.8.0: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial files passed");
 }

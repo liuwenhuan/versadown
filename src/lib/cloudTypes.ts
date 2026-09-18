@@ -89,7 +89,7 @@ export type CloudCredentials = { username: string } & (
   | { password?: never; useSavedPassword: true }
 );
 export type PasswordLoginRequest = CloudCredentials & { provider: CloudProvider };
-export interface CloudError { code: 'not_authorized' | 'credentials_expired' | 'web_auth_required' | 'authorization_pending' | 'credential_storage_error' | 'invalid_response' | 'network_error' | 'provider_error' | 'invalid_input' | 'provider_unsupported' | 'pikpak_regional_membership_restricted' | 'pikpak_operation_verification_required' | 'session_renewed_retry_operation'; message: string; }
+export interface CloudError { code: 'not_authorized' | 'credentials_expired' | 'web_auth_required' | 'authorization_pending' | 'credential_storage_error' | 'invalid_response' | 'network_error' | 'provider_error' | 'invalid_input' | 'provider_unsupported' | 'pikpak_regional_membership_restricted' | 'pikpak_operation_verification_required' | 'session_renewed_retry_operation' | 'source_file_missing'; message: string; }
 export interface CloudDirectoryDownloadFailure { relativePath: string; code: string; message: string; }
 export interface CloudDirectoryDownloadOutcome {
   task: TaskActionResult;

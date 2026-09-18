@@ -509,6 +509,7 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
+        QuarkError::SourceFileMissing => "source_file_missing",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",

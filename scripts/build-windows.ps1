@@ -1,14 +1,37 @@
+[CmdletBinding()]
 param(
-    [switch]$Installer
+    [ValidateSet('Quick', 'Release')]
+    [string]$Mode = 'Release',
+
+    # Packaging is intentionally a release-only operation. Quick builds are
+    # runnable local candidates, never installer artifacts.
+    [switch]$Installer,
+
+    # Lets CI and contributors verify the selected layout without invoking a
+    # frontend, Rust, or WiX build.
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
 
+if ($Installer -and $Mode -ne 'Release') {
+    throw 'Installer packaging is only available for the Release build mode.'
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'build-tools.ps1')
 
-$releaseTargetDir = Join-Path $projectRoot '.tools\release-target'
-$publishedDir = Join-Path $projectRoot 'artifacts'
+$profile = if ($Mode -eq 'Quick') { 'quick' } else { 'release' }
+$targetRoot = if ($Mode -eq 'Quick') {
+    Join-Path $projectRoot '.tools\quick-target'
+} else {
+    Join-Path $projectRoot '.tools\release-target'
+}
+$publishedDir = if ($Mode -eq 'Quick') {
+    Join-Path $projectRoot 'artifacts\quick'
+} else {
+    Join-Path $projectRoot 'artifacts'
+}
 $publishedBinary = Join-Path $publishedDir 'alldownloader.exe'
 $publishedSidecarDir = Join-Path $publishedDir 'binaries'
 $sidecarName = 'aria2-next-x86_64-pc-windows-msvc.exe'
@@ -18,87 +41,239 @@ $xunleiHelperName = 'xunlei-native-helper.cjs'
 $xunleiHelperSource = Join-Path $projectRoot "src-tauri\binaries\$xunleiHelperName"
 $publishedXunleiHelper = Join-Path $publishedSidecarDir $xunleiHelperName
 $legacyPublishedSidecar = Join-Path $publishedSidecarDir 'aria2c-x86_64-pc-windows-msvc.exe'
-$buildTools = Get-AllDownloaderBuildTools -ProjectRoot $projectRoot
-$pnpmCommand = $buildTools.Pnpm
-$cargoCommand = $buildTools.Cargo
-$env:Path = "$(Split-Path -Parent $pnpmCommand);$(Split-Path -Parent $cargoCommand);$env:Path"
-$env:CARGO_TARGET_DIR = $releaseTargetDir
-$env:CARGO_INCREMENTAL = '1'
-
 $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
-if (-not (Test-Path -LiteralPath $vcvars)) {
-    throw "Visual Studio C++ build environment was not found: $vcvars"
+
+function Get-FileSha256 {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($hasher.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') })
+    } finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
 }
 
-Set-Location $projectRoot
-if ($Installer) {
-    $command = '"{0}" >nul && "{1}" exec tauri build --runner "{2}"' -f $vcvars, $pnpmCommand, $cargoCommand
-} else {
-    # Keep the distributable binary out of the shared Cargo target. Other
-    # development builds may omit `custom-protocol` and would otherwise
-    # overwrite the release executable with one that points at the Vite URL.
-    $frontendInputs = @(
-        (Join-Path $projectRoot 'index.html'),
-        (Join-Path $projectRoot 'package.json'),
-        (Join-Path $projectRoot 'pnpm-lock.yaml')
+function Get-FrontendSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
     )
-    $frontendInputs += Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -File -Recurse
-    $frontendInputs += Get-ChildItem -LiteralPath $projectRoot -File -Filter 'tsconfig*.json'
-    $frontendInputs += Get-ChildItem -LiteralPath $projectRoot -File -Filter 'vite.config.*'
-    $publicDir = Join-Path $projectRoot 'public'
+
+    $frontendInputs = @(
+        (Join-Path $ProjectRoot 'index.html'),
+        (Join-Path $ProjectRoot 'package.json'),
+        (Join-Path $ProjectRoot 'pnpm-lock.yaml')
+    )
+    $frontendInputs += Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'src') -File -Recurse
+    $frontendInputs += Get-ChildItem -LiteralPath $ProjectRoot -File -Filter 'tsconfig*.json'
+    $frontendInputs += Get-ChildItem -LiteralPath $ProjectRoot -File -Filter 'vite.config.*'
+    $publicDir = Join-Path $ProjectRoot 'public'
     if (Test-Path -LiteralPath $publicDir) {
         $frontendInputs += Get-ChildItem -LiteralPath $publicDir -File -Recurse
     }
 
     $signatureLines = foreach ($input in $frontendInputs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object { $_.FullName }) {
         $path = if ($input -is [System.IO.FileInfo]) { $input.FullName } else { [string]$input }
-        $relativePath = $path.Substring($projectRoot.Length).TrimStart([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar))
-        '{0}:{1}' -f $relativePath, (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        $relativePath = $path.Substring($ProjectRoot.Length).TrimStart([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar))
+        '{0}:{1}' -f $relativePath, (Get-FileSha256 -Path $path)
     }
     $signatureBytes = [System.Text.Encoding]::UTF8.GetBytes(($signatureLines -join "`n"))
     $signatureHasher = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $frontendSignature = -join ($signatureHasher.ComputeHash($signatureBytes) | ForEach-Object { $_.ToString('x2') })
+        return -join ($signatureHasher.ComputeHash($signatureBytes) | ForEach-Object { $_.ToString('x2') })
     } finally {
         $signatureHasher.Dispose()
     }
-    $cacheDir = Join-Path $projectRoot '.tools\build-cache'
-    $signatureFile = Join-Path $cacheDir 'frontend.sha256'
-    $distDir = Join-Path $projectRoot 'dist'
-    $previousSignature = if (Test-Path -LiteralPath $signatureFile) { (Get-Content -LiteralPath $signatureFile -Raw).Trim() } else { '' }
+}
 
-    if ($frontendSignature -ne $previousSignature -or -not (Test-Path -LiteralPath $distDir)) {
-        & $pnpmCommand run build
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
-        Set-Content -LiteralPath $signatureFile -Value $frontendSignature -NoNewline
+function Save-FrontendSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot,
+
+        [Parameter(Mandatory)]
+        [string]$Signature
+    )
+
+    $cacheDir = Join-Path $ProjectRoot '.tools\build-cache'
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    Set-Content -LiteralPath (Join-Path $cacheDir 'frontend.sha256') -Value $Signature -NoNewline
+}
+
+function Invoke-FrontendBuild {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$PnpmCommand,
+
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    & $PnpmCommand run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Frontend production build failed with exit code $LASTEXITCODE."
+    }
+    $signature = Get-FrontendSignature -ProjectRoot $ProjectRoot
+    Save-FrontendSignature -ProjectRoot $ProjectRoot -Signature $signature
+}
+
+function Ensure-FrontendBuild {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$PnpmCommand,
+
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot,
+
+        [switch]$Force
+    )
+
+    $currentSignature = Get-FrontendSignature -ProjectRoot $ProjectRoot
+    $signatureFile = Join-Path $ProjectRoot '.tools\build-cache\frontend.sha256'
+    $previousSignature = if (Test-Path -LiteralPath $signatureFile) { (Get-Content -LiteralPath $signatureFile -Raw).Trim() } else { '' }
+    $distDir = Join-Path $ProjectRoot 'dist'
+
+    if ($Force -or $currentSignature -ne $previousSignature -or -not (Test-Path -LiteralPath $distDir)) {
+        if ($Force) {
+            Write-Host 'Release build: rebuilding production frontend.'
+        } else {
+            Write-Host 'Frontend inputs changed: rebuilding production frontend.'
+        }
+        Invoke-FrontendBuild -PnpmCommand $PnpmCommand -ProjectRoot $ProjectRoot
     } else {
-        Write-Host 'Frontend unchanged; reusing dist.'
+        Write-Host 'Frontend unchanged; reusing dist for quick build.'
+    }
+}
+
+function Invoke-MsvcBuild {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VcvVars,
+
+        [Parameter(Mandatory)]
+        [string]$CargoCommand,
+
+        [Parameter(Mandatory)]
+        [string]$PnpmCommand,
+
+        [Parameter(Mandatory)]
+        [string]$TargetRoot,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('quick', 'release')]
+        [string]$Profile,
+
+        [switch]$Installer
+    )
+
+    $incremental = if ($Profile -eq 'quick') { '1' } else { '0' }
+    if ($Installer) {
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && call "{3}" exec tauri build --runner "{4}"' -f $VcvVars, $TargetRoot, $incremental, $PnpmCommand, $CargoCommand
+    } elseif ($Profile -eq 'quick') {
+        $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && "{3}" build --manifest-path "{4}" --profile quick --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $CargoCommand, $manifest
+    } else {
+        $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && "{3}" build --manifest-path "{4}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $CargoCommand, $manifest
     }
 
-    $command = '"{0}" >nul && "{1}" build --manifest-path "{2}" --release --features custom-protocol' -f $vcvars, $cargoCommand, (Join-Path $projectRoot 'src-tauri\Cargo.toml')
+    & cmd.exe /d /s /c $command
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows $Profile build failed with exit code $LASTEXITCODE."
+    }
 }
-& cmd.exe /d /s /c $command
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$builtBinary = Join-Path $releaseTargetDir 'release\alldownloader.exe'
-if (-not (Test-Path -LiteralPath $builtBinary)) {
-    throw "Release binary was not produced: $builtBinary"
+function Publish-BuildOutput {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BuiltBinary,
+
+        [Parameter(Mandatory)]
+        [string]$PublishedBinary,
+
+        [Parameter(Mandatory)]
+        [string]$SidecarSource,
+
+        [Parameter(Mandatory)]
+        [string]$PublishedSidecar,
+
+        [Parameter(Mandatory)]
+        [string]$XunleiHelperSource,
+
+        [Parameter(Mandatory)]
+        [string]$PublishedXunleiHelper,
+
+        [Parameter(Mandatory)]
+        [string]$LegacyPublishedSidecar
+    )
+
+    foreach ($input in @($BuiltBinary, $SidecarSource, $XunleiHelperSource)) {
+        if (-not (Test-Path -LiteralPath $input -PathType Leaf)) {
+            throw "Publish input was not found: $input"
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PublishedBinary) | Out-Null
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PublishedSidecar) | Out-Null
+    Copy-Item -LiteralPath $BuiltBinary -Destination $PublishedBinary -Force
+    Copy-Item -LiteralPath $SidecarSource -Destination $PublishedSidecar -Force
+    Copy-Item -LiteralPath $XunleiHelperSource -Destination $PublishedXunleiHelper -Force
+    if (Test-Path -LiteralPath $LegacyPublishedSidecar -PathType Leaf) {
+        Remove-Item -LiteralPath $LegacyPublishedSidecar -Force
+    }
+
+    Write-Host "Published ($Mode): $PublishedBinary"
+    Write-Host "Published ($Mode): $PublishedSidecar"
+    Write-Host "Published ($Mode): $PublishedXunleiHelper"
 }
-New-Item -ItemType Directory -Force -Path $publishedDir | Out-Null
-Copy-Item -LiteralPath $builtBinary -Destination $publishedBinary -Force
-if (-not (Test-Path -LiteralPath $sidecarSource -PathType Leaf)) {
-    throw "Aria2 Next sidecar was not found: $sidecarSource"
+
+if ($DryRun) {
+    $buildKind = if ($Installer) { 'release installer package' } else { "$profile executable" }
+    Write-Host "Dry run: $buildKind"
+    Write-Host "Cargo target: $targetRoot"
+    Write-Host "Published executable: $publishedBinary"
+    if ($Mode -eq 'Quick') {
+        Write-Host 'Frontend: rebuild only when its source signature changes.'
+    } elseif ($Installer) {
+        Write-Host 'Frontend: Tauri executes the production beforeBuildCommand.'
+    } else {
+        Write-Host 'Frontend: always run the production build.'
+    }
+    exit 0
 }
-New-Item -ItemType Directory -Force -Path $publishedSidecarDir | Out-Null
-Copy-Item -LiteralPath $sidecarSource -Destination $publishedSidecar -Force
-if (-not (Test-Path -LiteralPath $xunleiHelperSource -PathType Leaf)) {
-    throw "Xunlei native helper was not found: $xunleiHelperSource"
+
+$buildTools = Get-AllDownloaderBuildTools -ProjectRoot $projectRoot
+$pnpmCommand = $buildTools.Pnpm
+$cargoCommand = $buildTools.Cargo
+$env:Path = "$(Split-Path -Parent $pnpmCommand);$(Split-Path -Parent $cargoCommand);$env:Path"
+
+if (-not (Test-Path -LiteralPath $vcvars)) {
+    throw "Visual Studio C++ build environment was not found: $vcvars"
 }
-Copy-Item -LiteralPath $xunleiHelperSource -Destination $publishedXunleiHelper -Force
-if (Test-Path -LiteralPath $legacyPublishedSidecar -PathType Leaf) {
-    Remove-Item -LiteralPath $legacyPublishedSidecar -Force
+
+Set-Location $projectRoot
+if ($Installer) {
+    # Tauri owns beforeBuildCommand for a package build, so it performs the
+    # frontend production build exactly once.
+    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $cargoCommand -PnpmCommand $pnpmCommand -TargetRoot $targetRoot -Profile $profile -Installer
+    Save-FrontendSignature -ProjectRoot $projectRoot -Signature (Get-FrontendSignature -ProjectRoot $projectRoot)
+} else {
+    Ensure-FrontendBuild -PnpmCommand $pnpmCommand -ProjectRoot $projectRoot -Force:($Mode -eq 'Release')
+    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $cargoCommand -PnpmCommand $pnpmCommand -TargetRoot $targetRoot -Profile $profile
 }
-Write-Host "Published: $publishedBinary"
-Write-Host "Published: $publishedSidecar"
-Write-Host "Published: $publishedXunleiHelper"
+
+$builtBinary = Join-Path $targetRoot "$profile\alldownloader.exe"
+Publish-BuildOutput -BuiltBinary $builtBinary -PublishedBinary $publishedBinary -SidecarSource $sidecarSource -PublishedSidecar $publishedSidecar -XunleiHelperSource $xunleiHelperSource -PublishedXunleiHelper $publishedXunleiHelper -LegacyPublishedSidecar $legacyPublishedSidecar

@@ -1,6 +1,6 @@
 use super::{
     http::response_json,
-    types::{encoded, required},
+    types::{download_source_missing_from_http_404, encoded, required},
     *,
 };
 use serde::{Deserialize, Serialize};
@@ -255,6 +255,24 @@ mod tests {
         assert_eq!(download_body["fids_token"], json!(["file-secret"]));
     }
 
+    #[test]
+    fn quark_personal_download_marks_a_missing_file_response_explicitly() {
+        struct StatusHttp;
+        impl CloudHttpTransport for StatusHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                Ok(CloudHttpResponse {
+                    status: 404,
+                    body: json!({}).to_string(),
+                    set_cookies: vec![],
+                })
+            }
+        }
+
+        assert!(matches!(
+            QuarkClient::new("sid=current".into(), &StatusHttp).download_url("missing-file"),
+            Err(QuarkError::SourceFileMissing)
+        ));
+    }
 
     #[test]
     fn quark_share_download_rejection_falls_back_to_authorized_drive_transfer() {
@@ -1028,6 +1046,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
             Some(json!({"fids":[id]})),
             true,
         )
+        .map_err(download_source_missing_from_http_404)
     }
 
     /// Uploads one regular local file using Quark's authenticated CloudDrive

@@ -35,6 +35,9 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
                 .into()
         }
         QuarkError::AuthorizationPending => "正在等待网页登录，请在授权窗口完成登录".into(),
+        QuarkError::SourceFileMissing => {
+            "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载".into()
+        }
         QuarkError::InvalidResponse => "网盘返回的下载信息无效，请刷新后重试".into(),
         QuarkError::Storage => "安全凭据存储不可用".into(),
         QuarkError::Transport(message)
@@ -65,6 +68,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         }
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
+        QuarkError::SourceFileMissing => "source_file_missing",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",

@@ -1,6 +1,6 @@
 use super::{
     http::response_json,
-    types::{encoded, required},
+    types::{download_source_missing_from_http_404, encoded, required},
     *,
 };
 use base64::Engine as _;
@@ -600,14 +600,11 @@ mod tests {
         );
     }
     #[test]
-    fn pikpak_share_preserves_not_found_and_deleted_failures_for_the_parse_ui() {
-        for (share_status, expected) in [
-            ("NOT_FOUND", "PikPak 分享的文件不存在"),
-            ("DELETED", "PikPak 分享已删除"),
-        ] {
+    fn pikpak_share_marks_not_found_and_deleted_as_missing_sources() {
+        for share_status in ["NOT_FOUND", "DELETED"] {
             assert!(matches!(
                 pikpak_share_status(&json!({"share_status":share_status})),
-                Err(QuarkError::Provider(message)) if message == expected
+                Err(QuarkError::SourceFileMissing)
             ));
         }
     }
@@ -1568,7 +1565,8 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
             "GET",
             format!("{DRIVE}/drive/v1/files/{}?usage=CACHE", encoded(id)),
             None,
-        )?;
+        )
+        .map_err(download_source_missing_from_http_404)?;
         if let Some(url) = cached["web_content_link"]
             .as_str()
             .filter(|url| url.starts_with("https://"))
@@ -1579,7 +1577,8 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
             "GET",
             format!("{DRIVE}/drive/v1/files/{}?usage=FETCH", encoded(id)),
             None,
-        )?;
+        )
+        .map_err(download_source_missing_from_http_404)?;
         let url = fetched["web_content_link"]
             .as_str()
             .filter(|url| url.starts_with("https://"))
@@ -2043,8 +2042,7 @@ fn pikpak_share_status(value: &Value) -> Result<(), QuarkError> {
         Some("PASS_CODE_EMPTY" | "PASS_CODE_ERROR") => Err(QuarkError::InvalidInput(
             "PikPak 分享访问码错误或缺失".into(),
         )),
-        Some("NOT_FOUND") => Err(QuarkError::Provider("PikPak 分享的文件不存在".into())),
-        Some("DELETED") => Err(QuarkError::Provider("PikPak 分享已删除".into())),
+        Some("NOT_FOUND" | "DELETED") => Err(QuarkError::SourceFileMissing),
         Some(_) => Err(QuarkError::Provider("PikPak 分享已失效或无权访问".into())),
         None => Err(QuarkError::InvalidResponse),
     }

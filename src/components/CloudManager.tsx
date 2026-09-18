@@ -78,6 +78,11 @@ type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'co
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
 const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
 const expiredAuthorizationStatus = '授权过期请重新登录';
+// The upload response confirms that the provider accepted the file, but some
+// drives index the file into the directory listing asynchronously. Always use
+// fresh server listings and retry a bounded number of times instead of adding
+// the response optimistically to the visible directory.
+const UPLOAD_DIRECTORY_CONFIRMATION_DELAYS_MS = [0, 250, 750, 1_500] as const;
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'share';
 const MY_SHARES_DIRECTORY_ID = '__all_downloader_my_shares__';
 
@@ -812,10 +817,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         ]
         : next.items;
       const items = rootItems;
-      setDirectory({ ...next, items });
+      const visibleDirectory = { ...next, items };
+      setDirectory(visibleDirectory);
       setBreadcrumbs(nextBreadcrumbs);
       setDirectoryState(items.length ? 'ready' : 'empty');
-      return true;
+      return visibleDirectory;
     } catch (error) {
       if (requiresPikpakOperationVerification(error)) {
         showOperationVerification(error);
@@ -826,13 +832,33 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         const message = `读取目录需要网页验证。${detail ? ` ${detail}` : ''}`;
         queueAuthorizationContinuation('加载目录', async () => { await loadDirectory(account, parentId, nextBreadcrumbs); }, message, Boolean(directory), account.id);
         setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
-        return false;
+        return null;
       }
       setDirectory(null);
       setDirectoryState(isCredentialExpired(error) ? 'expired' : 'error');
       setAuthorizationStatus(errorMessage(error, '无法读取此目录'));
-      return false;
+      return null;
     }
+  }
+
+  async function refreshUploadedDirectory(
+    account: CloudAccount,
+    parentId: string,
+    nextBreadcrumbs: readonly Breadcrumb[],
+    uploaded: readonly CloudFile[]
+  ) {
+    const expectedIds = new Set(uploaded
+      .filter((file) => file.parentId === parentId)
+      .map((file) => file.id));
+    for (const delay of UPLOAD_DIRECTORY_CONFIRMATION_DELAYS_MS) {
+      if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+      const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs);
+      if (!refreshed) return { loaded: false, confirmed: false };
+      if (!expectedIds.size || [...expectedIds].every((id) => refreshed.items.some((file) => file.id === id))) {
+        return { loaded: true, confirmed: true };
+      }
+    }
+    return { loaded: true, confirmed: false };
   }
 
   useEffect(() => {
@@ -1055,8 +1081,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         // The upload result is authoritative even when the follow-up listing fails.
         setUploadResult(report);
         setOperation(report);
-        if (refresh && !await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs)) return;
-        if (result.cancelled) return;
+        const directoryRefresh = refresh
+          ? await refreshUploadedDirectory(activeAccount, currentDirectoryId, breadcrumbs, result.uploaded)
+          : { loaded: true, confirmed: true };
+        if (!directoryRefresh.loaded) return;
+        const finalReport = directoryRefresh.confirmed
+          ? report
+          : { ...report, message: `${report.message}；服务端目录尚未同步，请稍后刷新确认` };
+        if (result.cancelled) {
+          setOperation(finalReport);
+          return;
+        }
         if (result.failures.length > 0) {
           const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
           if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
@@ -1074,10 +1109,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
             setOperation({ kind: 'error', message: `已自动恢复登录；成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项，请重试失败项目` });
             return;
           }
-          setOperation(report);
+          setOperation(finalReport);
           return;
         }
-        setOperation(report);
+        setOperation(finalReport);
         setEditor(null);
         setEditorValue('');
         return;

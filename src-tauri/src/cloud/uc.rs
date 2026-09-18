@@ -688,7 +688,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     /// than stored; callers must create a stable `cloud://uc/<fid>` task source.
     pub fn download(&self, id: &str) -> Result<UcDownload, QuarkError> {
         validate_id(id)?;
-        let response = self.request(
+        let response = self.send(
             "POST",
             "file/download",
             "entry=ft",

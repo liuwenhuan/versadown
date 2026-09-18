@@ -1,6 +1,6 @@
 use super::{
     tianyi_app::{self, TianyiAppSession},
-    types::{encoded, required},
+    types::{download_source_missing_from_http_404, encoded, required},
     CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudFileKind, CloudHttpRequest,
     CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShare, CloudShareOptions,
     CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest, UploadHttpResponse,
@@ -1353,15 +1353,16 @@ impl<'a, T: CloudHttpTransport> TianyiClient<'a, T> {
                 "GET",
                 "/getFileDownloadUrl.action",
                 &[("fileId", id), ("dt", "3"), ("flag", "1")],
-            )?
+            )
         } else {
             self.request(
                 "GET",
                 "/api/open/file/getFileDownloadUrl.action",
                 &format!("fileId={}", encoded(id)),
                 None,
-            )?
-        };
+            )
+        }
+        .map_err(download_source_missing_from_http_404)?;
         let mut url = required(&value, "fileDownloadUrl")?;
         if !url.starts_with("https://") {
             return Err(QuarkError::InvalidResponse);
@@ -1538,6 +1539,12 @@ fn tianyi_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
         return Err(QuarkError::WebAuthorizationRequired);
     }
     if let Some(code) = tianyi_protocol_error_code(&value) {
+        if matches!(
+            code.to_ascii_lowercase().as_str(),
+            "filenotfound" | "filenotexist" | "sharenotfound"
+        ) {
+            return Err(QuarkError::SourceFileMissing);
+        }
         return Err(
             if matches!(code.as_str(), "-1" | "401" | "InvalidSessionKey") {
                 QuarkError::AuthorizationExpired

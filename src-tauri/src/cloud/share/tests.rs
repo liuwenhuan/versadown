@@ -1514,11 +1514,15 @@ fn refresh_budget_ignores_non_share_and_non_http_failures() {
     let budget = CloudShareRefreshBudget::default();
     assert!(!budget.claim("cloud://baidu/file", Some("22")).unwrap());
     let source = fixture("share").source_for("f1");
-    for code in [None, Some("3"), Some("24"), Some("403")] {
+    for code in [None, Some("3"), Some("403")] {
         assert!(!budget.claim(&source, code).unwrap());
     }
     assert!(budget.claim(&source, Some("22")).unwrap());
     assert!(!budget.claim(&source, Some("22")).unwrap());
+
+    let http_forbidden = fixture("http-forbidden").source_for("f1");
+    assert!(budget.claim(&http_forbidden, Some("24")).unwrap());
+    assert!(!budget.claim(&http_forbidden, Some("24")).unwrap());
 
     let resume_unsupported = fixture("share").source_for("f2");
     assert!(budget.claim(&resume_unsupported, Some("8")).unwrap());

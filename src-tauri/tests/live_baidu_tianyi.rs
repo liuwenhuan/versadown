@@ -249,6 +249,7 @@ fn provider_error_kind(error: &QuarkError) -> &'static str {
         }
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak-regional-membership-restricted",
         QuarkError::AuthorizationPending => "authorization-pending",
+        QuarkError::SourceFileMissing => "source-file-missing",
         QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         QuarkError::InvalidResponse => "invalid-response",
         QuarkError::Storage => "storage",

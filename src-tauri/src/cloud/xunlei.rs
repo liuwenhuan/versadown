@@ -7,7 +7,7 @@
 
 use super::{
     http::response_json,
-    types::{encoded, required},
+    types::{download_source_missing_from_http_404, encoded, required},
     *,
 };
 use hmac::{Hmac, Mac};
@@ -165,6 +165,36 @@ mod tests {
             client.download("file-1").unwrap(),
             ("https://cdn.example/test.zip".into(), "test.zip".into())
         );
+    }
+
+    #[test]
+    fn xunlei_download_marks_a_missing_file_response_explicitly() {
+        struct DownloadHttp;
+        impl CloudHttpTransport for DownloadHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                Ok(CloudHttpResponse {
+                    status: 404,
+                    body: r#"{"error":"not_found"}"#.into(),
+                    ..Default::default()
+                })
+            }
+        }
+        let mut session: XunleiSession =
+            serde_json::from_slice(&credentials().load("xunlei").unwrap().unwrap()).unwrap();
+        session.profile.client_version = "1.92.101".into();
+        session.web_security = XunleiWebSecurity {
+            captcha_token: "official-root-ticket".into(),
+            expires_at: now() + 600,
+            action: "GET:/drive/v1/files".into(),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            XunleiClient::new(session, &DownloadHttp)
+                .supervised()
+                .download("missing-file"),
+            Err(QuarkError::SourceFileMissing)
+        ));
     }
 
     #[test]
@@ -2558,7 +2588,8 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 "GET",
                 self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
                 None,
-            )?;
+            )
+            .map_err(download_source_missing_from_http_404)?;
             let file = value.get("data").unwrap_or(&value);
             if file
                 .get("id")

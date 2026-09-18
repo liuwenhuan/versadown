@@ -56,6 +56,22 @@ winreg = "0.55"
 custom-protocol = ["tauri/custom-protocol"]
 report-debug-tool = []
 
+# 日常可运行验证使用的中间配置。它与正式发布目标隔离，保留
+# 增量编译，并以较低优化级别缩短 Rust 与链接阶段的耗时。
+[profile.quick]
+inherits = "dev"
+opt-level = 1
+debug = 0
+incremental = true
+
+# 正式发布产物优先体积和运行时优化。symbols 会移除 Rust 符号；
+# Thin LTO 在体积/编译耗时之间保持适合桌面发布的平衡。
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+incremental = false
+
 [patch.crates-io]
 # Tao 0.36 includes a wider API change. Backport only the Windows DPI fix
 # from tauri-apps/tao#1252 while keeping Tauri's 0.35 dependency contract.

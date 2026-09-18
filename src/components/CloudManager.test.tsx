@@ -2338,6 +2338,28 @@ it.each([
   expect(listCloudDirectory).toHaveBeenCalledTimes(2);
 });
 
+it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as const)('retries the server-backed directory listing until an uploaded %s file is visible', async (provider) => {
+  const user = userEvent.setup();
+  const rootId = cloudCatalog.find((descriptor) => descriptor.provider === provider)!.rootDirectoryId;
+  const uploaded = { id: `${provider}-uploaded`, parentId: rootId, name: '已确认.txt', kind: 'file' as const };
+  const listCloudDirectory = vi.fn()
+    .mockResolvedValueOnce({ id: rootId, items: [] })
+    .mockResolvedValueOnce({ id: rootId, items: [] })
+    .mockResolvedValueOnce({ id: rootId, items: [uploaded] });
+  const client = createCloudFake({
+    listCloudDirectory,
+    uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded: [uploaded], failures: [] })
+  });
+  render(<CloudManager provider={provider} client={client} initialAccount={{ id: `${provider}-1`, displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
+
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传' }));
+  await confirmAllLocalUploads(user);
+
+  expect(await screen.findByText('已确认.txt')).toBeVisible();
+  expect(listCloudDirectory).toHaveBeenCalledTimes(3);
+});
+
 it('refreshes an upload outcome before offering inline reauthorization for expired credentials', async () => {
   const user = userEvent.setup();
   const listCloudDirectory = vi.fn()

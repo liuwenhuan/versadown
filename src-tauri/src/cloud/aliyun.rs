@@ -904,6 +904,9 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
                 }
             }
         }
+        if aliyun_source_file_missing(response) {
+            return Err(QuarkError::SourceFileMissing);
+        }
         let value = response_json(response)?;
         let code = value.get("code").and_then(Value::as_str).unwrap_or("");
         if matches!(
@@ -1481,6 +1484,14 @@ fn pds_resource_api(metadata: &Value) -> Result<String, QuarkError> {
     Ok(format!("https://{domain}.api.aliyunpds.com"))
 }
 
+fn aliyun_source_file_missing(response: &CloudHttpResponse) -> bool {
+    response.status == 404
+        && serde_json::from_str::<Value>(&response.body)
+            .ok()
+            .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))
+            .is_some_and(|code| matches!(code.as_str(), "NotFound.File" | "NotFound.FileId"))
+}
+
 fn aliyun_share_from_value(
     value: &Value,
     fallback_file_ids: Option<&[String]>,
@@ -1795,6 +1806,9 @@ impl AliyunShareAdapter<'_> {
         body: Value,
     ) -> Result<Value, QuarkError> {
         let response = self.personal_raw(session, path, body)?;
+        if aliyun_source_file_missing(&response) {
+            return Err(QuarkError::SourceFileMissing);
+        }
         let value = response_json(&response)?;
         match value.get("code").and_then(Value::as_str).unwrap_or("") {
             "" => Ok(value),
@@ -1833,6 +1847,7 @@ impl AliyunShareAdapter<'_> {
                             QuarkError::Transport(_)
                                 | QuarkError::Provider(_)
                                 | QuarkError::InvalidResponse
+                                | QuarkError::SourceFileMissing
                         ) =>
                 {
                     aliyun_transient_retry_pause(attempt);

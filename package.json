@@ -11,8 +11,10 @@
     "test:launcher": "node scripts/smoke-launcher.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
-    "build:windows:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Installer",
+    "build:windows:quick": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Quick",
+    "build:windows:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Release",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Release",
+    "build:windows:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Release -Installer",
     "tauri:binary": "pnpm run build:windows",
     "tauri:build": "pnpm run build:windows:installer"
   },

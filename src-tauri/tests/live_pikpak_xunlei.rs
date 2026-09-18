@@ -49,6 +49,7 @@ fn error_kind(error: &QuarkError) -> &'static str {
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak-regional-membership-restricted",
         QuarkError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
         QuarkError::AuthorizationPending => "authorization-pending",
+        QuarkError::SourceFileMissing => "source-file-missing",
         QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         QuarkError::InvalidResponse => "invalid-response",
         QuarkError::Storage => "storage",
