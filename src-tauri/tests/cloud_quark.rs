@@ -77,7 +77,7 @@ fn quark_file_download_uses_the_desktop_file_transfer_profile() {
     assert_eq!(query.get("fr"), Some(&"pc".into()));
     assert_eq!(query.get("pr"), Some(&"ucpro".into()));
     assert_eq!(query.get("sys"), Some(&"win32".into()));
-    assert_eq!(query.get("ve"), Some(&"2.5.56".into()));
+    assert_eq!(query.get("ve"), Some(&"3.20.0".into()));
     assert!(query.contains_key("__t"));
     assert_eq!(
         request.headers.get("Accept").unwrap(),

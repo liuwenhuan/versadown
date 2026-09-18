@@ -8,7 +8,9 @@
 //! direct download URLs.
 
 use alldownloader_lib::cloud::{
-    commands::{parse_stable_cloud_source, resolve_download, restore_account},
+    commands::{
+        apply_cloud_download_policy, parse_stable_cloud_source, resolve_download, restore_account,
+    },
     share::{
         inspect_share_with_adapter, preflight_selected_share_download, provider_share_adapter,
         resolve_current_share_download, selected_share_download, selected_share_sources,
@@ -21,7 +23,7 @@ use alldownloader_lib::{
     aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process},
     Aria2Settings, DownloadAction, DownloadService, NewTask, TaskStore, UriSubmissionOptions,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::{
     collections::BTreeSet,
     path::PathBuf,
@@ -328,12 +330,21 @@ async fn wait_for_download(
     over_limit: bool,
 ) -> Result<(String, u64, u64), Box<dyn std::error::Error>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let sample_throughput =
+        std::env::var("ALLDOWNLOADER_LIVE_THROUGHPUT_SAMPLE").as_deref() == Ok("1");
+    let mut throughput_sample = None;
+    let mut max_connections = 0_u32;
+    let mut max_speed = 0_u64;
     loop {
         let task = service.reconcile_task(task_id).await?;
         let gid = task.aria_gid.as_deref().ok_or("aria2 GID missing")?;
         let status = client.tell_status(gid).await?;
         let completed = status.completed_length.parse::<u64>()?;
         let total = status.total_length.parse::<u64>()?;
+        if sample_throughput {
+            max_connections = max_connections.max(status.connections.parse()?);
+            max_speed = max_speed.max(status.download_speed.parse()?);
+        }
         match status.status.as_str() {
             "complete" => return Ok(("complete".into(), completed, total)),
             "error" | "removed" => {
@@ -345,6 +356,30 @@ async fn wait_for_download(
                 ));
             }
             _ if over_limit && (completed > 0 || tokio::time::Instant::now() >= deadline) => {
+                if sample_throughput && completed > 0 {
+                    let (started_at, starting_bytes) = throughput_sample
+                        .get_or_insert_with(|| (tokio::time::Instant::now(), completed));
+                    if started_at.elapsed() < Duration::from_secs(2) {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
+                    let paused = service.control(task_id, DownloadAction::Pause).await?;
+                    let elapsed_millis = started_at.elapsed().as_millis().max(1);
+                    let transferred = paused.completed_length.saturating_sub(*starting_bytes);
+                    let sustained_speed = transferred.saturating_mul(1_000) / elapsed_millis as u64;
+                    println!(
+                        "LIVE_SHARE_THROUGHPUT max_connections={max_connections} max_speed={max_speed} sustained_speed={sustained_speed}"
+                    );
+                    assert!(
+                        sustained_speed > 0,
+                        "share throughput sample did not transfer bytes after it started"
+                    );
+                    return Ok((
+                        "paused-over-20MiB".into(),
+                        paused.completed_length,
+                        paused.total_length.unwrap_or(total),
+                    ));
+                }
                 let paused = service.control(task_id, DownloadAction::Pause).await?;
                 return Ok((
                     "paused-over-20MiB".into(),
@@ -405,7 +440,25 @@ async fn wait_for_first_download_bytes(
     }
 }
 
-fn latest_personal_quark_file_id() -> Result<String, Box<dyn std::error::Error>> {
+const MIN_PERSONAL_QUARK_THROUGHPUT_BYTES: i64 = 8 * 1024 * 1024;
+
+fn personal_quark_probe_connections() -> Result<u8, Box<dyn std::error::Error>> {
+    match std::env::var("ALLDOWNLOADER_LIVE_QUARK_CONNECTIONS") {
+        Ok(value) => {
+            let connections = value.parse::<u8>()?;
+            if !(1..=4).contains(&connections) {
+                return Err("Quark throughput probe connections must be between 1 and 4".into());
+            }
+            Ok(connections)
+        }
+        Err(std::env::VarError::NotPresent) => Ok(4),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("Quark throughput probe connections is not Unicode".into())
+        }
+    }
+}
+
+fn largest_personal_quark_file_id() -> Result<String, Box<dyn std::error::Error>> {
     let app_data = PathBuf::from(std::env::var_os("APPDATA").ok_or("APPDATA missing")?)
         .join("com.alldownloader.desktop");
     let database = app_data.join("tasks.sqlite");
@@ -417,26 +470,30 @@ fn latest_personal_quark_file_id() -> Result<String, Box<dyn std::error::Error>>
         database_uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )?;
-    let source = connection.query_row(
-        "SELECT source FROM tasks WHERE source LIKE 'cloud://quark/%' ORDER BY updated_at DESC LIMIT 1",
-        [],
-        |row| row.get::<_, String>(0),
-    )?;
+    let source = connection
+        .query_row(
+            "SELECT source FROM tasks WHERE source LIKE 'cloud://quark/%' AND total_length >= ?1 ORDER BY total_length DESC LIMIT 1",
+            params![MIN_PERSONAL_QUARK_THROUGHPUT_BYTES],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or("no recorded Quark task is large enough for a throughput sample")?;
     let (provider, file_id) = parse_stable_cloud_source(&source)?;
     if provider != CloudProvider::Quark {
-        return Err("latest personal Quark task resolved to another provider".into());
+        return Err("recorded personal Quark task resolved to another provider".into());
     }
     Ok(file_id)
 }
 
 #[test]
-#[ignore = "requires the current user's authorized Quark session and one existing personal Quark task"]
-fn live_personal_quark_download_resumes_existing_payload_with_aria2_next(
+#[ignore = "requires the current user's authorized Quark session and one recorded personal Quark task of at least 8 MiB"]
+fn live_personal_quark_download_samples_configured_connection_throughput(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("ALLDOWNLOADER_LIVE_QUARK_PERSONAL").as_deref() != Ok("1") {
         return Ok(());
     }
-    let file_id = latest_personal_quark_file_id()?;
+    let configured_connections = personal_quark_probe_connections()?;
+    let file_id = largest_personal_quark_file_id()?;
     let credentials = app_session_store()?;
     let transport = RedactedTransport::new()?;
     let resolved = resolve_download(CloudProvider::Quark, &file_id, &credentials, &transport)?;
@@ -458,22 +515,50 @@ fn live_personal_quark_download_resumes_existing_payload_with_aria2_next(
             kind: "cloud".into(),
             is_private: false,
         })?;
-        let mut options = resolved.into_uri_submission_options();
+        let mut options = apply_cloud_download_policy(
+            CloudProvider::Quark,
+            configured_connections,
+            resolved.into_uri_submission_options(),
+        );
         options.directory = Some(engine.downloads.clone());
         let submitted = service
             .submit_uri_with_options(prepared.id, vec![direct_url], options)
             .await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut max_connections = 0_u32;
+        let mut max_speed = 0_u64;
+        let mut throughput_sample = None;
         let outcome = loop {
             let task = service.reconcile_task(submitted.id).await?;
             let gid = task.aria_gid.as_deref().ok_or("aria2 GID missing")?;
             let status = engine.client.tell_status(gid).await?;
             let completed = status.completed_length.parse::<u64>()?;
+            max_connections = max_connections.max(status.connections.parse()?);
+            max_speed = max_speed.max(status.download_speed.parse()?);
             match status.status.as_str() {
-                "complete" if completed > 0 => break Ok(()),
+                "complete" if completed > 0 => {
+                    println!(
+                        "LIVE_QUARK_PERSONAL configured_connections={configured_connections} max_connections={max_connections} max_speed={max_speed} sustained_speed=completed-before-sample"
+                    );
+                    break Ok(())
+                }
                 _ if completed > 0 => {
-                    service.control(submitted.id, DownloadAction::Pause).await?;
-                    break Ok(());
+                    let (started_at, starting_bytes) = throughput_sample
+                        .get_or_insert_with(|| (tokio::time::Instant::now(), completed));
+                    if started_at.elapsed() >= Duration::from_secs(2) {
+                        let paused = service.control(submitted.id, DownloadAction::Pause).await?;
+                        let elapsed_millis = started_at.elapsed().as_millis().max(1);
+                        let transferred = paused.completed_length.saturating_sub(*starting_bytes);
+                        let sustained_speed = transferred.saturating_mul(1_000) / elapsed_millis as u64;
+                        println!(
+                            "LIVE_QUARK_PERSONAL configured_connections={configured_connections} max_connections={max_connections} max_speed={max_speed} sustained_speed={sustained_speed}"
+                        );
+                        assert!(
+                            sustained_speed > 0,
+                            "Quark throughput sample did not transfer bytes after it started"
+                        );
+                        break Ok(());
+                    }
                 }
                 "error" | "removed" => {
                     break Err(format!(

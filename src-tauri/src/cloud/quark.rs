@@ -150,7 +150,7 @@ mod tests {
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(query.get("entry"), Some(&"ft".into()));
         assert_eq!(query.get("sys"), Some(&"win32".into()));
-        assert_eq!(query.get("ve"), Some(&"2.5.56".into()));
+        assert_eq!(query.get("ve"), Some(&"3.20.0".into()));
         assert!(query.contains_key("__t"));
         assert_eq!(requests[2].headers["User-Agent"], QUARK_DESKTOP_USER_AGENT);
         assert_eq!(
@@ -580,8 +580,10 @@ mod tests {
     }
 }
 
-pub const QUARK_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch";
-const QUARK_DESKTOP_VERSION: &str = "2.5.56";
+/// Current public Quark Drive desktop transfer profile. Keep the API version
+/// and User-Agent in lockstep so the server sees one coherent client profile.
+pub const QUARK_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/3.20.0 Chrome/112.0.5615.165 Electron/24.1.3.8 Safari/537.36 Channel/pckk_other_ch";
+const QUARK_DESKTOP_VERSION: &str = "3.20.0";
 const QUARK_DESKTOP_ORIGIN: &str = "https://pan.quark.cn";
 const QUARK_DESKTOP_REFERER: &str = "https://pan.quark.cn/";
 const QUARK_DESKTOP_ACCEPT: &str = "application/json, text/plain, */*";

@@ -21,7 +21,7 @@ fn provider_download_concurrency_matches_the_literal_safety_matrix() {
     use alldownloader_lib::cloud::ProviderRegistry;
 
     let rows = [
-        (CloudProvider::Quark, 1, 4),
+        (CloudProvider::Quark, 4, 4),
         (CloudProvider::Pikpak, 4, 4),
         (CloudProvider::Baidu, 4, 4),
         (CloudProvider::Tianyi, 1, 1),

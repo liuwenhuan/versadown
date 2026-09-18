@@ -1,4 +1,6 @@
 //! Explicit, opt-in, read-only probe for provider direct-download Range support.
+//! It uses the configured app proxy when enabled, and otherwise uses the same
+//! direct path a normal cloud download uses.
 //!
 //! The probe never prints cloud item metadata, resolved URLs, request headers,
 //! session material, or proxy configuration.
@@ -28,23 +30,37 @@ fn app_data_root() -> Result<PathBuf, &'static str> {
     Ok(PathBuf::from(app_data).join("com.alldownloader.desktop"))
 }
 
-fn configured_proxy_client(root: &PathBuf) -> Result<reqwest::blocking::Client, &'static str> {
+fn direct_or_configured_proxy_client(
+    root: &PathBuf,
+) -> Result<(reqwest::blocking::Client, &'static str), &'static str> {
     let proxy_url = match std::env::var("ALLDOWNLOADER_LIVE_PROXY") {
-        Ok(value) => live_proxy_url(&value)?,
+        Ok(value) => Some(live_proxy_url(&value)?),
         Err(std::env::VarError::NotPresent) => {
             let bytes = fs::read(root.join("settings.json")).map_err(|_| "settings-unavailable")?;
             let settings: AppSettings =
                 serde_json::from_slice(&bytes).map_err(|_| "settings-invalid")?;
-            proxy_url(&settings.proxy)?
+            settings
+                .proxy
+                .enabled
+                .then(|| proxy_url(&settings.proxy))
+                .transpose()?
         }
         Err(std::env::VarError::NotUnicode(_)) => return Err("proxy-invalid"),
     };
-    let proxy = reqwest::Proxy::all(proxy_url.as_str()).map_err(|_| "proxy-invalid")?;
-    reqwest::blocking::Client::builder()
-        .proxy(proxy)
-        .timeout(Duration::from_secs(45))
+    let transport = if proxy_url.is_some() {
+        "configured-proxy"
+    } else {
+        "direct"
+    };
+    let mut client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(45));
+    if let Some(proxy_url) = proxy_url {
+        let proxy = reqwest::Proxy::all(proxy_url.as_str()).map_err(|_| "proxy-invalid")?;
+        client = client.proxy(proxy);
+    }
+    client
         .build()
-        .map_err(|_| "proxy-client-unavailable")
+        .map(|client| (client, transport))
+        .map_err(|_| "download-client-unavailable")
 }
 
 fn live_proxy_url(value: &str) -> Result<url::Url, &'static str> {
@@ -231,13 +247,33 @@ fn print_fail(provider: CloudProvider, reason: &str) {
     eprintln!("{} FAIL {reason}", provider.key());
 }
 
-#[test]
-#[ignore = "requires saved cloud sessions and ALLDOWNLOADER_LIVE_CLOUD_CONCURRENCY=1"]
-fn enabled_providers_support_four_concurrent_disjoint_ranges_through_configured_proxy() {
+fn selected_providers() -> Result<Vec<CloudProvider>, &'static str> {
+    let filter = match std::env::var("ALLDOWNLOADER_LIVE_PROVIDER") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err("provider-filter-invalid"),
+    };
     let providers = CloudProvider::ALL
         .into_iter()
         .filter(|provider| provider.is_enabled())
+        .filter(|provider| filter.as_deref().is_none_or(|key| key == provider.key()))
         .collect::<Vec<_>>();
+    if providers.is_empty() {
+        return Err("provider-filter-invalid");
+    }
+    Ok(providers)
+}
+
+#[test]
+#[ignore = "requires saved cloud sessions and ALLDOWNLOADER_LIVE_CLOUD_CONCURRENCY=1"]
+fn enabled_providers_support_four_concurrent_disjoint_ranges() {
+    let providers = match selected_providers() {
+        Ok(providers) => providers,
+        Err(reason) => {
+            eprintln!("cloud-download-concurrency SKIP {reason}");
+            return;
+        }
+    };
     if std::env::var("ALLDOWNLOADER_LIVE_CLOUD_CONCURRENCY").as_deref() != Ok("1") {
         for provider in providers {
             print_skip(provider, "opt-in-disabled");
@@ -254,7 +290,7 @@ fn enabled_providers_support_four_concurrent_disjoint_ranges_through_configured_
             return;
         }
     };
-    let client = match configured_proxy_client(&root) {
+    let (client, transport) = match direct_or_configured_proxy_client(&root) {
         Ok(client) => client,
         Err(reason) => {
             for provider in providers {
@@ -286,6 +322,7 @@ fn enabled_providers_support_four_concurrent_disjoint_ranges_through_configured_
 
     let mut failures = 0usize;
     for provider in providers {
+        eprintln!("{} TRANSPORT {transport}", provider.key());
         match state.store.load(provider.key()) {
             Ok(Some(_)) => {}
             Ok(None) => {

@@ -404,11 +404,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         share_patterns,
         max_upload_concurrency: 2,
         download_concurrency: match provider {
-            Quark => DownloadConcurrencyPolicy {
-                max_connections_per_file: 1,
-                max_concurrent_tasks: 4,
-            },
-            Pikpak | Baidu | Aliyun | Uc => DownloadConcurrencyPolicy {
+            Quark | Pikpak | Baidu | Aliyun | Uc => DownloadConcurrencyPolicy {
                 max_connections_per_file: 4,
                 max_concurrent_tasks: 4,
             },
