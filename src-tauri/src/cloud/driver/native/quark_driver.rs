@@ -123,11 +123,10 @@ impl DownloadOps for QuarkDriver<'_> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(file_id)
                     .into(),
-                headers: vec![
-                    ("Cookie".into(), download_cookie),
-                    ("Referer".into(), "https://pan.quark.cn/".into()),
-                    ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
-                ],
+                // The file-transfer profile is selected when resolving the
+                // signed URL, and these same headers must accompany aria2's
+                // CDN request for the server to retain it.
+                headers: quark_download_headers(&download_cookie, &[]),
             })
         }
     }

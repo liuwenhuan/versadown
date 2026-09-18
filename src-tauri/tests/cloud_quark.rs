@@ -2,8 +2,9 @@
 mod upload_support;
 use alldownloader_lib::cloud::{
     parse_quark_download_url, parse_quark_files, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CloudUploadTransport, CredentialStore, MemoryCredentialStore, QuarkClient,
-    QuarkError, UploadHttpRequest, UploadHttpResponse,
+    CloudHttpTransport, CloudProvider, CloudUploadTransport, CredentialStore,
+    MemoryCredentialStore, ProviderRegistry, QuarkClient, QuarkError, UploadHttpRequest,
+    UploadHttpResponse,
 };
 use base64::Engine;
 use std::{collections::VecDeque, io::Write, sync::Mutex};
@@ -54,6 +55,72 @@ fn quark_copy_uses_the_native_copy_endpoint_and_destination() {
     let body: serde_json::Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
     assert_eq!(body["filelist"], serde_json::json!(["file-1", "folder-2"]));
     assert_eq!(body["to_pdir_fid"], "target-folder");
+}
+
+#[test]
+fn quark_file_download_uses_the_desktop_file_transfer_profile() {
+    let http = RecordingHttp::new();
+    let client = QuarkClient::new("sid=local-session".into(), &http);
+
+    assert!(matches!(
+        client.download_url("file-1"),
+        Err(QuarkError::AuthorizationExpired)
+    ));
+
+    let request = http.0.lock().unwrap().pop().unwrap();
+    let url = url::Url::parse(&request.url).unwrap();
+    assert_eq!(url.path(), "/1/clouddrive/file/download");
+    let query = url
+        .query_pairs()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(query.get("entry"), Some(&"ft".into()));
+    assert_eq!(query.get("fr"), Some(&"pc".into()));
+    assert_eq!(query.get("pr"), Some(&"ucpro".into()));
+    assert_eq!(query.get("sys"), Some(&"win32".into()));
+    assert_eq!(query.get("ve"), Some(&"2.5.56".into()));
+    assert!(query.contains_key("__t"));
+    assert_eq!(
+        request.headers.get("Accept").unwrap(),
+        "application/json, text/plain, */*"
+    );
+    assert_eq!(
+        request.headers.get("Accept-Language").unwrap(),
+        "zh-CN,zh;q=0.9"
+    );
+    assert_eq!(
+        request.headers.get("Content-Type").unwrap(),
+        "application/json"
+    );
+}
+
+#[test]
+fn quark_personal_download_forwards_the_desktop_profile_to_the_cdn() {
+    let store = MemoryCredentialStore::default();
+    store.save("quark", b"sid=local-session").unwrap();
+    let http = SequencedHttp::new([
+        r#"{"code":0,"data":[{"fid":"file-1","file_name":"movie.mkv","download_url":"https://download.quark.cn/movie?sign=secret"}]}"#,
+    ]);
+
+    let download = ProviderRegistry::global()
+        .driver(CloudProvider::Quark, &store, &http)
+        .resolve_download("file-1")
+        .unwrap();
+
+    assert!(download
+        .headers
+        .contains(&("Cookie".into(), "sid=local-session".into())));
+    assert!(download
+        .headers
+        .contains(&("Origin".into(), "https://pan.quark.cn".into())));
+    assert!(download
+        .headers
+        .contains(&("Accept".into(), "application/json, text/plain, */*".into())));
+    let request = http.requests().pop().unwrap();
+    let url = url::Url::parse(&request.url).unwrap();
+    let query = url
+        .query_pairs()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(query.get("entry"), Some(&"ft".into()));
 }
 
 #[test]

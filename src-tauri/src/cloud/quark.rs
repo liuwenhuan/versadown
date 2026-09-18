@@ -138,14 +138,26 @@ mod tests {
         assert!(download
             .headers
             .contains(&("Cookie".into(), "sid=current".into())));
+        assert!(download
+            .headers
+            .contains(&("Origin".into(), "https://pan.quark.cn".into())));
         let requests = http.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[2].method, "POST");
-        assert_eq!(
-            requests[2].url,
-            "https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc"
-        );
+        let url = url::Url::parse(&requests[2].url).unwrap();
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(query.get("entry"), Some(&"ft".into()));
+        assert_eq!(query.get("sys"), Some(&"win32".into()));
+        assert_eq!(query.get("ve"), Some(&"2.5.56".into()));
+        assert!(query.contains_key("__t"));
         assert_eq!(requests[2].headers["User-Agent"], QUARK_DESKTOP_USER_AGENT);
+        assert_eq!(
+            requests[2].headers["Accept"],
+            "application/json, text/plain, */*"
+        );
+        assert_eq!(requests[2].headers["Content-Type"], "application/json");
         let token_body: Value = serde_json::from_str(requests[0].body.as_ref().unwrap()).unwrap();
         assert_eq!(token_body["passcode"], "a123");
         let download_body: Value =
@@ -569,6 +581,11 @@ mod tests {
 }
 
 pub const QUARK_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.56 Chrome/100.0.4896.160 Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch";
+const QUARK_DESKTOP_VERSION: &str = "2.5.56";
+const QUARK_DESKTOP_ORIGIN: &str = "https://pan.quark.cn";
+const QUARK_DESKTOP_REFERER: &str = "https://pan.quark.cn/";
+const QUARK_DESKTOP_ACCEPT: &str = "application/json, text/plain, */*";
+const QUARK_DESKTOP_ACCEPT_LANGUAGE: &str = "zh-CN,zh;q=0.9";
 const QUARK_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
     object_host: "pds.quark.cn",
     object_store_user_agent: "aliyun-sdk-js/6.6.1",
@@ -617,6 +634,71 @@ pub fn parse_quark_download_url(body: &str) -> Result<String, QuarkError> {
     super::share::validate_direct_url(url)?;
     Ok(url.to_owned())
 }
+
+fn quark_api_url(path: &str) -> String {
+    format!(
+        "https://drive-pc.quark.cn/1/clouddrive/{path}{}pr=ucpro&fr=pc",
+        if path.contains('?') { "&" } else { "?" }
+    )
+}
+
+/// Builds the PC file-transfer request Quark uses when it issues a temporary
+/// download URL. `entry=ft` is deliberately only sent for this operation: it
+/// selects the desktop file-transfer flow rather than changing unrelated drive
+/// requests. The timestamp prevents an intermediary from replaying a cached
+/// temporary-link response.
+fn quark_desktop_download_url() -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!(
+        "https://drive-pc.quark.cn/1/clouddrive/file/download?entry=ft&fr=pc&pr=ucpro&uc_param_str=&sys=win32&ve={QUARK_DESKTOP_VERSION}&ut=&guid=&__dt=1000&__t={timestamp}"
+    )
+}
+
+fn quark_request_headers(cookie: &str, desktop_file_transfer: bool) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::from([
+        ("Cookie".into(), cookie.into()),
+        ("Origin".into(), QUARK_DESKTOP_ORIGIN.into()),
+        ("Referer".into(), QUARK_DESKTOP_REFERER.into()),
+        ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
+    ]);
+    if desktop_file_transfer {
+        headers.insert("Accept".into(), QUARK_DESKTOP_ACCEPT.into());
+        headers.insert(
+            "Accept-Language".into(),
+            QUARK_DESKTOP_ACCEPT_LANGUAGE.into(),
+        );
+        headers.insert("Content-Type".into(), "application/json".into());
+    }
+    headers
+}
+
+/// Headers must be retained when aria2 follows Quark's signed CDN link. In
+/// particular, Origin was previously sent to the API but silently dropped for
+/// both personal-drive and share downloads.
+pub(crate) fn quark_download_headers(
+    cookie: &str,
+    response_cookies: &[String],
+) -> Vec<(String, String)> {
+    let mut headers = super::share::download_headers(
+        cookie,
+        response_cookies,
+        QUARK_DESKTOP_USER_AGENT,
+        Some(QUARK_DESKTOP_REFERER),
+    );
+    headers.extend([
+        ("Origin".into(), QUARK_DESKTOP_ORIGIN.into()),
+        ("Accept".into(), QUARK_DESKTOP_ACCEPT.into()),
+        (
+            "Accept-Language".into(),
+            QUARK_DESKTOP_ACCEPT_LANGUAGE.into(),
+        ),
+    ]);
+    headers
+}
+
 pub struct QuarkClient<'a, T: CloudHttpTransport + ?Sized> {
     cookie: String,
     http: &'a T,
@@ -631,16 +713,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
         url: String,
         body: Option<Value>,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        let headers = BTreeMap::from([
-            ("Cookie".into(), self.cookie.clone()),
-            ("Origin".into(), "https://pan.quark.cn".into()),
-            ("Referer".into(), "https://pan.quark.cn/".into()),
-            ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
-        ]);
+        self.request_url_with_profile(method, url, body, false)
+    }
+    fn request_url_with_profile(
+        &self,
+        method: &'static str,
+        url: String,
+        body: Option<Value>,
+        desktop_file_transfer: bool,
+    ) -> Result<CloudHttpResponse, QuarkError> {
         let r = self.http.send(CloudHttpRequest {
             method,
             url,
-            headers,
+            headers: quark_request_headers(&self.cookie, desktop_file_transfer),
             body: body.map(|v| v.to_string()),
         })?;
         response_json(&r)?;
@@ -652,14 +737,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
         path: &str,
         body: Option<Value>,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        self.request_url(
-            method,
-            format!(
-                "https://drive-pc.quark.cn/1/clouddrive/{path}{}pr=ucpro&fr=pc",
-                if path.contains('?') { "&" } else { "?" }
-            ),
-            body,
-        )
+        self.request_url(method, quark_api_url(path), body)
     }
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
         let r = self.request_url(
@@ -798,7 +876,12 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
         )
     }
     pub fn download_url(&self, id: &str) -> Result<CloudHttpResponse, QuarkError> {
-        self.request("POST", "file/download", Some(json!({"fids":[id]})))
+        self.request_url_with_profile(
+            "POST",
+            quark_desktop_download_url(),
+            Some(json!({"fids":[id]})),
+            true,
+        )
     }
 
     /// Uploads one regular local file using Quark's authenticated CloudDrive
@@ -1154,18 +1237,15 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         path: &str,
         body: Option<Value>,
     ) -> Result<CloudHttpResponse, QuarkError> {
+        let desktop_file_transfer = path == "file/download";
         self.http.send(CloudHttpRequest {
             method,
-            url: format!(
-                "https://drive-pc.quark.cn/1/clouddrive/{path}{}pr=ucpro&fr=pc",
-                if path.contains('?') { "&" } else { "?" }
-            ),
-            headers: BTreeMap::from([
-                ("Cookie".into(), self.cookie.clone()),
-                ("User-Agent".into(), QUARK_DESKTOP_USER_AGENT.into()),
-                ("Origin".into(), "https://pan.quark.cn".into()),
-                ("Referer".into(), "https://pan.quark.cn/".into()),
-            ]),
+            url: if desktop_file_transfer {
+                quark_desktop_download_url()
+            } else {
+                quark_api_url(path)
+            },
+            headers: quark_request_headers(&self.cookie, desktop_file_transfer),
             body: body.map(|value| value.to_string()),
         })
     }
@@ -1196,12 +1276,7 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         Ok(super::commands::ResolvedCloudDownload {
             url,
             name: name.into(),
-            headers: super::share::download_headers(
-                &self.cookie,
-                &response.set_cookies,
-                QUARK_DESKTOP_USER_AGENT,
-                Some("https://pan.quark.cn/"),
-            ),
+            headers: quark_download_headers(&self.cookie, &response.set_cookies),
         })
     }
 }
