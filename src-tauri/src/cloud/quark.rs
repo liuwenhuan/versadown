@@ -15,6 +15,85 @@ pub const QUARK_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
         hint: "提取码必须为 4 位字母或数字",
     };
 
+const QUARK_SHARE_PROVIDER_CODE_PREFIX: &str = "__quark_share_provider_code__:";
+const QUARK_SHARE_FAILURE_PREFIX: &str = "__quark_share_failure__:";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuarkShareFailureStage {
+    Transfer,
+    TransferTask,
+    PersonalDownload,
+}
+
+impl QuarkShareFailureStage {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Transfer => "transfer",
+            Self::TransferTask => "transfer_task",
+            Self::PersonalDownload => "personal_download",
+        }
+    }
+}
+
+/// Decode only our fixed, internal marker. Provider response text is never
+/// copied into a durable task record or sent to the UI because it can contain
+/// URLs or temporary credentials.
+pub(crate) fn quark_share_failure_details(
+    error: &QuarkError,
+) -> Option<(QuarkShareFailureStage, Option<i64>)> {
+    let QuarkError::Provider(message) = error else {
+        return None;
+    };
+    let (stage, code) = message
+        .strip_prefix(QUARK_SHARE_FAILURE_PREFIX)?
+        .split_once(':')?;
+    let stage = match stage {
+        "transfer" => QuarkShareFailureStage::Transfer,
+        "transfer_task" => QuarkShareFailureStage::TransferTask,
+        "personal_download" => QuarkShareFailureStage::PersonalDownload,
+        _ => return None,
+    };
+    let code = if code == "unknown" {
+        None
+    } else {
+        let code = code.parse::<i64>().ok()?;
+        (code >= 0).then_some(code)
+    };
+    Some((stage, code))
+}
+
+fn quark_share_provider_code(error: &QuarkError) -> Option<i64> {
+    let QuarkError::Provider(message) = error else {
+        return None;
+    };
+    message
+        .strip_prefix(QUARK_SHARE_PROVIDER_CODE_PREFIX)?
+        .parse::<i64>()
+        .ok()
+        .filter(|code| *code >= 0)
+}
+
+fn quark_share_failure(stage: QuarkShareFailureStage, error: QuarkError) -> QuarkError {
+    let Some(code) = quark_share_provider_code(&error) else {
+        return error;
+    };
+    QuarkError::Provider(format!(
+        "{QUARK_SHARE_FAILURE_PREFIX}{}:{code}",
+        stage.key()
+    ))
+}
+
+fn is_quark_direct_download_unavailable(error: &QuarkError) -> bool {
+    matches!(
+        quark_share_provider_code(error),
+        Some(41016) | Some(50001..)
+    )
+}
+
+fn is_quark_direct_download_refresh_required(error: &QuarkError) -> bool {
+    quark_share_provider_code(error) == Some(41016)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +255,7 @@ mod tests {
         assert_eq!(download_body["fids_token"], json!(["file-secret"]));
     }
 
+
     #[test]
     fn quark_share_download_rejection_falls_back_to_authorized_drive_transfer() {
         let credentials = MemoryCredentialStore::default();
@@ -201,6 +281,62 @@ mod tests {
             adapter.resolve(&entry),
             Ok(ShareResolution::TransferRequired(request)) if request.source == entry.plan.source_for("11")
         ));
+    }
+
+    #[test]
+    fn quark_share_41016_refreshes_context_before_transferring() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("quark", b"__uid=account-7; sid=current")
+            .unwrap();
+        let http = Http::new(vec![
+            json!({"status":404,"code":41016}),
+            json!({"code":0,"data":{"stoken":"fresh-share-token"}}),
+            json!({"code":0,"data":{"list":[{"fid":"11","file_name":"movie.mp4","dir":false,"size":123,"share_fid_token":"fresh-file-token"}]},"metadata":{"_total":1}}),
+            json!({"status":404,"code":41016}),
+            json!({"code":0,"data":{"task_id":"save-task"}}),
+            json!({"code":0,"data":{"status":2,"save_as":{"save_as_top_fids":["personal-11"]}}}),
+            json!({"code":0,"data":[{"fid":"personal-11","download_url":"https://download.quark.cn/personal?sign=secret"}]}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+        let plan = CloudSharePlan::new(
+            CloudProvider::Quark,
+            "share123".into(),
+            Some("a123".into()),
+            vec![CloudShareEntry::new(
+                "share123",
+                "11".into(),
+                "movie.mp4".into(),
+                vec![],
+                Some(123),
+            )],
+            json!({"stoken":"stale-share-token","files":{"11":{"token":"stale-file-token","parent":"0"}}}),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("11");
+
+        let resolved = resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "https://download.quark.cn/personal?sign=secret"
+        );
+        let refreshed = store.resolve_entry(&source).unwrap();
+        assert_eq!(
+            refreshed.plan.provider_context["stoken"],
+            "fresh-share-token"
+        );
+        assert_eq!(
+            refreshed.plan.provider_context["files"]["11"]["token"],
+            "fresh-file-token"
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 7);
+        let save_body: Value = serde_json::from_str(requests[4].body.as_ref().unwrap()).unwrap();
+        assert_eq!(save_body["stoken"], "fresh-share-token");
+        assert_eq!(save_body["fid_token_list"], json!(["fresh-file-token"]));
     }
 
     #[test]
@@ -1268,10 +1404,10 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         let response = self.share_raw(method, path, body)?;
         let value: Value =
             serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        validate_share_codes(&value)?;
+        let code = validate_share_codes(&value)?;
         response_json(&response).map_err(|error| match error {
             QuarkError::Provider(_) => {
-                QuarkError::Provider("夸克分享请求失败，请检查访问码及分享有效期".into())
+                QuarkError::Provider(format!("{QUARK_SHARE_PROVIDER_CODE_PREFIX}{code}"))
             }
             error => error,
         })?;
@@ -1420,6 +1556,61 @@ impl ShareResolve for QuarkShareAdapter<'_> {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError> {
         resolve_quark_share(self.credentials, self.http, entry)
     }
+
+    fn resolve_with_context(
+        &self,
+        entry: &CloudShareResolvedEntry,
+    ) -> Result<ShareOperationResult<ShareResolution>, QuarkError> {
+        if entry.plan.provider_context["quark_direct_download_unavailable"] == true {
+            return Ok(ShareOperationResult {
+                result: Ok(ShareResolution::TransferRequired(TransferRequest {
+                    source: entry.plan.source_for(&entry.entry.entry_id),
+                })),
+                updated_context: None,
+            });
+        }
+        match resolve_quark_share_direct(self.credentials, self.http, entry) {
+            Ok(download) => Ok(ShareOperationResult {
+                result: Ok(ShareResolution::Direct(download)),
+                updated_context: None,
+            }),
+            Err(error) if is_quark_direct_download_refresh_required(&error) => {
+                let refreshed = self.refresh_entry(entry)?;
+                let mut context = refreshed.plan.provider_context.clone();
+                match resolve_quark_share_direct(self.credentials, self.http, &refreshed) {
+                    Ok(download) => Ok(ShareOperationResult {
+                        result: Ok(ShareResolution::Direct(download)),
+                        updated_context: Some(context),
+                    }),
+                    Err(error) if is_quark_direct_download_unavailable(&error) => {
+                        context["quark_direct_download_unavailable"] = json!(true);
+                        Ok(ShareOperationResult {
+                            result: Ok(ShareResolution::TransferRequired(TransferRequest {
+                                source: entry.plan.source_for(&entry.entry.entry_id),
+                            })),
+                            updated_context: Some(context),
+                        })
+                    }
+                    Err(error) => Ok(ShareOperationResult {
+                        result: Err(error),
+                        updated_context: Some(context),
+                    }),
+                }
+            }
+            Err(error) if is_quark_direct_download_unavailable(&error) => {
+                Ok(ShareOperationResult {
+                    result: Ok(ShareResolution::TransferRequired(TransferRequest {
+                        source: entry.plan.source_for(&entry.entry.entry_id),
+                    })),
+                    updated_context: None,
+                })
+            }
+            Err(error) => Ok(ShareOperationResult {
+                result: Err(error),
+                updated_context: None,
+            }),
+        }
+    }
 }
 impl ShareTransfer for QuarkShareAdapter<'_> {
     fn transfer_capacity(
@@ -1447,15 +1638,21 @@ impl ShareTransfer for QuarkShareAdapter<'_> {
         let client = self.client()?;
         let context = &entry.plan.provider_context;
         let file = &context["files"][&entry.entry.entry_id];
-        let response = client.share_request("POST", "share/sharepage/save", Some(json!({"fid_list":[entry.entry.entry_id],"fid_token_list":[required(file,"token")?],"to_pdir_fid":"0","pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"pdir_fid":required(file,"parent")?,"scene":"link","pdir_save_all":false,"exclude_fids":[]})))?;
+        let response = client
+            .share_request("POST", "share/sharepage/save", Some(json!({"fid_list":[entry.entry.entry_id],"fid_token_list":[required(file,"token")?],"to_pdir_fid":"0","pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"pdir_fid":required(file,"parent")?,"scene":"link","pdir_save_all":false,"exclude_fids":[]})))
+            .map_err(|error| quark_share_failure(QuarkShareFailureStage::Transfer, error))?;
         let value = response_json(&response)?;
         let task = required(&value["data"], "task_id")?;
         for retry in 0..20 {
-            let response = client.share_request(
-                "GET",
-                &format!("task?task_id={}&retry_index={retry}", encoded(&task)),
-                None,
-            )?;
+            let response = client
+                .share_request(
+                    "GET",
+                    &format!("task?task_id={}&retry_index={retry}", encoded(&task)),
+                    None,
+                )
+                .map_err(|error| {
+                    quark_share_failure(QuarkShareFailureStage::TransferTask, error)
+                })?;
             let value = response_json(&response)?;
             match value["data"]["status"].as_i64() {
                 Some(2) => {
@@ -1477,19 +1674,60 @@ impl ShareTransfer for QuarkShareAdapter<'_> {
                     } else {
                         store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
                     }
-                    let response = client.share_request(
-                        "POST",
-                        "file/download",
-                        Some(json!({"fids":[id]})),
-                    )?;
+                    let response = client
+                        .share_request("POST", "file/download", Some(json!({"fids":[id]})))
+                        .map_err(|error| {
+                            quark_share_failure(QuarkShareFailureStage::PersonalDownload, error)
+                        })?;
                     persist_quark_download_cookies(self.credentials, &client.cookie, &response)?;
                     return client.share_download(&response, &entry.entry.name);
                 }
                 Some(0 | 1) => std::thread::sleep(std::time::Duration::from_millis(250)),
-                _ => return Err(QuarkError::Provider("夸克转存任务失败".into())),
+                _ => {
+                    return Err(QuarkError::Provider(format!(
+                        "{QUARK_SHARE_FAILURE_PREFIX}{}:unknown",
+                        QuarkShareFailureStage::TransferTask.key()
+                    )))
+                }
             }
         }
-        Err(QuarkError::Provider("夸克转存尚未完成，请稍后重试".into()))
+        Err(QuarkError::Provider(format!(
+            "{QUARK_SHARE_FAILURE_PREFIX}{}:unknown",
+            QuarkShareFailureStage::TransferTask.key()
+        )))
+    }
+
+    fn transfer_with_context(
+        &self,
+        entry: &CloudShareResolvedEntry,
+        store: &CloudSharePlanStore,
+    ) -> Result<ShareOperationResult<super::commands::ResolvedCloudDownload>, QuarkError> {
+        let result = self.transfer(entry, store);
+        let should_refresh = matches!(
+            result.as_ref().err().and_then(quark_share_failure_details),
+            Some((QuarkShareFailureStage::Transfer, Some(41016)))
+        );
+        if !should_refresh {
+            return Ok(ShareOperationResult {
+                result,
+                updated_context: None,
+            });
+        }
+        let refreshed = match self.refresh_entry(entry) {
+            Ok(refreshed) => refreshed,
+            Err(_) => {
+                return Ok(ShareOperationResult {
+                    result,
+                    updated_context: None,
+                })
+            }
+        };
+        let mut context = refreshed.plan.provider_context.clone();
+        context["quark_direct_download_unavailable"] = json!(true);
+        Ok(ShareOperationResult {
+            result: self.transfer(&refreshed, store),
+            updated_context: Some(context),
+        })
     }
 }
 impl RecordedTransferResolver for QuarkShareAdapter<'_> {
@@ -1505,18 +1743,15 @@ impl RecordedTransferResolver for QuarkShareAdapter<'_> {
             return Err(QuarkError::InvalidResponse);
         }
         let client = self.client()?;
-        let response = client.share_raw(
-            "POST",
-            "file/download",
-            Some(json!({"fids":[created_file_id]})),
-        )?;
-        let value: Value =
-            serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-        validate_share_codes(&value)?;
-        response_json(&response).map_err(|error| match error {
-            QuarkError::Provider(_) => QuarkError::Provider("夸克个人盘文件请求失败".into()),
-            error => error,
-        })?;
+        let response = client
+            .share_request(
+                "POST",
+                "file/download",
+                Some(json!({"fids":[created_file_id]})),
+            )
+            .map_err(|error| {
+                quark_share_failure(QuarkShareFailureStage::PersonalDownload, error)
+            })?;
         Ok(ShareOperationResult {
             result: persist_quark_download_cookies(self.credentials, &client.cookie, &response)
                 .and_then(|_| client.share_download(&response, &entry.entry.name))
@@ -1534,33 +1769,73 @@ impl CloudShareAdapter for QuarkShareAdapter<'_> {
     }
 }
 
+impl QuarkShareAdapter<'_> {
+    fn refresh_entry(
+        &self,
+        entry: &CloudShareResolvedEntry,
+    ) -> Result<CloudShareResolvedEntry, QuarkError> {
+        let candidate = crate::parser::CloudShareCandidate {
+            provider: CloudProvider::Quark,
+            url: format!("https://pan.quark.cn/s/{}", entry.plan.canonical_share_id),
+            access_code: entry.plan.access_code.clone(),
+        };
+        let ShareInspection::Plan(plan) = self.inspect(&candidate)? else {
+            return Err(QuarkError::InvalidInput(
+                "夸克分享现在需要提取码，请重新解析分享链接".into(),
+            ));
+        };
+        if plan.canonical_share_id != entry.plan.canonical_share_id {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let refreshed_entry = plan
+            .entries
+            .iter()
+            .find(|candidate| candidate.entry_id == entry.entry.entry_id)
+            .cloned()
+            .ok_or_else(|| {
+                QuarkError::InvalidInput(
+                    "夸克分享中的文件已变更或不可下载，请重新解析分享链接".into(),
+                )
+            })?;
+        let mut refreshed = entry.clone();
+        refreshed.plan.provider_context = plan.provider_context;
+        refreshed.entry = refreshed_entry;
+        Ok(refreshed)
+    }
+}
+
 pub fn resolve_quark_share(
     credentials: &dyn CredentialStore,
     http: &dyn CloudHttpTransport,
     entry: &CloudShareResolvedEntry,
 ) -> Result<ShareResolution, QuarkError> {
+    match resolve_quark_share_direct(credentials, http, entry) {
+        Ok(download) => Ok(ShareResolution::Direct(download)),
+        Err(error) if is_quark_direct_download_unavailable(&error) => {
+            Ok(ShareResolution::TransferRequired(TransferRequest {
+                source: entry.plan.source_for(&entry.entry.entry_id),
+            }))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_quark_share_direct(
+    credentials: &dyn CredentialStore,
+    http: &dyn CloudHttpTransport,
+    entry: &CloudShareResolvedEntry,
+) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
     let adapter = QuarkShareAdapter { credentials, http };
     let client = adapter.client()?;
     if entry.provider != CloudProvider::Quark {
         return Err(QuarkError::InvalidResponse);
     }
     let context = &entry.plan.provider_context;
-    let response = match client.share_request(
+    let response = client.share_request(
         "POST",
         "file/download",
         Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]})),
-    ) {
-        // The share endpoint occasionally rejects a direct link even though
-        // the already-inspected share and the authenticated personal drive are
-        // both valid.  The established transfer path is the safe fallback: it
-        // records the exact copied file before requesting its temporary URL.
-        Err(QuarkError::Provider(_)) => {
-            return Ok(ShareResolution::TransferRequired(TransferRequest {
-                source: entry.plan.source_for(&entry.entry.entry_id),
-            }));
-        }
-        result => result?,
-    };
+    )?;
     persist_quark_download_cookies(credentials, &client.cookie, &response)?;
     let value = response_json(&response)?;
     let files = value["data"]
@@ -1569,11 +1844,9 @@ pub fn resolve_quark_share(
     // This is the successful download response for one already-selected file,
     // never a directory listing or an authorization/provider error.
     if files.is_empty() {
-        return Ok(ShareResolution::TransferRequired(TransferRequest {
-            source: entry.plan.source_for(&entry.entry.entry_id),
-        }));
+        return Err(QuarkError::Provider(format!(
+            "{QUARK_SHARE_PROVIDER_CODE_PREFIX}50001"
+        )));
     }
-    Ok(ShareResolution::Direct(
-        client.share_download(&response, &entry.entry.name)?,
-    ))
+    client.share_download(&response, &entry.entry.name)
 }

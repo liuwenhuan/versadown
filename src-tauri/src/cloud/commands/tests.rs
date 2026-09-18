@@ -510,6 +510,20 @@ fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secret
     }
 }
 
+#[test]
+fn quark_share_transfer_failure_keeps_stage_and_provider_code() {
+    let error = QuarkError::Provider("__quark_share_failure__:transfer:41016".into());
+
+    assert_eq!(
+        super::share_resolution_failure_message(&error),
+        "夸克分享转存失败（错误码 41016），请确认分享仍有效且账号具备转存权限后重试"
+    );
+    assert_eq!(
+        super::cloud_failure_code(&error),
+        "quark_share_transfer_failed"
+    );
+}
+
 fn windows_device_name_variants() -> Vec<String> {
     [
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",

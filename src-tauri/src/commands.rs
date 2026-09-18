@@ -224,7 +224,7 @@ pub struct TaskActionOutcome {
 pub struct CloudShareBatchFailure {
     pub selected_id: String,
     pub code: &'static str,
-    pub message: &'static str,
+    pub message: String,
 }
 
 #[derive(Serialize)]
@@ -1030,33 +1030,12 @@ where
             Ok(outcome) => result.outcomes.push(outcome),
             Err(error) => result.failures.push(CloudShareBatchFailure {
                 selected_id,
-                code: cloud_share_failure_code(&error),
+                code: crate::cloud::commands::cloud_failure_code(&error),
                 message: crate::cloud::commands::share_resolution_failure_message(&error),
             }),
         }
     }
     result
-}
-
-fn cloud_share_failure_code(error: &crate::cloud::QuarkError) -> &'static str {
-    use crate::cloud::QuarkError;
-    match error {
-        QuarkError::NotAuthorized => "not_authorized",
-        QuarkError::AuthorizationExpired => "credentials_expired",
-        QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
-        QuarkError::PikpakOperationVerificationRequired(_) => {
-            "pikpak_operation_verification_required"
-        }
-        QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
-        QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
-        QuarkError::AuthorizationPending => "authorization_pending",
-        QuarkError::InvalidResponse => "invalid_response",
-        QuarkError::Storage => "credential_storage_error",
-        QuarkError::Transport(_) => "network_error",
-        QuarkError::Provider(_) => "provider_error",
-        QuarkError::InvalidInput(_) => "invalid_input",
-        QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
-    }
 }
 
 fn parse_resources(store: &TaskStore, task_id: Uuid) -> Result<Vec<ParseResource>, String> {

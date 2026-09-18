@@ -2,32 +2,51 @@ use super::*;
 pub use crate::cloud::common::*;
 pub(crate) const CLOUD_SHARE_PREPARE_FAILURE: &str = "网盘分享下载准备失败，请重试";
 
-pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static str {
+pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
+    if let Some((stage, code)) = crate::cloud::quark_share_failure_details(error) {
+        let code = code
+            .map(|code| format!("（错误码 {code}）"))
+            .unwrap_or_default();
+        return match stage {
+            crate::cloud::QuarkShareFailureStage::Transfer => {
+                format!("夸克分享转存失败{code}，请确认分享仍有效且账号具备转存权限后重试")
+            }
+            crate::cloud::QuarkShareFailureStage::TransferTask => {
+                format!("夸克转存任务未完成{code}，请稍后重试")
+            }
+            crate::cloud::QuarkShareFailureStage::PersonalDownload => {
+                format!("夸克转存已完成，但个人盘下载地址获取失败{code}，请重试")
+            }
+        };
+    }
     match error {
-        QuarkError::NotAuthorized => "尚未授权此网盘，请登录后使用",
-        QuarkError::AuthorizationExpired => "网盘会话已过期，请重新登录授权",
-        QuarkError::SessionRenewedRetryOperation => "登录已自动恢复，请重新执行本次操作",
-        QuarkError::WebAuthorizationRequired => "此登录方式需要网页验证，请点击网页授权完成登录",
-        QuarkError::CaptchaRequired => "网盘要求完成官方操作验证后重试",
+        QuarkError::NotAuthorized => "尚未授权此网盘，请登录后使用".into(),
+        QuarkError::AuthorizationExpired => "网盘会话已过期，请重新登录授权".into(),
+        QuarkError::SessionRenewedRetryOperation => "登录已自动恢复，请重新执行本次操作".into(),
+        QuarkError::WebAuthorizationRequired => {
+            "此登录方式需要网页验证，请点击网页授权完成登录".into()
+        }
+        QuarkError::CaptchaRequired => "网盘要求完成官方操作验证后重试".into(),
         QuarkError::PikpakOperationVerificationRequired(_) => {
-            "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试"
+            "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试".into()
         }
         QuarkError::PikpakRegionalMembershipRestricted => {
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
+                .into()
         }
-        QuarkError::AuthorizationPending => "正在等待网页登录，请在授权窗口完成登录",
-        QuarkError::InvalidResponse => "网盘返回的下载信息无效，请刷新后重试",
-        QuarkError::Storage => "安全凭据存储不可用",
+        QuarkError::AuthorizationPending => "正在等待网页登录，请在授权窗口完成登录".into(),
+        QuarkError::InvalidResponse => "网盘返回的下载信息无效，请刷新后重试".into(),
+        QuarkError::Storage => "安全凭据存储不可用".into(),
         QuarkError::Transport(message)
             if message == crate::xunlei_native::PLUGIN_UPDATE_MESSAGE =>
         {
-            crate::xunlei_native::PLUGIN_UPDATE_MESSAGE
+            crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.into()
         }
-        QuarkError::Transport(_) => "网盘分享下载地址网络请求失败，请检查网络后重试",
-        QuarkError::Provider(_) => "网盘分享下载地址请求失败，请稍后重试",
-        QuarkError::InvalidInput(_) => "网盘分享下载请求无效，请重新解析分享链接",
+        QuarkError::Transport(_) => "网盘分享下载地址网络请求失败，请检查网络后重试".into(),
+        QuarkError::Provider(_) => "网盘分享下载地址请求失败，请稍后重试".into(),
+        QuarkError::InvalidInput(_) => "网盘分享下载请求无效，请重新解析分享链接".into(),
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
-            "当前网盘分享下载暂不支持"
+            "当前网盘分享下载暂不支持".into()
         }
     }
 }
@@ -49,6 +68,9 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",
+        QuarkError::Provider(_) if crate::cloud::quark_share_failure_details(error).is_some() => {
+            "quark_share_transfer_failed"
+        }
         QuarkError::Provider(_) => "provider_error",
         QuarkError::InvalidInput(_) => "invalid_input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",

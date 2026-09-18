@@ -457,10 +457,10 @@ pub(crate) fn cloud_share_failure_outcome(
     tasks: &TaskStore,
     prepared: DownloadTask,
     failure_code: Option<&str>,
-    message: &'static str,
+    message: impl AsRef<str>,
 ) -> TaskActionOutcome {
     let task = tasks
-        .fail_with_code(prepared.id, failure_code, message)
+        .fail_with_code(prepared.id, failure_code, message.as_ref())
         .or_else(|_| tasks.find(prepared.id))
         .unwrap_or(prepared);
     cloud_share_task_outcome(tasks, task)
