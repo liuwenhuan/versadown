@@ -154,8 +154,12 @@ impl CloudDownloadDispatch {
                 "任务状态已变化，本次提交已跳过".into(),
             ));
         }
+        let native_resume = retry_options.is_some_and(|(_, continue_download)| continue_download)
+            && task.status == TaskStatus::Paused
+            && crate::xunlei_native::is_native_gid(task.aria_gid.as_deref());
         if task.status == TaskStatus::Recycled
-            || (task.aria_gid.is_some()
+            || (!native_resume
+                && task.aria_gid.is_some()
                 && matches!(
                     task.status,
                     TaskStatus::Queued | TaskStatus::Downloading | TaskStatus::Paused
@@ -361,5 +365,53 @@ impl CloudDownloadDispatch {
                     .ok()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NewTask;
+
+    #[tokio::test]
+    async fn paused_xunlei_native_task_can_reenter_dispatch_for_fresh_authorization() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Paused;
+        task.aria_gid = Some("xunlei-native:42".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+
+        let (queued, _) = dispatch
+            .prepare_expected_with_retry_intent(&store, &task, false, true)
+            .await
+            .unwrap();
+
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert!(queued.aria_gid.is_none());
+        let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
+        assert!(options.continue_download);
+        assert_eq!(
+            options.native_resume_gid.as_deref(),
+            Some("xunlei-native:42")
+        );
+    }
+
+    #[tokio::test]
+    async fn paused_aria_task_cannot_reenter_dispatch_while_it_owns_a_gid() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Paused;
+        task.aria_gid = Some("0123456789abcdef".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+
+        assert!(CloudDownloadDispatch::default()
+            .prepare_expected_with_retry_intent(&store, &task, false, true)
+            .await
+            .is_err());
     }
 }

@@ -99,6 +99,15 @@ try {
         taskApi.setTaskEquityToken(task, command.token, -1);
         return true;
       }
+      case 'setIdentity': {
+        const currentUserId = String(command.userId || '');
+        const currentPeerId = String(command.peerId || peerId);
+        if (!currentUserId) throw new Error('identity_missing');
+        manager.setUserInfo(currentUserId, '');
+        manager.setGlobalExtInfo(`isvip=1,viptype=super,viplevel=,userchannel=,client_peerid=${currentPeerId}`, false);
+        manager.setTokenMode(2);
+        return true;
+      }
       case 'taskInfo': {
         const base = taskApi.getTaskBase(taskById(command.taskId)) || {};
         return { traceId: String(base.traceId || '') };

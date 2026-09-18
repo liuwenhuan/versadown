@@ -2001,20 +2001,35 @@ async fn run_cloud_directory_group_action(
             .filter(|task| task.aria_gid.is_some() && task_is_active(task.status));
         // Dispatch every interrupt before waiting for any child's reconciliation.
         let targets = targets.collect::<Vec<_>>();
-        let mut results = Vec::new();
-        if !targets.is_empty() {
+        let (native_targets, aria_targets): (Vec<_>, Vec<_>) = targets
+            .into_iter()
+            .partition(|task| crate::xunlei_native::is_native_gid(task.aria_gid.as_deref()));
+        let control = if action == "pause" {
+            DownloadAction::Pause
+        } else {
+            DownloadAction::Resume
+        };
+        let native_action = action.to_owned();
+        let mut errors = futures_util::future::join_all(native_targets.into_iter().map(|task| {
+            run_local_task_action(task.id.to_string(), native_action.clone(), app.clone())
+        }))
+        .await
+        .into_iter()
+        .filter_map(Result::err)
+        .collect::<Vec<_>>();
+        if !aria_targets.is_empty() {
             let service = state.runtime.service().await.map_err(|e| e.to_string())?;
-            let control = if action == "pause" {
-                DownloadAction::Pause
-            } else {
-                DownloadAction::Resume
-            };
-            results = futures_util::future::join_all(
-                targets
-                    .iter()
-                    .map(|task| service.control_directory_member(task.id, control)),
-            )
-            .await;
+            errors.extend(
+                futures_util::future::join_all(
+                    aria_targets
+                        .iter()
+                        .map(|task| service.control_directory_member(task.id, control)),
+                )
+                .await
+                .into_iter()
+                .filter_map(Result::err)
+                .map(|error| error.to_string()),
+            );
         }
         if action == "resume" {
             let app = app.clone();
@@ -2087,7 +2102,7 @@ async fn run_cloud_directory_group_action(
                 }
             });
         }
-        if let Some(error) = results.into_iter().find_map(Result::err) {
+        if let Some(error) = errors.into_iter().next() {
             return Err(format!("部分目录文件操作失败，请重试：{error}"));
         }
         return crate::cloud::commands::cloud_directory_group_task_outcome(&state.store, group)
@@ -2189,9 +2204,21 @@ async fn run_local_task_action(
     if crate::xunlei_native::is_native_gid(current.aria_gid.as_deref())
         && matches!(action.as_str(), "pause" | "resume" | "cancel")
     {
+        if action == "resume" {
+            let task = resubmit_task(
+                app.clone(),
+                &state,
+                current,
+                UriSubmissionOptions {
+                    continue_download: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+            return task_action_outcome(&state.store, task, None);
+        }
         let action = match action.as_str() {
             "pause" => DownloadAction::Pause,
-            "resume" => DownloadAction::Resume,
             "cancel" => DownloadAction::Cancel,
             _ => unreachable!(),
         };
@@ -2268,12 +2295,16 @@ pub async fn resolve_duplicate_download(
             if current.status == TaskStatus::Paused && current.aria_gid.is_some() =>
         {
             if crate::xunlei_native::is_native_gid(current.aria_gid.as_deref()) {
-                state.xunlei_native_backend.control(
-                    &app,
-                    &state.store,
+                resubmit_task(
+                    app.clone(),
+                    &state,
                     current,
-                    DownloadAction::Resume,
-                )?
+                    UriSubmissionOptions {
+                        continue_download: true,
+                        ..Default::default()
+                    },
+                )
+                .await?
             } else {
                 state
                     .runtime

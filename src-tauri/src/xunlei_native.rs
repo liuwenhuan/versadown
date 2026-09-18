@@ -301,6 +301,7 @@ impl XunleiNativeBackend {
                 let Some(api) = api.as_mut() else {
                     return Ok(None);
                 };
+                api.set_identity(user_id, peer_id)?;
                 let size = resolved.size_hint().unwrap_or(0);
                 let reusable = api.reusable_task(&output_directory, &output_name, size)?;
                 let native_id = if let Some((native_id, status)) = reusable {
@@ -765,6 +766,14 @@ impl WindowsApi {
         }))?;
         Ok(())
     }
+    fn set_identity(&mut self, user_id: &str, peer_id: &str) -> Result<(), NativeSubmitError> {
+        self.request(serde_json::json!({
+            "action": "setIdentity",
+            "userId": user_id,
+            "peerId": peer_id,
+        }))?;
+        Ok(())
+    }
     fn decrypt_equity_rule(
         &mut self,
         encrypted: &str,
@@ -1163,6 +1172,16 @@ mod tests {
         assert!(options.headers.is_empty());
     }
 
+    #[test]
+    fn helper_can_refresh_the_native_engine_identity_before_vip_injection() {
+        let helper = include_str!("../binaries/xunlei-native-helper.cjs");
+        let identity = helper.find("case 'setIdentity'").unwrap();
+        let user = helper[identity..].find("manager.setUserInfo").unwrap();
+        let vip = helper[identity..].find("manager.setGlobalExtInfo").unwrap();
+        let token_mode = helper[identity..].find("manager.setTokenMode(2)").unwrap();
+        assert!(user < vip && vip < token_mode);
+    }
+
     #[cfg(windows)]
     #[test]
     fn retry_reuses_the_most_progressed_native_task_for_the_same_destination() {
@@ -1346,6 +1365,8 @@ mod tests {
         )
         .expect("official Xunlei helper should start")
         .expect("Thunder should be installed");
+        api.set_identity(&session.user_id, peer_id)
+            .expect("running helper should accept the current Xunlei identity");
         let output_name = "midysj-native-live.zip";
         let output_path = output_directory.join(output_name);
         eprintln!(
@@ -1409,7 +1430,22 @@ mod tests {
         };
         std::thread::sleep(std::time::Duration::from_secs(3));
         api.start(task_id).expect("native task should resume");
-        api.enable_vip(task_id, &token)
+        let resumed_trace_id = api
+            .wait_for_trace_id(task_id)
+            .expect("resumed native task should expose an acceleration trace id");
+        let resumed_token = request_equity_token(
+            &mut api,
+            NativeEquityRequest {
+                access_token: &session.access_token,
+                user_id: &session.user_id,
+                peer_id,
+                client_version: &client_version,
+                trace_id: &resumed_trace_id,
+                resource_url: &download.url,
+            },
+        )
+        .expect("resumed SVIP task should receive a fresh acceleration rule");
+        api.enable_vip(task_id, &resumed_token)
             .expect("SVIP rule should be restored after resume");
         let resumed_at = loop {
             let (received, total, status) = api.progress(task_id).unwrap_or((0, 0, 0));

@@ -553,7 +553,21 @@ pub async fn resume_reauthorized_provider_tasks(
         {
             continue;
         }
-        let resumed = if waiting_for_startup_authorization && task.aria_gid.is_some() {
+        let resumed = if waiting_for_startup_authorization
+            && crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
+        {
+            crate::commands::resubmit_task(
+                app.clone(),
+                &state,
+                task,
+                crate::UriSubmissionOptions {
+                    continue_download: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(QuarkError::Transport)
+        } else if waiting_for_startup_authorization && task.aria_gid.is_some() {
             state
                 .runtime
                 .service()
