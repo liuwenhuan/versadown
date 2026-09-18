@@ -485,6 +485,10 @@ fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secret
             QuarkError::PikpakRegionalMembershipRestricted,
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员",
         ),
+        (
+            QuarkError::Transport(crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.into()),
+            crate::xunlei_native::PLUGIN_UPDATE_MESSAGE,
+        ),
     ];
     for (error, expected) in typed {
         assert_eq!(super::share_resolution_failure_message(&error), expected);

@@ -1179,6 +1179,7 @@ impl DownloadService {
             .into_iter()
             .filter(|task| {
                 task.aria_gid.is_some()
+                    && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                     && !matches!(task.status, TaskStatus::Cancelled | TaskStatus::Recycled)
             })
             .collect();

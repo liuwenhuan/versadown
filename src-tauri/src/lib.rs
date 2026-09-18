@@ -26,6 +26,7 @@ mod update;
 #[cfg(windows)]
 mod window_interaction;
 mod window_lifecycle;
+mod xunlei_native;
 
 pub use aria2::*;
 pub use commands::list_queue_tasks_for_scope;
@@ -343,6 +344,7 @@ pub fn run() {
                 privacy_session: Default::default(),
                 cloud_download_sources: Default::default(),
                 cloud_download_dispatch,
+                xunlei_native_backend: Default::default(),
             });
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),

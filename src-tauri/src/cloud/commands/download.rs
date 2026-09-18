@@ -592,11 +592,6 @@ pub async fn queue_cloud_dispatch(
                     if !share {
                         check_dispatch_owner(&submit_app, &state.store, provider, id)?;
                     }
-                    let service = state
-                        .runtime
-                        .service()
-                        .await
-                        .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?;
                     // Refresh user settings at the last possible moment. Keep the
                     // configured proxy intact, including authentication and routing.
                     let current = crate::commands::download_submission_options(&state)
@@ -616,6 +611,26 @@ pub async fn queue_cloud_dispatch(
                     } else {
                         apply_cloud_download_policy(provider, configured_connections, configured)
                     };
+                    if provider == CloudProvider::Xunlei {
+                        match state.xunlei_native_backend.submit(
+                            &submit_app,
+                            &state.store,
+                            id,
+                            &resolved,
+                            &configured,
+                        ) {
+                            Ok(Some(task)) => return Ok(task),
+                            Ok(None) => {}
+                            Err(error) => {
+                                return Err(QuarkError::Transport(error.user_message()));
+                            }
+                        }
+                    }
+                    let service = state
+                        .runtime
+                        .service()
+                        .await
+                        .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?;
                     let (url, options) = share::share_submission_options(resolved, configured)?;
                     service
                         .submit_uri_with_options(id, vec![url], options)
@@ -1530,7 +1545,19 @@ impl ResolvedCloudDownload {
     pub fn into_uri_submission_options(self) -> UriSubmissionOptions {
         UriSubmissionOptions {
             output_name: Some(safe_filename(&self.name)),
-            headers: self.headers,
+            // This marker carries an opaque native credential only while the
+            // resolver hands the result to the backend selector. Never expose
+            // it to aria2, its RPC log, or the CDN request.
+            headers: self
+                .headers
+                .into_iter()
+                .filter(|(name, _)| {
+                    !name.eq_ignore_ascii_case(
+                        crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER,
+                    ) && !name
+                        .eq_ignore_ascii_case(crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER)
+                })
+                .collect(),
             ..Default::default()
         }
     }

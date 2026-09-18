@@ -44,6 +44,7 @@ impl TransferSynchronizer {
     pub fn poll_interval(&self) -> Result<Duration, DownloadServiceError> {
         let active = self.service.store().list()?.iter().any(|task| {
             task.aria_gid.is_some()
+                && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                 && (matches!(
                     task.status,
                     crate::TaskStatus::Downloading | crate::TaskStatus::AwaitingUser

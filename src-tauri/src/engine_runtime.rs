@@ -860,7 +860,8 @@ impl EngineRuntime {
             ) {
                 continue;
             }
-            let can_resume = task.aria_gid.is_some();
+            let can_resume = task.aria_gid.is_some()
+                && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref());
             task.status = if can_resume {
                 TaskStatus::Paused
             } else {

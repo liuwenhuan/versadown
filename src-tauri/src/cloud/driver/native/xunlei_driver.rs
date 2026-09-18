@@ -116,7 +116,7 @@ impl DownloadOps for XunleiDriver<'_> {
         let store = &self.store;
         let http = &self.http;
         with_xunlei_client(store, http, |client| {
-            let (url, name) = client.download(file_id)?;
+            let download = client.download_with_acceleration(file_id)?;
             // Keep the authenticated browser's public identity on the CDN
             // request, but never forward bearer/captcha/cookies off the API.
             let session = client.session();
@@ -127,7 +127,23 @@ impl DownloadOps for XunleiDriver<'_> {
             if session.profile.is_modern_web() {
                 headers.push(("Referer".into(), "https://pan.xunlei.com/".into()));
             }
-            Ok(ResolvedCloudDownload { url, name, headers })
+            if let Some(token) = download.acceleration_token {
+                headers.push((
+                    crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER.into(),
+                    token,
+                ));
+            }
+            if let Some(size) = download.size {
+                headers.push((
+                    crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER.into(),
+                    size.to_string(),
+                ));
+            }
+            Ok(ResolvedCloudDownload {
+                url: download.url,
+                name: download.name,
+                headers,
+            })
         })
     }
 }

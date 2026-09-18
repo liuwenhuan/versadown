@@ -126,6 +126,7 @@ impl DownloadService {
         let has_persisted_engine_tasks = store.list()?.into_iter().any(|task| {
             !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled)
                 && task.aria_gid.is_some()
+                && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
         });
         let mut statuses = Self::native_statuses(api.as_ref()).await?;
         if has_persisted_engine_tasks && statuses.is_empty() {
@@ -207,10 +208,10 @@ impl DownloadService {
             .into_iter()
             .filter(|task| {
                 !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled)
-                    && task
-                        .aria_gid
-                        .as_ref()
-                        .is_some_and(|gid| !native_gids.contains(gid))
+                    && task.aria_gid.as_ref().is_some_and(|gid| {
+                        !crate::xunlei_native::is_native_gid(Some(gid))
+                            && !native_gids.contains(gid)
+                    })
             })
             .map(|task| task.id)
             .collect::<Vec<_>>();
@@ -260,6 +261,7 @@ impl DownloadService {
         let store = self.store();
         for mut task in store.list()? {
             if task.aria_gid.is_some()
+                && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                 && matches!(
                     task.status,
                     TaskStatus::Downloading | TaskStatus::Queued | TaskStatus::AwaitingUser

@@ -41,6 +41,7 @@ pub struct AppState {
     pub privacy_session: crate::privacy::PrivacySession,
     pub cloud_download_sources: crate::cloud::commands::CloudDownloadSourceGate,
     pub cloud_download_dispatch: crate::cloud::download_dispatch::CloudDownloadDispatch,
+    pub xunlei_native_backend: std::sync::Arc<crate::xunlei_native::XunleiNativeBackend>,
 }
 
 #[derive(Clone, Serialize)]
@@ -2175,6 +2176,20 @@ async fn run_local_task_action(
         // guard. Use its fresh GID instead of locally cancelling a stale copy.
         current = state.store.find(id).map_err(|error| error.to_string())?;
     }
+    if crate::xunlei_native::is_native_gid(current.aria_gid.as_deref())
+        && matches!(action.as_str(), "pause" | "resume" | "cancel")
+    {
+        let action = match action.as_str() {
+            "pause" => DownloadAction::Pause,
+            "resume" => DownloadAction::Resume,
+            "cancel" => DownloadAction::Cancel,
+            _ => unreachable!(),
+        };
+        let task = state
+            .xunlei_native_backend
+            .control(&app, &state.store, current, action)?;
+        return task_action_outcome(&state.store, task, None);
+    }
     if action == "resume"
         && current.aria_gid.is_none()
         && current.status == TaskStatus::Paused
@@ -2242,11 +2257,20 @@ pub async fn resolve_duplicate_download(
         ("resume", DuplicateDownloadState::ResumeAvailable)
             if current.status == TaskStatus::Paused && current.aria_gid.is_some() =>
         {
-            state
-                .runtime
-                .control(current.id, DownloadAction::Resume)
-                .await
-                .map_err(|error| error.to_string())?
+            if crate::xunlei_native::is_native_gid(current.aria_gid.as_deref()) {
+                state.xunlei_native_backend.control(
+                    &app,
+                    &state.store,
+                    current,
+                    DownloadAction::Resume,
+                )?
+            } else {
+                state
+                    .runtime
+                    .control(current.id, DownloadAction::Resume)
+                    .await
+                    .map_err(|error| error.to_string())?
+            }
         }
         ("resume", DuplicateDownloadState::ResumeAvailable) => {
             resubmit_task(

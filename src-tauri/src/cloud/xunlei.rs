@@ -866,14 +866,27 @@ impl XunleiShareAdapter<'_> {
         } else {
             client.supervised()
         };
-        let result = client.download(file_id);
+        let result = client.download_with_acceleration(file_id);
         let refreshed = serde_json::to_vec(&client.session()).map_err(|_| QuarkError::Storage)?;
         self.credentials.save("xunlei", &refreshed)?;
-        let (url, _) = result?;
+        let download = result?;
+        let mut headers = xunlei_cdn_headers(&client.session().profile.user_agent);
+        if let Some(token) = download.acceleration_token {
+            headers.push((
+                crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER.into(),
+                token,
+            ));
+        }
+        if let Some(size) = download.size {
+            headers.push((
+                crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER.into(),
+                size.to_string(),
+            ));
+        }
         Ok(super::commands::ResolvedCloudDownload {
-            url,
+            url: download.url,
             name,
-            headers: xunlei_cdn_headers(&client.session().profile.user_agent),
+            headers,
         })
     }
 }
@@ -1013,6 +1026,24 @@ fn xunlei_content_link(file: &Value) -> Result<Option<&str>, QuarkError> {
         }
     }
     Ok(None)
+}
+
+fn xunlei_acceleration_token(file: &Value) -> Result<Option<String>, QuarkError> {
+    let Some(link) = file
+        .get("links")
+        .and_then(|links| links.get("application/octet-stream"))
+    else {
+        return Ok(None);
+    };
+    let Some(token) = link.get("token") else {
+        return Ok(None);
+    };
+    token
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .map(Some)
+        .ok_or(QuarkError::InvalidResponse)
 }
 
 impl ShareInspect for XunleiShareAdapter<'_> {
@@ -2470,6 +2501,13 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
 
     /// Retrieves a short-lived direct link afresh for every download request.
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
+        let download = self.download_with_acceleration(id)?;
+        Ok((download.url, download.name))
+    }
+
+    /// The acceleration credential remains separate from the CDN request. It
+    /// is consumed only by the local native backend and never by aria2.
+    pub fn download_with_acceleration(&self, id: &str) -> Result<XunleiDownload, QuarkError> {
         let modern_web = self.session().profile.is_modern_web();
         let started = std::time::Instant::now();
         loop {
@@ -2496,7 +2534,16 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                     if !link.starts_with("https://") {
                         return Err(QuarkError::InvalidResponse);
                     }
-                    return Ok((link.to_owned(), name));
+                    return Ok(XunleiDownload {
+                        url: link.to_owned(),
+                        name,
+                        acceleration_token: xunlei_acceleration_token(file)?,
+                        size: file.get("size").and_then(|value| {
+                            value.as_u64().or_else(|| {
+                                value.as_str().and_then(|value| value.parse::<u64>().ok())
+                            })
+                        }),
+                    });
                 }
                 None => {}
             }
@@ -2514,6 +2561,13 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             std::thread::sleep(download_poll_delay(started.elapsed())?);
         }
     }
+}
+
+pub struct XunleiDownload {
+    pub url: String,
+    pub name: String,
+    pub acceleration_token: Option<String>,
+    pub size: Option<u64>,
 }
 
 fn xunlei_share_from_value(

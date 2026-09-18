@@ -18,6 +18,11 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> &'static s
         QuarkError::AuthorizationPending => "正在等待网页登录，请在授权窗口完成登录",
         QuarkError::InvalidResponse => "网盘返回的下载信息无效，请刷新后重试",
         QuarkError::Storage => "安全凭据存储不可用",
+        QuarkError::Transport(message)
+            if message == crate::xunlei_native::PLUGIN_UPDATE_MESSAGE =>
+        {
+            crate::xunlei_native::PLUGIN_UPDATE_MESSAGE
+        }
         QuarkError::Transport(_) => "网盘分享下载地址网络请求失败，请检查网络后重试",
         QuarkError::Provider(_) => "网盘分享下载地址请求失败，请稍后重试",
         QuarkError::InvalidInput(_) => "网盘分享下载请求无效，请重新解析分享链接",
