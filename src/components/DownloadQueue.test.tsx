@@ -89,7 +89,8 @@ it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
   expect(screen.queryByText('已连接 99')).not.toBeInTheDocument();
 });
 
-it('shows a disabled queued control until aria2 promotes the task to an active slot', () => {
+it('uses one queued control with the regular task menu until aria2 promotes the task', async () => {
+  const user = userEvent.setup();
   const onCommand = vi.fn();
   const { rerender } = render(<DownloadQueue tasks={[
     { id: 'queued-task', name: 'waiting.zip', kind: 'file', status: 'queued', progress: 0 },
@@ -97,13 +98,21 @@ it('shows a disabled queued control until aria2 promotes the task to an active s
 
   const queued = screen.getByRole('button', { name: 'waiting.zip 排队中' });
   expect(queued).toHaveTextContent('排队中');
-  expect(queued).toBeDisabled();
+  expect(queued).toBeEnabled();
+  expect(queued).toHaveAttribute('aria-haspopup', 'menu');
+  expect(screen.queryByRole('button', { name: '更多操作 waiting.zip' })).not.toBeInTheDocument();
+  expect(queued.closest('.task-actions')?.querySelectorAll('button')).toHaveLength(1);
+  await user.click(queued);
+  expect(screen.getByRole('menu', { name: 'waiting.zip 任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '取消任务' })).toBeVisible();
 
   rerender(<DownloadQueue tasks={[
     { id: 'queued-task', name: 'waiting.zip', kind: 'file', status: 'downloading', progress: 0 },
   ]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
 
   expect(screen.getByRole('button', { name: '暂停 waiting.zip' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: '更多操作 waiting.zip' })).toBeVisible();
   expect(screen.queryByRole('button', { name: 'waiting.zip 排队中' })).not.toBeInTheDocument();
 });
 

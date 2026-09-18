@@ -456,6 +456,7 @@ it('creates PikPak with a server-generated code then validates and saves a custo
   await user.click(within(create).getByRole('button', { name: '创建分享链接' }));
   expect(client.createCloudShare).toHaveBeenCalledWith('pikpak', ['file-1'], { name: '报告.pdf', generatePassCode: true });
   const result = await screen.findByRole('dialog', { name: '分享链接已创建' });
+  expect(result.querySelector('.cloud-share-passcode-editor')).toBeTruthy();
   const code = within(result).getByRole('textbox', { name: '新提取码' });
   expect(code).toHaveValue('old1');
   await user.clear(code);
@@ -469,6 +470,13 @@ it('creates PikPak with a server-generated code then validates and saves a custo
   expect(updateCloudSharePassCode).toHaveBeenCalledWith('pikpak', 'share-p', 'a1B2');
   expect(within(result).getByText('a1B2', { selector: 'b' })).toBeVisible();
   expect(client.createCloudShare).toHaveBeenCalledTimes(1);
+});
+
+it('keeps the PikPak share-code input, save button, and validation message in separate grid cells', () => {
+  const styles = readFileSync('src/styles.css', 'utf8');
+  expect(styles).toContain('.cloud-share-dialog .cloud-share-passcode-editor{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end}');
+  expect(styles).toContain('.cloud-share-dialog .cloud-share-passcode-editor button{min-width:92px;margin:0;white-space:nowrap}');
+  expect(styles).toContain('.cloud-share-dialog .cloud-share-passcode-editor p{grid-column:1/-1;margin:0;font-size:11px}');
 });
 
 it('preserves the old share code on failure and reopens my shares with the successfully updated code', async () => {
@@ -669,8 +677,12 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
         restoreOnMount={false} showSessionActions={false} />);
       await screen.findByRole('tree');
       const manager = container.querySelector('.cloud-file-manager')!;
-      // Extra minimum height must stay below the content, not stretch auto rows.
-      expect(getComputedStyle(manager).alignContent).toBe('start');
+      const list = container.querySelector('.cloud-list')!;
+      expect(getComputedStyle(manager).display).toBe('flex');
+      expect(getComputedStyle(manager).minHeight).toBe('0');
+      expect(getComputedStyle(list).flexGrow).toBe('1');
+      expect(getComputedStyle(list).minHeight).toBe('0');
+      expect(getComputedStyle(list).overflowX).toBe('hidden');
       const refresh = screen.getByRole('button', { name: '刷新' });
       expect(getComputedStyle(refresh).display).toBe('grid');
       expect(getComputedStyle(refresh).placeItems).toBe('center');
@@ -897,14 +909,21 @@ it.each([
   expect(within(card).getByRole('button', { name: `查看${label}网盘信息` })).toBeVisible();
 });
 
-it('shows the regional access notice only for PikPak', async () => {
+it('shows the PikPak regional and Xunlei SVIP notices from their information buttons', async () => {
   const user = userEvent.setup();
   const pikpak = { ...cloudCatalog.find(item => item.provider === 'pikpak')!, authorizationUrl: 'https://mypikpak.com/drive' };
   const view = render(<NativeCloudManager descriptor={pikpak} provider="pikpak" client={createCloudFake()} authorizationOnly />);
   await user.click(screen.getByRole('button', { name: '查看PikPak网盘信息' }));
-  expect(screen.getByRole('region', { name: 'PikPak网盘信息' })).toHaveTextContent('本网盘中国大陆无法直接访问。');
+  expect(screen.getByRole('region', { name: 'PikPak网盘信息' })).toHaveTextContent('此网盘中国大陆无法直接访问');
 
-  view.rerender(<CloudManager provider="quark" client={createCloudFake()} authorizationOnly />);
+  const xunlei = { ...cloudCatalog.find(item => item.provider === 'xunlei')!, authorizationUrl: 'https://pan.xunlei.com' };
+  view.unmount();
+  const xunleiView = render(<NativeCloudManager descriptor={xunlei} provider="xunlei" client={createCloudFake()} authorizationOnly />);
+  await user.click(screen.getByRole('button', { name: '查看迅雷网盘信息' }));
+  expect(screen.getByRole('region', { name: '迅雷网盘信息' })).toHaveTextContent('安装迅雷官方客户端后方可使用SVIP下载通道。');
+
+  xunleiView.unmount();
+  render(<CloudManager provider="quark" client={createCloudFake()} authorizationOnly />);
   await user.click(screen.getByRole('button', { name: '查看夸克网盘信息' }));
   expect(screen.getByRole('region', { name: '夸克网盘信息' })).not.toHaveTextContent('中国大陆无法直接访问');
 });
@@ -1325,6 +1344,25 @@ it('opens folders by double click without rendering an enter button', async () =
   expect(client.listCloudDirectory).toHaveBeenLastCalledWith('quark', 'folder-1');
 });
 
+it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as const)(
+  'uses the named parent-directory row instead of a back button for %s', async (provider) => {
+    const user = userEvent.setup();
+    const listCloudDirectory = vi.fn().mockImplementation((_provider: CloudProvider, parentId: string) => Promise.resolve(parentId === 'child-folder'
+      ? { id: parentId, items: [{ id: 'child-file', parentId, name: '子目录文件.txt', kind: 'file' as const }] }
+      : { id: parentId, items: [{ id: 'child-folder', parentId, name: '子目录', kind: 'folder' as const }] }));
+    const client = createCloudFake({ listCloudDirectory });
+    render(<CloudManager provider={provider} client={client} initialAccount={{ id: `${provider}-account`, displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
+
+    await screen.findByText('子目录');
+    expect(screen.queryByRole('button', { name: '返回上一级' })).not.toBeInTheDocument();
+    await user.dblClick(screen.getByText('子目录'));
+    const parentRow = await screen.findByRole('treeitem', { name: '返回上一级目录' });
+    expect(parentRow).toHaveTextContent('返回上级目录');
+    await user.click(parentRow);
+    await waitFor(() => expect(listCloudDirectory).toHaveBeenLastCalledWith(provider, cloudRootDirectoryId[provider]));
+  }
+);
+
 it('shows normal file commands in the row context menu and opens a folder from it', async () => {
   const client = createCloudFake();
   render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
@@ -1352,9 +1390,12 @@ it('uses readable file-manager text with compact file rows', async () => {
   style.textContent = readFileSync('src/styles.css', 'utf8');
   document.head.appendChild(style);
   try {
-    render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+    const { container } = render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
     const folder = await screen.findByText('归档');
     const row = folder.closest('.cloud-file-row')!;
+    expect(style.textContent).toMatch(/\.cloud-list\{[^}]*scrollbar-gutter:stable/);
+    expect(style.textContent).toMatch(/\.cloud-file-manager \.cloud-row::after\{[^}]*right:calc\(-1 \* var\(--cloud-scrollbar-gutter-width/);
+    expect(container.querySelector('.cloud-list')!.style.getPropertyValue('--cloud-scrollbar-gutter-width')).toBe('0px');
     expect(getComputedStyle(row).fontSize).toBe('14px');
     expect(getComputedStyle(row).minHeight).toBe('44px');
     expect(getComputedStyle(document.querySelector('.cloud-columns')!).fontSize).toBe('13px');

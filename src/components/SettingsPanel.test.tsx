@@ -62,6 +62,7 @@ it('keeps proxy, traffic caps, and aria2 configuration in separate network setti
   const rateLimitFieldset = overallDownloadLimit.closest('fieldset');
 
   expect(rateLimitForm).toContainElement(overallDownloadLimit);
+  expect(rateLimitForm).toHaveTextContent('0为不限速');
   expect(rateLimitForm).toContainElement(p2pUploadLimit);
   expect(rateLimitForm).toContainElement(cloudUploadLimit);
   expect(p2pUploadLimit.closest('fieldset')).toBe(rateLimitFieldset);
@@ -107,13 +108,14 @@ it('keeps rate limits and their save control inline while accepting one decimal 
   }
 });
 
-it('keeps helper descriptions limited to privacy and aria2 diagnostics', async () => {
+it('shows the rate-limit helper and the privacy and aria2 diagnostic descriptions', async () => {
   const user = userEvent.setup();
   const { container } = render(<SettingsPanel initial={initial} onChange={() => {}} />);
 
   expect(container.querySelectorAll('.settings-content small')).toHaveLength(0);
   await user.click(screen.getByRole('tab', { name: '网络' }));
-  expect(container.querySelectorAll('.settings-content small')).toHaveLength(0);
+  expect(container.querySelectorAll('.settings-content small')).toHaveLength(1);
+  expect(screen.getByText('0为不限速')).toBeVisible();
   await user.click(screen.getByRole('tab', { name: '高级' }));
   const descriptions = Array.from(container.querySelectorAll('.settings-content small'));
   expect(descriptions).toHaveLength(2);

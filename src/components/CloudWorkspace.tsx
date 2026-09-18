@@ -247,7 +247,7 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
     if (pending && pending.pointerId === event.pointerId) clearProviderCardDrag(pending);
   }
 
-  return <section className="cloud-workspace" aria-label="我的网盘工作区">
+  return <section className={`cloud-workspace${activePage === 'management' ? '' : ' cloud-workspace--files'}`} aria-label="我的网盘工作区">
     {activePage === 'management' && <section className="cloud-management-panel" aria-label="网盘管理">
       {recoveringAccounts && <div className="cloud-account-recovery" role="status" aria-label="正在读取网盘账号状态"><i aria-hidden="true" /><span>正在读取网盘账号状态…</span></div>}
       {recoveryError && <p className="cloud-operation-status error" role="alert">恢复账号失败：{recoveryError}</p>}
@@ -279,7 +279,7 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
     {/* Keep visited account workspaces alive during navigation, including their
         in-flight upload callbacks and results. Removing/replacing an account
         unmounts its workspace, so state never leaks into another login. */}
-    {accounts.filter(account => visitedAccounts.has(accountKey(account)) || accountKey(account) === activeKey).map(account => <div key={`files:${accountKey(account)}`} hidden={accountKey(account) !== activeKey}>
+    {accounts.filter(account => visitedAccounts.has(accountKey(account)) || accountKey(account) === activeKey).map(account => <div className="cloud-file-workspace" key={`files:${accountKey(account)}`} hidden={accountKey(account) !== activeKey}>
       <CloudManager
       descriptor={catalog.find(d => d.provider === account.provider)!}
       provider={account.provider}

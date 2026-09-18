@@ -3,13 +3,13 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { FloatingLauncher, type LauncherPointerPosition } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, moveLauncherPointerDrag, openLauncherManager, openLauncherNewDownload, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, moveLauncherPointerDrag, openLauncherActiveDownloads, openLauncherNewDownload, runLauncherMenuAction, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement } from '../lib/launcherWindow';
 import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, stageDroppedTorrent, updateSettings } from '../lib/api';
 import { runNativeLauncherDrag } from '../lib/launcherWindow';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
 
-export type LauncherSurfaceMode = 'compact' | 'quick-add' | 'context-menu';
+export type LauncherSurfaceMode = 'compact' | 'context-menu';
 
 export function LauncherWindow() {
   const [activeCount, setActiveCount] = useState(0);
@@ -27,7 +27,6 @@ export function LauncherWindow() {
   const regionQueue = useRef(Promise.resolve());
   const lastValidRegions = useRef<LauncherInputRegion[]>([launcherIconRegion]);
   const disposed = useRef(false);
-  const quickAddElement = useRef<HTMLElement | null>(null);
   const menuElement = useRef<HTMLElement | null>(null);
   const [inputReady, setInputReady] = useState(false);
   const dragSession = useRef<LauncherPointerDragSession | null>(null);
@@ -42,7 +41,6 @@ export function LauncherWindow() {
   const hasActiveDownload = activeCount > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
 
-  const captureQuickAdd = useCallback((element: HTMLElement | null) => { quickAddElement.current = element; }, []);
   const captureMenu = useCallback((element: HTMLElement | null) => { menuElement.current = element; }, []);
 
   const applyRegions = useCallback((regions: LauncherInputRegion[]) => {
@@ -82,7 +80,7 @@ export function LauncherWindow() {
 
   useLayoutEffect(() => {
     let disposed = false;
-    const element = mode === 'quick-add' ? quickAddElement.current : mode === 'context-menu' ? menuElement.current : null;
+    const element = mode === 'context-menu' ? menuElement.current : null;
     const syncInput = () => {
       const rect = element?.getBoundingClientRect();
       const popup = rect && rect.width > 0 && rect.height > 0
@@ -95,7 +93,7 @@ export function LauncherWindow() {
       return update;
     };
     const update = syncInput();
-    // Quick-add validation and menu settings can change the actual input rectangle.
+    // The menu can change its actual input rectangle as settings expand.
     const observer = element && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncInput) : null;
     if (element) observer?.observe(element);
     return () => { disposed = true; observer?.disconnect(); };
@@ -292,17 +290,12 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${mode === 'quick-add' ? 'launcher-expanded' : ''} ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
-        mode={mode}
-        placement={popupPlacement}
-        onModeChange={requestMode}
-        onQuickAddElement={captureQuickAdd}
-        onParse={(input) => { void sendLauncherInput(input); }}
         onScan={scanDownloadInputs}
         onDroppedInput={openLauncherNewDownload}
         onStageDroppedTorrent={stageLauncherTorrent}
-        onOpenTaskList={() => { void openLauncherManager(); }}
+        onActivateTaskList={() => { void openLauncherActiveDownloads(); }}
         onDragStart={(pointer, grabOffset) => { dragStartQueue.current = beginLauncherDrag(pointer, grabOffset); }}
         onDragMove={moveLauncherDrag}
         onDragEnd={finishLauncherDrag}

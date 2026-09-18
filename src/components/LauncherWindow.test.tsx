@@ -8,7 +8,7 @@ const state = vi.hoisted(() => ({
   updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(),
   setLauncherInputRegions: vi.fn(),
   runNativeLauncherDrag: vi.fn(),
-  beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(), openNewDownload: vi.fn(), stageDroppedTorrent: vi.fn(),
+  beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(), openActiveDownloads: vi.fn(), openNewDownload: vi.fn(), stageDroppedTorrent: vi.fn(),
   onMoved: vi.fn(), onScaleChanged: vi.fn(),
   movedHandler: undefined as undefined | (() => void),
   scaleChangedHandler: undefined as undefined | (() => void),
@@ -39,9 +39,8 @@ vi.mock('../lib/launcherWindow', () => ({
   beginLauncherPointerDrag: state.beginLauncherPointerDrag,
   runNativeLauncherDrag: state.runNativeLauncherDrag,
   moveLauncherPointerDrag: state.moveLauncherPointerDrag,
-  openLauncherManager: vi.fn().mockResolvedValue(undefined),
+  openLauncherActiveDownloads: state.openActiveDownloads,
   openLauncherNewDownload: state.openNewDownload,
-  sendLauncherInput: vi.fn().mockResolvedValue(undefined),
   stageDroppedTorrent: state.stageDroppedTorrent,
 }));
 vi.mock('../lib/downloadEvents', () => ({
@@ -56,7 +55,6 @@ import { LauncherWindow } from './LauncherWindow';
 import { beginLauncherPointerDrag, moveLauncherPointerDrag, setLauncherInputRegions, setLauncherWindowVisible } from '../lib/launcherWindow';
 
 const icon = { x: 346, y: 328, width: 64, height: 64 };
-const quickAdd = { x: 0, y: 92, width: 410, height: 236 };
 const menu = { x: 114, y: 16, width: 280, height: 296 };
 
 function deferred<T>() {
@@ -80,6 +78,7 @@ beforeEach(() => {
     windowPosition: { x: 1369, y: 506 }, pointerPosition: { x: 10, y: 10 }, scaleFactor: 1.5,
   });
   state.moveLauncherPointerDrag.mockReset().mockResolvedValue(undefined);
+  state.openActiveDownloads.mockReset().mockResolvedValue(undefined);
   state.openNewDownload.mockReset().mockResolvedValue(undefined);
   state.stageDroppedTorrent.mockReset().mockResolvedValue('C:\\AppData\\dropped-torrents\\fixture.torrent');
   state.movedHandler = undefined;
@@ -93,8 +92,7 @@ beforeEach(() => {
     return Promise.resolve(() => { state.scaleChangedHandler = undefined; });
   });
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
-    const bounds = this.classList.contains('launcher-panel') ? quickAdd
-      : this.classList.contains('launcher-context-menu') ? menu : { x: 0, y: 0, width: 0, height: 0 };
+    const bounds = this.classList.contains('launcher-context-menu') ? menu : { x: 0, y: 0, width: 0, height: 0 };
     return { ...bounds, left: bounds.x, top: bounds.y, right: bounds.x + bounds.width, bottom: bounds.y + bounds.height, toJSON() {} };
   });
 });
@@ -154,34 +152,27 @@ it('keeps the compact launcher visible for an active task in download-only mode'
   await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenLastCalledWith(true));
 });
 
-it('keeps the same hexagon node while switching between both popup types', async () => {
-  const user = userEvent.setup();
+it('keeps the hexagon compact on one click, activates tasks on double click, and opens the context menu on right click', async () => {
   render(<LauncherWindow />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   const mark = trigger.querySelector('.launcher-mark');
-  await user.click(trigger);
-  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
-  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, quickAdd]);
+  fireEvent.click(trigger);
+  expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument();
+  fireEvent.doubleClick(trigger);
+  await waitFor(() => expect(state.openActiveDownloads).toHaveBeenCalledOnce());
   fireEvent.contextMenu(trigger);
   expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
   expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);
   expect(trigger.querySelector('.launcher-mark')).toBe(mark);
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-  await user.click(trigger);
-  expect(await screen.findByRole('dialog')).toBeVisible();
-  expect(trigger.querySelector('.launcher-mark')).toBe(mark);
 });
 
-it('never resizes, clips, hides, or shows the native window for popup transitions', async () => {
-  const user = userEvent.setup();
+it('never resizes, clips, hides, or shows the native window for context-menu transitions', async () => {
   render(<LauncherWindow />);
   await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalledOnce());
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
-  await user.click(trigger);
-  await screen.findByRole('dialog');
   fireEvent.contextMenu(trigger);
   await screen.findByRole('menu');
-  await user.keyboard('{Escape}');
+  fireEvent.keyDown(window, { key: 'Escape' });
   await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
   expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]);
   expect(vi.mocked(setLauncherWindowVisible).mock.calls.slice(1)).toEqual([]);
@@ -196,19 +187,18 @@ it('uses the last intent while an earlier placement lookup is pending', async ()
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   fireEvent.contextMenu(trigger);
   await waitFor(() => expect(state.getLauncherPopupPlacement).toHaveBeenCalledOnce());
-  fireEvent.click(trigger); fireEvent.contextMenu(trigger); fireEvent.click(trigger);
+  fireEvent.keyDown(window, { key: 'Escape' });
   await act(async () => pending.resolve('below'));
-  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
-  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, quickAdd]);
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]);
 });
 
-it('uses the last input when left and right clicks alternate rapidly', async () => {
+it('does not open a new-task dialog when left and right clicks alternate rapidly', async () => {
   render(<LauncherWindow />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   fireEvent.click(trigger); fireEvent.contextMenu(trigger); fireEvent.click(trigger);
-  expect(await screen.findByRole('dialog', { name: '新建下载' })).toBeVisible();
-  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument();
+  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
 });
 
 it.each(['Escape', 'blur', 'drag'] as const)('restores icon-only input for %s', async (reason) => {
@@ -314,7 +304,6 @@ it('changes native visibility only for the visibility policy, not popup state', 
   await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalled());
   vi.mocked(setLauncherWindowVisible).mockClear();
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: '打开下载输入' }));
     fireEvent.contextMenu(screen.getByRole('button', { name: '打开下载输入' }));
   });
   await screen.findByRole('menu', { name: '悬浮球菜单' });
@@ -332,7 +321,7 @@ it('recomputes placement and reapplies the safe input region after the launcher 
   expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);
 });
 
-it.each(['context-menu', 'quick-add'] as const)('uses the below slot for %s without moving the icon', async (popup) => {
+it('uses the below slot for the context menu without moving the icon', async () => {
   state.getLauncherPopupPlacement.mockResolvedValue('below');
   const stylesheet = document.createElement('style');
   stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
@@ -340,8 +329,8 @@ it.each(['context-menu', 'quick-add'] as const)('uses the below slot for %s with
   try {
     render(<LauncherWindow />);
     const trigger = screen.getByRole('button', { name: '打开下载输入' });
-    if (popup === 'context-menu') fireEvent.contextMenu(trigger); else fireEvent.click(trigger);
-    const surface = await screen.findByRole(popup === 'context-menu' ? 'menu' : 'dialog');
+    fireEvent.contextMenu(trigger);
+    const surface = await screen.findByRole('menu');
     expect(trigger.closest('main')).toHaveClass('launcher-popup-below');
     expect(getComputedStyle(trigger.closest('.launcher-interaction-target')!).top).toBe('328px');
     expect(getComputedStyle(surface).top).toBe('392px');

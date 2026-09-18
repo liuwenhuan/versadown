@@ -104,6 +104,12 @@ describe('reconcileTaskSnapshot', () => {
     expect(reconcileTaskSnapshot([completed], [], 'active')).toEqual([completed]);
   });
 
+  it('keeps failed tasks in the active scope while the terminal snapshot refreshes', () => {
+    const failed = task({ id: 'failed-task', status: 'failed', progress: 12 });
+
+    expect(reconcileTaskSnapshot([failed], [], 'terminal')).toEqual([failed]);
+  });
+
   it('keeps a task updated after the active snapshot request began', () => {
     const live = task({ id: 'live-task', status: 'awaiting_user' });
 

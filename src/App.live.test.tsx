@@ -432,7 +432,7 @@ it('optimistically queues a refresh and restores its failed state when the actio
   await user.click(screen.getByRole('tab', { name: /下载中/ }));
 
   await user.click(await screen.findByRole('button', { name: '重新下载 retry-pending.zip' }));
-  expect(screen.getByRole('button', { name: 'retry-pending.zip 排队中' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'retry-pending.zip 排队中' })).toBeEnabled();
   expect(screen.getByText('正在提交下载任务…')).toBeVisible();
 
   await act(async () => { action.reject(new Error('下载引擎暂时不可用')); });
@@ -875,8 +875,8 @@ it('starts every selected paused task from the multi-selection menu', async () =
     expect(state.taskAction).toHaveBeenCalledWith('resume-1', 'resume');
     expect(state.taskAction).toHaveBeenCalledWith('resume-2', 'resume');
   });
-  expect(screen.getByRole('button', { name: 'first-paused.zip 排队中' })).toBeDisabled();
-  expect(screen.getByRole('button', { name: 'second-paused.zip 排队中' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'first-paused.zip 排队中' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'second-paused.zip 排队中' })).toBeEnabled();
   await act(async () => {
     firstAction.resolve({ task: { ...first, status: 'downloading' } });
     secondAction.resolve({ task: { ...second, status: 'downloading' } });
@@ -1608,6 +1608,18 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
   await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
 });
 
+it('switches the manager to the active-downloads tab when the launcher is double-clicked', async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-open-active-downloads')).toBeDefined());
+
+  await user.click(screen.getByRole('tab', { name: /已完成/ }));
+  expect(screen.getByRole('tab', { name: /已完成/ })).toHaveAttribute('aria-selected', 'true');
+  act(() => { state.listeners.get('launcher-open-active-downloads')?.({ payload: undefined }); });
+
+  expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true');
+});
+
 it('expands primary navigation when the launcher opens a non-download workspace', async () => {
   const user = userEvent.setup();
   render(<App />);
@@ -1635,7 +1647,7 @@ it('uses the existing native task action for floating-ball batch resume', async 
   act(() => { state.listeners.get('launcher-command')?.({ payload: 'resume-all' }); });
 
   await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('paused-task', 'resume'));
-  expect(screen.getByRole('button', { name: 'archive.iso 排队中' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'archive.iso 排队中' })).toBeEnabled();
   await act(async () => { action.resolve({ task: { ...pausedTask, status: 'downloading' } }); });
   expect(await screen.findByRole('button', { name: '暂停 archive.iso' })).toBeVisible();
 });

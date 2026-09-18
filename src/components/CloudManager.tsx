@@ -462,10 +462,10 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
         <p>{share.name}</p>
         <form className="cloud-operation-editor"><label>分享链接<input aria-label="分享链接" readOnly value={share.url} /></label></form>
         {share.passCode && <p>提取码：<b>{share.passCode}</b></p>}
-        {onUpdatePassCode && <form className="cloud-operation-editor" onSubmit={updatePassCode}>
+        {onUpdatePassCode && <form className="cloud-operation-editor cloud-share-passcode-editor" onSubmit={updatePassCode}>
           <label>修改提取码<input aria-label="新提取码" aria-invalid={Boolean(updatedPassCodeError)} disabled={savingPassCode || busy} value={updatedPassCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => { setUpdatedPassCode(event.target.value); setUpdateNotice(null); }} /></label>
-          {updatedPassCodeError && <p role="alert">{updatedPassCodeError}</p>}
           <button type="submit" className="secondary" disabled={savingPassCode || busy || !updatedPassCode.trim() || Boolean(updatedPassCodeError) || updatedPassCode.trim() === share.passCode}>{savingPassCode ? '正在保存…' : '保存提取码'}</button>
+          {updatedPassCodeError && <p role="alert">{updatedPassCodeError}</p>}
           {updateNotice && <p role={updateNotice.error ? 'alert' : 'status'}>{updateNotice.message}</p>}
         </form>}
         <button className="secondary" onClick={() => onCopy(share.url)}>复制分享链接</button><button className="primary" disabled={savingPassCode} onClick={onClose}>完成</button>
@@ -508,7 +508,8 @@ function CloudProviderInfo({ provider, label, officialUrl }: { provider: CloudPr
         <div><dt>官方网站</dt><dd><a href={officialUrl} target="_blank" rel="noreferrer" aria-label={`${label}网盘官方网站`} onClick={externalLink(officialUrl)}>{officialUrl}</a></dd></div>
         <div><dt>插件制作者</dt><dd><a href="https://versadown.aigutta.com" target="_blank" rel="noreferrer" aria-label="插件制作者 aigutta" onClick={externalLink('https://versadown.aigutta.com')}>aigutta</a></dd></div>
       </dl>
-      {provider === 'pikpak' && <p className="cloud-provider-info-notice">本网盘中国大陆无法直接访问。</p>}
+      {provider === 'pikpak' && <p className="cloud-provider-info-notice">此网盘中国大陆无法直接访问</p>}
+      {provider === 'xunlei' && <p className="cloud-provider-info-notice">安装迅雷官方客户端后方可使用SVIP下载通道。</p>}
       {provider === 'tianyi' && <p className="cloud-provider-info-notice">如果通过账号和密码登录，推荐登录门户网址<a href="https://e.dlife.cn" target="_blank" rel="noreferrer" aria-label="天翼账号登录门户" onClick={externalLink('https://e.dlife.cn')}>e.dlife.cn</a>，点击“账号安全”，关闭“设备锁”，这样无需每次登录做短信认证。</p>}
     </section>;
 }
@@ -630,6 +631,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const selectionAnchor = useRef<string | null>(null);
   const selectAllCheckbox = useRef<HTMLInputElement>(null);
   const selectionMenuTrigger = useRef<HTMLButtonElement>(null);
+  const fileListRef = useRef<HTMLDivElement>(null);
 
   const sortedItems = sortedCloudFiles(directory?.items ?? [], sort);
   const selected = sortedItems.filter((item) => selectedIds.includes(item.id));
@@ -647,6 +649,19 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
   const logoutLabel = passwordSession ? '退出登录' : '退出授权';
   const allSelected = Boolean(selectableItems.length) && selected.length === selectableItems.length;
+
+  useLayoutEffect(() => {
+    const list = fileListRef.current;
+    if (!list) return;
+    const syncScrollbarGutter = () => {
+      list.style.setProperty('--cloud-scrollbar-gutter-width', `${Math.max(0, list.offsetWidth - list.clientWidth)}px`);
+    };
+    syncScrollbarGutter();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(syncScrollbarGutter);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [directoryState]);
 
   function queueAuthorizationContinuation(name: string, resume: () => Promise<void>, message: string, showOperation = true, expectedAccountId = activeAccount?.id) {
     if (!expectedAccountId) return;
@@ -1450,6 +1465,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   if (directoryState === 'expired') return authorizationView(true);
 
   const parent = breadcrumbs.at(-2);
+  const canNavigateToParent = Boolean(parent && !isRecycleBin && !isMyShares);
+  const navigateToParent = () => {
+    if (!parent || operationBusy) return;
+    void loadDirectory(activeAccount, parent.id, breadcrumbs.slice(0, -1));
+  };
   return <section className="cloud-manager cloud-file-manager" aria-label={`${label}文件管理器`}>
     {showSessionActions && <div className="cloud-file-sessionbar">
       {showSessionActions && sessionActions()}
@@ -1457,7 +1477,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
     <div className="cloud-filebar">
       <div className="cloud-pathbar">
-        <button className="cloud-icon-button" aria-label="返回上一级" title="返回上一级" disabled={!parent || operationBusy} onClick={() => { if (parent) void loadDirectory(activeAccount, parent.id, breadcrumbs.slice(0, -1)); }}><CloudActionIcon action="back" /></button>
         <div className="cloud-breadcrumbs" role="navigation" aria-label="当前目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1} onClick={() => void loadDirectory(activeAccount, crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label="文件操作">
@@ -1478,6 +1497,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     {directoryState === 'error' && <div className="cloud-state cloud-error" role="alert"><b>加载失败</b><span>{authorizationStatus}</span>{authorizationContinuationButton()}<button className="secondary" onClick={refreshDirectory}>重试</button></div>}
     {(directoryState === 'ready' || directoryState === 'empty') && <div
       className="cloud-list"
+      ref={fileListRef}
       role="tree"
       aria-label={`${label}网盘文件`}
       tabIndex={0}
@@ -1485,6 +1505,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
       <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">特殊文件夹仅可打开</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />恢复</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />永久删除</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl)}><CloudActionIcon action="copyShareLink" />复制链接</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />取消分享</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label="按名称排序" aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>名称<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label="按大小排序" aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>大小<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label="按修改时间排序" aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>修改时间<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
+      {canNavigateToParent && <div className="cloud-row cloud-file-row cloud-parent-directory-row" role="treeitem" aria-label="返回上一级目录" tabIndex={0} onClick={navigateToParent} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); navigateToParent(); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
+        <span className="cloud-check-cell" aria-hidden="true" />
+        <span className="cloud-file-name"><i className="folder"><CloudFileIcon kind="folder" /></i><b title="返回上级目录">返回上级目录</b></span>
+        <span>—</span><span>—</span>
+      </div>}
       {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? '回收站为空' : isMyShares ? '暂无分享文件' : '此目录为空'}</b><span>{isRecycleBin ? '没有可恢复或永久删除的项目' : isMyShares ? '在文件或目录的右键菜单中创建分享链接' : '可在这里上传文件或新建目录'}</span></div> : sortedItems.map((item, index) => {
         const isSelected = selectedIds.includes(item.id);
         const iconKind: CloudFileIconKind = isVirtualRecycleBinItem(item) ? 'recycle-bin' : isVirtualMySharesItem(item) ? 'my-shares' : item.kind;

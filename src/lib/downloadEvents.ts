@@ -3,7 +3,9 @@ import type { DownloadGlobalStat, QueueTask } from './types';
 
 export type TaskSnapshotScope = 'active' | 'terminal';
 
-const terminalTaskStatuses = new Set<QueueTask['status']>(['completed', 'failed', 'cancelled', 'recycled']);
+// Failed tasks remain in the active download list so users can retry or
+// manage them without switching to a separate terminal scope.
+const terminalTaskStatuses = new Set<QueueTask['status']>(['completed', 'cancelled', 'recycled']);
 
 export function upsertTask(tasks: readonly QueueTask[], snapshot: QueueTask): QueueTask[] {
   // A directory snapshot owns its descendants. A list response may have observed

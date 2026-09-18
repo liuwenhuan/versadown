@@ -346,7 +346,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         {saved && <div className="settings-actions"><span role="status">已保存，后续新任务生效</span></div>}
       </form>
       <form className="proxy-settings rate-limit-settings" onSubmit={saveRateLimits}>
-        <div className="setting-row"><span><b>限速设置</b></span></div>
+        <div className="setting-row"><span><b>限速设置</b><small>0为不限速</small></span></div>
         <fieldset>
           <label><span>整体下载限速（MiB/s）</span><input aria-label="整体下载限速" type="number" min="0" step="0.1" required value={rateLimitInputs.overallDownloadLimit} onChange={(event) => updateRateLimitInput('overallDownloadLimit', event.target.value)} onBlur={() => normalizeRateLimitInput('overallDownloadLimit')} /></label>
           <label><span>P2P 上传限速（MiB/s）</span><input aria-label="P2P 上传限速" type="number" min="0" step="0.1" required value={rateLimitInputs.p2pUploadLimit} onChange={(event) => updateRateLimitInput('p2pUploadLimit', event.target.value)} onBlur={() => normalizeRateLimitInput('p2pUploadLimit')} /></label>

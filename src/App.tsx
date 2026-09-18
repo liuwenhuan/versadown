@@ -965,13 +965,18 @@ export function App() {
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let disposed = false;
-    let unlisten: (() => void) | undefined;
+    const unlisten: (() => void)[] = [];
+    // This generic native input entry point is retained for non-launcher
+    // sources. The floating launcher itself no longer emits it on left click.
     listen<string>('launcher-parse', (event) => {
       void parse(event.payload).catch((error) => setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) }));
-    })
-      .then((stop) => { if (disposed) stop(); else unlisten = stop; })
-      .catch(() => undefined);
-    return () => { disposed = true; unlisten?.(); };
+    }).then((stop) => { if (disposed) stop(); else unlisten.push(stop); }).catch(() => undefined);
+    listen('launcher-open-active-downloads', () => {
+      setView('downloads');
+      setDownloadTab('active');
+      setHeaderPanel(null);
+    }).then((stop) => { if (disposed) stop(); else unlisten.push(stop); }).catch(() => undefined);
+    return () => { disposed = true; unlisten.forEach((stop) => stop()); };
   }, []);
 
   async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal') {
@@ -1064,7 +1069,7 @@ export function App() {
         setDuplicateQueue((current) => [...current, ...duplicates]);
         const failedTask = cloudTasks.find((task) => task.status === 'failed');
         if (failedTask && activeGeneration.current === requestGeneration) {
-          setNotice({ kind: 'error', message: `${failedTask.name}：${failedTask.error || '提交失败'}，可在“失败”中重试` });
+          setNotice({ kind: 'error', message: `${failedTask.name}：${failedTask.error || '提交失败'}，可在“下载中”重试` });
         }
         if (result.failures.length > 0) {
           const failedIds = new Set(result.failures.map((failure) => failure.selectedId));
