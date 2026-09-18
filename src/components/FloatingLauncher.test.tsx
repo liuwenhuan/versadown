@@ -142,14 +142,18 @@ it('stages a dropped torrent before opening the new-task dialog', async () => {
 
 it('starts dragging after pointer movement without opening the input panel', () => {
   const onDragStart = vi.fn();
-  render(<FloatingLauncher onParse={vi.fn()} onDragStart={onDragStart} />);
+  const onDragMove = vi.fn();
+  render(<FloatingLauncher onParse={vi.fn()} onDragStart={onDragStart} onDragMove={onDragMove} />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
 
-  fireEvent.mouseDown(trigger, { button: 0, clientX: 10, clientY: 10 });
-  fireEvent.mouseMove(trigger, { buttons: 1, clientX: 18, clientY: 16 });
+  fireEvent.mouseDown(trigger, { button: 0, clientX: 10, clientY: 10, screenX: 100, screenY: 200 });
+  // The window may already have moved beneath the cursor, so its local
+  // coordinates can go backwards while screen coordinates keep increasing.
+  fireEvent.mouseMove(trigger, { buttons: 1, clientX: 2, clientY: 6, screenX: 108, screenY: 206 });
   fireEvent.click(trigger);
 
-  expect(onDragStart).toHaveBeenCalledOnce();
+  expect(onDragStart).toHaveBeenCalledWith({ x: 100, y: 200 }, { x: 10, y: 10 });
+  expect(onDragMove).toHaveBeenCalledWith({ x: 108, y: 206 });
   expect(screen.queryByRole('button', { name: '开始解析下载' })).not.toBeInTheDocument();
 });
 

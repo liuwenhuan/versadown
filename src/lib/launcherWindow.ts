@@ -97,6 +97,13 @@ export async function beginLauncherPointerDrag(
   };
 }
 
+// Resolves after native mouse release on Windows; false selects the browser
+// fallback on platforms without this adapter. No per-move IPC is needed.
+export async function runNativeLauncherDrag(grabOffset?: LauncherPointerPosition): Promise<boolean> {
+  if (!isTauriRuntime()) return false;
+  return invoke<boolean>('drag_launcher_window', { grabOffset: grabOffset ?? null });
+}
+
 export async function moveLauncherPointerDrag(
   session: LauncherPointerDragSession,
   pointerPosition: LauncherPointerPosition,

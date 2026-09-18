@@ -13,6 +13,7 @@ mod duplicates;
 mod engine_runtime;
 mod ftp;
 mod launcher;
+mod launcher_drag;
 mod launcher_input;
 mod local_upload_picker;
 mod magnet_metadata;
@@ -381,6 +382,13 @@ pub fn run() {
                 }
                 if launcher_visibility == LauncherVisibility::Always {
                     if let Some(launcher) = app.get_webview_window("launcher") {
+                        // A transparent 410x720 WebView is larger than its
+                        // visible icon. Make its initial state click-through
+                        // before it can be shown; the region monitor restores
+                        // input only under the icon/popup once it is ready.
+                        if let Err(error) = launcher.set_ignore_cursor_events(true) {
+                            eprintln!("无法初始化悬浮窗鼠标穿透: {error}");
+                        }
                         // The command installs the HWND subclass on its owner thread.
                         // Await it outside setup so the UI thread stays available.
                         tauri::async_runtime::spawn(async move {
@@ -402,7 +410,9 @@ pub fn run() {
                                 // input-region update once mounted; never leave an
                                 // otherwise valid launcher permanently hidden while
                                 // that native refinement catches up.
-                                Err(error) => eprintln!("无法初始化悬浮窗输入区域，将由界面重试: {error}"),
+                                Err(error) => {
+                                    eprintln!("无法初始化悬浮窗输入区域，将由界面重试: {error}")
+                                }
                             }
                             if let Err(error) = launcher.show() {
                                 eprintln!("无法显示悬浮窗: {error}");
@@ -453,6 +463,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            launcher_drag::drag_launcher_window,
             launcher_input::set_launcher_input_regions,
             launcher_input::launcher_input_hit_test_for_test,
             app_version_command,

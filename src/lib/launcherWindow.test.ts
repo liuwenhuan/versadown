@@ -175,6 +175,13 @@ it('restores and reveals the main window before forwarding launcher input', asyn
   );
 });
 
+it('waits for native drag completion without sending browser position updates', async () => {
+  native.invoke.mockResolvedValueOnce(true);
+  await expect(launcherWindow.runNativeLauncherDrag({ x: 378, y: 360 })).resolves.toBe(true);
+  expect(native.invoke).toHaveBeenCalledWith('drag_launcher_window', { grabOffset: { x: 378, y: 360 } });
+  expect(native.setPosition).not.toHaveBeenCalled();
+});
+
 it('opens the manager new-task dialog with an accepted launcher drop', async () => {
   await launcherWindow.openLauncherNewDownload('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567');
 

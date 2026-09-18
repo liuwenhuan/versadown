@@ -286,6 +286,12 @@ pub fn set_launcher_window_visible(
     if visible {
         window.show().map_err(|error| error.to_string())
     } else {
+        // Hiding is not enough for a transparent fixed-size WebView canvas:
+        // set the native click-through style first so it can never race a
+        // taskbar or tray click while the renderer is being torn down.
+        window
+            .set_ignore_cursor_events(true)
+            .map_err(|error| error.to_string())?;
         window.hide().map_err(|error| error.to_string())
     }
 }

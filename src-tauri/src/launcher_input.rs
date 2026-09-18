@@ -86,6 +86,15 @@ fn launcher_hit_result(point: (i32, i32), regions: &[PhysicalLauncherRegion]) ->
     }
 }
 
+// `WM_NCHITTEST` is still installed on every WebView HWND as a precise fast
+// path. Chromium may, however, recreate one of those HWNDs after that pass.
+// Keep the top-level window click-through outside the active rectangles as a
+// second, independent safeguard: a transparent part of the fixed launcher
+// canvas must never cover another application or the system tray.
+fn should_ignore_cursor_events_at(point: (i32, i32), regions: &[PhysicalLauncherRegion]) -> bool {
+    !point_hits_regions(point, regions)
+}
+
 #[tauri::command]
 pub async fn set_launcher_input_regions(
     window: WebviewWindow,
@@ -107,7 +116,18 @@ pub async fn set_launcher_input_regions(
                 let result = target
                     .hwnd()
                     .map_err(|error| error.to_string())
-                    .and_then(|hwnd| platform::apply_hwnd(hwnd, physical));
+                    .and_then(|hwnd| {
+                        // This monitor only restores pointer input while the
+                        // cursor is over the icon or an open popup. It makes
+                        // click-through reliable even when WebView2 replaces
+                        // an internal child window after the subclass pass.
+                        platform::install_cursor_passthrough_monitor(
+                            target.clone(),
+                            hwnd,
+                            physical.clone(),
+                        )?;
+                        platform::apply_hwnd(hwnd, physical)
+                    });
                 let _ = sender.send(result);
             })
             .map_err(|error| error.to_string())?;
@@ -162,8 +182,14 @@ mod platform {
     use super::{launcher_hit_result, LauncherHitResult, PhysicalLauncherRegion};
     use std::{
         collections::HashMap,
-        sync::{Mutex, OnceLock, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex, OnceLock, RwLock,
+        },
+        thread,
+        time::Duration,
     };
+    use tauri::WebviewWindow;
     use windows::{
         core::BOOL,
         Win32::{
@@ -176,9 +202,10 @@ mod platform {
                     DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
                 },
                 WindowsAndMessaging::{
-                    CallWindowProcW, DefWindowProcW, EnumChildWindows, GetWindowLongPtrW,
-                    GetWindowThreadProcessId, SetWindowLongPtrW, GWLP_WNDPROC, HTCLIENT,
-                    HTTRANSPARENT, WM_NCDESTROY, WM_NCHITTEST, WNDPROC,
+                    CallWindowProcW, DefWindowProcW, EnumChildWindows, GetCursorPos,
+                    GetWindowLongPtrW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+                    SetWindowLongPtrW, GWLP_WNDPROC, GWL_EXSTYLE, HTCLIENT, HTTRANSPARENT,
+                    WM_NCDESTROY, WM_NCHITTEST, WNDPROC, WS_EX_TRANSPARENT,
                 },
             },
         },
@@ -200,12 +227,127 @@ mod platform {
     static FOREIGN_THREAD_SUBCLASSES: OnceLock<Mutex<HashMap<isize, ForeignThreadSubclass>>> =
         OnceLock::new();
 
+    struct CursorPassthroughMonitor {
+        regions: RwLock<Vec<PhysicalLauncherRegion>>,
+        update_pending: AtomicBool,
+    }
+
+    static CURSOR_PASSTHROUGH_MONITORS: OnceLock<
+        Mutex<HashMap<isize, Arc<CursorPassthroughMonitor>>>,
+    > = OnceLock::new();
+
     fn regions() -> &'static RwLock<HashMap<isize, Vec<PhysicalLauncherRegion>>> {
         REGIONS.get_or_init(|| RwLock::new(HashMap::new()))
     }
 
     fn foreign_thread_subclasses() -> &'static Mutex<HashMap<isize, ForeignThreadSubclass>> {
         FOREIGN_THREAD_SUBCLASSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn cursor_passthrough_monitors() -> &'static Mutex<HashMap<isize, Arc<CursorPassthroughMonitor>>>
+    {
+        CURSOR_PASSTHROUGH_MONITORS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn cursor_is_over_active_region(root: HWND, regions: &[PhysicalLauncherRegion]) -> bool {
+        let mut point = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) }.is_err()
+            || !unsafe { ScreenToClient(root, &mut point) }.as_bool()
+        {
+            return false;
+        }
+        !super::should_ignore_cursor_events_at((point.x, point.y), regions)
+    }
+
+    /// Makes the fixed transparent canvas physically click-through except for
+    /// its declared interactive rectangles. The poller is deliberately tiny
+    /// (one 60 Hz position check) and only changes native styles when the
+    /// cursor crosses a region boundary, so it neither redraws nor flashes the
+    /// launcher.
+    pub(super) fn install_cursor_passthrough_monitor(
+        window: WebviewWindow,
+        root: HWND,
+        active: Vec<PhysicalLauncherRegion>,
+    ) -> Result<(), String> {
+        let key = root.0 as isize;
+        let monitor = {
+            let mut monitors = cursor_passthrough_monitors()
+                .lock()
+                .map_err(|_| "悬浮窗鼠标穿透状态不可用".to_string())?;
+            if let Some(existing) = monitors.get(&key) {
+                *existing
+                    .regions
+                    .write()
+                    .map_err(|_| "悬浮窗鼠标穿透状态不可用".to_string())? = active;
+                return Ok(());
+            }
+            let monitor = Arc::new(CursorPassthroughMonitor {
+                regions: RwLock::new(active),
+                update_pending: AtomicBool::new(false),
+            });
+            monitors.insert(key, Arc::clone(&monitor));
+            monitor
+        };
+
+        thread::Builder::new()
+            .name("launcher-cursor-passthrough".to_string())
+            .spawn(move || {
+                // HWND is intentionally !Send in the Windows bindings. Its
+                // numeric handle is stable while IsWindow reports true, so
+                // reconstruct it inside this worker instead.
+                let root = HWND(key as *mut std::ffi::c_void);
+                loop {
+                    if !unsafe { IsWindow(Some(root)) }.as_bool() {
+                        break;
+                    }
+                    if !monitor.update_pending.swap(true, Ordering::AcqRel) {
+                        let current = Arc::clone(&monitor);
+                        let target = window.clone();
+                        if window
+                            .run_on_main_thread(move || {
+                                let root = HWND(key as *mut std::ffi::c_void);
+                                if unsafe { IsWindow(Some(root)) }.as_bool() {
+                                    // Evaluate on the owner thread, at application
+                                    // time. A queued pre-drag snapshot must never
+                                    // turn click-through on during native movement.
+                                    let ignore = !unsafe { IsWindowVisible(root) }.as_bool()
+                                        || (!crate::launcher_drag::is_dragging(key)
+                                            && current
+                                                .regions
+                                                .read()
+                                                .map(|regions| {
+                                                    !cursor_is_over_active_region(root, &regions)
+                                                })
+                                                .unwrap_or(true));
+                                    let actual_ignore =
+                                        unsafe { GetWindowLongPtrW(root, GWL_EXSTYLE) }
+                                            & WS_EX_TRANSPARENT.0 as isize
+                                            != 0;
+                                    if ignore != actual_ignore {
+                                        let _ = target.set_ignore_cursor_events(ignore);
+                                    }
+                                }
+                                current.update_pending.store(false, Ordering::Release);
+                            })
+                            .is_err()
+                        {
+                            monitor.update_pending.store(false, Ordering::Release);
+                            break;
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(16));
+                }
+                if let Ok(mut monitors) = cursor_passthrough_monitors().lock() {
+                    if monitors
+                        .get(&key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &monitor))
+                    {
+                        monitors.remove(&key);
+                    }
+                }
+            })
+            .map_err(|error| format!("无法启动悬浮窗鼠标穿透监视: {error}"))?;
+        Ok(())
     }
 
     fn hit_test_result(root_key: isize, lparam: LPARAM) -> Option<LRESULT> {
@@ -554,6 +696,18 @@ mod tests {
             launcher_hit_result((100, 100), &regions),
             LauncherHitResult::Transparent
         );
+    }
+
+    #[test]
+    fn cursor_passthrough_is_enabled_outside_active_regions() {
+        let regions = [PhysicalLauncherRegion {
+            left: 346,
+            top: 328,
+            right: 410,
+            bottom: 392,
+        }];
+        assert!(!should_ignore_cursor_events_at((378, 360), &regions));
+        assert!(should_ignore_cursor_events_at((100, 100), &regions));
     }
 
     #[test]

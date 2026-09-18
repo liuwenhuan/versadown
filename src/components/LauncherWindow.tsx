@@ -5,6 +5,7 @@ import { FloatingLauncher, type LauncherPointerPosition } from './FloatingLaunch
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
 import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, moveLauncherPointerDrag, openLauncherManager, openLauncherNewDownload, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement } from '../lib/launcherWindow';
 import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, stageDroppedTorrent, updateSettings } from '../lib/api';
+import { runNativeLauncherDrag } from '../lib/launcherWindow';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
 
@@ -35,6 +36,8 @@ export function LauncherWindow() {
   const dragMoveCompletion = useRef(Promise.resolve());
   const dragMoveInFlight = useRef(false);
   const launcherDragging = useRef(false);
+  const nativeDragInFlight = useRef(false);
+  const dragEndPointer = useRef<LauncherPointerPosition | null>(null);
   popupPlacementRef.current = popupPlacement;
   const hasActiveDownload = activeCount > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
@@ -209,12 +212,22 @@ export function LauncherWindow() {
     dragMoveCompletion.current = completion;
   }
 
-  async function beginLauncherDrag(pointer: LauncherPointerPosition) {
-    if (disposed.current) return;
+  async function beginLauncherDrag(pointer: LauncherPointerPosition, grabOffset?: LauncherPointerPosition) {
+    if (disposed.current || launcherDragging.current) return;
     launcherDragging.current = true;
+    nativeDragInFlight.current = true;
+    dragEndPointer.current = null;
     requestedMode.current = 'compact';
     setMode('compact');
     try {
+      const handled = await runNativeLauncherDrag(grabOffset);
+      nativeDragInFlight.current = false;
+      if (handled) {
+        launcherDragging.current = false;
+        dragPendingPointer.current = null;
+        if (!disposed.current) await refreshLauncherGeometry();
+        return;
+      }
       dragSession.current = await beginLauncherPointerDrag(pointer);
       if (disposed.current || !launcherDragging.current) return;
       const pendingPointer = dragPendingPointer.current;
@@ -223,19 +236,26 @@ export function LauncherWindow() {
       // the panel makes the next layout pass compact; the native update can
       // safely finish while the already-captured pointer follows the mouse.
       void applyRegions([launcherIconRegion]).catch(() => undefined);
+      if (dragEndPointer.current) finishLauncherDrag(dragEndPointer.current);
     } catch {
+      nativeDragInFlight.current = false;
       launcherDragging.current = false;
       dragSession.current = null;
+      dragPendingPointer.current = null;
       // Never begin pointer-driven dragging after the compact-region update fails.
     }
   }
 
   function moveLauncherDrag(pointer: LauncherPointerPosition) {
+    if (nativeDragInFlight.current) { dragPendingPointer.current = pointer; return; }
     if (launcherDragging.current) queueLauncherDragMove(pointer);
   }
 
   function finishLauncherDrag(pointer: LauncherPointerPosition) {
     if (!launcherDragging.current) return;
+    // Windows owns both the final position and mouse-release detection. A
+    // WebView pointercancel must not race it with a second position update.
+    if (nativeDragInFlight.current) { dragEndPointer.current = pointer; return; }
     queueLauncherDragMove(pointer);
     // A fast pointer-up can arrive while the safe icon-only region is still
     // being applied.  Wait for that start sequence to install its session,
@@ -283,7 +303,7 @@ export function LauncherWindow() {
         onDroppedInput={openLauncherNewDownload}
         onStageDroppedTorrent={stageLauncherTorrent}
         onOpenTaskList={() => { void openLauncherManager(); }}
-        onDragStart={(pointer) => { dragStartQueue.current = beginLauncherDrag(pointer); }}
+        onDragStart={(pointer, grabOffset) => { dragStartQueue.current = beginLauncherDrag(pointer, grabOffset); }}
         onDragMove={moveLauncherDrag}
         onDragEnd={finishLauncherDrag}
         onContextMenu={openContextMenu}

@@ -419,6 +419,27 @@ it('shows the duplicate decision when retry returns a queue projection', async (
   expect(await screen.findByRole('dialog', { name: '检测到重复下载' })).toBeVisible();
 });
 
+it('optimistically queues a refresh and restores its failed state when the action is rejected', async () => {
+  const failed: QueueTask = {
+    id: 'retry-pending', name: 'retry-pending.zip', kind: 'file', status: 'failed', progress: 12,
+    error: '上次下载失败', total_length: 100, completed_length: 12,
+  };
+  const action = deferred<{ task?: QueueTask }>();
+  state.list.mockResolvedValue([failed]);
+  state.taskAction.mockReturnValueOnce(action.promise);
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+
+  await user.click(await screen.findByRole('button', { name: '重新下载 retry-pending.zip' }));
+  expect(screen.getByRole('button', { name: 'retry-pending.zip 排队中' })).toBeDisabled();
+  expect(screen.getByText('正在提交下载任务…')).toBeVisible();
+
+  await act(async () => { action.reject(new Error('下载引擎暂时不可用')); });
+  expect(await screen.findByRole('button', { name: '重新下载 retry-pending.zip' })).toBeVisible();
+  expect(screen.getByRole('status')).toHaveTextContent('下载引擎暂时不可用');
+});
+
 it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorization via %s', async (delivery) => {
   vi.useFakeTimers();
   try {
@@ -609,6 +630,36 @@ it('sorts only the active task tab from the menu beside total speed', async () =
 
   await user.click(screen.getByRole('tab', { name: /已完成/ }));
   expect(visibleNames()).toEqual(['delta.zip', 'beta.zip']);
+});
+
+it('places a newly added download first without changing the active sort preference', async () => {
+  window.localStorage.removeItem('task-list-order-v1');
+  const active = [
+    { id: 'existing-zeta', name: 'zeta.zip', kind: 'file' as const, status: 'downloading' as const, progress: 20 },
+    { id: 'existing-alpha', name: 'alpha.zip', kind: 'file' as const, status: 'downloading' as const, progress: 80 },
+  ];
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'active' ? active : scope === 'terminal' ? [] : active
+  ));
+  state.parse.mockResolvedValueOnce({
+    task: { id: 'new-middle', name: 'middle.zip', kind: 'file', status: 'queued', progress: 0 },
+  });
+  const user = userEvent.setup();
+  render(<App />);
+
+  const queue = await screen.findByRole('region', { name: '下载队列' });
+  const visibleNames = () => Array.from(queue.querySelectorAll<HTMLElement>('.task-copy b')).map((item) => item.textContent);
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '按文件名称从 A 到 Z' }));
+  expect(visibleNames()).toEqual(['alpha.zip', 'zeta.zip']);
+
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  act(() => { state.listeners.get('launcher-parse')?.({ payload: 'https://example.test/middle.zip' }); });
+
+  await waitFor(() => expect(visibleNames()).toEqual(['middle.zip', 'alpha.zip', 'zeta.zip']));
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  expect(screen.getByRole('menuitemradio', { name: '按文件名称从 A 到 Z' })).toHaveAttribute('aria-checked', 'true');
+  window.localStorage.removeItem('task-list-order-v1');
 });
 
 it.each([
@@ -809,8 +860,10 @@ it('copies all selected task links to the clipboard on separate lines', async ()
 it('starts every selected paused task from the multi-selection menu', async () => {
   const first: QueueTask = { ...oldTask, id: 'resume-1', name: 'first-paused.zip', status: 'paused' };
   const second: QueueTask = { ...oldTask, id: 'resume-2', name: 'second-paused.zip', status: 'paused' };
+  const firstAction = deferred<{ task?: QueueTask }>();
+  const secondAction = deferred<{ task?: QueueTask }>();
   state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [first, second] : []));
-  state.taskAction.mockImplementation((id: string) => Promise.resolve({ task: { ...(id === first.id ? first : second), status: 'downloading' } }));
+  state.taskAction.mockImplementation((id: string) => id === first.id ? firstAction.promise : secondAction.promise);
   render(<App />);
 
   fireEvent.click(await screen.findByText('first-paused.zip'));
@@ -821,6 +874,12 @@ it('starts every selected paused task from the multi-selection menu', async () =
   await waitFor(() => {
     expect(state.taskAction).toHaveBeenCalledWith('resume-1', 'resume');
     expect(state.taskAction).toHaveBeenCalledWith('resume-2', 'resume');
+  });
+  expect(screen.getByRole('button', { name: 'first-paused.zip 排队中' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'second-paused.zip 排队中' })).toBeDisabled();
+  await act(async () => {
+    firstAction.resolve({ task: { ...first, status: 'downloading' } });
+    secondAction.resolve({ task: { ...second, status: 'downloading' } });
   });
 });
 
@@ -1567,7 +1626,8 @@ it('expands primary navigation when the launcher opens a non-download workspace'
 it('uses the existing native task action for floating-ball batch resume', async () => {
   const pausedTask: QueueTask = { ...oldTask, id: 'paused-task', status: 'paused' };
   state.list.mockResolvedValueOnce([pausedTask]);
-  state.taskAction.mockResolvedValueOnce({ task: { ...pausedTask, status: 'downloading' } });
+  const action = deferred<{ task?: QueueTask }>();
+  state.taskAction.mockReturnValueOnce(action.promise);
   render(<App />);
   await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
   await screen.findByText('archive.iso');
@@ -1575,6 +1635,9 @@ it('uses the existing native task action for floating-ball batch resume', async 
   act(() => { state.listeners.get('launcher-command')?.({ payload: 'resume-all' }); });
 
   await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('paused-task', 'resume'));
+  expect(screen.getByRole('button', { name: 'archive.iso 排队中' })).toBeDisabled();
+  await act(async () => { action.resolve({ task: { ...pausedTask, status: 'downloading' } }); });
+  expect(await screen.findByRole('button', { name: '暂停 archive.iso' })).toBeVisible();
 });
 
 it('cancels one expanded torrent file without cancelling the parent task', async () => {

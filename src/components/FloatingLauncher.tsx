@@ -19,13 +19,21 @@ interface FloatingLauncherProps {
   onDroppedInput?(input: string): void | Promise<void>;
   onStageDroppedTorrent?(file: File): Promise<string>;
   onExpandedChange?(expanded: boolean): void;
-  onDragStart?(pointer: LauncherPointerPosition): void;
+  onDragStart?(pointer: LauncherPointerPosition, grabOffset?: LauncherPointerPosition): void;
   onDragMove?(pointer: LauncherPointerPosition): void;
   onDragEnd?(pointer: LauncherPointerPosition): void;
   onContextMenu?(): void;
 }
 
 const dragThreshold = 5;
+
+function screenPointerPosition(event: { screenX: number; screenY: number }): LauncherPointerPosition {
+  // clientX/clientY are relative to this WebView. As the launcher window
+  // moves, those values change even when the physical cursor is stationary,
+  // creating a feedback loop that makes the icon oscillate. Screen-space
+  // coordinates remain stable throughout the captured drag.
+  return { x: event.screenX, y: event.screenY };
+}
 
 function draggedText(dataTransfer: DataTransfer): string {
   return [...new Set(['text/uri-list', 'text/plain']
@@ -52,6 +60,7 @@ function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
 export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placement, onModeChange, onQuickAddElement, onScan, onOpenTaskList, onDroppedInput, onStageDroppedTorrent, onExpandedChange, onDragStart, onDragMove, onDragEnd, onContextMenu }: FloatingLauncherProps) {
   const [uncontrolledExpanded, setUncontrolledExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
+  const dragGrabOffset = useRef<LauncherPointerPosition>();
   const dragPointerId = useRef<number | null>(null);
   const dragging = useRef(false);
   const suppressClick = useRef(false);
@@ -76,7 +85,8 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
 
   function beginPointer(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
-    dragOrigin.current = { x: event.clientX, y: event.clientY };
+    dragOrigin.current = screenPointerPosition(event);
+    dragGrabOffset.current = { x: event.clientX, y: event.clientY };
     dragPointerId.current = event.pointerId;
     dragging.current = false;
     suppressClick.current = false;
@@ -86,19 +96,20 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
   function movePointer(event: PointerEvent<HTMLDivElement>) {
     const origin = dragOrigin.current;
     if (!origin || dragPointerId.current !== event.pointerId) return;
+    const pointer = screenPointerPosition(event);
     if (!dragging.current) {
-      if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < dragThreshold) return;
+      if (Math.hypot(pointer.x - origin.x, pointer.y - origin.y) < dragThreshold) return;
       dragging.current = true;
       suppressClick.current = true;
       setLauncherExpanded(false);
-      onDragStart?.(origin);
+      onDragStart?.(origin, dragGrabOffset.current);
     }
-    onDragMove?.({ x: event.clientX, y: event.clientY });
+    onDragMove?.(pointer);
   }
 
   function endPointer(event: PointerEvent<HTMLDivElement>) {
     if (dragPointerId.current !== event.pointerId) return;
-    if (dragging.current) onDragEnd?.({ x: event.clientX, y: event.clientY });
+    if (dragging.current) onDragEnd?.(screenPointerPosition(event));
     dragging.current = false;
     dragOrigin.current = null;
     dragPointerId.current = null;
@@ -111,7 +122,8 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
   // functional without weakening the captured production path.
   function beginMouseFallback(event: ReactMouseEvent<HTMLDivElement>) {
     if (dragPointerId.current !== null || event.button !== 0) return;
-    dragOrigin.current = { x: event.clientX, y: event.clientY };
+    dragOrigin.current = screenPointerPosition(event);
+    dragGrabOffset.current = { x: event.clientX, y: event.clientY };
     dragPointerId.current = -1;
     dragging.current = false;
     suppressClick.current = false;
@@ -121,19 +133,20 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
     if (dragPointerId.current !== -1) return;
     const origin = dragOrigin.current;
     if (!origin) return;
+    const pointer = screenPointerPosition(event);
     if (!dragging.current) {
-      if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < dragThreshold) return;
+      if (Math.hypot(pointer.x - origin.x, pointer.y - origin.y) < dragThreshold) return;
       dragging.current = true;
       suppressClick.current = true;
       setLauncherExpanded(false);
-      onDragStart?.(origin);
+      onDragStart?.(origin, dragGrabOffset.current);
     }
-    onDragMove?.({ x: event.clientX, y: event.clientY });
+    onDragMove?.(pointer);
   }
 
   function endMouseFallback(event: ReactMouseEvent<HTMLDivElement>) {
     if (dragPointerId.current !== -1) return;
-    if (dragging.current) onDragEnd?.({ x: event.clientX, y: event.clientY });
+    if (dragging.current) onDragEnd?.(screenPointerPosition(event));
     dragging.current = false;
     dragOrigin.current = null;
     dragPointerId.current = null;

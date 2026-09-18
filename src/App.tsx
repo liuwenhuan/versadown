@@ -98,6 +98,19 @@ function sortTasks(tasks: readonly QueueTask[], mode: TaskSortMode): QueueTask[]
   }).map(({ task }) => task);
 }
 
+function prioritizeNewActiveTasks(tasks: readonly QueueTask[], newTaskIds: readonly string[]): QueueTask[] {
+  if (!newTaskIds.length) return [...tasks];
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const prioritizedIds = new Set(newTaskIds);
+  return [
+    ...newTaskIds.flatMap((id) => {
+      const task = byId.get(id);
+      return task ? [task] : [];
+    }),
+    ...tasks.filter((task) => !prioritizedIds.has(task.id)),
+  ];
+}
+
 function isPrivateTask(task: QueueTask): boolean {
   return task.isPrivate ?? task.is_private ?? false;
 }
@@ -296,6 +309,7 @@ function NavigationIcon({ kind }: { kind: 'tasks' | 'cloud' | 'settings' | 'abou
 
 export function App() {
   const [tasks, setTasks] = useState<QueueTask[]>([]);
+  const [newActiveTaskIds, setNewActiveTaskIds] = useState<string[]>([]);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const selectedTaskId = selectedTaskIds.at(-1) ?? null;
   const setSelectedTaskId = (next: string | null | ((current: string | null) => string | null)) => {
@@ -351,9 +365,12 @@ export function App() {
   const unsortedVisibleTasks = downloadTab === 'active' ? activeTasks
     : downloadTab === 'completed' ? completedTasks
       : recycledTasks;
-  const visibleTasks = useMemo(() => taskSorts[downloadTab] === 'manual'
-    ? applyStoredTaskOrder(unsortedVisibleTasks, taskOrders[downloadTab])
-    : sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]), [downloadTab, taskOrders, taskSorts, unsortedVisibleTasks]);
+  const visibleTasks = useMemo(() => {
+    const sorted = taskSorts[downloadTab] === 'manual'
+      ? applyStoredTaskOrder(unsortedVisibleTasks, taskOrders[downloadTab])
+      : sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]);
+    return downloadTab === 'active' ? prioritizeNewActiveTasks(sorted, newActiveTaskIds) : sorted;
+  }, [downloadTab, newActiveTaskIds, taskOrders, taskSorts, unsortedVisibleTasks]);
   const detailsTask = useMemo(() => filteredPrivacyTasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, filteredPrivacyTasks]);
   const downloadingTasks = filteredPrivacyTasks.filter((task) => task.status === 'downloading');
   const currentSpeed = formatSpeed(downloadingTasks.reduce((total, task) => total + (task.speedBytes ?? task.download_speed ?? 0), 0));
@@ -372,6 +389,10 @@ export function App() {
   const privacyUnlockPassword = useRef<HTMLInputElement>(null);
   const previousPrivacyUnlocked = useRef(false);
   const tasksRef = useRef<QueueTask[]>(tasks);
+  // Keep a locally requested start visible until its RPC action settles.  A
+  // polling snapshot can otherwise put the old paused/failed state back on
+  // screen while aria2 is still handling the request.
+  const pendingStartTaskIds = useRef(new Set<string>());
   const searchDropTarget = useRef<HTMLLabelElement>(null);
   const confirmationGeneration = useRef(0);
   useEffect(() => {
@@ -461,6 +482,47 @@ export function App() {
     taskEventVersions.current.set(task.id, taskEventEpoch.current);
   }
 
+  function applyTaskProjection(task: QueueTask) {
+    recordTaskEvent(task);
+    setTasks((current) => upsertTask(current, task));
+  }
+
+  function addNewDownloadTask(task: QueueTask) {
+    recordTaskEvent(task);
+    setTasks((current) => upsertTask(current, task));
+    if (!inactiveStatuses.has(task.status)) {
+      // New user-created tasks take precedence over a previously chosen
+      // ordering. This only affects the active list and keeps newest tasks
+      // first without changing the user's saved sort preference.
+      setNewActiveTaskIds((current) => [task.id, ...current.filter((id) => id !== task.id)]);
+    }
+  }
+
+  function queueTaskOptimistically(task: QueueTask) {
+    pendingStartTaskIds.current.add(task.id);
+    applyTaskProjection({
+      ...task,
+      status: 'queued',
+      speed: '等待开始',
+      speedBytes: 0,
+      download_speed: 0,
+      upload_speed: 0,
+      eta: undefined,
+      eta_seconds: undefined,
+      statusMessage: '正在提交下载任务…',
+      error: undefined,
+      failure_code: undefined,
+      reauthorization_required: undefined,
+    });
+  }
+
+  function restoreTaskAfterStartFailure(task: QueueTask, error: unknown) {
+    const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+      ? error.message : String(error);
+    applyTaskProjection({ ...task, statusMessage: undefined, error: message });
+    return message;
+  }
+
   function protectRemovedTasksFromOlderSnapshots(taskIds: readonly string[]) {
     taskEventEpoch.current += 1;
     for (const taskId of taskIds) {
@@ -479,6 +541,7 @@ export function App() {
       if (disposed()) return [] as QueueTask[];
       const protectedIds = new Set([...taskEventVersions.current]
         .flatMap(([id, epoch]) => epoch > requestStartEpoch ? [id] : []));
+      for (const id of pendingStartTaskIds.current) protectedIds.add(id);
       for (const id of permanentlyPurgedTaskIds.current) protectedIds.add(id);
       if (protectPurgeInProgress) {
         for (const id of purgingTaskIds.current) protectedIds.add(id);
@@ -821,20 +884,35 @@ export function App() {
   async function runLauncherBatchAction(command: 'pause' | 'resume') {
     const targets = tasksRef.current.filter((task) => (privacyVisibility.unlocked || !isPrivateTask(task)) && (command === 'pause' ? task.status === 'downloading' : task.status === 'paused'));
     if (!targets.length) return;
-    const results = await Promise.allSettled(targets.map((task) => runTaskAction(task.id, command)));
+    const actionTargets = command === 'resume'
+      ? targets.filter((task) => !pendingStartTaskIds.current.has(task.id))
+      : targets;
+    if (!actionTargets.length) return;
+    const optimisticTargets = command === 'resume' ? actionTargets : [];
+    optimisticTargets.forEach(queueTaskOptimistically);
+    const results = await Promise.allSettled(actionTargets.map((task) => runTaskAction(task.id, command)));
     let failure: unknown;
-    for (const result of results) {
+    let refreshNeeded = false;
+    for (const [index, result] of results.entries()) {
+      const task = actionTargets[index];
       if (result.status === 'rejected') {
         failure ??= result.reason;
+        if (command === 'resume' && optimisticTargets.some((target) => target.id === task.id)) {
+          restoreTaskAfterStartFailure(task, result.reason);
+        }
+        pendingStartTaskIds.current.delete(task.id);
         continue;
       }
       const snapshot = result.value.queueTask ?? result.value.task;
       if (snapshot) {
-        recordTaskEvent(snapshot);
-        setTasks((current) => upsertTask(current, snapshot));
+        applyTaskProjection(snapshot);
+      } else if (command === 'resume') {
+        refreshNeeded = true;
       }
+      pendingStartTaskIds.current.delete(task.id);
     }
     if (failure) setNotice({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) });
+    if (refreshNeeded) void refreshTaskSnapshot(() => false, 'active');
   }
 
   useEffect(() => {
@@ -898,7 +976,7 @@ export function App() {
 
   async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal') {
     const result = await parseDownload(input, accessCode, settings.privacyDownloadEnabled ?? false);
-    if (result.task) { recordTaskEvent(result.task); setTasks((current) => upsertTask(current, result.task!)); setSelectedTaskId(result.task.id); }
+    if (result.task) { addNewDownloadTask(result.task); setSelectedTaskId(result.task.id); }
     if (result.confirmation) {
       if (confirmationPlacement === 'header') showHeaderConfirmation(result.confirmation);
       else showConfirmation(result.confirmation);
@@ -960,8 +1038,7 @@ export function App() {
       shareConfirmationsInFlight.current.add(planKey);
       let createdTaskId: string | undefined;
       const onCreated = (task: QueueTask) => {
-        recordTaskEvent(task);
-        setTasks((current) => upsertTask(current, task));
+        addNewDownloadTask(task);
         if (createdTaskId || activeGeneration.current !== requestGeneration) return;
         createdTaskId = task.id;
         setActiveConfirmation(null);
@@ -979,10 +1056,10 @@ export function App() {
       try {
         const result = await confirmCloudShareDownload(planSource, selectedIds, destinationDirectory, privateDownload, onCreated);
         const outcomes = result.outcomes;
-        const cloudTasks = outcomes.flatMap((outcome) => outcome.queueTask ? [outcome.queueTask] : outcome.task ? [outcome.task] : outcome.duplicate ? [outcome.duplicate.task] : []);
+        const cloudTasks = outcomes.flatMap((outcome) => outcome.queueTask ? [outcome.queueTask] : outcome.task ? [outcome.task] : []);
         const duplicates = outcomes.flatMap((outcome) => outcome.duplicate ? [outcome.duplicate] : []);
-        cloudTasks.forEach((cloudTask) => recordTaskEvent(cloudTask));
-        setTasks((current) => cloudTasks.reduce((next, cloudTask) => upsertTask(next, cloudTask), current));
+        cloudTasks.forEach(addNewDownloadTask);
+        duplicates.forEach(({ task }) => applyTaskProjection(task));
         if (!createdTaskId && result.failures.length === 0 && cloudTasks.length) onCreated(cloudTasks[0]);
         setDuplicateQueue((current) => [...current, ...duplicates]);
         const failedTask = cloudTasks.find((task) => task.status === 'failed');
@@ -1021,8 +1098,7 @@ export function App() {
       ? confirmDownload(activeConfirmation.taskId, selectedIds, destinationDirectory, privateDownload)
       : confirmDownload(activeConfirmation.taskId, selectedIds, undefined, privateDownload)).catch(() => undefined);
     const confirmed = nativeTask ?? task;
-    recordTaskEvent(confirmed);
-    setTasks((current) => upsertTask(current, confirmed)); setSelectedTaskId(confirmed.id); setActiveConfirmation(null);
+    addNewDownloadTask(confirmed); setSelectedTaskId(confirmed.id); setActiveConfirmation(null);
   }
 
   function reopenTaskConfirmation(task: QueueTask) {
@@ -1047,6 +1123,11 @@ export function App() {
     if (!task) return;
     if (command === 'details') { setSelectedTaskId(id); setDetailsTaskId(id); return; }
     if (command === 'remove_record') { setPendingPurgeTaskIds([id]); return; }
+    const optimisticStart = command === 'resume' || command === 'retry';
+    if (optimisticStart) {
+      if (pendingStartTaskIds.current.has(id)) return;
+      queueTaskOptimistically(task);
+    }
     try {
       if (command === 'reauthorize') {
         if (taskAuthorizationActive.current) return;
@@ -1111,21 +1192,24 @@ export function App() {
       const result = await runTaskAction(id, command);
       if (result.duplicate) {
         const projection = result.queueTask ?? result.duplicate.task;
-        recordTaskEvent(projection);
-        setTasks((current) => upsertTask(current, projection));
+        applyTaskProjection(projection);
         setSelectedTaskId(id);
         enqueueDuplicate(result.duplicate);
       } else if (result.queueTask) {
-        recordTaskEvent(result.queueTask);
-        setTasks((current) => upsertTask(current, result.queueTask!));
+        applyTaskProjection(result.queueTask);
       } else if (result.task) {
-        recordTaskEvent(result.task);
-        setTasks((current) => upsertTask(current, result.task!));
+        applyTaskProjection(result.task);
+      } else if (optimisticStart) {
+        void refreshTaskSnapshot(() => false, 'active');
       }
     } catch (error) {
-      const message = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
-        ? error.message : String(error);
+      const message = optimisticStart
+        ? restoreTaskAfterStartFailure(task, error)
+        : error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+          ? error.message : String(error);
       setNotice({ kind: 'error', message });
+    } finally {
+      if (optimisticStart) pendingStartTaskIds.current.delete(id);
     }
   }
 
@@ -1157,42 +1241,53 @@ export function App() {
 
       const privacyTarget = command === 'move_to_private' ? true : command === 'move_to_normal' ? false : undefined;
 
-      const operations = targets.flatMap((task) => {
+      type BatchTaskOperation = { task: QueueTask; optimisticStart?: boolean; run: () => Promise<QueueTask | undefined> };
+      const operations: BatchTaskOperation[] = targets.flatMap<BatchTaskOperation>((task) => {
         if (privacyTarget !== undefined) return isPrivateTask(task) === privacyTarget
           ? []
-          : [{ task, operation: setTaskPrivacy(task.id, privacyTarget) }];
+          : [{ task, run: () => setTaskPrivacy(task.id, privacyTarget) }];
         if (command === 'pause') return task.status === 'downloading'
-          ? [{ task, operation: runTaskAction(task.id, 'pause').then((result) => result.queueTask ?? result.task) }]
+          ? [{ task, run: () => runTaskAction(task.id, 'pause').then((result) => result.queueTask ?? result.task) }]
           : [];
         if (command === 'resume') {
-          if (task.status === 'paused') return [{ task, operation: runTaskAction(task.id, 'resume').then((result) => result.queueTask ?? result.task) }];
-          if (task.status === 'failed') return [{ task, operation: runTaskAction(task.id, 'retry').then((result) => result.queueTask ?? result.task) }];
+          if (task.status === 'paused' && !pendingStartTaskIds.current.has(task.id)) return [{ task, optimisticStart: true, run: () => runTaskAction(task.id, 'resume').then((result) => result.queueTask ?? result.task) }];
+          if (task.status === 'failed' && !pendingStartTaskIds.current.has(task.id)) return [{ task, optimisticStart: true, run: () => runTaskAction(task.id, 'retry').then((result) => result.queueTask ?? result.task) }];
           return [];
         }
         if (task.status === 'completed' || task.status === 'failed') {
-          return [{ task, operation: moveTaskToRecycle(task.id) }];
+          return [{ task, run: () => moveTaskToRecycle(task.id) }];
         }
-        return [{ task, operation: runTaskAction(task.id, 'cancel').then((result) => result.queueTask ?? result.task) }];
+        return [{ task, run: () => runTaskAction(task.id, 'cancel').then((result) => result.queueTask ?? result.task) }];
       });
-      const results = await Promise.allSettled(operations.map(({ operation }) => operation));
+      operations.filter((operation) => operation.optimisticStart).forEach(({ task }) => queueTaskOptimistically(task));
+      const results = await Promise.allSettled(operations.map(({ run }) => run()));
       let failure: unknown;
       const newlyHiddenIds = new Set<string>();
-      results.forEach((result) => {
+      let refreshNeeded = false;
+      results.forEach((result, index) => {
+        const operation = operations[index];
         if (result.status === 'rejected') {
           failure ??= result.reason;
+          if (operation.optimisticStart) {
+            restoreTaskAfterStartFailure(operation.task, result.reason);
+            pendingStartTaskIds.current.delete(operation.task.id);
+          }
           return;
         }
         if (result.value) {
-          recordTaskEvent(result.value);
-          setTasks((current) => upsertTask(current, result.value!));
+          applyTaskProjection(result.value);
           if (privacyTarget === true && !privacyVisibility.unlocked && isPrivateTask(result.value)) newlyHiddenIds.add(result.value.id);
+        } else if (operation.optimisticStart) {
+          refreshNeeded = true;
         }
+        if (operation.optimisticStart) pendingStartTaskIds.current.delete(operation.task.id);
       });
       if (newlyHiddenIds.size) {
         setSelectedTaskIds((current) => current.filter((id) => !newlyHiddenIds.has(id)));
         setDetailsTaskId((current) => current && newlyHiddenIds.has(current) ? null : current);
       }
       if (failure) throw failure;
+      if (refreshNeeded) void refreshTaskSnapshot(() => false, 'active');
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
     }
@@ -1350,8 +1445,7 @@ export function App() {
       return;
     }
     if (outcome?.queueTask) {
-      recordTaskEvent(outcome.queueTask);
-      setTasks((current) => upsertTask(current, outcome.queueTask!));
+      addNewDownloadTask(outcome.queueTask);
       setSelectedTaskId(outcome.queueTask.id);
       setNotice({ kind: 'success', message: `已将「${outcome.queueTask.name}」加入下载队列` });
       return;
@@ -1361,8 +1455,7 @@ export function App() {
       setNotice({ kind: 'error', message: '网盘下载任务的返回数据无效' });
       return;
     }
-    recordTaskEvent(task);
-    setTasks((current) => upsertTask(current, task));
+    addNewDownloadTask(task);
     setSelectedTaskId(task.id);
     setNotice({ kind: 'success', message: `已将「${task.name}」加入下载队列` });
   }
@@ -1375,9 +1468,9 @@ export function App() {
   ) {
     let firstCreated = false;
     const accepted = new Set<string>();
-    const acceptCreated = (task: QueueTask) => {
-      recordTaskEvent(task);
-      setTasks((current) => upsertTask(current, task));
+    const acceptCreated = (task: QueueTask, newlyCreated = true) => {
+      if (newlyCreated) addNewDownloadTask(task);
+      else applyTaskProjection(task);
       if (accepted.has(task.id)) return;
       accepted.add(task.id);
       if (firstCreated) return;
@@ -1398,7 +1491,7 @@ export function App() {
 
     const outcomes = await Promise.allSettled(items.map(async (item) => {
       if (item.result?.duplicate) {
-        acceptCreated(item.result.duplicate.task);
+        acceptCreated(item.result.duplicate.task, false);
         enqueueDuplicate(item.result.duplicate);
         return;
       }
@@ -1420,7 +1513,7 @@ export function App() {
         );
         for (const outcome of result.outcomes) {
           const task = outcome.queueTask ?? outcome.task ?? outcome.duplicate?.task;
-          if (task) acceptCreated(task);
+          if (task) acceptCreated(task, !outcome.duplicate);
           if (outcome.duplicate) enqueueDuplicate(outcome.duplicate);
         }
         if (result.failures.length) throw new Error(result.failures.map(failure => failure.message).join('；'));
