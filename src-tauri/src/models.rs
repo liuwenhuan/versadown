@@ -49,7 +49,7 @@ impl Default for Aria2Settings {
         Self {
             rpc_port: 6800,
             rpc_token: String::new(),
-            max_concurrent_downloads: 5,
+            max_concurrent_downloads: 20,
             max_connections_per_server: 4,
             bt_seed_ratio: 1.5,
             debug_logging: false,
@@ -81,7 +81,7 @@ impl Aria2Settings {
             return Err("aria2 RPC Token 不能为空，且不能包含空白或控制字符".into());
         }
         if !(1..=64).contains(&self.max_concurrent_downloads) {
-            return Err("最大并行任务数必须在 1 到 64 之间".into());
+            return Err("最大并发任务数必须在 1 到 64 之间".into());
         }
         if !(1..=16).contains(&self.max_connections_per_server) {
             return Err("单任务并发连接数必须在 1 到 16 之间".into());
@@ -508,8 +508,9 @@ mod tests {
     use super::{AppSettings, Aria2Settings};
 
     #[test]
-    fn aria2_default_connections() {
+    fn aria2_defaults_include_twenty_concurrent_tasks_and_four_connections() {
         let defaults: Aria2Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.max_concurrent_downloads, 20);
         assert_eq!(defaults.max_connections_per_server, 4);
 
         let persisted: Aria2Settings =

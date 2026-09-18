@@ -17,6 +17,8 @@ pub const TRAY_LAUNCHER_ALWAYS: &str = "tray.launcher.always";
 pub const TRAY_LAUNCHER_DOWNLOADING: &str = "tray.launcher.downloading";
 pub const TRAY_LAUNCHER_HIDDEN: &str = "tray.launcher.hidden";
 const TRAY_ID: &str = "manager-tray";
+const EXIT_TRAY_REMOVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+const EXIT_ARIA2_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(7);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,7 +81,8 @@ impl LauncherInteractionState {
     }
 
     pub fn record_input_region_update(&self) {
-        self.input_region_update_requests.fetch_add(1, Ordering::Relaxed);
+        self.input_region_update_requests
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> LauncherInteractionSnapshot {
@@ -219,12 +222,20 @@ fn require_background_ui_test() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{EXIT_ARIA2_SHUTDOWN_TIMEOUT, EXIT_TRAY_REMOVE_DELAY};
+
     #[test]
     fn launcher_popup_commands_do_not_reintroduce_window_region_redraws() {
         let source = include_str!("launcher.rs");
         assert!(!source.contains(&["pub fn set", "_launcher_bounds"].concat()));
         assert!(!source.contains(&["pub fn set", "_launcher_compact_shape"].concat()));
         assert!(!source.contains(&["SetWindow", "Rgn"].concat()));
+    }
+
+    #[test]
+    fn explicit_exit_gives_aria2_a_bounded_grace_period_after_hiding_windows() {
+        assert_eq!(EXIT_TRAY_REMOVE_DELAY.as_secs(), 2);
+        assert_eq!(EXIT_ARIA2_SHUTDOWN_TIMEOUT.as_secs(), 7);
     }
 }
 
@@ -437,7 +448,23 @@ fn begin_application_exit(app: &AppHandle) {
     let runtime = std::sync::Arc::clone(&state.runtime);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _report = runtime.shutdown(std::time::Duration::from_secs(2)).await;
+        // The user-facing windows disappear immediately, but leave the tray in
+        // place briefly so the explicit exit has visible continuity while aria2
+        // saves its session.  Do not end the host process before shutdown has
+        // either completed gracefully or forced and reaped its owned child.
+        let remove_tray_app = app.clone();
+        let remove_tray = async move {
+            tokio::time::sleep(EXIT_TRAY_REMOVE_DELAY).await;
+            let _ = remove_tray_app.remove_tray_by_id(TRAY_ID);
+        };
+        let shutdown = runtime.shutdown(EXIT_ARIA2_SHUTDOWN_TIMEOUT);
+        let (_, report) = tokio::join!(remove_tray, shutdown);
+        if !report.child_stopped {
+            // `shutdown_report` only reaches this branch after its force-kill
+            // fallback failed.  Keep the process alive instead of orphaning a
+            // still-running child; the user can retry normal exit safely.
+            return;
+        }
         app.exit(0);
     });
 }

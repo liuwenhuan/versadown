@@ -175,7 +175,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             ("Accept".into(), "application/json, text/plain, */*".into()),
             ("Accept-Language".into(), "zh-CN,zh;q=0.9".into()),
             ("Cookie".into(), self.cookie()?.to_owned()),
-            ("Content-Type".into(), "application/json;charset=UTF-8".into()),
+            (
+                "Content-Type".into(),
+                "application/json;charset=UTF-8".into(),
+            ),
             ("Origin".into(), WEB.into()),
             ("Referer".into(), format!("{WEB}/")),
             ("User-Agent".into(), UC_DESKTOP_USER_AGENT.into()),
@@ -277,9 +280,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     }
 
     pub fn has_saved_display_name(&self) -> Result<bool, QuarkError> {
-        Ok(self
-            .saved_display_name(&self.account_id()?)
-            .is_some())
+        Ok(self.saved_display_name(&self.account_id()?).is_some())
     }
 
     /// Build the account shown from a browser-issued UC session. The official
@@ -532,12 +533,23 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         Ok(())
     }
 
-    pub fn create_share(&self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, QuarkError> {
-        if file_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into())); }
-        if options.generate_pass_code {
-            return Err(QuarkError::InvalidInput("UC 网盘需要设置自定义提取码".into()));
+    pub fn create_share(
+        &self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, QuarkError> {
+        if file_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
         }
-        let pass_code = options.pass_code.as_deref().filter(|code| !code.trim().is_empty());
+        if options.generate_pass_code {
+            return Err(QuarkError::InvalidInput(
+                "UC 网盘需要设置自定义提取码".into(),
+            ));
+        }
+        let pass_code = options
+            .pass_code
+            .as_deref()
+            .filter(|code| !code.trim().is_empty());
         let mut body = json!({
             "fid_list": file_ids,
             "title": options.name,
@@ -567,8 +579,17 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         if share_id.is_none() {
             let task_id = task_id.ok_or(QuarkError::InvalidResponse)?;
             for retry in 0..UC_SHARE_TASK_MAX_POLLS {
-                let task = self.personal_share_follow_up("GET", "task", &format!("task_id={}&retry_index={retry}", encoded(&task_id)), None)?;
-                if let Some(id) = task.pointer("/data/share_id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                let task = self.personal_share_follow_up(
+                    "GET",
+                    "task",
+                    &format!("task_id={}&retry_index={retry}", encoded(&task_id)),
+                    None,
+                )?;
+                if let Some(id) = task
+                    .pointer("/data/share_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                {
                     share_id = Some(id.to_owned());
                     break;
                 }
@@ -578,9 +599,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
                 }
             }
         }
-        let share_id = share_id.ok_or_else(|| QuarkError::Provider("UC 分享链接仍在生成，请稍后重试".into()))?;
-        let details = self.personal_share_follow_up("POST", "share/password", "", Some(json!({"share_id": &share_id})))?;
-        let mut share = uc_share_from_value(details.get("data").unwrap_or(&details), Some(file_ids), pass_code)?;
+        let share_id = share_id
+            .ok_or_else(|| QuarkError::Provider("UC 分享链接仍在生成，请稍后重试".into()))?;
+        let details = self.personal_share_follow_up(
+            "POST",
+            "share/password",
+            "",
+            Some(json!({"share_id": &share_id})),
+        )?;
+        let mut share = uc_share_from_value(
+            details.get("data").unwrap_or(&details),
+            Some(file_ids),
+            pass_code,
+        )?;
         // The password-detail response can expose its own `pwd_id` but not the
         // created share ID. Keep the task's `share_id`, since UC's management
         // list and delete endpoints both operate on that identifier.
@@ -592,10 +623,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         let mut shares = Vec::new();
         for page in 1..=10_000 {
             let value = self.request_json("GET", "share/mypage/detail", &format!("_page={page}&_size=200&_order_field=created_at&_order_type=desc&_fetch_total=1"), None)?;
-            let list = value.pointer("/data/list").and_then(Value::as_array).ok_or(QuarkError::InvalidResponse)?;
+            let list = value
+                .pointer("/data/list")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
             let count = list.len();
-            shares.extend(list.iter().map(|share| uc_share_from_value(share, None, None)).collect::<Result<Vec<_>, _>>()?);
-            if count < 200 { return Ok(shares); }
+            shares.extend(
+                list.iter()
+                    .map(|share| uc_share_from_value(share, None, None))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            if count < 200 {
+                return Ok(shares);
+            }
         }
         Err(QuarkError::InvalidResponse)
     }
@@ -697,17 +737,69 @@ fn uc_share_task_value(value: &Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn uc_share_from_value(value: &Value, fallback_file_ids: Option<&[String]>, pass_code: Option<&str>) -> Result<CloudShare, QuarkError> {
-    let id = value.get("share_id").or_else(|| value.get("pwd_id")).and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or(QuarkError::InvalidResponse)?;
-    let source_file_ids = value.get("fid_list").and_then(Value::as_array).map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()).or_else(|| fallback_file_ids.map(|ids| ids.to_vec())).unwrap_or_default();
-    let folder = value.get("file_type").and_then(Value::as_i64) == Some(0) || value.get("dir").and_then(Value::as_bool) == Some(true);
+fn uc_share_from_value(
+    value: &Value,
+    fallback_file_ids: Option<&[String]>,
+    pass_code: Option<&str>,
+) -> Result<CloudShare, QuarkError> {
+    let id = value
+        .get("share_id")
+        .or_else(|| value.get("pwd_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or(QuarkError::InvalidResponse)?;
+    let source_file_ids = value
+        .get("fid_list")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .or_else(|| fallback_file_ids.map(|ids| ids.to_vec()))
+        .unwrap_or_default();
+    let folder = value.get("file_type").and_then(Value::as_i64) == Some(0)
+        || value.get("dir").and_then(Value::as_bool) == Some(true);
     Ok(CloudShare {
-        id: id.into(), url: value.get("share_url").or_else(|| value.get("url")).and_then(Value::as_str).filter(|url| !url.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("https://drive.uc.cn/s/{id}")),
-        name: value.get("title").or_else(|| value.get("file_name")).and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("分享文件").into(),
-        kind: if folder { CloudFileKind::Folder } else { CloudFileKind::File }, source_file_ids,
-        pass_code: value.get("passcode").or_else(|| value.get("share_pwd")).and_then(Value::as_str).filter(|code| !code.is_empty()).map(str::to_owned).or_else(|| pass_code.map(str::to_owned)),
-        created_at: value.get("created_at").and_then(Value::as_str).map(str::to_owned),
-        expires_at: value.get("expired_at").or_else(|| value.get("expire_at")).and_then(Value::as_str).filter(|time| !time.is_empty()).map(str::to_owned),
+        id: id.into(),
+        url: value
+            .get("share_url")
+            .or_else(|| value.get("url"))
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("https://drive.uc.cn/s/{id}")),
+        name: value
+            .get("title")
+            .or_else(|| value.get("file_name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("分享文件")
+            .into(),
+        kind: if folder {
+            CloudFileKind::Folder
+        } else {
+            CloudFileKind::File
+        },
+        source_file_ids,
+        pass_code: value
+            .get("passcode")
+            .or_else(|| value.get("share_pwd"))
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .map(str::to_owned)
+            .or_else(|| pass_code.map(str::to_owned)),
+        created_at: value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        expires_at: value
+            .get("expired_at")
+            .or_else(|| value.get("expire_at"))
+            .and_then(Value::as_str)
+            .filter(|time| !time.is_empty())
+            .map(str::to_owned),
     })
 }
 
@@ -1521,7 +1613,9 @@ mod tests {
 
         assert!(session.cookie.contains("__ktd=browser-state"));
         assert!(session.cookie.contains("b-user-id=account-id"));
-        assert!(session.cookie.contains("UDRIVE_TRANSFER_SESS=share-session"));
+        assert!(session
+            .cookie
+            .contains("UDRIVE_TRANSFER_SESS=share-session"));
         assert!(!session.cookie.contains("analytics="));
     }
 
@@ -1571,7 +1665,9 @@ mod tests {
         let http = Http::new(vec![]);
         let client = UcClient::new(session, &http);
 
-        let account = client.account().expect("the saved card profile should load");
+        let account = client
+            .account()
+            .expect("the saved card profile should load");
 
         assert_eq!(account.id, "AAR/opaque-id");
         assert_eq!(account.display_name, "云端小橙");
@@ -1581,9 +1677,8 @@ mod tests {
     #[test]
     fn uc_personal_share_retries_a_transient_task_poll_transport_failure() {
         struct RetryHttp {
-            replies: std::sync::Mutex<
-                std::collections::VecDeque<Result<CloudHttpResponse, QuarkError>>,
-            >,
+            replies:
+                std::sync::Mutex<std::collections::VecDeque<Result<CloudHttpResponse, QuarkError>>>,
             requests: std::sync::Mutex<Vec<CloudHttpRequest>>,
         }
         impl CloudHttpTransport for RetryHttp {
@@ -1640,9 +1735,8 @@ mod tests {
     #[test]
     fn uc_personal_share_retries_a_transient_share_link_lookup_transport_failure() {
         struct RetryHttp {
-            replies: std::sync::Mutex<
-                std::collections::VecDeque<Result<CloudHttpResponse, QuarkError>>,
-            >,
+            replies:
+                std::sync::Mutex<std::collections::VecDeque<Result<CloudHttpResponse, QuarkError>>>,
         }
         impl CloudHttpTransport for RetryHttp {
             fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
@@ -1734,7 +1828,8 @@ mod tests {
     }
 
     #[test]
-    fn uc_personal_share_cancel_confirms_server_removal_when_delete_reports_it_is_already_stopped() {
+    fn uc_personal_share_cancel_confirms_server_removal_when_delete_reports_it_is_already_stopped()
+    {
         // Break caught: UC can return 41012 for an already-stopped share while
         // its list endpoint still has not converged. The list is authoritative.
         let http = Http::new(vec![
@@ -1840,9 +1935,7 @@ mod tests {
 
         assert!(matches!(error, QuarkError::Provider(_)));
         let request = &http.requests.lock().unwrap()[0];
-        assert!(request
-            .url
-            .ends_with("/share?pr=UCBrowser&fr=pc"));
+        assert!(request.url.ends_with("/share?pr=UCBrowser&fr=pc"));
         assert_eq!(
             request.headers.get("Accept-Language").map(String::as_str),
             Some("zh-CN,zh;q=0.9")

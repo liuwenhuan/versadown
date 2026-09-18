@@ -133,7 +133,11 @@ impl DownloadOps for QuarkDriver<'_> {
     }
 }
 impl ShareOps for QuarkDriver<'_> {
-    fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> {
+    fn create_share(
+        &mut self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
         QuarkClient::new(cookie(&self.store)?, &self.http).create_share(file_ids, options)
     }
     fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {

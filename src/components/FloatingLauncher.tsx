@@ -1,4 +1,4 @@
-import { MouseEvent as ReactMouseEvent, PointerEvent, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { NewDownloadDialog } from './NewDownloadDialog';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 import type { ScanDownloadResult } from '../lib/types';
@@ -16,6 +16,8 @@ interface FloatingLauncherProps {
   onQuickAddElement?(element: HTMLElement | null): void;
   onScan?(input: string): Promise<ScanDownloadResult[]>;
   onOpenTaskList?(): void | Promise<void>;
+  onDroppedInput?(input: string): void | Promise<void>;
+  onStageDroppedTorrent?(file: File): Promise<string>;
   onExpandedChange?(expanded: boolean): void;
   onDragStart?(pointer: LauncherPointerPosition): void;
   onDragMove?(pointer: LauncherPointerPosition): void;
@@ -24,6 +26,17 @@ interface FloatingLauncherProps {
 }
 
 const dragThreshold = 5;
+
+function draggedText(dataTransfer: DataTransfer): string {
+  return [...new Set(['text/uri-list', 'text/plain']
+    .map((type) => dataTransfer.getData(type).trim())
+    .filter(Boolean))]
+    .join('\n');
+}
+
+function isTorrentFile(file: File): boolean {
+  return file.name.trim().toLocaleLowerCase().endsWith('.torrent');
+}
 
 function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
   const shell = variant === 'dark' ? '#2e3239' : '#8bc2b3';
@@ -36,7 +49,7 @@ function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
   );
 }
 
-export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placement, onModeChange, onQuickAddElement, onScan, onOpenTaskList, onExpandedChange, onDragStart, onDragMove, onDragEnd, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placement, onModeChange, onQuickAddElement, onScan, onOpenTaskList, onDroppedInput, onStageDroppedTorrent, onExpandedChange, onDragStart, onDragMove, onDragEnd, onContextMenu }: FloatingLauncherProps) {
   const [uncontrolledExpanded, setUncontrolledExpanded] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const dragPointerId = useRef<number | null>(null);
@@ -46,6 +59,8 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
   const expanded = mode ? mode === 'quick-add' : expandedProp ?? uncontrolledExpanded;
   const intent = useRef<LauncherSurfaceMode>(mode ?? (expanded ? 'quick-add' : 'compact'));
   const quickAddRef = useRef<HTMLDivElement>(null);
+  const dropInFlight = useRef(false);
+  const [dropTarget, setDropTarget] = useState(false);
 
   useLayoutEffect(() => {
     intent.current = mode ?? (expanded ? 'quick-add' : 'compact');
@@ -133,10 +148,46 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
     setLauncherExpanded(intent.current !== 'quick-add');
   }
 
+  function beginDrop(event: ReactDragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDropTarget(true);
+  }
+
+  function leaveDrop(event: ReactDragEvent<HTMLDivElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(false);
+  }
+
+  async function acceptDrop(event: ReactDragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDropTarget(false);
+    if (dropInFlight.current) return;
+    dropInFlight.current = true;
+    try {
+      const inputs: string[] = [];
+      const torrents = Array.from(event.dataTransfer.files).filter(isTorrentFile);
+      if (torrents.length && onStageDroppedTorrent) {
+        inputs.push(...await Promise.all(torrents.map((file) => onStageDroppedTorrent(file))));
+      }
+      const text = draggedText(event.dataTransfer);
+      if (text && onScan) {
+        const scanned = await onScan(text);
+        inputs.push(...scanned.filter((item) => item.valid).map((item) => item.input));
+      }
+      const validInputs = [...new Set(inputs.map((input) => input.trim()).filter(Boolean))];
+      if (!validInputs.length || !onDroppedInput) return;
+      setLauncherExpanded(false);
+      await onDroppedInput(validInputs.join('\n'));
+    } finally {
+      dropInFlight.current = false;
+    }
+  }
+
   return (
     <>
       <div
-        className="launcher-interaction-target"
+        className={`launcher-interaction-target${dropTarget ? ' launcher-drop-target' : ''}`}
         onPointerDown={beginPointer}
         onPointerMove={movePointer}
         onPointerUp={endPointer}
@@ -144,6 +195,10 @@ export function FloatingLauncher({ onParse, expanded: expandedProp, mode, placem
         onMouseDown={beginMouseFallback}
         onMouseMove={moveMouseFallback}
         onMouseUp={endMouseFallback}
+        onDragEnter={beginDrop}
+        onDragOver={beginDrop}
+        onDragLeave={leaveDrop}
+        onDrop={(event) => { void acceptDrop(event); }}
         onClick={openFromClick}
         onContextMenu={(event) => {
           event.preventDefault();

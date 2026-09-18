@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
@@ -538,6 +539,50 @@ fn fail_engine_submission_text(store: &TaskStore, task: &DownloadTask, error: St
 #[tauri::command]
 pub fn scan_download_inputs(input: String) -> Vec<crate::ScannedInput> {
     crate::scan_download_inputs(&input)
+}
+
+const MAX_DROPPED_TORRENT_BYTES: usize = 16 * 1024 * 1024;
+
+fn stage_dropped_torrent_file(
+    data_directory: &Path,
+    file_name: &str,
+    contents_base64: &str,
+) -> Result<PathBuf, String> {
+    let name = Path::new(file_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty() && name.to_ascii_lowercase().ends_with(".torrent"))
+        .ok_or_else(|| "只能接收 .torrent 种子文件".to_string())?;
+    let contents = STANDARD
+        .decode(contents_base64)
+        .map_err(|_| "种子文件内容无效".to_string())?;
+    if contents.len() > MAX_DROPPED_TORRENT_BYTES {
+        return Err("种子文件超过 16 MiB 安全限制".to_string());
+    }
+    let directory = data_directory
+        .join("dropped-torrents")
+        .join(Uuid::new_v4().to_string());
+    fs::create_dir_all(&directory).map_err(|error| format!("无法暂存种子文件：{error}"))?;
+    let path = directory.join(name);
+    fs::write(&path, contents).map_err(|error| format!("无法暂存种子文件：{error}"))?;
+    Ok(path)
+}
+
+/// WebView drag/drop intentionally exposes file bytes rather than the source
+/// path so HTML text and link drops work consistently. Keep the selected
+/// torrent in application data for the task's later confirmation/retry flow.
+#[tauri::command]
+pub fn stage_dropped_torrent(
+    file_name: String,
+    contents_base64: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let data_directory = state
+        .settings_path
+        .parent()
+        .ok_or_else(|| "无法确定应用数据目录".to_string())?;
+    let path = stage_dropped_torrent_file(data_directory, &file_name, &contents_base64)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -3619,6 +3664,23 @@ mod tests {
     };
 
     #[test]
+    fn stages_dropped_torrent_bytes_under_application_data() {
+        let root = tempfile::tempdir().unwrap();
+        let staged = stage_dropped_torrent_file(
+            root.path(),
+            "Collection.torrent",
+            &STANDARD.encode(b"torrent-bytes"),
+        )
+        .unwrap();
+
+        assert!(staged.is_absolute());
+        assert_eq!(staged.file_name().and_then(|name| name.to_str()), Some("Collection.torrent"));
+        assert!(staged.starts_with(root.path().join("dropped-torrents")));
+        assert_eq!(fs::read(staged).unwrap(), b"torrent-bytes");
+        assert!(stage_dropped_torrent_file(root.path(), "not-a-torrent.zip", "eA==").is_err());
+    }
+
+    #[test]
     fn discard_prepared_accepts_only_pre_submission_statuses() {
         assert!(prepared_task_can_be_discarded(TaskStatus::Draft));
         assert!(prepared_task_can_be_discarded(TaskStatus::Parsing));
@@ -4006,13 +4068,11 @@ mod tests {
         store.set_private(private.id, true).unwrap();
 
         assert_eq!(
-            set_task_private_with_visibility(&store, ordinary.id, true, false, false)
-                .unwrap_err(),
+            set_task_private_with_visibility(&store, ordinary.id, true, false, false).unwrap_err(),
             "请先在设置中开启隐私下载"
         );
         assert_eq!(
-            set_task_private_with_visibility(&store, private.id, false, true, false)
-                .unwrap_err(),
+            set_task_private_with_visibility(&store, private.id, false, true, false).unwrap_err(),
             "隐私任务已锁定，请先解锁"
         );
     }

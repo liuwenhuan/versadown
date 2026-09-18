@@ -3,8 +3,8 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { FloatingLauncher, type LauncherPointerPosition } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, moveLauncherPointerDrag, openLauncherManager, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement } from '../lib/launcherWindow';
-import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, updateSettings } from '../lib/api';
+import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, moveLauncherPointerDrag, openLauncherManager, openLauncherNewDownload, runLauncherMenuAction, sendLauncherInput, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement } from '../lib/launcherWindow';
+import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, stageDroppedTorrent, updateSettings } from '../lib/api';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
 
@@ -32,7 +32,8 @@ export function LauncherWindow() {
   const dragSession = useRef<LauncherPointerDragSession | null>(null);
   const dragPendingPointer = useRef<LauncherPointerPosition | null>(null);
   const dragStartQueue = useRef(Promise.resolve());
-  const dragPositionQueue = useRef(Promise.resolve());
+  const dragMoveCompletion = useRef(Promise.resolve());
+  const dragMoveInFlight = useRef(false);
   const launcherDragging = useRef(false);
   popupPlacementRef.current = popupPlacement;
   const hasActiveDownload = activeCount > 0;
@@ -188,13 +189,21 @@ export function LauncherWindow() {
 
   function queueLauncherDragMove(pointer: LauncherPointerPosition) {
     dragPendingPointer.current = pointer;
-    if (!dragSession.current) return;
-    dragPositionQueue.current = dragPositionQueue.current.then(async () => {
-      const next = dragPendingPointer.current;
-      dragPendingPointer.current = null;
-      const session = dragSession.current;
-      if (next && session) await moveLauncherPointerDrag(session, next);
-    }).catch(() => undefined);
+    if (!dragSession.current || dragMoveInFlight.current) return;
+    dragMoveInFlight.current = true;
+    const pump = async () => {
+      while (launcherDragging.current && dragSession.current) {
+        const next = dragPendingPointer.current;
+        dragPendingPointer.current = null;
+        if (!next) return;
+        await moveLauncherPointerDrag(dragSession.current, next);
+      }
+    };
+    const completion = pump().catch(() => undefined).finally(() => {
+      dragMoveInFlight.current = false;
+      if (launcherDragging.current && dragPendingPointer.current) queueLauncherDragMove(dragPendingPointer.current);
+    });
+    dragMoveCompletion.current = completion;
   }
 
   async function beginLauncherDrag(pointer: LauncherPointerPosition) {
@@ -203,12 +212,14 @@ export function LauncherWindow() {
     requestedMode.current = 'compact';
     setMode('compact');
     try {
-      await applyRegions([launcherIconRegion]);
-      if (disposed.current || !launcherDragging.current) return;
       dragSession.current = await beginLauncherPointerDrag(pointer);
       if (disposed.current || !launcherDragging.current) return;
       const pendingPointer = dragPendingPointer.current;
       if (pendingPointer) queueLauncherDragMove(pendingPointer);
+      // Do not put native region work on the movement critical path. Closing
+      // the panel makes the next layout pass compact; the native update can
+      // safely finish while the already-captured pointer follows the mouse.
+      void applyRegions([launcherIconRegion]).catch(() => undefined);
     } catch {
       launcherDragging.current = false;
       dragSession.current = null;
@@ -226,7 +237,13 @@ export function LauncherWindow() {
     // A fast pointer-up can arrive while the safe icon-only region is still
     // being applied.  Wait for that start sequence to install its session,
     // then flush the final captured pointer position before refreshing.
-    void dragStartQueue.current.then(() => dragPositionQueue.current).finally(async () => {
+    void dragStartQueue.current.then(async () => {
+      await dragMoveCompletion.current;
+      if (dragPendingPointer.current) {
+        queueLauncherDragMove(dragPendingPointer.current);
+        await dragMoveCompletion.current;
+      }
+    }).finally(async () => {
       launcherDragging.current = false;
       dragSession.current = null;
       dragPendingPointer.current = null;
@@ -247,6 +264,10 @@ export function LauncherWindow() {
       .catch(() => undefined);
   }
 
+  async function stageLauncherTorrent(file: File): Promise<string> {
+    return stageDroppedTorrent(file.name, new Uint8Array(await file.arrayBuffer()));
+  }
+
   return (
     <main className={`launcher-shell ${mode === 'quick-add' ? 'launcher-expanded' : ''} ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
       <FloatingLauncher
@@ -256,6 +277,8 @@ export function LauncherWindow() {
         onQuickAddElement={captureQuickAdd}
         onParse={(input) => { void sendLauncherInput(input); }}
         onScan={scanDownloadInputs}
+        onDroppedInput={openLauncherNewDownload}
+        onStageDroppedTorrent={stageLauncherTorrent}
         onOpenTaskList={() => { void openLauncherManager(); }}
         onDragStart={(pointer) => { dragStartQueue.current = beginLauncherDrag(pointer); }}
         onDragMove={moveLauncherDrag}

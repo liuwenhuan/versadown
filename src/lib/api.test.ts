@@ -141,6 +141,17 @@ it('treats an indexed magnet file list as ready even while aria2 metadata is unr
   });
 });
 
+it('stages dropped torrent bytes for the normal confirmation flow', async () => {
+  native.invoke.mockResolvedValueOnce('C:\\AppData\\dropped-torrents\\fixture.torrent');
+  const { stageDroppedTorrent } = await import('./api');
+
+  await expect(stageDroppedTorrent('fixture.torrent', new Uint8Array([1, 2, 3]))).resolves.toBe('C:\\AppData\\dropped-torrents\\fixture.torrent');
+  expect(native.invoke).toHaveBeenCalledWith('stage_dropped_torrent', {
+    fileName: 'fixture.torrent',
+    contentsBase64: 'AQID',
+  });
+});
+
 it('marks an empty magnet file list as pending until a complete list is available', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'task',

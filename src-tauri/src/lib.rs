@@ -398,6 +398,7 @@ pub fn run() {
             local_upload_picker::local_upload_entries,
             main_window_interaction_state,
             commands::scan_download_inputs,
+            commands::stage_dropped_torrent,
             commands::parse_download,
             commands::discard_prepared_download,
             commands::confirm_cloud_share_download,

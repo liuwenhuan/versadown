@@ -7,7 +7,7 @@ const state = vi.hoisted(() => ({
   getGlobalStat: vi.fn(), getSettings: vi.fn(), scanDownloadInputs: vi.fn(),
   updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(),
   setLauncherInputRegions: vi.fn(),
-  beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(),
+  beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(), openNewDownload: vi.fn(), stageDroppedTorrent: vi.fn(),
   onMoved: vi.fn(), onScaleChanged: vi.fn(),
   movedHandler: undefined as undefined | (() => void),
   scaleChangedHandler: undefined as undefined | (() => void),
@@ -38,7 +38,9 @@ vi.mock('../lib/launcherWindow', () => ({
   beginLauncherPointerDrag: state.beginLauncherPointerDrag,
   moveLauncherPointerDrag: state.moveLauncherPointerDrag,
   openLauncherManager: vi.fn().mockResolvedValue(undefined),
+  openLauncherNewDownload: state.openNewDownload,
   sendLauncherInput: vi.fn().mockResolvedValue(undefined),
+  stageDroppedTorrent: state.stageDroppedTorrent,
 }));
 vi.mock('../lib/downloadEvents', () => ({
   formatSpeed: (value: number) => value === 524_288 ? '512 KB/s' : `${value} B/s`,
@@ -75,6 +77,8 @@ beforeEach(() => {
     windowPosition: { x: 1369, y: 506 }, pointerPosition: { x: 10, y: 10 }, scaleFactor: 1.5,
   });
   state.moveLauncherPointerDrag.mockReset().mockResolvedValue(undefined);
+  state.openNewDownload.mockReset().mockResolvedValue(undefined);
+  state.stageDroppedTorrent.mockReset().mockResolvedValue('C:\\AppData\\dropped-torrents\\fixture.torrent');
   state.movedHandler = undefined;
   state.scaleChangedHandler = undefined;
   state.onMoved.mockReset().mockImplementation((handler) => {
@@ -233,7 +237,7 @@ it('serializes region writes so a slow popup update cannot override compact inpu
   await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
 });
 
-it('awaits icon-only input before beginning a captured pointer drag', async () => {
+it('begins a captured pointer drag before a slow compact input-region update', async () => {
   render(<LauncherWindow />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   fireEvent.contextMenu(trigger);
@@ -244,10 +248,9 @@ it('awaits icon-only input before beginning a captured pointer drag', async () =
   fireEvent.mouseDown(trigger, { button: 0, buttons: 1, clientX: 10, clientY: 10 });
   fireEvent.mouseMove(trigger, { buttons: 1, clientX: 30, clientY: 30 });
   await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
-  expect(beginLauncherPointerDrag).not.toHaveBeenCalled();
-  await act(async () => pending.resolve());
   await waitFor(() => expect(beginLauncherPointerDrag).toHaveBeenCalledWith({ x: 10, y: 10 }));
   await waitFor(() => expect(moveLauncherPointerDrag).toHaveBeenCalledWith(expect.anything(), { x: 30, y: 30 }));
+  await act(async () => pending.resolve());
 });
 
 it('retains the previous input on failure and never falls back to the full canvas', async () => {

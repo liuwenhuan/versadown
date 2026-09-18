@@ -2258,18 +2258,32 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         self.list_files(XUNLEI_RECYCLE_BIN_ID, true)
     }
 
-    pub fn create_share(&self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, QuarkError> {
-        if file_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into())); }
+    pub fn create_share(
+        &self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, QuarkError> {
+        if file_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
+        }
         // Xunlei shares use the same drive-share contract as PikPak: a protected
         // link gets a server-generated access code, rather than accepting a
         // caller-supplied code verbatim.
-        let needs_pass_code = options.generate_pass_code || options.pass_code.as_deref().is_some_and(|code| !code.trim().is_empty());
-        let value = self.request("POST", self.drive_url("/drive/v1/share"), Some(json!({
-            "file_ids": file_ids,
-            "share_to": if needs_pass_code { "encryptedlink" } else { "publiclink" },
-            "expiration_days": options.expires_in_days.map(i64::from).unwrap_or(-1),
-            "pass_code_option": if needs_pass_code { "REQUIRED" } else { "NOT_REQUIRED" },
-        })))?;
+        let needs_pass_code = options.generate_pass_code
+            || options
+                .pass_code
+                .as_deref()
+                .is_some_and(|code| !code.trim().is_empty());
+        let value = self.request(
+            "POST",
+            self.drive_url("/drive/v1/share"),
+            Some(json!({
+                "file_ids": file_ids,
+                "share_to": if needs_pass_code { "encryptedlink" } else { "publiclink" },
+                "expiration_days": options.expires_in_days.map(i64::from).unwrap_or(-1),
+                "pass_code_option": if needs_pass_code { "REQUIRED" } else { "NOT_REQUIRED" },
+            })),
+        )?;
         let mut share = xunlei_share_from_value(&value, Some(file_ids), None)?;
         share.name = options.name.clone();
         Ok(share)
@@ -2280,19 +2294,47 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         let mut page_token = String::new();
         let mut seen_tokens = HashSet::new();
         for _ in 0..10_000 {
-            let value = self.request("GET", self.drive_url(&format!("/drive/v1/share/list?limit=100&thumbnail_size=SIZE_SMALL&page_token={}", encoded(&page_token))), None)?;
-            let list = value.get("data").and_then(Value::as_array).ok_or(QuarkError::InvalidResponse)?;
-            shares.extend(list.iter().map(|share| xunlei_share_from_value(share, None, None)).collect::<Result<Vec<_>, _>>()?);
-            page_token = value.get("next_page_token").and_then(Value::as_str).unwrap_or_default().to_owned();
-            if page_token.is_empty() { return Ok(shares); }
-            if !seen_tokens.insert(page_token.clone()) { return Err(QuarkError::InvalidResponse); }
+            let value = self.request(
+                "GET",
+                self.drive_url(&format!(
+                    "/drive/v1/share/list?limit=100&thumbnail_size=SIZE_SMALL&page_token={}",
+                    encoded(&page_token)
+                )),
+                None,
+            )?;
+            let list = value
+                .get("data")
+                .and_then(Value::as_array)
+                .ok_or(QuarkError::InvalidResponse)?;
+            shares.extend(
+                list.iter()
+                    .map(|share| xunlei_share_from_value(share, None, None))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            page_token = value
+                .get("next_page_token")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if page_token.is_empty() {
+                return Ok(shares);
+            }
+            if !seen_tokens.insert(page_token.clone()) {
+                return Err(QuarkError::InvalidResponse);
+            }
         }
         Err(QuarkError::InvalidResponse)
     }
 
     pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
-        if share_ids.is_empty() { return Err(QuarkError::InvalidInput("请选择至少一个分享".into())); }
-        self.request("POST", self.drive_url("/drive/v1/share:batchDelete"), Some(json!({"ids": share_ids})))?;
+        if share_ids.is_empty() {
+            return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
+        }
+        self.request(
+            "POST",
+            self.drive_url("/drive/v1/share:batchDelete"),
+            Some(json!({"ids": share_ids})),
+        )?;
         Ok(())
     }
 
@@ -2474,15 +2516,60 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
     }
 }
 
-fn xunlei_share_from_value(value: &Value, fallback_file_ids: Option<&[String]>, pass_code: Option<&str>) -> Result<CloudShare, QuarkError> {
+fn xunlei_share_from_value(
+    value: &Value,
+    fallback_file_ids: Option<&[String]>,
+    pass_code: Option<&str>,
+) -> Result<CloudShare, QuarkError> {
     let id = required(value, "share_id")?;
     Ok(CloudShare {
-        id: id.clone(), url: value.get("share_url").or_else(|| value.get("url")).and_then(Value::as_str).filter(|url| !url.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("https://pan.xunlei.com/s/{id}")),
-        name: value.get("share_name").or_else(|| value.get("name")).and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or("分享文件").into(),
-        kind: if value.get("file_type").and_then(Value::as_str) == Some("folder") { CloudFileKind::Folder } else { CloudFileKind::File },
-        source_file_ids: value.get("file_ids").and_then(Value::as_array).map(|ids| ids.iter().filter_map(Value::as_str).map(str::to_owned).collect()).or_else(|| fallback_file_ids.map(|ids| ids.to_vec())).unwrap_or_default(),
-        pass_code: value.get("pass_code").and_then(Value::as_str).filter(|code| !code.is_empty()).map(str::to_owned).or_else(|| pass_code.map(str::to_owned)),
-        created_at: value.get("created_at").and_then(Value::as_str).map(str::to_owned), expires_at: value.get("expiration").or_else(|| value.get("expire_at")).and_then(Value::as_str).filter(|time| !time.is_empty()).map(str::to_owned),
+        id: id.clone(),
+        url: value
+            .get("share_url")
+            .or_else(|| value.get("url"))
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("https://pan.xunlei.com/s/{id}")),
+        name: value
+            .get("share_name")
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("分享文件")
+            .into(),
+        kind: if value.get("file_type").and_then(Value::as_str) == Some("folder") {
+            CloudFileKind::Folder
+        } else {
+            CloudFileKind::File
+        },
+        source_file_ids: value
+            .get("file_ids")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .or_else(|| fallback_file_ids.map(|ids| ids.to_vec()))
+            .unwrap_or_default(),
+        pass_code: value
+            .get("pass_code")
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty())
+            .map(str::to_owned)
+            .or_else(|| pass_code.map(str::to_owned)),
+        created_at: value
+            .get("created_at")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        expires_at: value
+            .get("expiration")
+            .or_else(|| value.get("expire_at"))
+            .and_then(Value::as_str)
+            .filter(|time| !time.is_empty())
+            .map(str::to_owned),
     })
 }
 

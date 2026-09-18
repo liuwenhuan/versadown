@@ -174,3 +174,15 @@ it('restores and reveals the main window before forwarding launcher input', asyn
     'https://example.test/file.zip'
   );
 });
+
+it('opens the manager new-task dialog with an accepted launcher drop', async () => {
+  await launcherWindow.openLauncherNewDownload('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567');
+
+  expect(native.getByLabel).toHaveBeenCalledWith('main');
+  expect(native.calls).toEqual(['unminimize', 'show', 'focus', 'emit']);
+  expect(native.emitTo).toHaveBeenCalledWith(
+    'main',
+    'launcher-new-download',
+    'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
+  );
+});

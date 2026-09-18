@@ -89,6 +89,24 @@ it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
   expect(screen.queryByText('已连接 99')).not.toBeInTheDocument();
 });
 
+it('shows a disabled queued control until aria2 promotes the task to an active slot', () => {
+  const onCommand = vi.fn();
+  const { rerender } = render(<DownloadQueue tasks={[
+    { id: 'queued-task', name: 'waiting.zip', kind: 'file', status: 'queued', progress: 0 },
+  ]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  const queued = screen.getByRole('button', { name: 'waiting.zip 排队中' });
+  expect(queued).toHaveTextContent('排队中');
+  expect(queued).toBeDisabled();
+
+  rerender(<DownloadQueue tasks={[
+    { id: 'queued-task', name: 'waiting.zip', kind: 'file', status: 'downloading', progress: 0 },
+  ]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  expect(screen.getByRole('button', { name: '暂停 waiting.zip' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: 'waiting.zip 排队中' })).not.toBeInTheDocument();
+});
+
 it('shows a sharing marker only for completed peer-to-peer tasks that are still uploading', () => {
   render(<DownloadQueue tasks={[
     { id: 'sharing', name: 'sharing.mkv', kind: 'magnet', status: 'completed', progress: 100, completed_at: 1_789_095_720, p2p_sharing: true },

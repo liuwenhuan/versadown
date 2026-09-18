@@ -1,7 +1,7 @@
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, RwLock,
+        Arc, Mutex as StdMutex, RwLock,
     },
     time::Duration,
 };
@@ -269,6 +269,9 @@ pub struct EngineRuntime {
     state_events: Arc<dyn EngineStateSink>,
     state: RwLock<EngineAvailability>,
     slot: Mutex<EngineSlot>,
+    // Kept separate from `slot` so an explicit application exit can always
+    // terminate the owned aria2 child, even while a recovery holds `slot`.
+    active_service: StdMutex<Option<Arc<DownloadService>>>,
     exiting: AtomicBool,
     monitor_started: AtomicBool,
     automatic_retry_used: AtomicBool,
@@ -306,6 +309,7 @@ impl EngineRuntime {
                 client: None,
                 sync_cancel: None,
             }),
+            active_service: StdMutex::new(None),
             exiting: AtomicBool::new(false),
             monitor_started: AtomicBool::new(false),
             automatic_retry_used: AtomicBool::new(false),
@@ -317,6 +321,33 @@ impl EngineRuntime {
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+    }
+
+    fn register_active_service(&self, service: Arc<DownloadService>) {
+        *self
+            .active_service
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(service);
+    }
+
+    fn active_service(&self) -> Option<Arc<DownloadService>> {
+        self.active_service
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn clear_active_service(&self, service: &Arc<DownloadService>) {
+        let mut active = self
+            .active_service
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, service))
+        {
+            *active = None;
+        }
     }
 
     pub async fn initialize(&self) -> EngineAvailability {
@@ -368,7 +399,9 @@ impl EngineRuntime {
         if let Some(cancel) = slot.sync_cancel.take() {
             let _ = cancel.send(true);
         }
-        slot.service.take();
+        if let Some(previous) = slot.service.take() {
+            self.clear_active_service(&previous);
+        }
         slot.client.take();
         let launch_config = self
             .launch_config
@@ -396,6 +429,7 @@ impl EngineRuntime {
             .with_events(Arc::clone(&self.download_events)),
         );
         slot.service = Some(Arc::clone(&service));
+        self.register_active_service(Arc::clone(&service));
         slot.client = Some(client.clone());
         let recovered = service.recover_native(&download_root).await;
         if self.exiting.load(Ordering::Acquire) {
@@ -625,6 +659,7 @@ impl EngineRuntime {
         slot.client.take();
         if let Some(service) = slot.service.take() {
             let report = service.shutdown_report(Duration::from_secs(5)).await;
+            self.clear_active_service(&service);
             if !report.child_stopped {
                 return Err("aria2 未能在保存会话后停止，设置未应用".into());
             }
@@ -750,29 +785,16 @@ impl EngineRuntime {
     }
 
     pub async fn shutdown(&self, timeout: Duration) -> crate::aria2::recovery::ShutdownReport {
-        let deadline = tokio::time::Instant::now() + timeout;
         self.exiting.store(true, Ordering::Release);
         self.ftp.shutdown().await;
-        let mut slot = match tokio::time::timeout_at(deadline, self.slot.lock()).await {
-            Ok(slot) => slot,
-            Err(_) => {
-                self.set_state(EngineAvailability::unavailable("应用正在退出"));
-                return crate::aria2::recovery::ShutdownReport {
-                    session_saved: false,
-                    shutdown_requested: false,
-                    force_killed: false,
-                    child_stopped: false,
-                };
-            }
-        };
-        if let Some(cancel) = slot.sync_cancel.take() {
-            let _ = cancel.send(true);
-        }
-        slot.client.take();
-        let report = if let Some(service) = slot.service.take() {
-            service
-                .shutdown_report(deadline.saturating_duration_since(tokio::time::Instant::now()))
-                .await
+        // `retry_locked` and recovery deliberately retain `slot` while awaiting
+        // RPC.  Exit cannot depend on that lock: its service registry gives the
+        // shutdown path direct access to the owned child and guarantees the
+        // timeout path calls `terminate_fallback`.
+        let report = if let Some(service) = self.active_service() {
+            let report = service.shutdown_report(timeout).await;
+            self.clear_active_service(&service);
+            report
         } else {
             crate::aria2::recovery::ShutdownReport {
                 session_saved: false,
@@ -781,6 +803,15 @@ impl EngineRuntime {
                 child_stopped: true,
             }
         };
+        // Cleanup bookkeeping when the slot is currently idle.  A retry that
+        // owns it observes `exiting` and performs the same cleanup itself.
+        if let Ok(mut slot) = self.slot.try_lock() {
+            if let Some(cancel) = slot.sync_cancel.take() {
+                let _ = cancel.send(true);
+            }
+            slot.client.take();
+            slot.service.take();
+        }
         self.set_state(EngineAvailability::unavailable("应用正在退出"));
         report
     }
@@ -792,6 +823,7 @@ impl EngineRuntime {
         slot.client.take();
         if let Some(service) = slot.service.take() {
             let _ = service.shutdown_report(Duration::ZERO).await;
+            self.clear_active_service(&service);
         }
     }
 

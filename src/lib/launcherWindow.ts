@@ -161,6 +161,13 @@ export async function sendLauncherInput(input: string) {
   await emitTo('main', 'launcher-parse', input);
 }
 
+/** Opens the manager's normal new-task dialog without parsing the input yet. */
+export async function openLauncherNewDownload(input: string) {
+  if (!isTauriRuntime() || !input.trim()) return;
+  await openLauncherManager();
+  await emitTo('main', 'launcher-new-download', input);
+}
+
 export async function startLauncherDragging() {
   if (!isTauriRuntime()) return;
   await invoke('start_launcher_dragging');

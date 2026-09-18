@@ -11,7 +11,7 @@ const initial = {
   proxy: { enabled: false, protocol: 'http' as const, host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 20, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
   deleteTransferredShareFilesAfterDownload: true,
   cloudUploadLimit: 0
 };
@@ -198,9 +198,10 @@ it('enables cleanup for application-created transfer files by default', () => {
   expect(screen.queryByText('仅删除本应用为下载创建的转存文件，不会删除您的其他网盘文件。')).not.toBeInTheDocument();
 });
 
-it('defaults new connections to four while preserving an explicit eight', async () => {
+it('defaults to twenty concurrent tasks and four connections while preserving an explicit eight', async () => {
   const user = userEvent.setup();
   expect(defaultSettings.aria2.maxConnectionsPerServer).toBe(4);
+  expect(defaultSettings.aria2.maxConcurrentDownloads).toBe(20);
 
   render(<SettingsPanel initial={{ ...defaultSettings, aria2: { ...defaultSettings.aria2, maxConnectionsPerServer: 8 } }} onChange={() => {}} />);
   await user.click(screen.getByRole('tab', { name: '网络' }));
@@ -337,7 +338,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
     proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+    aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 20, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
     deleteTransferredShareFilesAfterDownload: true,
     cloudUploadLimit: 0
   });
@@ -352,8 +353,8 @@ it('saves aria2 RPC and engine settings from the network settings', async () => 
   await user.clear(screen.getByRole('spinbutton', { name: 'aria2 RPC 端口' }));
   await user.type(screen.getByRole('spinbutton', { name: 'aria2 RPC 端口' }), '16800');
   await user.type(screen.getByLabelText('aria2 RPC Token'), 'local-token');
-  await user.clear(screen.getByRole('spinbutton', { name: '最大并行任务数' }));
-  await user.type(screen.getByRole('spinbutton', { name: '最大并行任务数' }), '3');
+  await user.clear(screen.getByRole('spinbutton', { name: '最大并发任务数' }));
+  await user.type(screen.getByRole('spinbutton', { name: '最大并发任务数' }), '3');
   await user.clear(screen.getByRole('spinbutton', { name: '单任务并发连接数' }));
   await user.type(screen.getByRole('spinbutton', { name: '单任务并发连接数' }), '4');
   await user.clear(screen.getByRole('spinbutton', { name: 'BT 分享率' }));

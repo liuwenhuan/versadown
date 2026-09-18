@@ -132,9 +132,23 @@ impl DownloadOps for XunleiDriver<'_> {
     }
 }
 impl ShareOps for XunleiDriver<'_> {
-    fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> { with_xunlei_client(&self.store, &self.http, |client| client.create_share(file_ids, options)) }
-    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> { with_xunlei_client(&self.store, &self.http, |client| client.list_shares()) }
-    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> { with_xunlei_client(&self.store, &self.http, |client| client.cancel_shares(share_ids)) }
+    fn create_share(
+        &mut self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
+        with_xunlei_client(&self.store, &self.http, |client| {
+            client.create_share(file_ids, options)
+        })
+    }
+    fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
+        with_xunlei_client(&self.store, &self.http, |client| client.list_shares())
+    }
+    fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
+        with_xunlei_client(&self.store, &self.http, |client| {
+            client.cancel_shares(share_ids)
+        })
+    }
 }
 impl ProviderAuth for XunleiDriver<'_> {
     fn login_password(

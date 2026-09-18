@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -102,6 +102,42 @@ it('scans launcher quick-add input before dispatching it to the manager', async 
   expect(onParse).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: '确认并完成' }));
   expect(onParse).toHaveBeenCalledWith('ftp://example.test/pub/archive.iso', undefined);
+});
+
+it('opens a new task from a valid link embedded in dropped text', async () => {
+  const onScan = vi.fn().mockResolvedValue([
+    { input: 'not a link', valid: false, message: '不支持的下载内容' },
+    { input: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567', valid: true, kind: 'magnet' },
+  ]);
+  const onDroppedInput = vi.fn().mockResolvedValue(undefined);
+  render(<FloatingLauncher onParse={vi.fn()} onScan={onScan} onDroppedInput={onDroppedInput} />);
+
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  fireEvent.drop(trigger, {
+    dataTransfer: {
+      files: [],
+      getData: (type: string) => type === 'text/plain'
+        ? '复制内容：magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
+        : '',
+    },
+  });
+
+  await screen.findByRole('button', { name: '打开下载输入' });
+  expect(onScan).toHaveBeenCalledWith('复制内容：magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567');
+  await waitFor(() => expect(onDroppedInput).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
+});
+
+it('stages a dropped torrent before opening the new-task dialog', async () => {
+  const onStageDroppedTorrent = vi.fn().mockResolvedValue('C:\\AppData\\dropped-torrents\\fixture.torrent');
+  const onDroppedInput = vi.fn().mockResolvedValue(undefined);
+  render(<FloatingLauncher onParse={vi.fn()} onDroppedInput={onDroppedInput} onStageDroppedTorrent={onStageDroppedTorrent} />);
+
+  fireEvent.drop(screen.getByRole('button', { name: '打开下载输入' }), {
+    dataTransfer: { files: [{ name: 'fixture.torrent' }], getData: () => '' },
+  });
+
+  await waitFor(() => expect(onStageDroppedTorrent).toHaveBeenCalledWith(expect.objectContaining({ name: 'fixture.torrent' })));
+  expect(onDroppedInput).toHaveBeenCalledWith('C:\\AppData\\dropped-torrents\\fixture.torrent');
 });
 
 it('starts dragging after pointer movement without opening the input panel', () => {

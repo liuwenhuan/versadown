@@ -852,6 +852,22 @@ export function App() {
     if (!isTauriRuntime()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    listen<string>('launcher-new-download', (event) => {
+      const input = event.payload.trim();
+      if (!input) return;
+      setView('downloads');
+      setDownloadTab('active');
+      setHeaderPanel(null);
+      setNewDownloadInput(input);
+      setNewDownloadOpen(true);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
     listen<'new-download' | 'resume-all' | 'pause-all'>('launcher-command', (event) => {
       if (event.payload === 'new-download') {
         setView('downloads');

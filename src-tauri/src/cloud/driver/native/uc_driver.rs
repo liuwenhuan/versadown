@@ -162,14 +162,30 @@ impl DownloadOps for UcDriver<'_> {
     }
 }
 impl ShareOps for UcDriver<'_> {
-    fn create_share(&mut self, file_ids: &[String], options: &CloudShareOptions) -> Result<CloudShare, CloudError> {
-        uc::UcClient::new(load_provider_session(CloudProvider::Uc, &self.store)?, &self.http).create_share(file_ids, options)
+    fn create_share(
+        &mut self,
+        file_ids: &[String],
+        options: &CloudShareOptions,
+    ) -> Result<CloudShare, CloudError> {
+        uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &self.store)?,
+            &self.http,
+        )
+        .create_share(file_ids, options)
     }
     fn list_shares(&mut self) -> Result<Vec<CloudShare>, CloudError> {
-        uc::UcClient::new(load_provider_session(CloudProvider::Uc, &self.store)?, &self.http).list_shares()
+        uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &self.store)?,
+            &self.http,
+        )
+        .list_shares()
     }
     fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
-        uc::UcClient::new(load_provider_session(CloudProvider::Uc, &self.store)?, &self.http).cancel_shares(share_ids)
+        uc::UcClient::new(
+            load_provider_session(CloudProvider::Uc, &self.store)?,
+            &self.http,
+        )
+        .cancel_shares(share_ids)
     }
 }
 impl ProviderAuth for UcDriver<'_> {
@@ -199,8 +215,11 @@ impl ProviderAuth for UcDriver<'_> {
         input: &WebAuthorizationInput,
     ) -> Result<Option<Vec<u8>>, CloudError> {
         Ok(Some(
-            serde_json::to_vec(&uc::parse_uc_web_authorization(&input.cookies, &input.storage)?)
-                .map_err(|_| QuarkError::Storage)?,
+            serde_json::to_vec(&uc::parse_uc_web_authorization(
+                &input.cookies,
+                &input.storage,
+            )?)
+            .map_err(|_| QuarkError::Storage)?,
         ))
     }
 }

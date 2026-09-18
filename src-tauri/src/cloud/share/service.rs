@@ -501,9 +501,7 @@ impl CloudShareRefreshBudget {
         // 22 means the signed URL was rejected.  8 means the CDN cannot
         // resume the partial response.  Both require a newly resolved URL;
         // the caller decides whether 8 must restart from zero.
-        if !source.starts_with("cloud-share://")
-            || !matches!(aria_error_code, Some("8" | "22"))
-        {
+        if !source.starts_with("cloud-share://") || !matches!(aria_error_code, Some("8" | "22")) {
             return Ok(false);
         }
         parse_stable_cloud_share_source(source)?;

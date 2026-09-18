@@ -75,18 +75,18 @@ impl TaskStore {
         let transaction = connection.unchecked_transaction()?;
         let group_is_private: Option<bool> = transaction
             .query_row(
-            "SELECT g.is_private FROM cloud_directory_groups g
+                "SELECT g.is_private FROM cloud_directory_groups g
              JOIN cloud_directory_group_items i ON i.group_id = g.id
              WHERE g.id = ?1 AND i.id = ?2
              AND g.status NOT IN ('recycled', 'cancelled', 'completed')
              AND (i.task_id IS NULL OR i.task_id = ?3)",
-            params![
-                group.to_string(),
-                item.to_string(),
-                retry_task.map(|id| id.to_string())
-            ],
-            |row| row.get(0),
-        )
+                params![
+                    group.to_string(),
+                    item.to_string(),
+                    retry_task.map(|id| id.to_string())
+                ],
+                |row| row.get(0),
+            )
             .optional()?;
         let Some(group_is_private) = group_is_private else {
             return Err(StoreError::NotFound(item));
@@ -508,12 +508,11 @@ impl TaskStore {
              )",
             params![is_private, timestamp, id.to_string()],
         )?;
-        let group = transaction
-            .query_row(
-                &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
-                [id.to_string()],
-                cloud_directory_group_from_row,
-            )?;
+        let group = transaction.query_row(
+            &format!("{CLOUD_DIRECTORY_GROUP_SELECT} WHERE id = ?1"),
+            [id.to_string()],
+            cloud_directory_group_from_row,
+        )?;
         transaction.commit()?;
         Ok(group)
     }
@@ -839,11 +838,7 @@ impl TaskStore {
             .map_err(StoreError::from)
     }
 
-    pub fn set_task_private(
-        &self,
-        id: Uuid,
-        is_private: bool,
-    ) -> Result<DownloadTask, StoreError> {
+    pub fn set_task_private(&self, id: Uuid, is_private: bool) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let changed = connection.execute(
             "UPDATE tasks SET is_private = ?1, updated_at = ?2 WHERE id = ?3",
@@ -2097,8 +2092,12 @@ mod tests {
                 ],
             )
             .unwrap();
-        let first = store.create(NewTask::direct("https://example.test/one.bin")).unwrap();
-        let second = store.create(NewTask::direct("https://example.test/two.bin")).unwrap();
+        let first = store
+            .create(NewTask::direct("https://example.test/one.bin"))
+            .unwrap();
+        let second = store
+            .create(NewTask::direct("https://example.test/two.bin"))
+            .unwrap();
         let items = store.cloud_directory_group_items(group.id).unwrap();
         store
             .link_cloud_directory_group_item_task(group.id, items[0].id, first.id)
@@ -2107,7 +2106,9 @@ mod tests {
             .link_cloud_directory_group_item_task(group.id, items[1].id, second.id)
             .unwrap();
 
-        let group = store.set_cloud_directory_group_private(group.id, true).unwrap();
+        let group = store
+            .set_cloud_directory_group_private(group.id, true)
+            .unwrap();
 
         assert!(group.is_private);
         assert!(store.find(first.id).unwrap().is_private);

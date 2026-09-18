@@ -2,8 +2,7 @@ use super::{
     types::{encoded, required},
     CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudFileKind, CloudHttpRequest,
     CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShare, CloudShareOptions,
-    CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest,
-    UploadHttpResponse,
+    CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest, UploadHttpResponse,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -1508,7 +1507,9 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
         }
         if options.generate_pass_code {
-            return Err(QuarkError::InvalidInput("百度网盘需要设置自定义提取码".into()));
+            return Err(QuarkError::InvalidInput(
+                "百度网盘需要设置自定义提取码".into(),
+            ));
         }
         let fsids = file_ids
             .iter()
@@ -1529,7 +1530,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             &write_query(&token, "channel=chunlei"),
             form(&[
                 ("fid_list", json!(fsids).to_string()),
-                ("schannel", if pass_code.is_some() { "4" } else { "0" }.into()),
+                (
+                    "schannel",
+                    if pass_code.is_some() { "4" } else { "0" }.into(),
+                ),
                 ("channel_list", "[]".into()),
                 ("period", options.expires_in_days.unwrap_or(0).to_string()),
                 ("pwd", pass_code.unwrap_or_default().into()),
@@ -2510,11 +2514,7 @@ fn baidu_share_from_value(
         .get("fid_list")
         .or_else(|| value.get("fsIds"))
         .and_then(Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(string_or_number)
-                .collect::<Vec<_>>()
-        })
+        .map(|ids| ids.iter().filter_map(string_or_number).collect::<Vec<_>>())
         .or_else(|| {
             value
                 .get("fs_id")

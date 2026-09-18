@@ -151,6 +151,29 @@ export async function scanDownloadInputs(input: string): Promise<ScanDownloadRes
   return invoke<ScanDownloadResult[]>('scan_download_inputs', { input });
 }
 
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Keeps a torrent dropped through a WebView drag operation in application
+ * storage. WebView2 exposes dropped files as bytes instead of an absolute
+ * path when native drag/drop handling is disabled for HTML text drops.
+ */
+export async function stageDroppedTorrent(fileName: string, bytes: Uint8Array): Promise<string> {
+  if (!isTauriRuntime()) throw new Error('当前环境不支持接收拖入的种子文件');
+  if (bytes.byteLength > 16 * 1024 * 1024) throw new Error('种子文件超过 16 MiB 安全限制');
+  return invoke<string>('stage_dropped_torrent', {
+    fileName,
+    contentsBase64: encodeBase64(bytes),
+  });
+}
+
 export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false, postProcessingNote?: string): Promise<QueueTask | undefined> {
   if (!isTauriRuntime()) return undefined;
   return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), ...(postProcessingNote?.trim() ? { postProcessingNote } : {}) });
@@ -240,7 +263,7 @@ export const defaultSettings: AppSettings = {
   proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
-  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
+  aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 20, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
   deleteTransferredShareFilesAfterDownload: true,
   privacyDownloadEnabled: false,
   privacyPasswordConfigured: false,

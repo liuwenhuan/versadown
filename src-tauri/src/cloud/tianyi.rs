@@ -3,8 +3,7 @@ use super::{
     types::{encoded, required},
     CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudFileKind, CloudHttpRequest,
     CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShare, CloudShareOptions,
-    CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest,
-    UploadHttpResponse,
+    CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest, UploadHttpResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -106,20 +105,31 @@ mod tests {
         ]);
         let client = TianyiClient::new(TianyiSession::cookie("COOKIE_LOGIN_USER=user"), &http);
 
-        let share = client.create_share(&["file-1".into()], &CloudShareOptions {
-            name: "归档".into(),
-            pass_code: None,
-            generate_pass_code: true,
-            expires_in_days: Some(7),
-        }).unwrap();
+        let share = client
+            .create_share(
+                &["file-1".into()],
+                &CloudShareOptions {
+                    name: "归档".into(),
+                    pass_code: None,
+                    generate_pass_code: true,
+                    expires_in_days: Some(7),
+                },
+            )
+            .unwrap();
         assert_eq!(share.url, "https://cloud.189.cn/t/example");
         assert!(client.list_shares().unwrap().is_empty());
         client.cancel_shares(&["42".into(), "84".into()]).unwrap();
 
         let requests = http.requests.lock().unwrap();
-        assert!(requests[0].url.contains("/api/open/share/createShareLink.action?fileId=file-1&expireTime=7&shareType=3"));
-        assert!(requests[1].url.contains("/api/portal/listShares.action?shareType=1&pageNum=1&pageSize=60"));
-        assert!(requests[2].url.contains("/api/portal/cancelShare.action?shareIdList=42%2C84&ancelType=1"));
+        assert!(requests[0].url.contains(
+            "/api/open/share/createShareLink.action?fileId=file-1&expireTime=7&shareType=3"
+        ));
+        assert!(requests[1]
+            .url
+            .contains("/api/portal/listShares.action?shareType=1&pageNum=1&pageSize=60"));
+        assert!(requests[2]
+            .url
+            .contains("/api/portal/cancelShare.action?shareIdList=42%2C84&ancelType=1"));
     }
     fn credentials() -> MemoryCredentialStore {
         let store = MemoryCredentialStore::default();

@@ -1535,6 +1535,20 @@ it('opens the normal new-download dialog from the floating-ball menu command', a
   expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
 });
 
+it('opens the normal new-download dialog with an accepted floating-ball drop', async () => {
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-new-download')).toBeDefined());
+
+  act(() => {
+    state.listeners.get('launcher-new-download')?.({
+      payload: 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+    });
+  });
+
+  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
+});
+
 it('expands primary navigation when the launcher opens a non-download workspace', async () => {
   const user = userEvent.setup();
   render(<App />);
