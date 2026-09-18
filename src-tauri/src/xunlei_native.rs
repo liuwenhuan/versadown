@@ -295,17 +295,27 @@ impl XunleiNativeBackend {
                 let Some(api) = api.as_mut() else {
                     return Ok(None);
                 };
-                let native_id = api.create_p2sp_task(
-                    &resolved.url,
-                    &output_path,
-                    &output_name,
-                    &output_directory,
-                    referer,
-                    resolved.size_hint().unwrap_or(0),
-                    user_agent,
-                    cid,
-                    gcid,
-                )?;
+                let size = resolved.size_hint().unwrap_or(0);
+                let reusable = api.reusable_task(&output_directory, &output_name, size)?;
+                let native_id = if let Some((native_id, status)) = reusable {
+                    if status == 5 {
+                        api.stop(native_id)?;
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                    native_id
+                } else {
+                    api.create_p2sp_task(
+                        &resolved.url,
+                        &output_path,
+                        &output_name,
+                        &output_directory,
+                        referer,
+                        size,
+                        user_agent,
+                        cid,
+                        gcid,
+                    )?
+                };
                 api.start(native_id)?;
                 let trace_id = api.wait_for_trace_id(native_id)?;
                 let client_version = api.client_version.clone();
@@ -690,6 +700,16 @@ impl WindowsApi {
             .ok_or_else(|| NativeSubmitError::Failed("迅雷原生任务创建失败".into()))
     }
 
+    fn reusable_task(
+        &self,
+        save_path: &std::path::Path,
+        display_name: &str,
+        file_size: u64,
+    ) -> Result<Option<(u32, i32)>, NativeSubmitError> {
+        let database = self.state_directory.join("TaskDb.dat");
+        reusable_task_in_database(&database, save_path, display_name, file_size)
+    }
+
     fn enable_vip(&mut self, id: u32, token: &str) -> Result<(), NativeSubmitError> {
         self.request(serde_json::json!({
             "action": "enableVip",
@@ -835,6 +855,36 @@ impl WindowsApi {
         }
         serde_json::from_str(&line).map_err(|_| NativeSubmitError::Incompatible)
     }
+}
+
+#[cfg(windows)]
+fn reusable_task_in_database(
+    database: &std::path::Path,
+    save_path: &std::path::Path,
+    display_name: &str,
+    file_size: u64,
+) -> Result<Option<(u32, i32)>, NativeSubmitError> {
+    use rusqlite::OptionalExtension;
+
+    if !database.is_file() {
+        return Ok(None);
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+    connection
+        .query_row(
+            "SELECT TaskId, Status FROM TaskBase
+             WHERE SavePath=?1 AND Name=?2 AND (?3=0 OR ResourceSize=?3)
+               AND Status IN (5, 7)
+             ORDER BY TotalReceiveSize DESC, TaskId DESC LIMIT 1",
+            rusqlite::params![save_path.to_string_lossy(), display_name, file_size],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i32>(1)?)),
+        )
+        .optional()
+        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))
 }
 
 #[cfg(windows)]
@@ -1006,6 +1056,52 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn retry_reuses_the_most_progressed_native_task_for_the_same_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("TaskDb.dat");
+        let save_path = root.path().join("下载目录");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE TaskBase (
+                    TaskId INTEGER PRIMARY KEY,
+                    Status INTEGER NOT NULL,
+                    SavePath TEXT NOT NULL,
+                    Name TEXT NOT NULL,
+                    ResourceSize INTEGER NOT NULL,
+                    TotalReceiveSize INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        for (id, status, received) in [(10, 5, 1024), (11, 7, 4096), (12, 9, 8192)] {
+            connection
+                .execute(
+                    "INSERT INTO TaskBase VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        id,
+                        status,
+                        save_path.to_string_lossy(),
+                        "文件.zip",
+                        65_536_u64,
+                        received
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert_eq!(
+            reusable_task_in_database(&database, &save_path, "文件.zip", 65_536).unwrap(),
+            Some((11, 7))
+        );
+        assert_eq!(
+            reusable_task_in_database(&database, &save_path, "其他.zip", 65_536).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     #[ignore = "requires an installed Thunder client"]
     fn installed_download_sdk_starts_in_isolated_helper() {
         let root = tempfile::tempdir().unwrap();
@@ -1129,6 +1225,11 @@ mod tests {
             .expect("official P2SP task should be created");
         eprintln!("native live task id: {task_id}");
         api.start(task_id).expect("native task should start");
+        let reusable = api
+            .reusable_task(&output_directory, output_name, download.size.unwrap_or(0))
+            .expect("native task database should be readable")
+            .expect("the running native destination should be reusable");
+        assert_eq!(reusable.0, task_id);
         let trace_id = api
             .wait_for_trace_id(task_id)
             .expect("native task should expose its acceleration trace id");

@@ -166,6 +166,40 @@ mod tests {
             ("https://cdn.example/test.zip".into(), "test.zip".into())
         );
     }
+
+    #[test]
+    fn xunlei_download_hash_is_gcid_only_when_cid_is_absent() {
+        struct DownloadHttp;
+        impl CloudHttpTransport for DownloadHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                Ok(CloudHttpResponse {
+                    status: 200,
+                    body: json!({
+                        "id": "file-1",
+                        "name": "test.zip",
+                        "web_content_link": "https://cdn.example/test.zip",
+                        "hash": "file-gcid"
+                    })
+                    .to_string(),
+                    ..Default::default()
+                })
+            }
+        }
+        let mut session: XunleiSession =
+            serde_json::from_slice(&credentials().load("xunlei").unwrap().unwrap()).unwrap();
+        session.web_security = XunleiWebSecurity {
+            captcha_token: "official-root-ticket".into(),
+            expires_at: now() + 600,
+            action: "GET:/drive/v1/files".into(),
+            ..Default::default()
+        };
+        let download = XunleiClient::new(session, &DownloadHttp)
+            .download_with_acceleration("file-1")
+            .unwrap();
+
+        assert_eq!(download.cid, None);
+        assert_eq!(download.gcid.as_deref(), Some("file-gcid"));
+    }
     #[test]
     fn current_modern_web_bearer_without_expiry_is_probed_before_refresh() {
         struct RefusingHttp;
@@ -2546,7 +2580,6 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                         acceleration_token: xunlei_acceleration_token(file)?,
                         cid: file
                             .get("cid")
-                            .or_else(|| file.get("hash"))
                             .and_then(Value::as_str)
                             .filter(|value| !value.is_empty())
                             .map(str::to_owned),
