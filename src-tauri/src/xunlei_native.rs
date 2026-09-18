@@ -44,6 +44,8 @@ pub struct XunleiNativeBackend {
     #[cfg(windows)]
     api: std::sync::Mutex<Option<WindowsApi>>,
     #[cfg(windows)]
+    equity_tokens: std::sync::Mutex<BTreeMap<u32, String>>,
+    #[cfg(windows)]
     plugin_config_path: Option<PathBuf>,
     #[cfg(windows)]
     helper_path: Option<PathBuf>,
@@ -54,6 +56,8 @@ impl Default for XunleiNativeBackend {
         Self {
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
+            #[cfg(windows)]
+            equity_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(windows)]
             plugin_config_path: None,
             #[cfg(windows)]
@@ -67,6 +71,8 @@ impl XunleiNativeBackend {
         Self {
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
+            #[cfg(windows)]
+            equity_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(windows)]
             plugin_config_path: Some(plugin_config_path),
             #[cfg(windows)]
@@ -304,6 +310,15 @@ impl XunleiNativeBackend {
                     }
                     native_id
                 } else {
+                    let failed =
+                        api.failed_zero_data_tasks(&output_directory, &output_name, size)?;
+                    for failed_id in &failed {
+                        api.delete(*failed_id)?;
+                    }
+                    if !failed.is_empty() {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        remove_failed_artifacts(&output_path, size)?;
+                    }
                     api.create_p2sp_task(
                         &resolved.url,
                         &output_path,
@@ -331,6 +346,10 @@ impl XunleiNativeBackend {
                     },
                 )?;
                 api.enable_vip(native_id, &token)?;
+                self.equity_tokens
+                    .lock()
+                    .map_err(|_| NativeSubmitError::Incompatible)?
+                    .insert(native_id, token);
                 native_id
             };
 
@@ -397,10 +416,28 @@ impl XunleiNativeBackend {
                     .ok_or_else(|| "迅雷原生下载组件未安装".to_string())?;
                 match action {
                     DownloadAction::Pause => api.stop(native_id),
-                    DownloadAction::Resume => api.start(native_id),
+                    DownloadAction::Resume => (|| -> Result<(), NativeSubmitError> {
+                        api.start(native_id)?;
+                        if let Some(token) = self
+                            .equity_tokens
+                            .lock()
+                            .map_err(|_| NativeSubmitError::Incompatible)?
+                            .get(&native_id)
+                            .cloned()
+                        {
+                            api.enable_vip(native_id, &token)?;
+                        }
+                        Ok(())
+                    })(),
                     DownloadAction::Cancel => api.delete(native_id),
                 }
                 .map_err(|error| error.user_message())?;
+            }
+
+            if action == DownloadAction::Cancel {
+                if let Ok(mut tokens) = self.equity_tokens.lock() {
+                    tokens.remove(&native_id);
+                }
             }
 
             let mut updated = task;
@@ -710,6 +747,16 @@ impl WindowsApi {
         reusable_task_in_database(&database, save_path, display_name, file_size)
     }
 
+    fn failed_zero_data_tasks(
+        &self,
+        save_path: &std::path::Path,
+        display_name: &str,
+        file_size: u64,
+    ) -> Result<Vec<u32>, NativeSubmitError> {
+        let database = self.state_directory.join("TaskDb.dat");
+        failed_zero_data_tasks_in_database(&database, save_path, display_name, file_size)
+    }
+
     fn enable_vip(&mut self, id: u32, token: &str) -> Result<(), NativeSubmitError> {
         self.request(serde_json::json!({
             "action": "enableVip",
@@ -878,13 +925,75 @@ fn reusable_task_in_database(
         .query_row(
             "SELECT TaskId, Status FROM TaskBase
              WHERE SavePath=?1 AND Name=?2 AND (?3=0 OR ResourceSize=?3)
-               AND Status IN (5, 7)
+               AND (Status IN (5, 7) OR (Status=9 AND TotalReceiveSize>0))
              ORDER BY TotalReceiveSize DESC, TaskId DESC LIMIT 1",
             rusqlite::params![save_path.to_string_lossy(), display_name, file_size],
             |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i32>(1)?)),
         )
         .optional()
         .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))
+}
+
+#[cfg(windows)]
+fn failed_zero_data_tasks_in_database(
+    database: &std::path::Path,
+    save_path: &std::path::Path,
+    display_name: &str,
+    file_size: u64,
+) -> Result<Vec<u32>, NativeSubmitError> {
+    if !database.is_file() {
+        return Ok(Vec::new());
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT TaskId FROM TaskBase
+             WHERE SavePath=?1 AND Name=?2 AND (?3=0 OR ResourceSize=?3)
+               AND Status=9 AND TotalReceiveSize=0
+             ORDER BY TaskId",
+        )
+        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![save_path.to_string_lossy(), display_name, file_size],
+            |row| row.get::<_, u32>(0),
+        )
+        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))
+}
+
+#[cfg(windows)]
+fn remove_failed_artifacts(
+    output_path: &std::path::Path,
+    expected_size: u64,
+) -> Result<(), NativeSubmitError> {
+    if let Ok(metadata) = std::fs::metadata(output_path) {
+        if !metadata.is_file()
+            || (metadata.len() != 0 && (expected_size == 0 || metadata.len() != expected_size))
+        {
+            return Err(NativeSubmitError::Failed(
+                "目标文件已存在，无法清理迅雷失败任务的占位文件".into(),
+            ));
+        }
+        std::fs::remove_file(output_path)
+            .map_err(|_| NativeSubmitError::Failed("无法清理迅雷失败任务的占位文件".into()))?;
+    }
+
+    for suffix in [".xltd", ".xltd.cfg"] {
+        let mut temporary = output_path.as_os_str().to_owned();
+        temporary.push(suffix);
+        let temporary = PathBuf::from(temporary);
+        if temporary.is_file() {
+            std::fs::remove_file(temporary)
+                .map_err(|_| NativeSubmitError::Failed("无法清理迅雷失败任务的临时文件".into()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1073,7 +1182,7 @@ mod tests {
                 );",
             )
             .unwrap();
-        for (id, status, received) in [(10, 5, 1024), (11, 7, 4096), (12, 9, 8192)] {
+        for (id, status, received) in [(10, 5, 1024), (11, 7, 4096), (12, 9, 0), (13, 9, 8192)] {
             connection
                 .execute(
                     "INSERT INTO TaskBase VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1092,12 +1201,47 @@ mod tests {
 
         assert_eq!(
             reusable_task_in_database(&database, &save_path, "文件.zip", 65_536).unwrap(),
-            Some((11, 7))
+            Some((13, 9))
+        );
+        assert_eq!(
+            failed_zero_data_tasks_in_database(&database, &save_path, "文件.zip", 65_536).unwrap(),
+            vec![12]
         );
         assert_eq!(
             reusable_task_in_database(&database, &save_path, "其他.zip", 65_536).unwrap(),
             None
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_artifact_cleanup_removes_native_temporary_files_but_preserves_real_data() {
+        let root = tempfile::tempdir().unwrap();
+        let placeholder = root.path().join("placeholder.bin");
+        let file = std::fs::File::create(&placeholder).unwrap();
+        file.set_len(65_536).unwrap();
+        drop(file);
+        std::fs::write(
+            root.path().join("placeholder.bin.xltd"),
+            b"sparse placeholder",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("placeholder.bin.xltd.cfg"), b"metadata").unwrap();
+
+        remove_failed_artifacts(&placeholder, 65_536).unwrap();
+        assert!(!placeholder.exists());
+        assert!(!root.path().join("placeholder.bin.xltd").exists());
+        assert!(!root.path().join("placeholder.bin.xltd.cfg").exists());
+
+        std::fs::write(root.path().join("placeholder.bin.xltd"), b"native-only").unwrap();
+        std::fs::write(root.path().join("placeholder.bin.xltd.cfg"), b"metadata").unwrap();
+        remove_failed_artifacts(&placeholder, 65_536).unwrap();
+        assert!(!root.path().join("placeholder.bin.xltd").exists());
+        assert!(!root.path().join("placeholder.bin.xltd.cfg").exists());
+
+        std::fs::write(&placeholder, b"real data").unwrap();
+        assert!(remove_failed_artifacts(&placeholder, 65_536).is_err());
+        assert_eq!(std::fs::read(&placeholder).unwrap(), b"real data");
     }
 
     #[cfg(windows)]
@@ -1265,6 +1409,8 @@ mod tests {
         };
         std::thread::sleep(std::time::Duration::from_secs(3));
         api.start(task_id).expect("native task should resume");
+        api.enable_vip(task_id, &token)
+            .expect("SVIP rule should be restored after resume");
         let resumed_at = loop {
             let (received, total, status) = api.progress(task_id).unwrap_or((0, 0, 0));
             if received >= paused_at + 512 * 1024 {
