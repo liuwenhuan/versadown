@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
+pub const QUARK_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
+    CloudSharePassCodeConstraint {
+        min_length: 4,
+        max_length: 4,
+        character_set: CloudSharePassCodeCharacterSet::AsciiAlphanumeric,
+        hint: "提取码必须为 4 位字母或数字",
+    };
+
 #[cfg(test)]
 mod tests {
     use super::*;

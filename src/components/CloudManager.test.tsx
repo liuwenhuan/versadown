@@ -570,6 +570,26 @@ it('uses a provider-declared UC share-code constraint while the user types', asy
   expect(createCloudShare).toHaveBeenCalledWith('uc', ['file-1'], { name: '报告.pdf', passCode: 'a7b2' });
 });
 
+it('uses the same four-character alphanumeric share-code guidance for Quark', async () => {
+  const user = userEvent.setup();
+  const createCloudShare = vi.fn().mockResolvedValue({ id: 'share-quark', url: 'https://pan.quark.cn/s/share-quark', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'] });
+  render(<CloudManager provider="quark" client={createCloudFake({ createCloudShare })} initialAccount={{ id: 'quark', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  const passCode = within(dialog).getByRole('textbox', { name: '提取码' });
+  expect(within(dialog).getByText('将分享 报告.pdf。可选设置提取码和有效期，提取码必须为 4 位字母或数字')).toBeVisible();
+  expect(passCode).toHaveAttribute('maxlength', '4');
+
+  await user.type(passCode, 'a7!');
+  expect(within(dialog).getByRole('button', { name: '创建分享链接' })).toBeDisabled();
+  await user.clear(passCode);
+  await user.type(passCode, 'a7B2');
+  await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
+  expect(createCloudShare).toHaveBeenCalledWith('quark', ['file-1'], { name: '报告.pdf', passCode: 'a7B2' });
+});
+
 it('refreshes my shares from the provider after cancelling a share', async () => {
   // Break caught: skipping the follow-up list leaves the virtual directory
   // disconnected from the server state after a successful cancellation.
@@ -1359,6 +1379,27 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
     const parentRow = await screen.findByRole('treeitem', { name: '返回上一级目录' });
     expect(parentRow).toHaveTextContent('返回上级目录');
     await user.click(parentRow);
+    await waitFor(() => expect(listCloudDirectory).toHaveBeenLastCalledWith(provider, cloudRootDirectoryId[provider]));
+  }
+);
+
+it.each(['回收站', '我的分享'] as const)(
+  'returns from the virtual %s folder to the cloud root with the named parent-directory row', async (virtualFolder) => {
+    const user = userEvent.setup();
+    const provider = 'pikpak' as const;
+    const recycleBinId = cloudRecycleBinDirectoryId[provider];
+    const listCloudDirectory = vi.fn().mockImplementation((_requestedProvider: CloudProvider, parentId: string) => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [{ id: 'deleted-file', parentId, name: '已删除文件.txt', kind: 'file' as const }] }
+      : { id: parentId, items: [] }));
+    const listCloudShares = vi.fn().mockResolvedValue([{ id: 'share-1', url: 'https://mypikpak.com/s/share-1', name: '已分享文件.txt', kind: 'file' as const, sourceFileIds: [] }]);
+    const client = createCloudFake({ listCloudDirectory, listCloudShares });
+    render(<CloudManager provider={provider} client={client} initialAccount={{ id: 'pikpak-account', displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
+
+    await user.dblClick(await screen.findByText(virtualFolder, { exact: true }));
+    const parentRow = await screen.findByRole('treeitem', { name: '返回上一级目录' });
+    expect(parentRow).toHaveTextContent('返回上级目录');
+    await user.click(parentRow);
+
     await waitFor(() => expect(listCloudDirectory).toHaveBeenLastCalledWith(provider, cloudRootDirectoryId[provider]));
   }
 );

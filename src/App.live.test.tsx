@@ -260,6 +260,13 @@ it('keeps title-bar controls outside native drag regions', async () => {
   expect(state.startDragging).not.toHaveBeenCalled();
 });
 
+it('uses equal square hit targets for every main-window control', () => {
+  const styles = readFileSync('src/styles.css', 'utf8');
+  expect(styles).toContain('.window-controls{position:relative;z-index:1;display:flex;height:64px;flex:0 0 auto;align-items:center;margin-left:auto}');
+  expect(styles).toContain('.window-controls button{display:grid;width:48px;height:48px;flex:0 0 48px;padding:0;place-items:center;border:0;border-radius:8px;');
+  expect(styles).not.toContain('.window-controls button{width:34px}');
+});
+
 it('uses regular font weight for task tabs and file titles', async () => {
   const stylesheet = document.createElement('style');
   stylesheet.textContent = readFileSync('src/styles.css', 'utf8');

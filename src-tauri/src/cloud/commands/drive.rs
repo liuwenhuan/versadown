@@ -131,12 +131,18 @@ fn validate_share_options(
         return Err(QuarkError::InvalidInput("分享名称不能为空".into()));
     }
     if let Some(pass_code) = &options.pass_code {
-        let max_length = if provider == CloudProvider::Aliyun {
-            64
+        let pass_code = pass_code.trim();
+        let requires_four_alphanumeric_characters = matches!(
+            provider,
+            CloudProvider::Quark | CloudProvider::Pikpak | CloudProvider::Uc
+        );
+        let has_valid_provider_format = if requires_four_alphanumeric_characters {
+            pass_code.chars().count() == 4 && pass_code.chars().all(|character| character.is_ascii_alphanumeric())
         } else {
-            32
+            let max_length = if provider == CloudProvider::Aliyun { 64 } else { 32 };
+            !pass_code.is_empty() && pass_code.chars().count() <= max_length
         };
-        if pass_code.trim().is_empty() || pass_code.chars().count() > max_length {
+        if !has_valid_provider_format {
             return Err(QuarkError::InvalidInput("提取码格式无效".into()));
         }
     }
@@ -379,9 +385,11 @@ mod tests {
     }
 
     #[test]
-    fn aliyun_allows_a_64_character_share_code_without_relaxing_other_providers() {
+    fn enforces_each_provider_share_code_constraint_before_submitting() {
         assert!(validate_share_options(CloudProvider::Aliyun, &options("a".repeat(64))).is_ok());
         assert!(validate_share_options(CloudProvider::Aliyun, &options("a".repeat(65))).is_err());
-        assert!(validate_share_options(CloudProvider::Quark, &options("a".repeat(33))).is_err());
+        assert!(validate_share_options(CloudProvider::Quark, &options("a1B2".into())).is_ok());
+        assert!(validate_share_options(CloudProvider::Quark, &options("a1!2".into())).is_err());
+        assert!(validate_share_options(CloudProvider::Quark, &options("a1B".into())).is_err());
     }
 }

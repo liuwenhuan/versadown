@@ -419,6 +419,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         },
         share_pass_code_constraint: match provider {
             Aliyun => Some(super::aliyun::ALIYUN_SHARE_PASS_CODE_CONSTRAINT),
+            Quark => Some(super::quark::QUARK_SHARE_PASS_CODE_CONSTRAINT),
             Uc => Some(super::uc::UC_SHARE_PASS_CODE_CONSTRAINT),
             Pikpak => Some(CloudSharePassCodeConstraint {
                 min_length: 4,
@@ -446,10 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn uc_catalog_exposes_its_personal_share_code_constraint_without_applying_it_to_other_providers(
+    fn catalog_exposes_each_provider_share_code_constraint(
     ) {
-        // Break caught: the shared UI needs the UC plugin's constraint from
-        // the catalog, but a UC-only rule must not restrict other providers.
+        // Break caught: the shared UI must receive each provider's own share
+        // code contract before it submits a server-rejected share creation.
         let catalog = ProviderRegistry::global().catalog();
         let uc = catalog
             .iter()
@@ -481,9 +482,14 @@ mod tests {
             .iter()
             .find(|descriptor| descriptor.provider == CloudProvider::Quark)
             .expect("Quark must be present in the catalog");
-        assert!(serde_json::to_value(quark)
-            .unwrap()
-            .get("sharePassCodeConstraint")
-            .is_none());
+        assert_eq!(
+            serde_json::to_value(quark).unwrap()["sharePassCodeConstraint"],
+            serde_json::json!({
+                "minLength": 4,
+                "maxLength": 4,
+                "characterSet": "asciiAlphanumeric",
+                "hint": "提取码必须为 4 位字母或数字",
+            })
+        );
     }
 }

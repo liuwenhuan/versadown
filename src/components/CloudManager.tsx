@@ -1465,7 +1465,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   if (directoryState === 'expired') return authorizationView(true);
 
   const parent = breadcrumbs.at(-2);
-  const canNavigateToParent = Boolean(parent && !isRecycleBin && !isMyShares);
+  const canNavigateToParent = Boolean(parent);
   const navigateToParent = () => {
     if (!parent || operationBusy) return;
     void loadDirectory(activeAccount, parent.id, breadcrumbs.slice(0, -1));

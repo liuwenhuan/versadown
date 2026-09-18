@@ -34,12 +34,12 @@ export const cloudCatalog: ProviderDescriptor[] = cloudCatalogRows.map(([
   capabilities: { list: true, createDirectory: true, rename: true, move: true, copy: true, trash: true, delete: true, restore: true, download: true, upload: true, shareInspect: true, shareTransfer: true, recordedTransferResolve: true, shareCreate: true, shareList: true, shareCancel: true },
   maxUploadConcurrency: 2,
   downloadConcurrency: { maxConnectionsPerFile, maxConcurrentTasks },
-  ...(provider === 'uc' ? {
+  ...((provider === 'quark' || provider === 'uc') ? {
     sharePassCodeConstraint: {
       minLength: 4,
       maxLength: 4,
       characterSet: 'asciiAlphanumeric' as const,
-      hint: 'UC 提取码需为 4 位字母或数字'
+      hint: '提取码必须为 4 位字母或数字'
     }
   } : {})
 }));
