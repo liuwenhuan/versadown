@@ -497,8 +497,10 @@ impl XunleiNativeBackend {
                     .ok()
                     .and_then(|api| api.as_ref()?.progress(native_task_id).ok());
                 #[cfg(not(windows))]
-                let native_progress: Option<(u64, u64, i32)> = None;
-                let Some((completed, native_total, _native_status)) = native_progress else {
+                let native_progress: Option<(u64, u64, i32, i32)> = None;
+                let Some((completed, native_total, native_status, native_error_code)) =
+                    native_progress
+                else {
                     continue;
                 };
                 let total = (native_total > 0)
@@ -524,6 +526,10 @@ impl XunleiNativeBackend {
                     task.download_speed = 0;
                     task.error = None;
                     let _ = backend.stop_completed_task(&task);
+                } else if native_status == 9 {
+                    task.status = TaskStatus::Failed;
+                    task.download_speed = 0;
+                    task.error = Some(native_failure_message(native_error_code));
                 } else if unchanged >= 120 {
                     task.status = TaskStatus::Failed;
                     task.download_speed = 0;
@@ -818,7 +824,7 @@ impl WindowsApi {
         self.task_action("delete", id, "迅雷原生任务取消失败")
     }
 
-    fn progress(&self, id: u32) -> Result<(u64, u64, i32), NativeSubmitError> {
+    fn progress(&self, id: u32) -> Result<(u64, u64, i32, i32), NativeSubmitError> {
         let database = self.state_directory.join("TaskDb.dat");
         let connection = rusqlite::Connection::open_with_flags(
             database,
@@ -827,9 +833,10 @@ impl WindowsApi {
         .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))?;
         connection
             .query_row(
-                "SELECT TotalReceiveSize, ResourceSize, Status FROM TaskBase WHERE TaskId=?1",
+                "SELECT TotalReceiveSize, ResourceSize, Status, FailureErrorCode
+                 FROM TaskBase WHERE TaskId=?1",
                 [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))
     }
@@ -920,8 +927,6 @@ fn reusable_task_in_database(
     display_name: &str,
     file_size: u64,
 ) -> Result<Option<(u32, i32)>, NativeSubmitError> {
-    use rusqlite::OptionalExtension;
-
     if !database.is_file() {
         return Ok(None);
     }
@@ -930,17 +935,36 @@ fn reusable_task_in_database(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    connection
-        .query_row(
-            "SELECT TaskId, Status FROM TaskBase
-             WHERE SavePath=?1 AND Name=?2 AND (?3=0 OR ResourceSize=?3)
-               AND (Status IN (5, 7) OR (Status=9 AND TotalReceiveSize>0))
-             ORDER BY TotalReceiveSize DESC, TaskId DESC LIMIT 1",
-            rusqlite::params![save_path.to_string_lossy(), display_name, file_size],
-            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, i32>(1)?)),
+    let mut statement = connection
+        .prepare(
+            "SELECT TaskId, Status, SavePath, TotalReceiveSize FROM TaskBase
+             WHERE Name=?1 COLLATE NOCASE AND (?2=0 OR ResourceSize=?2)
+               AND (Status IN (5, 7) OR (Status=9 AND TotalReceiveSize>0))",
         )
-        .optional()
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))
+        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+    let rows = statement
+        .query_map(rusqlite::params![display_name, file_size], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
+            ))
+        })
+        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+    let requested_path = normalize_native_save_path(&save_path.to_string_lossy());
+    let mut best: Option<(u32, i32, u64)> = None;
+    for row in rows {
+        let (id, status, recorded_path, received) =
+            row.map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+        if normalize_native_save_path(&recorded_path) != requested_path {
+            continue;
+        }
+        if best.is_none_or(|current| (received, id) > (current.2, current.0)) {
+            best = Some((id, status, received));
+        }
+    }
+    Ok(best.map(|(id, status, _)| (id, status)))
 }
 
 #[cfg(windows)]
@@ -960,20 +984,46 @@ fn failed_zero_data_tasks_in_database(
     .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
     let mut statement = connection
         .prepare(
-            "SELECT TaskId FROM TaskBase
-             WHERE SavePath=?1 AND Name=?2 AND (?3=0 OR ResourceSize=?3)
+            "SELECT TaskId, SavePath FROM TaskBase
+             WHERE Name=?1 COLLATE NOCASE AND (?2=0 OR ResourceSize=?2)
                AND Status=9 AND TotalReceiveSize=0
              ORDER BY TaskId",
         )
         .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
     let rows = statement
-        .query_map(
-            rusqlite::params![save_path.to_string_lossy(), display_name, file_size],
-            |row| row.get::<_, u32>(0),
-        )
+        .query_map(rusqlite::params![display_name, file_size], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))
+    let requested_path = normalize_native_save_path(&save_path.to_string_lossy());
+    let mut failed = Vec::new();
+    for row in rows {
+        let (id, recorded_path) =
+            row.map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
+        if normalize_native_save_path(&recorded_path) == requested_path {
+            failed.push(id);
+        }
+    }
+    Ok(failed)
+}
+
+#[cfg(windows)]
+fn normalize_native_save_path(value: &str) -> String {
+    let mut normalized = value.trim().replace('/', "\\");
+    while normalized.len() > 3 && normalized.ends_with('\\') {
+        normalized.pop();
+    }
+    normalized.make_ascii_lowercase();
+    normalized
+}
+
+#[cfg(windows)]
+fn native_failure_message(error_code: i32) -> String {
+    if error_code == 0 {
+        "迅雷原生任务失败，请重试".into()
+    } else {
+        format!("迅雷原生任务失败（错误码 {error_code}），请重试")
+    }
 }
 
 #[cfg(windows)]
@@ -1188,6 +1238,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("TaskDb.dat");
         let save_path = root.path().join("下载目录");
+        let recorded_save_path = format!(
+            "{}\\",
+            save_path
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_ascii_uppercase()
+        );
+        let retry_save_path = PathBuf::from(
+            save_path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase(),
+        );
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .execute_batch(
@@ -1208,7 +1271,7 @@ mod tests {
                     rusqlite::params![
                         id,
                         status,
-                        save_path.to_string_lossy(),
+                        &recorded_save_path,
                         "文件.zip",
                         65_536_u64,
                         received
@@ -1219,16 +1282,21 @@ mod tests {
         drop(connection);
 
         assert_eq!(
-            reusable_task_in_database(&database, &save_path, "文件.zip", 65_536).unwrap(),
+            reusable_task_in_database(&database, &retry_save_path, "文件.zip", 65_536).unwrap(),
             Some((13, 9))
         );
         assert_eq!(
-            failed_zero_data_tasks_in_database(&database, &save_path, "文件.zip", 65_536).unwrap(),
+            failed_zero_data_tasks_in_database(&database, &retry_save_path, "文件.zip", 65_536,)
+                .unwrap(),
             vec![12]
         );
         assert_eq!(
-            reusable_task_in_database(&database, &save_path, "其他.zip", 65_536).unwrap(),
+            reusable_task_in_database(&database, &retry_save_path, "其他.zip", 65_536).unwrap(),
             None
+        );
+        assert_eq!(
+            native_failure_message(201),
+            "迅雷原生任务失败（错误码 201），请重试"
         );
     }
 
@@ -1416,7 +1484,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let paused_at = loop {
-            let (received, total, status) = api.progress(task_id).unwrap_or((0, 0, 0));
+            let (received, total, status, _) = api.progress(task_id).unwrap_or((0, 0, 0, 0));
             if received >= 512 * 1024 {
                 eprintln!("native live progress before pause: {received}/{total}, status={status}");
                 api.stop(task_id).expect("native task should pause");
@@ -1448,7 +1516,7 @@ mod tests {
         api.enable_vip(task_id, &resumed_token)
             .expect("SVIP rule should be restored after resume");
         let resumed_at = loop {
-            let (received, total, status) = api.progress(task_id).unwrap_or((0, 0, 0));
+            let (received, total, status, _) = api.progress(task_id).unwrap_or((0, 0, 0, 0));
             if received >= paused_at + 512 * 1024 {
                 eprintln!("native live progress after resume: {received}/{total}, status={status}");
                 break received;
