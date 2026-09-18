@@ -9,13 +9,16 @@
 use alldownloader_lib::{
     aria2::{Aria2LaunchConfig, Aria2Process},
     cloud::{
-    commands::CloudState, CloudDirectory, CloudError, CloudFile, CloudFileKind, CloudHttpRequest,
-    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShareOptions, CloudUploadTransport,
-    CredentialStore, DpapiCredentialStore, ProviderRegistry, ReqwestTransport,
-    ResolvedCloudDownload, UploadHttpRequest, UploadHttpResponse,
+        commands::{parse_stable_cloud_source, CloudState},
+        uc::{UcClient, UcSession},
+        CloudDirectory, CloudError, CloudFile, CloudFileKind, CloudHttpRequest, CloudHttpResponse,
+        CloudHttpTransport, CloudProvider, CloudShareOptions, CloudUploadTransport,
+        CredentialStore, DpapiCredentialStore, ProviderRegistry, ReqwestTransport,
+        ResolvedCloudDownload, UploadHttpRequest, UploadHttpResponse,
     },
     Aria2Settings, DownloadService, NewTask, TaskStatus, TaskStore,
 };
+use rusqlite::{Connection, OpenFlags};
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -1363,15 +1366,29 @@ fn live_uc_existing_file_download() -> LiveResult<()> {
     let provider = CloudProvider::Uc;
     let credentials_root = session_root()?;
     let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
-        failure(format!("UC credential store initialization failed: {}", error_kind(&error)))
+        failure(format!(
+            "UC credential store initialization failed: {}",
+            error_kind(&error)
+        ))
     })?;
-    if credentials.load(provider.key()).map_err(|error| {
-        failure(format!("UC credential decrypt failed: {}", error_kind(&error)))
-    })?.is_none() {
+    if credentials
+        .load(provider.key())
+        .map_err(|error| {
+            failure(format!(
+                "UC credential decrypt failed: {}",
+                error_kind(&error)
+            ))
+        })?
+        .is_none()
+    {
         return Err(failure("UC is not currently authorized"));
     }
-    let state = CloudState::new(credentials_root)
-        .map_err(|error| failure(format!("UC state initialization failed: {}", error_kind(&error))))?;
+    let state = CloudState::new(credentials_root).map_err(|error| {
+        failure(format!(
+            "UC state initialization failed: {}",
+            error_kind(&error)
+        ))
+    })?;
     let http = LiveTransport::new()?;
     let directory = step(provider, "list root for existing-file download", || {
         driver_list(
@@ -1388,7 +1405,9 @@ fn live_uc_existing_file_download() -> LiveResult<()> {
             item.kind == CloudFileKind::File && item.size.is_some_and(|size| size <= 1024 * 1024)
         })
         .min_by_key(|item| item.size)
-        .ok_or_else(|| failure("UC root has no small file available for read-only download testing"))?;
+        .ok_or_else(|| {
+            failure("UC root has no small file available for read-only download testing")
+        })?;
     let result = step(provider, "resolve existing-file download", || {
         resolve_download(&state, &http, provider, &file.id)
     })
@@ -1398,32 +1417,226 @@ fn live_uc_existing_file_download() -> LiveResult<()> {
 }
 
 #[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; read-only check that pending UC downloads are bound to the currently authorized account"]
+fn live_uc_pending_download_account_binding() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let credentials_root = session_root()?;
+    let state = CloudState::new(credentials_root).map_err(|error| {
+        failure(format!(
+            "UC state initialization failed: {}",
+            error_kind(&error)
+        ))
+    })?;
+    let http = LiveTransport::new()?;
+    let account = step(
+        provider,
+        "read current account for pending-download binding",
+        || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .account()
+        },
+    )?;
+    let record = state
+        .auth_supervisor
+        .record(&state.store, provider)
+        .map_err(|error| {
+            failure(format!(
+                "UC authorization record read failed: {}",
+                error_kind(&error)
+            ))
+        })?;
+    let app_data = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| failure("APPDATA is required for the task store"))?
+        .join("com.alldownloader.desktop");
+    let connection = Connection::open_with_flags(
+        app_data.join("tasks.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let (pending, matching, unbound): (i64, i64, i64) = connection.query_row(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN a.account_id = ?1 THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN a.account_id IS NULL THEN 1 ELSE 0 END), 0)
+         FROM tasks t
+         LEFT JOIN cloud_download_accounts a ON a.id = t.id
+         WHERE t.source LIKE 'cloud://uc/%'
+           AND t.status = 'paused'
+           AND t.failure_code = 'authorization_pending'",
+        [&account.id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let record_matches = record.account_id.as_deref() == Some(&account.id);
+    eprintln!(
+        "LIVE-E2E uc pending-download binding: pending={pending}; matching={matching}; unbound={unbound}; supervisor_matches={record_matches}"
+    );
+    if pending > 0 && (matching != pending || unbound > 0 || !record_matches) {
+        return Err(failure(
+            "a pending UC download is not bound to the current authorized account",
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; read-only check that UC exposes a stable member identity"]
+fn live_uc_member_identity_is_not_a_rotating_browser_marker() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let credentials_root = session_root()?;
+    let credentials = DpapiCredentialStore::new(credentials_root).map_err(|error| {
+        failure(format!(
+            "UC credential store initialization failed: {}",
+            error_kind(&error)
+        ))
+    })?;
+    let bytes = credentials
+        .load(provider.key())
+        .map_err(|error| {
+            failure(format!(
+                "UC credential decrypt failed: {}",
+                error_kind(&error)
+            ))
+        })?
+        .ok_or_else(|| failure("UC is not currently authorized"))?;
+    let session: UcSession =
+        serde_json::from_slice(&bytes).map_err(|_| failure("UC session has an invalid shape"))?;
+    let http = LiveTransport::new()?;
+    let identity = step(provider, "read verified member identity", || {
+        UcClient::new(session, &http).verified_account_id()
+    })?
+    .ok_or_else(|| failure("UC member response did not contain a stable identity"))?;
+    http.report();
+    if identity.starts_with("AAR/") {
+        return Err(failure(
+            "UC returned a rotating browser marker instead of a stable identity",
+        ));
+    }
+    eprintln!("LIVE-E2E uc member identity: verified-stable=true");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and a legacy pending UC task; read-only classification before recovery"]
+fn live_uc_legacy_pending_download_sources_are_classified_by_current_session() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let app_data = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| failure("APPDATA is required for the task store"))?
+        .join("com.alldownloader.desktop");
+    let connection = Connection::open_with_flags(
+        app_data.join("tasks.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT t.source, t.name FROM tasks t
+         JOIN cloud_download_accounts a ON a.id = t.id
+         WHERE a.provider = 'uc'
+           AND a.account_id LIKE 'AAR/%'
+           AND t.source LIKE 'cloud://uc/%'
+           AND t.status = 'paused'
+           AND t.failure_code = 'authorization_pending'",
+    )?;
+    let sources = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if sources.is_empty() {
+        return Err(failure(
+            "no legacy pending UC download was available for verification",
+        ));
+    }
+    let state = CloudState::new(session_root()?).map_err(|error| {
+        failure(format!(
+            "UC state initialization failed: {}",
+            error_kind(&error)
+        ))
+    })?;
+    let http = LiveTransport::new()?;
+    let mut resolvable = 0;
+    let mut missing = 0;
+    let root = driver_list(
+        &state,
+        &http,
+        provider,
+        ProviderRegistry::global().get(provider).root_directory_id,
+    )?;
+    let mut exact_id_in_root = 0;
+    let mut same_name_in_root = 0;
+    for (source, name) in &sources {
+        let (source_provider, file_id) =
+            parse_stable_cloud_source(source).map_err(|error| failure(error_kind(&error)))?;
+        if source_provider != provider {
+            return Err(failure("legacy UC task source selected the wrong provider"));
+        }
+        exact_id_in_root += usize::from(root.items.iter().any(|item| item.id == file_id));
+        same_name_in_root += usize::from(root.items.iter().any(|item| item.name == *name));
+        match resolve_download(&state, &http, provider, &file_id) {
+            Ok(_) => resolvable += 1,
+            Err(CloudError::SourceFileMissing) => missing += 1,
+            Err(error) => {
+                return Err(failure(format!(
+                    "UC pending-download source classification failed: {}",
+                    error_kind(&error)
+                )))
+            }
+        }
+    }
+    http.report();
+    eprintln!(
+        "LIVE-E2E uc legacy pending sources: candidates={}; resolvable={resolvable}; source-missing={missing}; exact-id-in-root={exact_id_in_root}; same-name-in-root={same_name_in_root}",
+        sources.len(),
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing small UC file; verifies the production aria2 handoff without retaining a signed URL or file"]
 fn live_uc_existing_file_aria2_download() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
     let credentials_root = session_root()?;
     let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
-        failure(format!("UC credential store initialization failed: {}", error_kind(&error)))
+        failure(format!(
+            "UC credential store initialization failed: {}",
+            error_kind(&error)
+        ))
     })?;
     if credentials
         .load(provider.key())
-        .map_err(|error| failure(format!("UC credential decrypt failed: {}", error_kind(&error))))?
+        .map_err(|error| {
+            failure(format!(
+                "UC credential decrypt failed: {}",
+                error_kind(&error)
+            ))
+        })?
         .is_none()
     {
         return Err(failure("UC is not currently authorized"));
     }
-    let state = CloudState::new(credentials_root)
-        .map_err(|error| failure(format!("UC state initialization failed: {}", error_kind(&error))))?;
-    let http = LiveTransport::new()?;
-    let directory = step(provider, "list root for aria2 existing-file download", || {
-        driver_list(
-            &state,
-            &http,
-            provider,
-            ProviderRegistry::global().get(provider).root_directory_id,
-        )
+    let state = CloudState::new(credentials_root).map_err(|error| {
+        failure(format!(
+            "UC state initialization failed: {}",
+            error_kind(&error)
+        ))
     })?;
+    let http = LiveTransport::new()?;
+    let directory = step(
+        provider,
+        "list root for aria2 existing-file download",
+        || {
+            driver_list(
+                &state,
+                &http,
+                provider,
+                ProviderRegistry::global().get(provider).root_directory_id,
+            )
+        },
+    )?;
     let file = directory
         .items
         .into_iter()

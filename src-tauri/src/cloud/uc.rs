@@ -23,7 +23,8 @@ const UC_SHARE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 pub const UC_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
 // The download CDN rejects the legacy desktop-client profile used by UC's
 // JSON API. Use the current browser profile only for the signed file request.
-const UC_DOWNLOAD_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
+const UC_DOWNLOAD_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
 const UC_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
     object_host: "pds.uc.cn",
     object_store_user_agent: "aliyun-sdk-js/6.6.1",
@@ -45,6 +46,11 @@ pub struct UcSession {
     pub cookie: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Stable UC user id obtained from the authenticated member response.
+    /// `__uid` is intentionally not stored here: UC rotates that browser
+    /// session marker and it cannot safely bind an interrupted download.
+    #[serde(default)]
+    pub account_id: Option<String>,
     #[serde(default)]
     pub auth_method: CloudAuthMethod,
 }
@@ -64,6 +70,7 @@ impl UcSession {
         Self {
             cookie: cookie.into(),
             display_name: None,
+            account_id: None,
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -258,11 +265,49 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         unreachable!("retry loop always returns its final request result")
     }
 
-    fn account_id(&self) -> Result<String, QuarkError> {
+    /// Browser `__uid` is sufficient to render an old session card, but it is
+    /// not a durable account identity.  Never use it to decide whether a
+    /// paused download belongs to a newly restored session.
+    fn legacy_session_id(&self) -> Result<String, QuarkError> {
         let cookie = self.cookie()?;
         Ok(cookie_value(cookie, "__uid")
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| format!("uc-{:x}", md5::compute(cookie))))
+    }
+
+    fn persisted_account_id(&self) -> Option<String> {
+        self.session
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| {
+                !id.is_empty() && id.chars().count() <= 256 && !id.chars().any(char::is_control)
+            })
+            .map(str::to_owned)
+    }
+
+    /// UC's `b-user-id` cookie is a user identifier issued alongside the web
+    /// session. Unlike `__uid`, it is not the `AAR/...` browser-session
+    /// marker that changes when a user signs in again.
+    fn browser_account_id(&self) -> Result<Option<String>, QuarkError> {
+        Ok(cookie_value(self.cookie()?, "b-user-id").filter(|id| {
+            !id.is_empty()
+                && id.chars().count() <= 256
+                && !id.chars().any(char::is_control)
+                && !id.starts_with("AAR/")
+        }))
+    }
+
+    fn account_with_id(&self, id: String) -> CloudAccount {
+        CloudAccount {
+            provider: CloudProvider::Uc,
+            display_name: self
+                .saved_display_name(&id)
+                .unwrap_or(UC_CARD_DISPLAY_NAME)
+                .to_owned(),
+            id,
+            auth_method: self.session.auth_method,
+        }
     }
 
     fn has_share_session_cookie(&self) -> Result<bool, QuarkError> {
@@ -283,29 +328,62 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     }
 
     pub fn has_saved_display_name(&self) -> Result<bool, QuarkError> {
-        Ok(self.saved_display_name(&self.account_id()?).is_some())
+        let id = self
+            .persisted_account_id()
+            .unwrap_or(self.legacy_session_id()?);
+        Ok(self.saved_display_name(&id).is_some())
     }
 
     /// Build the account shown from a browser-issued UC session. The official
     /// page's visible nickname is retained with the encrypted session, so the
     /// card can be restored without replaying opaque browser context.
     pub fn web_account(&self) -> Result<CloudAccount, QuarkError> {
-        let id = self.account_id()?;
-        Ok(CloudAccount {
-            provider: CloudProvider::Uc,
-            id: id.clone(),
-            display_name: self
-                .saved_display_name(&id)
-                .unwrap_or(UC_CARD_DISPLAY_NAME)
-                .to_owned(),
-            auth_method: self.session.auth_method,
-        })
+        let id = self
+            .persisted_account_id()
+            .unwrap_or(self.legacy_session_id()?);
+        Ok(self.account_with_id(id))
+    }
+
+    /// Return the durable UC user identity. Older sessions are upgraded from
+    /// the explicit `b-user-id` cookie or, where available, the member
+    /// endpoint; neither source accepts the rotating `AAR/...` marker.
+    pub fn verified_account_id(&self) -> Result<Option<String>, QuarkError> {
+        if let Some(id) = self.persisted_account_id() {
+            return Ok(Some(id));
+        }
+        let browser_account_id = self.browser_account_id()?;
+        let response = self.request_json(
+            "GET",
+            "member",
+            "fetch_subscribe=true&_ch=home&fetch_identity=true",
+            None,
+        );
+        match response {
+            Ok(value) => {
+                let member_account_id = value["data"]
+                    .get("user_id")
+                    .and_then(string_or_number)
+                    .filter(|id| {
+                        !id.is_empty()
+                            && id.chars().count() <= 256
+                            && !id.chars().any(char::is_control)
+                            && !id.starts_with("AAR/")
+                    });
+                Ok(member_account_id.or(browser_account_id))
+            }
+            Err(_) if browser_account_id.is_some() => Ok(browser_account_id),
+            Err(error) => Err(error),
+        }
     }
 
     /// A UC browser session restores the account captured at authorization.
-    /// `__uid` remains only an internal account key, never a display name.
+    /// The rotating `__uid` is a rendering-only fallback for old sessions;
+    /// new bindings use `verified_account_id` above.
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
-        self.web_account()
+        let id = self
+            .verified_account_id()?
+            .unwrap_or(self.legacy_session_id()?);
+        Ok(self.account_with_id(id))
     }
 
     pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
@@ -323,19 +401,16 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     }
 
     fn stable_account_id(&self) -> Result<Option<String>, QuarkError> {
+        if let Some(id) = self.persisted_account_id() {
+            return Ok(Some(id));
+        }
+        // Share-transfer ownership is an existing compatibility contract. Its
+        // legacy fallback stays local to those plans; personal-download
+        // bindings use `verified_account_id` and never rely on this marker.
         if let Some(id) = cookie_value(self.cookie()?, "__uid").filter(|id| !id.is_empty()) {
             return Ok(Some(id));
         }
-        let value = self.request_json(
-            "GET",
-            "member",
-            "fetch_subscribe=true&_ch=home&fetch_identity=true",
-            None,
-        )?;
-        Ok(value["data"]
-            .get("user_id")
-            .and_then(string_or_number)
-            .filter(|id| !id.is_empty()))
+        self.verified_account_id()
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
@@ -1725,16 +1800,49 @@ mod tests {
     fn uc_account_restores_the_nickname_captured_from_the_browser() {
         let mut session = UcSession::cookie("__uid=AAR/opaque-id; __puus=session");
         session.display_name = Some("云端小橙".into());
-        let http = Http::new(vec![]);
+        let http = Http::new(vec![json!({
+            "code": 0,
+            "data": {"user_id": "uc-user-42"}
+        })]);
         let client = UcClient::new(session, &http);
 
         let account = client
             .account()
             .expect("the saved card profile should load");
 
-        assert_eq!(account.id, "AAR/opaque-id");
+        assert_eq!(account.id, "uc-user-42");
+        assert_eq!(account.display_name, "云端小橙");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.contains("/member?"));
+    }
+
+    #[test]
+    fn uc_web_account_uses_persisted_member_identity_without_replaying_a_profile_request() {
+        let mut session = UcSession::cookie("__uid=AAR/rotated-session; __puus=session");
+        session.account_id = Some("uc-user-42".into());
+        session.display_name = Some("云端小橙".into());
+        let http = Http::new(vec![]);
+        let client = UcClient::new(session, &http);
+
+        let account = client.web_account().expect("a restored UC card account");
+
+        assert_eq!(account.id, "uc-user-42");
         assert_eq!(account.display_name, "云端小橙");
         assert!(http.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn uc_account_uses_b_user_id_when_the_member_profile_omits_an_identity() {
+        let session =
+            UcSession::cookie("__uid=AAR/rotated-session; b-user-id=uc-user-42; __puus=session");
+        let http = Http::new(vec![json!({"code": 0, "data": {}})]);
+        let client = UcClient::new(session, &http);
+
+        let account = client.account().expect("a stable UC account identity");
+
+        assert_eq!(account.id, "uc-user-42");
+        assert_eq!(account.display_name, "UC网盘");
     }
 
     #[test]

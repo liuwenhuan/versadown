@@ -12,6 +12,24 @@ pub fn restore_account(
         .account()
 }
 
+/// A legacy persisted session may be usable even though it predates the
+/// authorization-maintenance record. Record the verified account identity so
+/// startup recovery can safely match deferred downloads to this session.
+fn record_restored_account(
+    state: &CloudState,
+    provider: CloudProvider,
+    account: &CloudAccount,
+) -> Result<(), QuarkError> {
+    state.auth_supervisor.ready(
+        &state.store,
+        provider,
+        Some(account.id.clone()),
+        Some(account.auth_method),
+        auth_supervisor::session_expiry(&state.store, provider)?,
+    )?;
+    Ok(())
+}
+
 pub(crate) fn list_cloud_directory(
     provider: CloudProvider,
     store: &impl CredentialStore,
@@ -50,8 +68,13 @@ pub async fn cloud_account(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
+    // `record_restored_account` uses the credential supervisor's synchronous
+    // provider guard. Keep it in `run_session_work`'s blocking worker instead
+    // of calling it after `.await` on Tauri's Tokio runtime thread.
     run_session_work(app, provider, SessionWorkKind::Read, move |s, h| {
-        restore_account(provider, &s.store, h)
+        let account = restore_account(provider, &s.store, h)?;
+        record_restored_account(s, provider, &account)?;
+        Ok(account)
     })
     .await
 }
@@ -374,6 +397,7 @@ pub async fn cloud_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cloud::{auth_supervisor::AuthHealth, CloudAuthMethod, CredentialStore};
 
     fn options(pass_code: String) -> CloudShareOptions {
         CloudShareOptions {
@@ -391,5 +415,27 @@ mod tests {
         assert!(validate_share_options(CloudProvider::Quark, &options("a1B2".into())).is_ok());
         assert!(validate_share_options(CloudProvider::Quark, &options("a1!2".into())).is_err());
         assert!(validate_share_options(CloudProvider::Quark, &options("a1B".into())).is_err());
+    }
+
+    #[test]
+    fn restored_legacy_session_records_the_verified_account_for_startup_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let state = CloudState::new(root.path().join("sessions")).unwrap();
+        state.store.save("uc", b"uc-session=fixture").unwrap();
+        let account = CloudAccount {
+            provider: CloudProvider::Uc,
+            id: "uc-account-1".into(),
+            display_name: "fixture".into(),
+            auth_method: CloudAuthMethod::Web,
+        };
+
+        record_restored_account(&state, CloudProvider::Uc, &account).unwrap();
+
+        let record = state
+            .auth_supervisor
+            .record(&state.store, CloudProvider::Uc)
+            .unwrap();
+        assert_eq!(record.health, AuthHealth::Ready);
+        assert_eq!(record.account_id.as_deref(), Some("uc-account-1"));
     }
 }

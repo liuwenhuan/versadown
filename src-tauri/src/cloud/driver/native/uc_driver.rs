@@ -15,22 +15,22 @@ impl DriveOps for UcDriver<'_> {
         {
             let mut session: uc::UcSession = load_provider_session(CloudProvider::Uc, store)?;
             let client = uc::UcClient::new(session.clone(), http);
-            if client.has_saved_display_name()? {
-                return client.web_account();
-            }
-            // Legacy sessions have no browser-captured nickname (or contain
-            // an old opaque __uid value). Keep the card usable with its
-            // provider label until the next web authorization captures the
-            // real UC nickname.
-            match client.account() {
-                Ok(account) => {
-                    session.display_name = (account.display_name != uc::UC_CARD_DISPLAY_NAME)
-                        .then(|| account.display_name.clone());
-                    save_provider_session(provider, store, &session)?;
-                    Ok(account)
+            // Existing sessions used the rotating browser `__uid` as their
+            // account binding. Ask UC for its durable user id once, then keep
+            // it in the encrypted session so startup recovery survives a
+            // later cookie rotation. A member-profile failure must not make a
+            // previously usable card disappear.
+            let account = match client.verified_account_id() {
+                Ok(Some(account_id)) => {
+                    session.account_id = Some(account_id);
+                    uc::UcClient::new(session.clone(), http).web_account()?
                 }
-                Err(_) => client.web_account(),
-            }
+                Ok(None) | Err(_) => client.web_account()?,
+            };
+            session.display_name = (account.display_name != uc::UC_CARD_DISPLAY_NAME)
+                .then(|| account.display_name.clone());
+            save_provider_session(provider, store, &session)?;
+            Ok(account)
         }
     }
     fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {

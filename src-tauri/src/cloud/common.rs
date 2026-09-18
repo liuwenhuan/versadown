@@ -197,9 +197,15 @@ pub(crate) fn finalize_uc_web_authorization(
     // The official UC page captures the nickname before this call, but the
     // directory read remains the authorization proof. A page which has not
     // populated its profile yet must still preserve a verified login.
-    let account = match client.account() {
-        Ok(account) => account,
-        Err(_) => client.web_account()?,
+    let account = match client.verified_account_id() {
+        Ok(Some(account_id)) => {
+            session.account_id = Some(account_id);
+            uc::UcClient::new(session.clone(), http).web_account()?
+        }
+        // The root listing already proved the official browser session is
+        // usable. Keep that login when UC temporarily withholds the member
+        // profile; the next successful account read will upgrade its binding.
+        Ok(None) | Err(_) => client.web_account()?,
     };
     session.display_name =
         (account.display_name != uc::UC_CARD_DISPLAY_NAME).then(|| account.display_name.clone());

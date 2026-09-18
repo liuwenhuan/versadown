@@ -2084,6 +2084,7 @@ fn uc_web_authorization_does_not_display_or_persist_an_opaque_cookie_identifier(
     let credentials = MemoryCredentialStore::default();
     let transport = SequenceTransport(Mutex::new(VecDeque::from([
         r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+        r#"{"code":0,"status":200,"data":{"user_id":"uc-user-42"}}"#,
     ])));
 
     let account = super::finalize_uc_web_authorization(
@@ -2108,6 +2109,7 @@ fn uc_web_authorization_uses_the_official_web_profile_nickname_on_the_cloud_card
     let credentials = MemoryCredentialStore::default();
     let transport = SequenceTransport(Mutex::new(VecDeque::from([
         r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#,
+        r#"{"code":0,"status":200,"data":{"user_id":"uc-user-42"}}"#,
     ])));
 
     let input = crate::cloud::driver::WebAuthorizationInput {
@@ -2126,8 +2128,12 @@ fn uc_web_authorization_uses_the_official_web_profile_nickname_on_the_cloud_card
         .complete_web(&input)
         .expect("a verified UC login should retain the browser-captured nickname");
 
-    assert_eq!(account.id, "new-user");
+    assert_eq!(account.id, "uc-user-42");
     assert_eq!(account.display_name, "云端小橙");
+
+    let saved: UcSession =
+        serde_json::from_slice(&credentials.load("uc").unwrap().unwrap()).unwrap();
+    assert_eq!(saved.account_id.as_deref(), Some("uc-user-42"));
 
     let restored = crate::cloud::ProviderRegistry::global()
         .driver(
