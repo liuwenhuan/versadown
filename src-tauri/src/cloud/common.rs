@@ -201,8 +201,8 @@ pub(crate) fn finalize_uc_web_authorization(
         Ok(account) => account,
         Err(_) => client.web_account()?,
     };
-    session.display_name = (account.display_name != uc::UC_CARD_DISPLAY_NAME)
-        .then(|| account.display_name.clone());
+    session.display_name =
+        (account.display_name != uc::UC_CARD_DISPLAY_NAME).then(|| account.display_name.clone());
     save_provider_session(CloudProvider::Uc, store, &session)?;
     Ok(account)
 }

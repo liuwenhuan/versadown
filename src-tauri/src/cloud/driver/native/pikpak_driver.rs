@@ -131,7 +131,11 @@ impl ShareOps for PikpakDriver<'_> {
     fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
         PikPakClient::new(&self.http, &self.store).cancel_shares(share_ids)
     }
-    fn update_share_pass_code(&mut self, share_id: &str, pass_code: &str) -> Result<(), CloudError> {
+    fn update_share_pass_code(
+        &mut self,
+        share_id: &str,
+        pass_code: &str,
+    ) -> Result<(), CloudError> {
         PikPakClient::new(&self.http, &self.store).update_share_pass_code(share_id, pass_code)
     }
 }

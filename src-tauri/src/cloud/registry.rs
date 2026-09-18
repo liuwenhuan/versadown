@@ -441,7 +441,10 @@ mod tests {
     #[test]
     fn only_pikpak_advertises_share_pass_code_updates() {
         for descriptor in ProviderRegistry::global().catalog() {
-            assert_eq!(descriptor.capabilities.share_update_pass_code, descriptor.provider == CloudProvider::Pikpak);
+            assert_eq!(
+                descriptor.capabilities.share_update_pass_code,
+                descriptor.provider == CloudProvider::Pikpak
+            );
         }
     }
 

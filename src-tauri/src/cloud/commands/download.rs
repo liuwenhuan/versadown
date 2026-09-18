@@ -1570,10 +1570,12 @@ mod tests {
     #[test]
     fn directory_leaf_source_matches_do_not_block_distinct_output_paths() {
         assert!(source_duplicate_blocks_submission(None));
-        assert!(!source_duplicate_blocks_submission(Some(DirectoryLeafContext {
-            group_id: uuid::Uuid::new_v4(),
-            item_id: uuid::Uuid::new_v4(),
-        })));
+        assert!(!source_duplicate_blocks_submission(Some(
+            DirectoryLeafContext {
+                group_id: uuid::Uuid::new_v4(),
+                item_id: uuid::Uuid::new_v4(),
+            }
+        )));
     }
 }
 
