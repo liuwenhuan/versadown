@@ -536,7 +536,10 @@ pub async fn resume_reauthorized_provider_tasks(
             .is_some_and(|group| {
                 matches!(
                     group.status,
-                    TaskStatus::Cancelled | TaskStatus::Recycled | TaskStatus::Completed
+                    TaskStatus::Paused
+                        | TaskStatus::Cancelled
+                        | TaskStatus::Recycled
+                        | TaskStatus::Completed
                 )
             })
         {

@@ -477,7 +477,7 @@ fn startup_directory_recovery_covers_every_provider_without_changing_terminal_gr
 
 #[test]
 fn startup_directory_recovery_handles_linked_preparations_but_leaves_engine_owned_tasks_alone() {
-    for status in [TaskStatus::Parsing, TaskStatus::Paused] {
+    for status in [TaskStatus::Queued, TaskStatus::Parsing, TaskStatus::Downloading, TaskStatus::Paused] {
         let temp = tempfile::tempdir().unwrap();
         let store = TaskStore::open_in_memory().unwrap();
         let interrupted = cancellation_group(&store, temp.path());

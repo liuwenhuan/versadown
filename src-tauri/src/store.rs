@@ -147,7 +147,7 @@ impl TaskStore {
                  LEFT JOIN tasks t ON t.id = i.task_id
                  WHERE i.group_id = cloud_directory_groups.id AND (
                      (i.task_id IS NULL AND i.failure_code IS NULL AND i.failure_message IS NULL)
-                     OR (t.aria_gid IS NULL AND t.status IN ('parsing', 'paused'))
+                     OR (t.aria_gid IS NULL AND t.status IN ('queued', 'parsing', 'downloading', 'paused'))
                  )
              )",
             [current_timestamp()],
@@ -157,6 +157,9 @@ impl TaskStore {
     /// Cloud tasks persist an expiring provider URL in aria2's native session.
     /// Before that session is loaded at application startup, turn only tasks
     /// that had been actively downloading into an explicit authorization wait.
+    /// Include interrupted dispatches without a GID: their in-memory resolver
+    /// does not survive restart. Share dispatches become manually resumable
+    /// because their plan, rather than a personal-drive account, owns recovery.
     /// The original GID and native checkpoint are retained; a successful
     /// account check can therefore resume the same task instead of treating it
     /// as an unrecoverable engine loss.
@@ -164,8 +167,10 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let mut statement = connection.prepare(
             "SELECT id FROM tasks
-             WHERE source LIKE 'cloud://%' AND aria_gid IS NOT NULL
-               AND status IN ('queued', 'downloading')",
+             WHERE (source LIKE 'cloud://%' OR
+                    (source LIKE 'cloud-share://%' AND aria_gid IS NULL))
+               AND (status IN ('queued', 'downloading') OR
+                    (status = 'parsing' AND aria_gid IS NULL))",
         )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -175,11 +180,19 @@ impl TaskStore {
         let now = current_timestamp();
         for id in &ids {
             connection.execute(
-                "UPDATE tasks SET status = 'paused', error = ?1,
-                 failure_code = 'authorization_pending', download_speed = 0,
+                "UPDATE tasks SET status = 'paused',
+                 error = CASE WHEN source LIKE 'cloud://%' THEN ?1 ELSE ?4 END,
+                 failure_code = CASE WHEN source LIKE 'cloud://%'
+                     THEN 'authorization_pending' ELSE 'interrupted_submission' END,
+                 download_speed = 0,
                  upload_speed = 0, connections = 0, eta_seconds = NULL,
                  updated_at = ?2 WHERE id = ?3",
-                params!["恢复网盘登录后继续下载", now, id],
+                params![
+                    "恢复网盘登录后继续下载",
+                    now,
+                    id,
+                    "上次网盘下载准备被中断，可继续下载"
+                ],
             )?;
         }
         ids.into_iter()
@@ -1075,6 +1088,21 @@ impl TaskStore {
         download_root: &Path,
     ) -> Result<IncompatibleTaskPurgeReport, StoreError> {
         let root = std::fs::canonicalize(download_root)?;
+        // A refreshed cloud URL can lose its old GID before the process exits.
+        // Engine ownership is not file ownership: retain payloads/control files
+        // still referenced by durable tasks, even when that GID is unowned.
+        let protected = {
+            let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+            let mut statement = connection.prepare("SELECT path FROM task_files")?;
+            let paths = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            paths
+                .into_iter()
+                .flat_map(|path| [path.clone(), format!("{path}.aria2")])
+                .filter_map(|path| std::fs::canonicalize(path).ok())
+                .collect::<HashSet<_>>()
+        };
         let mut report = IncompatibleTaskPurgeReport::default();
         for value in paths {
             let path = std::path::PathBuf::from(value);
@@ -1082,6 +1110,9 @@ impl TaskStore {
                 path.clone(),
                 std::path::PathBuf::from(format!("{value}.aria2")),
             ] {
+                if std::fs::canonicalize(&candidate).is_ok_and(|path| protected.contains(&path)) {
+                    continue;
+                }
                 match remove_managed_payload_file(&root, &candidate)? {
                     ManagedFileRemoval::Removed => report.removed_files += 1,
                     ManagedFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
@@ -1975,6 +2006,212 @@ mod tests {
         cloud::CloudProvider,
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
     };
+
+    #[test]
+    fn startup_orphan_cleanup_preserves_payloads_owned_by_detached_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://pikpak/partial"))
+            .unwrap();
+        let payload = root.path().join("partial.bin");
+        let control = root.path().join("partial.bin.aria2");
+        let orphan = root.path().join("orphan.bin");
+        std::fs::write(&payload, b"partial bytes").unwrap();
+        std::fs::write(&control, b"checkpoint").unwrap();
+        std::fs::write(&orphan, b"unowned").unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 100, 13, true)],
+            )
+            .unwrap();
+        let report = store
+            .purge_incompatible_payload_paths(
+                &[
+                    payload.to_string_lossy().into_owned(),
+                    orphan.to_string_lossy().into_owned(),
+                ],
+                root.path(),
+            )
+            .unwrap();
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(std::fs::read(payload).unwrap(), b"partial bytes");
+        assert_eq!(std::fs::read(control).unwrap(), b"checkpoint");
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn startup_recovers_detached_cloud_submissions_for_every_provider_and_share_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let mut expected = Vec::new();
+        {
+            let store = TaskStore::open_path(&database).unwrap();
+            for provider in crate::cloud::ProviderRegistry::global().catalog() {
+                for scheme in ["cloud", "cloud-share"] {
+                    for status in [
+                        TaskStatus::Queued,
+                        TaskStatus::Parsing,
+                        TaskStatus::Downloading,
+                    ] {
+                        let task = store
+                            .create(NewTask {
+                                source: format!("{scheme}://{}/fixture", provider.provider.key()),
+                                name: "partial.bin".into(),
+                                kind: "cloud".into(),
+                                is_private: false,
+                            })
+                            .unwrap();
+                        let mut snapshot = task;
+                        snapshot.status = status;
+                        snapshot.completed_length = 153_694_208;
+                        snapshot.total_length = Some(969_107_298);
+                        snapshot.progress = 15;
+                        snapshot.download_speed = 123;
+                        snapshot.connections = 2;
+                        let task = store.apply_transfer_snapshot(snapshot).unwrap();
+                        store
+                            .upsert_files(
+                                task.id,
+                                &[(
+                                    0,
+                                    "C:/Downloads/partial.bin".into(),
+                                    969_107_298,
+                                    153_694_208,
+                                    true,
+                                )],
+                            )
+                            .unwrap();
+                        store
+                            .bind_cloud_download_account(task.id, provider.provider, "owner")
+                            .unwrap();
+                        expected.push((task.id, scheme, provider.provider));
+                    }
+                }
+            }
+        }
+        // Reopen the database with no in-memory worker or retry intent.
+        let store = TaskStore::open_path(&database).unwrap();
+        let recovered = store.defer_startup_cloud_downloads().unwrap();
+        assert_eq!(recovered.len(), expected.len());
+        for (id, scheme, provider) in expected {
+            let task = store.find(id).unwrap();
+            assert_eq!(task.status, TaskStatus::Paused);
+            assert_eq!(task.completed_length, 153_694_208);
+            assert_eq!(task.total_length, Some(969_107_298));
+            assert_eq!(task.progress, 15);
+            assert!(task.aria_gid.is_none());
+            assert_eq!(task.download_speed, 0);
+            assert_eq!(task.connections, 0);
+            assert_eq!(store.files(id).unwrap().len(), 1);
+            let (ready, _) = store
+                .reauthorized_cloud_downloads(provider, "owner")
+                .unwrap();
+            assert_eq!(
+                ready.iter().any(|candidate| candidate.id == id),
+                scheme == "cloud"
+            );
+            assert_eq!(
+                task.failure_code.as_deref(),
+                Some(if scheme == "cloud" {
+                    "authorization_pending"
+                } else {
+                    "interrupted_submission"
+                })
+            );
+        }
+        assert!(store.defer_startup_cloud_downloads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_preserves_manual_pause_terminal_tasks_and_non_cloud_downloads() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut untouched = Vec::new();
+        for scheme in ["cloud", "cloud-share"] {
+            for status in [
+                TaskStatus::Paused,
+                TaskStatus::Completed,
+                TaskStatus::Failed,
+                TaskStatus::Cancelled,
+                TaskStatus::Recycled,
+            ] {
+                let mut task = store
+                    .create(NewTask::direct(format!("{scheme}://pikpak/fixture")))
+                    .unwrap();
+                task.status = status;
+                task.error = Some("keep original message".into());
+                untouched.push(store.apply_transfer_snapshot(task).unwrap());
+            }
+        }
+        let mut share = store
+            .create(NewTask::direct("cloud-share://pikpak/linked"))
+            .unwrap();
+        share.status = TaskStatus::Queued;
+        share.aria_gid = Some("existing-share-gid".into());
+        untouched.push(store.apply_transfer_snapshot(share).unwrap());
+        let mut direct = store
+            .create(NewTask::direct("https://example.test/file"))
+            .unwrap();
+        direct.status = TaskStatus::Queued;
+        untouched.push(store.apply_transfer_snapshot(direct).unwrap());
+        assert!(store.defer_startup_cloud_downloads().unwrap().is_empty());
+        for before in untouched {
+            let after = store.find(before.id).unwrap();
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.error, before.error);
+            assert_eq!(after.aria_gid, before.aria_gid);
+        }
+    }
+
+    #[test]
+    fn startup_detached_directory_member_keeps_its_root_and_becomes_resumable() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(CloudProvider::Pikpak, "root", "Album", "C:/Downloads"),
+                &[NewCloudDirectoryGroupItem::new(
+                    "file",
+                    &["Album"],
+                    "partial.bin",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
+        let mut task = store
+            .create(NewTask::direct("cloud-share://pikpak/fixture"))
+            .unwrap();
+        task.status = TaskStatus::Queued;
+        task.completed_length = 40;
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+        assert_eq!(store.recover_interrupted_cloud_directories().unwrap(), 1);
+        store.defer_startup_cloud_downloads().unwrap();
+        assert_eq!(
+            store
+                .cloud_directory_group(group.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Paused
+        );
+        assert_eq!(
+            store
+                .cloud_directory_group_for_task(task.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            group.id
+        );
+        assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Paused);
+        assert_eq!(store.find(task.id).unwrap().completed_length, 40);
+    }
 
     #[test]
     fn startup_defers_only_active_direct_cloud_tasks_and_keeps_them_recoverable() {

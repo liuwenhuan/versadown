@@ -383,6 +383,42 @@ mod tests {
     use crate::NewTask;
 
     #[tokio::test]
+    async fn startup_recovered_partial_download_reenters_dispatch_without_creating_a_task() {
+        for provider in super::super::ProviderRegistry::global().catalog() {
+            for scheme in ["cloud", "cloud-share"] {
+                let store = TaskStore::open_in_memory().unwrap();
+                let mut task = store.create(NewTask::direct(format!("{scheme}://{}/fixture", provider.provider.key()))).unwrap();
+                task.status = TaskStatus::Queued;
+                task.completed_length = 40;
+                task.total_length = Some(100);
+                let task = store.apply_transfer_snapshot(task).unwrap();
+                store.defer_startup_cloud_downloads().unwrap();
+                let paused = store.find(task.id).unwrap();
+                assert_eq!(paused.status, TaskStatus::Paused);
+                let dispatch = CloudDownloadDispatch::default();
+                let (_, version) = dispatch.prepare_expected_with_retry_intent(&store, &paused, false, true).await.unwrap();
+                let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
+                assert!(options.continue_download);
+                assert!(!options.allow_overwrite);
+                let result = dispatch.run(&store, provider.provider, task.id, version,
+                    || async { Ok(()) },
+                    |_| async {
+                        let mut resumed = store.find(task.id).unwrap();
+                        resumed.aria_gid = Some("replacement-gid".into());
+                        resumed.status = TaskStatus::Downloading;
+                        store.apply_transfer_snapshot(resumed).map_err(|_| QuarkError::Storage)
+                    },
+                ).await.unwrap();
+                assert_eq!(result.id, task.id);
+                assert_eq!(result.status, TaskStatus::Downloading);
+                assert_eq!(result.completed_length, 40);
+                assert_eq!(result.total_length, Some(100));
+                assert_eq!(store.list().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn paused_xunlei_native_task_can_reenter_dispatch_for_fresh_authorization() {
         let store = TaskStore::open_in_memory().unwrap();
         let mut task = store
