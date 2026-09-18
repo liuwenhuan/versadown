@@ -83,18 +83,19 @@ async fn native_recovery_reconciles_only_owned_job() {
 async fn native_recovery_retries_an_empty_startup_snapshot_before_detaching_tasks() {
     let active_requests = Arc::new(AtomicUsize::new(0));
     let observed_requests = Arc::clone(&active_requests);
-    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
-        "aria2.tellActive" => {
-            if observed_requests.fetch_add(1, Ordering::SeqCst) == 0 {
-                json!([])
-            } else {
-                json!([fixture::status("owned", "active", 25)])
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => {
+                if observed_requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                    json!([])
+                } else {
+                    json!([fixture::status("owned", "active", 25)])
+                }
             }
-        }
-        "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
-        other => panic!("{other}"),
-    })
-    .await;
+            "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            other => panic!("{other}"),
+        })
+        .await;
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store

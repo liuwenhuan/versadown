@@ -3708,7 +3708,10 @@ mod tests {
         .unwrap();
 
         assert!(staged.is_absolute());
-        assert_eq!(staged.file_name().and_then(|name| name.to_str()), Some("Collection.torrent"));
+        assert_eq!(
+            staged.file_name().and_then(|name| name.to_str()),
+            Some("Collection.torrent")
+        );
         assert!(staged.starts_with(root.path().join("dropped-torrents")));
         assert_eq!(fs::read(staged).unwrap(), b"torrent-bytes");
         assert!(stage_dropped_torrent_file(root.path(), "not-a-torrent.zip", "eA==").is_err());

@@ -16,5 +16,5 @@
     ],
     "security": { "csp": null }
   },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico"], "resources": ["binaries/aria2-next-x86_64-pc-windows-msvc.exe"], "windows": { "wix": { "language": ["zh-CN"] } } }
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico"], "resources": ["binaries/aria2-next-x86_64-pc-windows-msvc.exe", "binaries/xunlei-native-helper.cjs"], "windows": { "wix": { "language": ["zh-CN"] } } }
 }

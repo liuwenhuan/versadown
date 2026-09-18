@@ -127,17 +127,35 @@ impl DownloadOps for XunleiDriver<'_> {
             if session.profile.is_modern_web() {
                 headers.push(("Referer".into(), "https://pan.xunlei.com/".into()));
             }
-            if let Some(token) = download.acceleration_token {
-                headers.push((
-                    crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER.into(),
-                    token,
-                ));
-            }
+            let peer_id = if session.web_context.peer_id.is_empty() {
+                if session.web_context.device_id.is_empty() {
+                    session.profile.device_id.clone()
+                } else {
+                    session.web_context.device_id.clone()
+                }
+            } else {
+                session.web_context.peer_id.clone()
+            };
+            headers.push((
+                crate::xunlei_native::ACCESS_TOKEN_MARKER_HEADER.into(),
+                session.access_token.clone(),
+            ));
+            headers.push((
+                crate::xunlei_native::USER_ID_MARKER_HEADER.into(),
+                session.user_id.clone(),
+            ));
+            headers.push((crate::xunlei_native::PEER_ID_MARKER_HEADER.into(), peer_id));
             if let Some(size) = download.size {
                 headers.push((
                     crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER.into(),
                     size.to_string(),
                 ));
+            }
+            if let Some(cid) = download.cid {
+                headers.push((crate::xunlei_native::CID_MARKER_HEADER.into(), cid));
+            }
+            if let Some(gcid) = download.gcid {
+                headers.push((crate::xunlei_native::GCID_MARKER_HEADER.into(), gcid));
             }
             Ok(ResolvedCloudDownload {
                 url: download.url,

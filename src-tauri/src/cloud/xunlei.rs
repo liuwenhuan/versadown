@@ -883,6 +883,12 @@ impl XunleiShareAdapter<'_> {
                 size.to_string(),
             ));
         }
+        if let Some(cid) = download.cid {
+            headers.push((crate::xunlei_native::CID_MARKER_HEADER.into(), cid));
+        }
+        if let Some(gcid) = download.gcid {
+            headers.push((crate::xunlei_native::GCID_MARKER_HEADER.into(), gcid));
+        }
         Ok(super::commands::ResolvedCloudDownload {
             url: download.url,
             name,
@@ -2538,6 +2544,18 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                         url: link.to_owned(),
                         name,
                         acceleration_token: xunlei_acceleration_token(file)?,
+                        cid: file
+                            .get("cid")
+                            .or_else(|| file.get("hash"))
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned),
+                        gcid: file
+                            .get("gcid")
+                            .or_else(|| file.get("hash"))
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned),
                         size: file.get("size").and_then(|value| {
                             value.as_u64().or_else(|| {
                                 value.as_str().and_then(|value| value.parse::<u64>().ok())
@@ -2567,6 +2585,8 @@ pub struct XunleiDownload {
     pub url: String,
     pub name: String,
     pub acceleration_token: Option<String>,
+    pub cid: Option<String>,
+    pub gcid: Option<String>,
     pub size: Option<u64>,
 }
 

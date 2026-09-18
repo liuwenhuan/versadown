@@ -14,6 +14,9 @@ $publishedSidecarDir = Join-Path $publishedDir 'binaries'
 $sidecarName = 'aria2-next-x86_64-pc-windows-msvc.exe'
 $sidecarSource = Join-Path $projectRoot "src-tauri\binaries\$sidecarName"
 $publishedSidecar = Join-Path $publishedSidecarDir $sidecarName
+$xunleiHelperName = 'xunlei-native-helper.cjs'
+$xunleiHelperSource = Join-Path $projectRoot "src-tauri\binaries\$xunleiHelperName"
+$publishedXunleiHelper = Join-Path $publishedSidecarDir $xunleiHelperName
 $legacyPublishedSidecar = Join-Path $publishedSidecarDir 'aria2c-x86_64-pc-windows-msvc.exe'
 $buildTools = Get-AllDownloaderBuildTools -ProjectRoot $projectRoot
 $pnpmCommand = $buildTools.Pnpm
@@ -89,8 +92,13 @@ if (-not (Test-Path -LiteralPath $sidecarSource -PathType Leaf)) {
 }
 New-Item -ItemType Directory -Force -Path $publishedSidecarDir | Out-Null
 Copy-Item -LiteralPath $sidecarSource -Destination $publishedSidecar -Force
+if (-not (Test-Path -LiteralPath $xunleiHelperSource -PathType Leaf)) {
+    throw "Xunlei native helper was not found: $xunleiHelperSource"
+}
+Copy-Item -LiteralPath $xunleiHelperSource -Destination $publishedXunleiHelper -Force
 if (Test-Path -LiteralPath $legacyPublishedSidecar -PathType Leaf) {
     Remove-Item -LiteralPath $legacyPublishedSidecar -Force
 }
 Write-Host "Published: $publishedBinary"
 Write-Host "Published: $publishedSidecar"
+Write-Host "Published: $publishedXunleiHelper"

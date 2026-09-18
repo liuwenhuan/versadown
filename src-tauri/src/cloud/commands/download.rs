@@ -1555,7 +1555,14 @@ impl ResolvedCloudDownload {
                     !name.eq_ignore_ascii_case(
                         crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER,
                     ) && !name
-                        .eq_ignore_ascii_case(crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER)
+                        .eq_ignore_ascii_case(crate::xunlei_native::ACCESS_TOKEN_MARKER_HEADER)
+                        && !name.eq_ignore_ascii_case(crate::xunlei_native::USER_ID_MARKER_HEADER)
+                        && !name.eq_ignore_ascii_case(crate::xunlei_native::PEER_ID_MARKER_HEADER)
+                        && !name.eq_ignore_ascii_case(
+                            crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER,
+                        )
+                        && !name.eq_ignore_ascii_case(crate::xunlei_native::CID_MARKER_HEADER)
+                        && !name.eq_ignore_ascii_case(crate::xunlei_native::GCID_MARKER_HEADER)
                 })
                 .collect(),
             ..Default::default()

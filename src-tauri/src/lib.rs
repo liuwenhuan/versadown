@@ -302,6 +302,19 @@ pub fn run() {
             } else {
                 manifest_sidecar
             };
+            let manifest_xunlei_helper = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join("xunlei-native-helper.cjs");
+            let bundled_xunlei_helper = app
+                .path()
+                .resource_dir()?
+                .join("binaries")
+                .join("xunlei-native-helper.cjs");
+            let xunlei_helper = if bundled_xunlei_helper.exists() {
+                bundled_xunlei_helper
+            } else {
+                manifest_xunlei_helper
+            };
             let default_destination = if background_ui_test.as_deref() == Some("1") {
                 std::env::var_os("ALLDOWNLOADER_TEST_DOWNLOAD_DIR")
                     .map(std::path::PathBuf::from)
@@ -343,6 +356,12 @@ pub fn run() {
             };
             let cloud_download_dispatch =
                 cloud::download_dispatch::CloudDownloadDispatch::default();
+            let xunlei_native_backend =
+                std::sync::Arc::new(xunlei_native::XunleiNativeBackend::with_plugin_paths(
+                    data_dir.join("plugins").join("xunlei-native.json"),
+                    xunlei_helper,
+                ));
+            xunlei_native_backend.initialize_plugin_config();
             let events = std::sync::Arc::new(TauriDownloadEvents {
                 app: app.handle().clone(),
                 store: std::sync::Arc::clone(&store),
@@ -366,14 +385,16 @@ pub fn run() {
                 privacy_session: Default::default(),
                 cloud_download_sources: Default::default(),
                 cloud_download_dispatch,
-                xunlei_native_backend: Default::default(),
+                xunlei_native_backend,
             });
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
             ));
             #[cfg(windows)]
-            if let Some(main) = app.get_webview_window("main") {
-                window_interaction::install(&main).map_err(std::io::Error::other)?;
+            if background_ui_test.as_deref() != Some("1") {
+                if let Some(main) = app.get_webview_window("main") {
+                    window_interaction::install(&main).map_err(std::io::Error::other)?;
+                }
             }
             if should_show_windows(background_ui_test.as_deref()) {
                 launcher::setup_manager_tray(app.handle()).map_err(std::io::Error::other)?;

@@ -101,10 +101,21 @@ impl ReqwestTransport {
     fn client_with_jar(
         jar: Arc<reqwest::cookie::Jar>,
     ) -> Result<reqwest::blocking::Client, QuarkError> {
-        reqwest::blocking::Client::builder()
+        let mut builder = reqwest::blocking::Client::builder()
             .cookie_provider(jar)
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36");
+        if let Some(proxy) = std::env::var_os("HTTPS_PROXY")
+            .or_else(|| std::env::var_os("https_proxy"))
+            .or_else(|| std::env::var_os("ALL_PROXY"))
+            .filter(|value| !value.is_empty())
+        {
+            builder = builder.proxy(
+                reqwest::Proxy::all(proxy.to_string_lossy().as_ref())
+                    .map_err(|_| QuarkError::Transport("代理配置无效".into()))?,
+            );
+        }
+        builder
             .build()
             .map_err(|_| QuarkError::Transport("无法初始化 HTTPS 客户端".into()))
     }

@@ -31,10 +31,11 @@ async function main(){
     fs.writeFileSync(path.join(data,'settings.json'),JSON.stringify({downloadDirectory:path.join(data,'downloads'),proxy:original.proxy,aria2:{...original.aria2,rpcPort:enginePort,rpcToken:require('node:crypto').randomBytes(32).toString('hex')}}));
   }
   const binary=path.resolve(process.env.ALLDOWNLOADER_TEST_BINARY||'artifacts/alldownloader.exe');
-  const child=spawn(binary,[],{cwd:path.dirname(binary),windowsHide:true,stdio:'ignore',env:{...process.env,
+  const child=spawn(binary,[],{cwd:path.dirname(binary),windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,
     ALLDOWNLOADER_BACKGROUND_UI_TEST:'1',ALLDOWNLOADER_TEST_DATA_DIR:data,ALLDOWNLOADER_TEST_DOWNLOAD_DIR:path.join(data,'downloads'),
     WEBVIEW2_USER_DATA_FOLDER:path.join(data,'webview2'),WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${port} --disable-background-timer-throttling`}});
-  let manager;
+  let manager,diagnostic='';
+  for(const stream of [child.stdout,child.stderr])stream?.on('data',chunk=>{diagnostic=(diagnostic+String(chunk)).slice(-4096);});
   try{
     for(let n=0;n<120&&!manager;n++){
       for(const page of (await targets(port).catch(()=>[])).filter(t=>t.type==='page'&&/tauri.localhost/.test(t.url))){
@@ -42,7 +43,10 @@ async function main(){
       }
       if(!manager)await delay(250);
     }
-    if(!manager)throw Error('app_start_timeout');
+    if(!manager){
+      const pages=await targets(port).catch(()=>[]);
+      throw Error(`app_start_timeout:exit=${child.exitCode}:signal=${child.signalCode}:pages=${JSON.stringify(pages.map(p=>({type:p.type,url:p.url,title:p.title})))}:diagnostic=${diagnostic.replace(/https?:\/\/\S+/g,'<url>').replace(/[A-Za-z0-9_-]{48,}/g,'<redacted>')}`);
+    }
     let clicked=false;
     for(let n=0;n<80&&!clicked;n++){
       clicked=await evaluate(manager,`(()=>{
