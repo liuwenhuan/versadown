@@ -635,7 +635,12 @@ pub async fn queue_cloud_dispatch(
                     service
                         .submit_uri_with_options(id, vec![url], options)
                         .await
-                        .map_err(|_| QuarkError::Transport("aria2 未能接受网盘下载任务".into()))
+                        .map_err(|error| match error {
+                            crate::aria2::service::DownloadServiceError::InvalidNativeCheckpoint => {
+                                QuarkError::Transport(error.to_string())
+                            }
+                            _ => QuarkError::Transport("aria2 未能接受网盘下载任务".into()),
+                        })
                 },
             )
             .await;

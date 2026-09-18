@@ -125,6 +125,110 @@ fn valid_header(name: &str, value: &str) -> bool {
         && !value.contains(['\r', '\n'])
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NewTask;
+
+    #[test]
+    fn detached_partial_download_recovers_the_native_checkpoint_before_resubmission() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap();
+        let task = store
+            .create(NewTask::direct("https://fresh.example.test/archive.zip"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(128),
+                completed_length: 7,
+                ..task
+            })
+            .unwrap();
+        let payload = root.path().join("archive.zip");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 7, true)],
+            )
+            .unwrap();
+        let state_directory = root.path().join("aria2-next-state/stream");
+        std::fs::create_dir_all(&state_directory).unwrap();
+        let checkpoint = rusqlite::Connection::open(state_directory.join("state.db")).unwrap();
+        checkpoint
+            .execute_batch("CREATE TABLE downloads (gid TEXT PRIMARY KEY, uri TEXT, path TEXT, total_length INTEGER, completed_length INTEGER, completed_ranges TEXT);")
+            .unwrap();
+        checkpoint
+            .execute(
+                "INSERT INTO downloads VALUES (?1, ?2, ?3, 128, 7, '0-7')",
+                rusqlite::params![
+                    "0123456789abcdef",
+                    "https://previous.example.test/archive.zip",
+                    payload.to_string_lossy(),
+                ],
+            )
+            .unwrap();
+
+        let recovered = resume_checkpoint(
+            &store,
+            &task,
+            &UriSubmissionOptions {
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("detached task should reuse its native checkpoint");
+
+        assert_eq!(recovered.path, payload);
+        assert_eq!(recovered.uri, "https://previous.example.test/archive.zip");
+    }
+
+    #[test]
+    fn detached_partial_download_without_a_verified_checkpoint_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap();
+        let task = store
+            .create(NewTask::direct("https://fresh.example.test/archive.zip"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(128),
+                completed_length: 7,
+                ..task
+            })
+            .unwrap();
+        let payload = root.path().join("archive.zip");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 7, true)],
+            )
+            .unwrap();
+
+        let result = resume_checkpoint(
+            &store,
+            &task,
+            &UriSubmissionOptions {
+                continue_download: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DownloadServiceError::InvalidNativeCheckpoint)
+        ));
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum DownloadServiceError {
     #[error(transparent)]
@@ -157,6 +261,34 @@ pub enum DownloadServiceError {
         cause: String,
         cleanup: String,
     },
+}
+
+fn resume_checkpoint(
+    store: &TaskStore,
+    task: &DownloadTask,
+    options: &UriSubmissionOptions,
+) -> Result<Option<super::native_resume::NativeCheckpoint>, DownloadServiceError> {
+    if !options.continue_download || options.allow_overwrite {
+        return Ok(None);
+    }
+    let gid = options
+        .native_resume_gid
+        .as_deref()
+        .or(task.aria_gid.as_deref());
+    let checkpoint = match gid {
+        Some(gid) => super::native_resume::checkpoint(store, task, gid),
+        None => super::native_resume::checkpoint_for_task(store, task),
+    };
+    let legacy_control = super::native_resume::has_legacy_control(store, task);
+    let detached_partial_payload = gid.is_none() && task.completed_length > 0;
+    if checkpoint.is_none()
+        && (options.native_resume_gid.is_some()
+            || (gid.is_some() && !legacy_control)
+            || (detached_partial_payload && !legacy_control))
+    {
+        return Err(DownloadServiceError::InvalidNativeCheckpoint);
+    }
+    Ok(checkpoint)
 }
 
 pub struct DownloadService {
@@ -357,24 +489,7 @@ impl DownloadService {
         uris: &mut Vec<String>,
         mut options: UriSubmissionOptions,
     ) -> Result<Aria2Options, DownloadServiceError> {
-        let checkpoint = if options.continue_download && !options.allow_overwrite {
-            let gid = options
-                .native_resume_gid
-                .as_deref()
-                .or(task.aria_gid.as_deref());
-            let checkpoint =
-                gid.and_then(|gid| super::native_resume::checkpoint(&self.store, task, gid));
-            if checkpoint.is_none()
-                && (options.native_resume_gid.is_some()
-                    || (gid.is_some()
-                        && !super::native_resume::has_legacy_control(&self.store, task)))
-            {
-                return Err(DownloadServiceError::InvalidNativeCheckpoint);
-            }
-            checkpoint
-        } else {
-            None
-        };
+        let checkpoint = resume_checkpoint(&self.store, task, &options)?;
         if let Some(checkpoint) = &checkpoint {
             options.directory = checkpoint.path.parent().map(Path::to_path_buf);
             options.output_name = checkpoint

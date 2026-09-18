@@ -598,7 +598,12 @@ pub async fn resubmit_current_cloud_download(
     service
         .compare_and_resubmit_uri_with_options(expected, vec![signed_url], options)
         .await
-        .map_err(|_| QuarkError::Transport("aria2 未能接受网盘下载任务".into()))
+        .map_err(|error| match error {
+            crate::aria2::service::DownloadServiceError::InvalidNativeCheckpoint => {
+                QuarkError::Transport(error.to_string())
+            }
+            _ => QuarkError::Transport("aria2 未能接受网盘下载任务".into()),
+        })
 }
 
 pub(crate) fn share_submission_options(
