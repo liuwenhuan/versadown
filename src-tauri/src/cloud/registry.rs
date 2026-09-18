@@ -418,6 +418,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             },
         },
         share_pass_code_constraint: match provider {
+            Aliyun => Some(super::aliyun::ALIYUN_SHARE_PASS_CODE_CONSTRAINT),
             Uc => Some(super::uc::UC_SHARE_PASS_CODE_CONSTRAINT),
             Pikpak => Some(CloudSharePassCodeConstraint {
                 min_length: 4,
@@ -461,6 +462,19 @@ mod tests {
                 "maxLength": 4,
                 "characterSet": "asciiAlphanumeric",
                 "hint": "提取码必须为 4 位字母或数字",
+            })
+        );
+        let aliyun = catalog
+            .iter()
+            .find(|descriptor| descriptor.provider == CloudProvider::Aliyun)
+            .expect("Aliyun must be present in the catalog");
+        assert_eq!(
+            serde_json::to_value(aliyun).unwrap()["sharePassCodeConstraint"],
+            serde_json::json!({
+                "minLength": 1,
+                "maxLength": 64,
+                "characterSet": "any",
+                "hint": "提取码可留空；填写时最多 64 个字符",
             })
         );
         let quark = catalog

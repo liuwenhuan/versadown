@@ -407,6 +407,29 @@ it('uses a share-specific vertical dialog layout', async () => {
   expect(dialog).not.toHaveClass('cloud-trash-confirm');
 });
 
+it('shows the Aliyun optional 64-character share-code requirement from its descriptor', async () => {
+  const user = userEvent.setup();
+  const descriptor = {
+    ...cloudCatalog.find(item => item.provider === 'aliyun')!,
+    sharePassCodeConstraint: {
+      minLength: 1,
+      maxLength: 64,
+      characterSet: 'any' as const,
+      hint: '提取码可留空；填写时最多 64 个字符',
+    },
+  };
+  render(<NativeCloudManager descriptor={descriptor} provider="aliyun" client={createCloudFake()} initialAccount={{ id: 'a', displayName: 'alice', provider: 'aliyun', authMethod: 'web' }} restoreOnMount={false} />);
+
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(dialog).toHaveTextContent('提取码可留空；填写时最多 64 个字符');
+  const passCode = within(dialog).getByRole('textbox', { name: '提取码' });
+  expect(passCode).toHaveAttribute('maxlength', '64');
+  await user.type(passCode, 'a'.repeat(65));
+  expect(passCode).toHaveValue('a'.repeat(64));
+});
+
 function shareCodeDescriptor(provider: CloudProvider = 'pikpak', enabled = true) {
   const base = cloudCatalog.find(item => item.provider === provider)!;
   return { ...base, capabilities: { ...base.capabilities, shareUpdatePassCode: enabled }, sharePassCodeConstraint: { minLength: 4, maxLength: 4, characterSet: 'asciiAlphanumeric' as const, hint: '提取码必须为 4 位字母或数字' } };

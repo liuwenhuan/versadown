@@ -1224,6 +1224,107 @@ fn live_aliyun_existing_file_download_resolution() -> LiveResult<()> {
 }
 
 #[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing file in the current user's Aliyun root directory; creates then cancels one temporary personal share"]
+fn live_aliyun_existing_file_personal_share_lifecycle() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Aliyun;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveTransport::new()?;
+    let directory = step(provider, "list root for existing-file share", || {
+        driver_list(
+            &state,
+            &http,
+            provider,
+            ProviderRegistry::global().get(provider).root_directory_id,
+        )
+    })?;
+    let file = directory
+        .items
+        .into_iter()
+        .find(|item| item.kind == CloudFileKind::File)
+        .ok_or_else(|| failure("Aliyun root has no file available for temporary share testing"))?;
+    let share_name = format!(
+        "AllDownloader temporary verification {}",
+        uuid::Uuid::new_v4()
+    );
+    let mut created_share_id = None;
+    let result = (|| -> LiveResult<()> {
+        let share = step(provider, "temporary personal-share create", || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .create_share(
+                    std::slice::from_ref(&file.id),
+                    &CloudShareOptions {
+                        name: share_name,
+                        pass_code: None,
+                        generate_pass_code: false,
+                        expires_in_days: None,
+                    },
+                )
+        })?;
+        if share.id.is_empty() {
+            return Err(failure(
+                "Aliyun temporary personal-share create returned an empty ID",
+            ));
+        }
+        created_share_id = Some(share.id.clone());
+        let share_url = url::Url::parse(&share.url).map_err(|_| {
+            failure("Aliyun temporary personal-share create returned an invalid URL")
+        })?;
+        if share_url.scheme() != "https" || share_url.host_str().is_none() {
+            return Err(failure(
+                "Aliyun temporary personal-share create did not return an HTTPS URL",
+            ));
+        }
+        step(provider, "temporary personal-share cancel", || {
+            ProviderRegistry::global()
+                .driver(provider, &state.store, &http)
+                .cancel_shares(std::slice::from_ref(&share.id))
+        })?;
+        let listed_after_cancellation = step(
+            provider,
+            "personal-share list after temporary cancel",
+            || {
+                ProviderRegistry::global()
+                    .driver(provider, &state.store, &http)
+                    .list_shares()
+            },
+        )?;
+        if listed_after_cancellation
+            .iter()
+            .any(|candidate| candidate.id == share.id)
+        {
+            return Err(failure(
+                "Aliyun personal-share list still contained the cancelled temporary share",
+            ));
+        }
+        created_share_id = None;
+        Ok(())
+    })();
+    let share_cleanup = match created_share_id.take() {
+        Some(share_id) => ProviderRegistry::global()
+            .driver(provider, &state.store, &http)
+            .cancel_shares(std::slice::from_ref(&share_id))
+            .map_err(|error| {
+                failure(format!(
+                    "Aliyun temporary personal-share cleanup failed: {}",
+                    error_kind(&error)
+                ))
+            }),
+        None => Ok(()),
+    };
+    http.report();
+    match (result, share_cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(test), Ok(())) => Err(test),
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (Err(test), Err(cleanup)) => Err(failure(format!(
+            "Aliyun temporary personal-share test failed ({test}); cleanup also failed ({cleanup})"
+        ))),
+    }
+}
+
+#[test]
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
 fn live_aliyun_trash_already_absent_file_is_idempotent() -> LiveResult<()> {
     require_live_authorization()?;

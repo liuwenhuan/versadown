@@ -5,8 +5,8 @@
 use super::{
     http::response_json, types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile,
     CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
-    CloudShare, CloudShareOptions, CloudStorageCapacity, CloudUploadTransport, CredentialStore,
-    QuarkError, UploadHttpRequest,
+    CloudShare, CloudShareOptions, CloudSharePassCodeCharacterSet, CloudSharePassCodeConstraint,
+    CloudStorageCapacity, CloudUploadTransport, CredentialStore, QuarkError, UploadHttpRequest,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -44,6 +44,13 @@ pub(crate) const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
 })()"#;
 pub(crate) const ALIYUN_RECYCLE_BIN_ID: &str = "__all_downloader_aliyun_recycle_bin__";
 const ALIYUN_RECYCLE_BIN_NAME: &str = "回收站";
+pub const ALIYUN_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
+    CloudSharePassCodeConstraint {
+        min_length: 1,
+        max_length: 64,
+        character_set: CloudSharePassCodeCharacterSet::Any,
+        hint: "提取码可留空；填写时最多 64 个字符",
+    };
 
 #[cfg(test)]
 mod tests {
@@ -187,7 +194,7 @@ mod tests {
         ));
     }
     #[test]
-    fn aliyun_personal_share_list_uses_the_consumer_route() {
+    fn aliyun_personal_share_list_uses_its_pds_resource_host() {
         let credentials = MemoryCredentialStore::default();
         credentials
             .save(
@@ -198,6 +205,7 @@ mod tests {
         let http = Http::new(vec![
             json!({"user_id":"u1","nick_name":"alice"}),
             json!({"items":[],"next_marker":""}),
+            json!({"domain_id":"bj29"}),
             json!({"items":[],"next_marker":""}),
         ]);
 
@@ -207,12 +215,16 @@ mod tests {
             .is_empty());
 
         let requests = http.requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests[2].url.ends_with("/adrive/v2/share_link/list"));
-        let body: Value = serde_json::from_str(requests[2].body.as_deref().unwrap()).unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[3].url,
+            "https://bj29.api.aliyunpds.com/v2/share_link/list"
+        );
+        let body: Value = serde_json::from_str(requests[3].body.as_deref().unwrap()).unwrap();
         assert_eq!(body["creator"], "u1");
         assert_eq!(body["limit"], 100);
         assert_eq!(body["marker"], "");
+        assert_eq!(body["include_cancelled"], false);
         assert!(body.get("drive_id").is_none());
     }
 
@@ -283,6 +295,78 @@ mod tests {
             "https://bj29.api.aliyunpds.com/v2/file/get_download_url"
         );
         assert_eq!(requests[3].body, requests[4].body);
+    }
+
+    #[test]
+    fn aliyun_personal_share_uses_its_pds_resource_host_with_explicit_empty_options() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive","browser_access_ready":true}"#,
+            )
+            .unwrap();
+        let http = Http::new(vec![
+            json!({"user_id":"u1","nick_name":"alice"}),
+            json!({"items":[],"next_marker":""}),
+            json!({"domain_id":"bj29"}),
+            json!({"share_id":"share-1","share_name":"test"}),
+        ]);
+        let options = CloudShareOptions {
+            name: "test".into(),
+            pass_code: None,
+            generate_pass_code: false,
+            expires_in_days: None,
+        };
+
+        let share = AliyunClient::new(&credentials, &http)
+            .create_share(&["file-1".into()], &options)
+            .unwrap();
+
+        assert_eq!(share.id, "share-1");
+        assert_eq!(share.url, "https://www.alipan.com/s/share-1");
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[3].url,
+            "https://bj29.api.aliyunpds.com/v2/share_link/create"
+        );
+        let body: Value = serde_json::from_str(requests[3].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["drive_id"], "drive");
+        assert_eq!(body["file_id_list"], json!(["file-1"]));
+        assert_eq!(body["share_name"], "test");
+        assert_eq!(body["share_pwd"], "");
+        assert_eq!(body["expiration"], "");
+    }
+
+    #[test]
+    fn aliyun_personal_share_cancel_uses_its_pds_resource_host() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save(
+                "aliyun",
+                br#"{"refresh_token":"refresh","access_token":"access","drive_id":"drive","browser_access_ready":true}"#,
+            )
+            .unwrap();
+        let http = Http::new(vec![
+            json!({"user_id":"u1","nick_name":"alice"}),
+            json!({"items":[],"next_marker":""}),
+            json!({"domain_id":"bj29"}),
+            json!({}),
+        ]);
+
+        AliyunClient::new(&credentials, &http)
+            .cancel_shares(&["share-1".into()])
+            .unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[3].url,
+            "https://bj29.api.aliyunpds.com/v2/share_link/cancel"
+        );
+        let body: Value = serde_json::from_str(requests[3].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body, json!({"share_id":"share-1"}));
     }
 
     #[test]
@@ -1084,9 +1168,14 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
         if file_ids.is_empty() {
             return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
         }
+        if file_ids.len() > 100 {
+            return Err(QuarkError::InvalidInput(
+                "阿里云盘单个分享最多支持 100 个文件或目录".into(),
+            ));
+        }
         if options.generate_pass_code {
             return Err(QuarkError::InvalidInput(
-                "阿里云盘需要设置自定义提取码".into(),
+                "阿里云盘不支持自动生成提取码，请手动填写或留空".into(),
             ));
         }
         let (session, _, _) = self.refreshed_validated_session()?;
@@ -1094,14 +1183,9 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
             "drive_id": session.drive_id,
             "file_id_list": file_ids,
             "share_name": options.name,
+            "share_pwd": options.pass_code.as_deref().unwrap_or(""),
+            "expiration": "",
         });
-        if let Some(pass_code) = options
-            .pass_code
-            .as_deref()
-            .filter(|code| !code.trim().is_empty())
-        {
-            body["share_pwd"] = json!(pass_code);
-        }
         if let Some(days) = options.expires_in_days {
             let expiration =
                 time::OffsetDateTime::now_utc() + time::Duration::days(i64::from(days));
@@ -1109,19 +1193,38 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
                 .format(&time::format_description::well_known::Rfc3339)
                 .map_err(|_| QuarkError::InvalidResponse)?);
         }
-        let value = self.api(&session, "/v2/share_link/create", body)?;
+        let metadata = self.api(
+            &session,
+            "/v2/file/get",
+            json!({"drive_id":session.drive_id,"file_id":file_ids[0]}),
+        )?;
+        let resource_api = pds_resource_api(&metadata)?;
+        let value = self.send(
+            "POST",
+            format!("{resource_api}/v2/share_link/create"),
+            Self::bearer_headers(&session),
+            Some(body),
+        )?;
         aliyun_share_from_value(&value, Some(file_ids), options.pass_code.as_deref())
     }
 
     pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
         let (session, account, _) = self.refreshed_validated_session()?;
+        let profile = self.api(&session, "/v2/user/get", json!({}))?;
+        let resource_api = pds_resource_api(&profile)?;
         let mut marker = String::new();
         let mut shares = Vec::new();
         for _ in 0..10_000 {
-            let value = self.api(
-                &session,
-                "/adrive/v2/share_link/list",
-                json!({"creator": account.id, "limit": 100, "marker": marker}),
+            let value = self.send(
+                "POST",
+                format!("{resource_api}/v2/share_link/list"),
+                Self::bearer_headers(&session),
+                Some(json!({
+                    "creator": account.id,
+                    "limit": 100,
+                    "marker": marker,
+                    "include_cancelled": false,
+                })),
             )?;
             let page = value
                 .get("items")
@@ -1150,11 +1253,14 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
             return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
         }
         let (session, _, _) = self.refreshed_validated_session()?;
+        let profile = self.api(&session, "/v2/user/get", json!({}))?;
+        let resource_api = pds_resource_api(&profile)?;
         for share_id in share_ids {
-            self.api(
-                &session,
-                "/v2/share_link/cancel",
-                json!({"share_id": share_id}),
+            self.send(
+                "POST",
+                format!("{resource_api}/v2/share_link/cancel"),
+                Self::bearer_headers(&session),
+                Some(json!({"share_id": share_id})),
             )?;
         }
         Ok(())

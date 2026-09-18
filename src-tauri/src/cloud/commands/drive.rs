@@ -123,12 +123,20 @@ pub async fn cloud_list_directory(
     .await
 }
 
-fn validate_share_options(options: &CloudShareOptions) -> Result<(), QuarkError> {
+fn validate_share_options(
+    provider: CloudProvider,
+    options: &CloudShareOptions,
+) -> Result<(), QuarkError> {
     if options.name.trim().is_empty() {
         return Err(QuarkError::InvalidInput("分享名称不能为空".into()));
     }
     if let Some(pass_code) = &options.pass_code {
-        if pass_code.trim().is_empty() || pass_code.chars().count() > 32 {
+        let max_length = if provider == CloudProvider::Aliyun {
+            64
+        } else {
+            32
+        };
+        if pass_code.trim().is_empty() || pass_code.chars().count() > max_length {
             return Err(QuarkError::InvalidInput("提取码格式无效".into()));
         }
     }
@@ -157,7 +165,7 @@ pub async fn cloud_create_share(
     if file_ids.is_empty() {
         return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
     }
-    validate_share_options(&options)?;
+    validate_share_options(provider, &options)?;
     run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
         ProviderRegistry::global()
             .driver(provider, &s.store, h)
@@ -355,4 +363,25 @@ pub async fn cloud_restore(
         schedule_cloud_capacity_invalidation(app, provider, CloudCapacityChangeReason::Restore);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(pass_code: String) -> CloudShareOptions {
+        CloudShareOptions {
+            name: "test".into(),
+            pass_code: Some(pass_code),
+            generate_pass_code: false,
+            expires_in_days: None,
+        }
+    }
+
+    #[test]
+    fn aliyun_allows_a_64_character_share_code_without_relaxing_other_providers() {
+        assert!(validate_share_options(CloudProvider::Aliyun, &options("a".repeat(64))).is_ok());
+        assert!(validate_share_options(CloudProvider::Aliyun, &options("a".repeat(65))).is_err());
+        assert!(validate_share_options(CloudProvider::Quark, &options("a".repeat(33))).is_err());
+    }
 }
