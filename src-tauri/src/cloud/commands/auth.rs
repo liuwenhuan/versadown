@@ -542,14 +542,32 @@ pub async fn resume_reauthorized_provider_tasks(
         {
             continue;
         }
-        if task.status != TaskStatus::Failed
-            || !requires_cloud_reauthorization_failure(task.failure_code.as_deref())
+        let waiting_for_startup_authorization = task.status == TaskStatus::Paused
+            && task.failure_code.as_deref() == Some("authorization_pending");
+        if !(waiting_for_startup_authorization
+            || (task.status == TaskStatus::Failed
+                && requires_cloud_reauthorization_failure(task.failure_code.as_deref())))
             || cloud_provider_from_download_source(&task.source).ok() != Some(provider)
-            || !matches!(crate::retry_duplicate_state(&state.store, &task), Ok(None))
+            || (!waiting_for_startup_authorization
+                && !matches!(crate::retry_duplicate_state(&state.store, &task), Ok(None)))
         {
             continue;
         }
-        match crate::commands::resubmit_task(app.clone(), &state, task, Default::default()).await {
+        let resumed = if waiting_for_startup_authorization && task.aria_gid.is_some() {
+            state
+                .runtime
+                .service()
+                .await
+                .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?
+                .control(task.id, crate::DownloadAction::Resume)
+                .await
+                .map_err(|_| QuarkError::Transport("恢复网盘下载任务失败".into()))
+        } else {
+            crate::commands::resubmit_task(app.clone(), &state, task, Default::default())
+                .await
+                .map_err(QuarkError::Transport)
+        };
+        match resumed {
             Ok(task) => {
                 if let Ok(outcome) = task_action_outcome(&state.store, task, None) {
                     if should_emit_task_update(&state, outcome.payload.task.is_private) {

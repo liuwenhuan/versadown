@@ -3,7 +3,6 @@ use super::{
     types::{Aria2Error, RpcSecret},
 };
 use std::{
-    io::{Read, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     time::Duration,
@@ -12,7 +11,6 @@ use tokio::time::{timeout_at, Instant};
 
 const STARTUP_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const OPERATION_RPC_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_STARTUP_STDERR_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct Aria2LaunchConfig {
@@ -43,6 +41,12 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
         format!("--save-session={}", session.display()),
         "--save-session-interval=10".into(),
         "--force-save=false".into(),
+        // A saved aria2 session contains short-lived, provider-issued URLs.
+        // Load every persisted GID in the paused state so the application can
+        // validate a cloud account before a saved cloud URL makes a request.
+        // Every new explicit submission overrides this per-task (see
+        // `DownloadService::submit_uri`).
+        "--pause=true".into(),
         "--pause-metadata=true".into(),
         format!("--dir={}", config.download_dir.display()),
         format!("--stop-with-process={}", config.parent_pid),
@@ -84,9 +88,6 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
 pub struct Aria2Process {
     child: Child,
     client: Aria2RpcClient,
-    startup_stderr: Option<std::process::ChildStderr>,
-    startup_stderr_log: Option<PathBuf>,
-    rpc_secret: RpcSecret,
 }
 
 impl Aria2Process {
@@ -139,27 +140,20 @@ impl Aria2Process {
                 .args(build_aria2_args(&config, &secret))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                // Keep early sidecar failures in a private pipe until the
-                // process exits. They are redacted before being persisted.
-                .stderr(if debug_logger.is_some() {
-                    Stdio::piped()
-                } else {
-                    Stdio::null()
-                });
+                // aria2-next's diagnostic output is already written through
+                // `--log` when logging is enabled. Never attach stderr to a
+                // pipe unless a reader drains it continuously: a busy startup
+                // can fill the Windows pipe before the RPC listener opens.
+                .stderr(Stdio::null());
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
                 command.creation_flags(0x08000000); // CREATE_NO_WINDOW
             }
-            let mut child = command.spawn()?;
+            let child = command.spawn()?;
             let mut process = Self {
-                startup_stderr: child.stderr.take(),
                 child,
                 client: client.clone(),
-                startup_stderr_log: debug_logger
-                    .as_ref()
-                    .map(|_| config.data_dir.join("aria2-startup-debug.log")),
-                rpc_secret: secret.clone(),
             };
             match process.wait_ready(Duration::from_secs(5)).await {
                 Ok(()) => {
@@ -239,33 +233,7 @@ impl Aria2Process {
             self.child.kill()?;
         }
         self.child.wait()?;
-        self.persist_startup_stderr();
         Ok(())
-    }
-
-    fn persist_startup_stderr(&mut self) {
-        let (Some(stderr), Some(path)) =
-            (self.startup_stderr.take(), self.startup_stderr_log.take())
-        else {
-            return;
-        };
-        let mut bytes = Vec::new();
-        if stderr
-            .take(MAX_STARTUP_STDERR_BYTES)
-            .read_to_end(&mut bytes)
-            .is_err()
-            || bytes.is_empty()
-        {
-            return;
-        }
-        let output = self.rpc_secret.redact(&String::from_utf8_lossy(&bytes));
-        if let Ok(mut log) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(log, "{output}");
-        }
     }
 }
 
@@ -325,5 +293,12 @@ mod tests {
 
         assert!(args.contains(&"--max-overall-download-limit=2621440".to_string()));
         assert!(args.contains(&"--max-overall-upload-limit=1572864".to_string()));
+    }
+
+    #[test]
+    fn debug_startup_never_uses_an_undrained_stderr_pipe() {
+        let source = include_str!("process.rs");
+        assert!(source.contains(".stderr(Stdio::null())"));
+        assert!(!source.contains(&["stderr(if debug_logger", ".is_some()"].concat()));
     }
 }

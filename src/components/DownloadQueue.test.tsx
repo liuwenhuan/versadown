@@ -623,6 +623,23 @@ it('keeps magnet metadata on the compact transfer-metrics row', () => {
   expect(metadata.querySelector('.task-metadata-indicator')).toBeVisible();
 });
 
+it('shows the shared loading indicator while a restored cloud task waits for login', () => {
+  render(<DownloadQueue
+    tasks={[{
+      id: 'cloud-waiting', name: 'cloud.bin', kind: 'cloud', status: 'paused', progress: 0,
+      error: '恢复网盘登录后继续下载', failure_code: 'authorization_pending',
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  const message = screen.getByText('恢复网盘登录后继续下载');
+  expect(message).toBeVisible();
+  expect(message.closest('.task-subtitle')).not.toHaveClass('task-error');
+  expect(message.querySelector('.task-metadata-indicator')).toBeVisible();
+});
+
 it('does not show file-information loading after a magnet transfer has started', () => {
   render(<DownloadQueue
     tasks={[{

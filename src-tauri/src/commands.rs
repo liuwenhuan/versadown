@@ -1342,11 +1342,21 @@ fn task_is_active(status: TaskStatus) -> bool {
     )
 }
 
+/// Failed tasks stay in the download tab so users can retry them without
+/// switching to a separate terminal tab. This is deliberately separate from
+/// `task_is_active`, which controls operations on a running task.
+fn task_is_listed_in_active_tab(status: TaskStatus) -> bool {
+    !matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Recycled
+    )
+}
+
 fn status_in_scope(status: TaskStatus, scope: Option<&str>) -> Result<bool, String> {
     match scope {
         None | Some("all") => Ok(true),
-        Some("active") => Ok(task_is_active(status)),
-        Some("terminal") => Ok(!task_is_active(status)),
+        Some("active") => Ok(task_is_listed_in_active_tab(status)),
+        Some("terminal") => Ok(!task_is_listed_in_active_tab(status)),
         Some(_) => Err("任务列表范围无效".to_string()),
     }
 }
@@ -4328,16 +4338,14 @@ mod tests {
             })
             .unwrap();
 
-        assert!(
-            project_cloud_directory_groups(&store, store.list().unwrap(), Some("active"))
-                .unwrap()
-                .is_empty()
-        );
+        let failed_active_scope =
+            project_cloud_directory_groups(&store, store.list().unwrap(), Some("active")).unwrap();
+        assert_eq!(failed_active_scope.len(), 1);
+        assert_eq!(failed_active_scope[0].status, TaskStatus::Failed);
         let terminal_scope =
             project_cloud_directory_groups(&store, store.list().unwrap(), Some("terminal"))
                 .unwrap();
-        assert_eq!(terminal_scope.len(), 1);
-        assert_eq!(terminal_scope[0].status, TaskStatus::Failed);
+        assert!(terminal_scope.is_empty());
     }
 
     #[test]
@@ -5107,7 +5115,7 @@ mod tests {
             .link_cloud_directory_group_item_task(group.id, items[1].id, second.id)
             .unwrap();
 
-        let failed = list_queue_tasks_for_scope(&store, Some("terminal")).unwrap();
+        let failed = list_queue_tasks_for_scope(&store, Some("active")).unwrap();
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].id, group.id.to_string());
         assert_eq!(failed[0].status, TaskStatus::Failed);

@@ -276,6 +276,12 @@ impl DownloadService {
         if self.task_for_uri_submission(task_id)?.aria_gid.is_some() {
             return Err(DownloadServiceError::AlreadySubmitted);
         }
+        // The process deliberately starts restored session entries paused so
+        // cloud authorization can be checked first. RPC submissions are new
+        // user-approved work and must retain their normal immediate-start
+        // behavior. Directory admission below intentionally replaces this
+        // with `pause=true` until its scheduler grants a slot.
+        options.insert("pause".into(), "false".into());
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.add_uri_for_task(task_id, uris, options).await?;
         if let Err(error) = self.store.bind_gid(task_id, &gid) {
@@ -473,6 +479,9 @@ impl DownloadService {
         }
         validate_task_source(&current.kind, &current.source)?;
         let mut options = self.prepare_uri_options(&current, &mut uris, options)?;
+        // See `submit_uri`: restored sessions start paused, while this is an
+        // explicit retry and should preserve normal immediate submission.
+        options.insert("pause".into(), "false".into());
         let directory = self.prepare_directory_uri(expected.id, &mut options)?;
         let gid = self.add_uri_for_task(expected.id, uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(expected.id, &gid) {
@@ -1520,18 +1529,28 @@ impl DownloadService {
         task.upload_speed = snapshot.upload_speed;
         task.connections = snapshot.connections;
         task.eta_seconds = snapshot.eta_seconds;
+        let waiting_for_cloud_authorization = task.status == TaskStatus::Paused
+            && task.failure_code.as_deref() == Some("authorization_pending");
         if task.status == TaskStatus::Completed {
             task.aria_error_code = None;
             task.error = None;
         } else {
             task.aria_error_code = snapshot.error_code;
-            task.error = if task.source.starts_with("cloud-share://") {
+            task.error = if waiting_for_cloud_authorization && snapshot.status == TaskStatus::Paused
+            {
+                // Recovery must not erase the durable wait reason just because
+                // aria2 reports the expected paused status.
+                task.error.clone()
+            } else if task.source.starts_with("cloud-share://") {
                 snapshot
                     .error_message
                     .map(|_| "网盘分享下载失败，请重试或重新解析分享链接".into())
             } else {
                 snapshot.error_message
             };
+        }
+        if waiting_for_cloud_authorization && snapshot.status != TaskStatus::Paused {
+            task.failure_code = None;
         }
         // aria2 reports BT file paths relative to its download directory. Once
         // a task has an approved absolute managed path, retain that path on

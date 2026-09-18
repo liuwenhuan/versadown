@@ -116,7 +116,7 @@ it('renders the compact download-manager layout without browser navigation contr
   expect(screen.queryByRole('button', { name: '新建下载' })).not.toBeInTheDocument();
   expect(screen.getByRole('tab', { name: /下载中/ })).toBeVisible();
   expect(screen.getByRole('tab', { name: /已完成/ })).toBeVisible();
-  expect(screen.getByRole('tab', { name: /失败/ })).toBeVisible();
+  expect(screen.queryByRole('tab', { name: /失败/ })).not.toBeInTheDocument();
   expect(screen.getByRole('tab', { name: /回收站/ })).toBeVisible();
   expect(screen.queryByRole('button', { name: '后退' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '前进' })).not.toBeInTheDocument();

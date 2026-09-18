@@ -162,20 +162,23 @@ mod platform {
     use super::{launcher_hit_result, LauncherHitResult, PhysicalLauncherRegion};
     use std::{
         collections::HashMap,
-        sync::{OnceLock, RwLock},
+        sync::{Mutex, OnceLock, RwLock},
     };
     use windows::{
         core::BOOL,
         Win32::{
-            Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
+            Foundation::{
+                GetLastError, SetLastError, HWND, LPARAM, LRESULT, POINT, WIN32_ERROR, WPARAM,
+            },
             Graphics::Gdi::ScreenToClient,
             UI::{
                 Shell::{
                     DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
                 },
                 WindowsAndMessaging::{
-                    EnumChildWindows, GetWindowThreadProcessId, HTCLIENT, HTTRANSPARENT,
-                    WM_NCDESTROY, WM_NCHITTEST,
+                    CallWindowProcW, DefWindowProcW, EnumChildWindows, GetWindowLongPtrW,
+                    GetWindowThreadProcessId, SetWindowLongPtrW, GWLP_WNDPROC, HTCLIENT,
+                    HTTRANSPARENT, WM_NCDESTROY, WM_NCHITTEST, WNDPROC,
                 },
             },
         },
@@ -184,8 +187,45 @@ mod platform {
     const LAUNCHER_SUBCLASS_ID: usize = 0x414C_444C;
     static REGIONS: OnceLock<RwLock<HashMap<isize, Vec<PhysicalLauncherRegion>>>> = OnceLock::new();
 
+    #[derive(Clone, Copy)]
+    struct ForeignThreadSubclass {
+        root_key: isize,
+        original_proc: isize,
+    }
+
+    // WebView2 can create child HWNDs on a renderer-owned UI thread.  The
+    // common-control subclass helper deliberately rejects those windows, so
+    // keep their instance subclasses separately and forward every message to
+    // the saved procedure with CallWindowProcW.
+    static FOREIGN_THREAD_SUBCLASSES: OnceLock<Mutex<HashMap<isize, ForeignThreadSubclass>>> =
+        OnceLock::new();
+
     fn regions() -> &'static RwLock<HashMap<isize, Vec<PhysicalLauncherRegion>>> {
         REGIONS.get_or_init(|| RwLock::new(HashMap::new()))
+    }
+
+    fn foreign_thread_subclasses() -> &'static Mutex<HashMap<isize, ForeignThreadSubclass>> {
+        FOREIGN_THREAD_SUBCLASSES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn hit_test_result(root_key: isize, lparam: LPARAM) -> Option<LRESULT> {
+        // WM_NCHITTEST packs signed screen coordinates, including negative monitors.
+        let packed = lparam.0 as u32;
+        let mut point = POINT {
+            x: (packed & 0xffff) as i16 as i32,
+            y: ((packed >> 16) as u16) as i16 as i32,
+        };
+        let root = HWND(root_key as *mut _);
+        // Regions always use launcher-client coordinates, also on offset children.
+        if !unsafe { ScreenToClient(root, &mut point) }.as_bool() {
+            return None;
+        }
+        let guard = regions().read().ok()?;
+        let active = guard.get(&root_key)?;
+        Some(match launcher_hit_result((point.x, point.y), active) {
+            LauncherHitResult::Client => LRESULT(HTCLIENT as isize),
+            LauncherHitResult::Transparent => LRESULT(HTTRANSPARENT as isize),
+        })
     }
 
     unsafe extern "system" fn subclass_proc(
@@ -197,23 +237,8 @@ mod platform {
         root_key: usize,
     ) -> LRESULT {
         if message == WM_NCHITTEST {
-            // WM_NCHITTEST packs signed screen coordinates, including negative monitors.
-            let packed = lparam.0 as u32;
-            let mut point = POINT {
-                x: (packed & 0xffff) as i16 as i32,
-                y: ((packed >> 16) & 0xffff) as i16 as i32,
-            };
-            let root = HWND(root_key as *mut _);
-            // Regions always use launcher-client coordinates, also on offset children.
-            if ScreenToClient(root, &mut point).as_bool() {
-                if let Ok(guard) = regions().read() {
-                    if let Some(active) = guard.get(&(root_key as isize)) {
-                        return match launcher_hit_result((point.x, point.y), active) {
-                            LauncherHitResult::Client => LRESULT(HTCLIENT as isize),
-                            LauncherHitResult::Transparent => LRESULT(HTTRANSPARENT as isize),
-                        };
-                    }
-                }
+            if let Some(result) = hit_test_result(root_key as isize, lparam) {
+                return result;
             }
         }
         if message == WM_NCDESTROY {
@@ -225,6 +250,38 @@ mod platform {
             let _ = RemoveWindowSubclass(hwnd, Some(subclass_proc), LAUNCHER_SUBCLASS_ID);
         }
         DefSubclassProc(hwnd, message, wparam, lparam)
+    }
+
+    unsafe extern "system" fn foreign_thread_subclass_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        let subclass = foreign_thread_subclasses()
+            .lock()
+            .ok()
+            .and_then(|mut subclasses| {
+                let subclass = subclasses.get(&(hwnd.0 as isize)).copied();
+                if message == WM_NCDESTROY {
+                    subclasses.remove(&(hwnd.0 as isize));
+                }
+                subclass
+            });
+
+        let Some(subclass) = subclass else {
+            return DefWindowProcW(hwnd, message, wparam, lparam);
+        };
+        if message == WM_NCHITTEST {
+            if let Some(result) = hit_test_result(subclass.root_key, lparam) {
+                return result;
+            }
+        }
+        // The value returned by GetWindowLongPtrW for GWLP_WNDPROC can be an
+        // internal thunk, so it must be called through CallWindowProcW rather
+        // than invoked as a Rust function pointer directly.
+        let original: WNDPROC = std::mem::transmute(subclass.original_proc);
+        CallWindowProcW(original, hwnd, message, wparam, lparam)
     }
 
     unsafe extern "system" fn collect_child(hwnd: HWND, data: LPARAM) -> BOOL {
@@ -252,18 +309,126 @@ mod platform {
         }
     }
 
+    fn install_foreign_thread_subclass(root: HWND, hwnd: HWND) -> Result<bool, String> {
+        let key = hwnd.0 as isize;
+        {
+            let subclasses = foreign_thread_subclasses()
+                .lock()
+                .map_err(|_| "悬浮窗输入区域状态不可用".to_string())?;
+            if let Some(existing) = subclasses.get(&key) {
+                if existing.root_key == root.0 as isize {
+                    return Ok(false);
+                }
+                return Err("悬浮窗输入窗口已被其他实例占用".to_string());
+            }
+        }
+
+        // Store the current procedure before installing ours.  This prevents
+        // an unrelated WebView message racing the cross-thread replacement
+        // from ever falling through to DefWindowProcW.
+        let original = unsafe { GetWindowLongPtrW(hwnd, GWLP_WNDPROC) };
+        if original == 0 {
+            return Err("无法读取悬浮窗输入窗口过程".to_string());
+        }
+        foreign_thread_subclasses()
+            .lock()
+            .map_err(|_| "悬浮窗输入区域状态不可用".to_string())?
+            .insert(
+                key,
+                ForeignThreadSubclass {
+                    root_key: root.0 as isize,
+                    original_proc: original,
+                },
+            );
+        // `SetWindowLongPtrW` can legitimately return zero when the previous
+        // procedure value is zero. Clear and inspect last-error as required by
+        // Win32 instead of treating that successful result as a failure; doing
+        // so previously left the launcher hidden during startup.
+        unsafe { SetLastError(WIN32_ERROR(0)) };
+        let previous = unsafe {
+            SetWindowLongPtrW(
+                hwnd,
+                GWLP_WNDPROC,
+                foreign_thread_subclass_proc as *const () as usize as isize,
+            )
+        };
+        if previous == 0 && unsafe { GetLastError() }.0 != 0 {
+            foreign_thread_subclasses()
+                .lock()
+                .map_err(|_| "悬浮窗输入区域状态不可用".to_string())?
+                .remove(&key);
+            return Err("无法安装悬浮窗输入窗口过程".to_string());
+        }
+        if previous != original {
+            if let Ok(mut subclasses) = foreign_thread_subclasses().lock() {
+                if let Some(subclass) = subclasses.get_mut(&key) {
+                    subclass.original_proc = previous;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn remove_foreign_thread_subclass(hwnd: HWND) {
+        let key = hwnd.0 as isize;
+        let subclass = foreign_thread_subclasses()
+            .lock()
+            .ok()
+            .and_then(|mut subclasses| subclasses.remove(&key));
+        if let Some(subclass) = subclass {
+            unsafe {
+                let _ = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass.original_proc);
+            }
+        }
+    }
+
+    fn install_foreign_thread_subclasses(
+        root: HWND,
+        targets: &[HWND],
+    ) -> Result<Vec<HWND>, String> {
+        let mut installed = Vec::new();
+        for &hwnd in targets {
+            match install_foreign_thread_subclass(root, hwnd) {
+                Ok(true) => installed.push(hwnd),
+                Ok(false) => {}
+                Err(error) => {
+                    for installed_hwnd in installed {
+                        remove_foreign_thread_subclass(installed_hwnd);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(installed)
+    }
+
     pub(super) fn apply_hwnd(
         root: HWND,
         active: Vec<PhysicalLauncherRegion>,
     ) -> Result<(), String> {
         let owner = unsafe { GetWindowThreadProcessId(root, None) };
-        let targets: Vec<_> = window_tree(root)
-            .into_iter()
-            // Foreign-thread Chromium HWNDs cannot legally use SetWindowSubclass.
-            // The smoke diagnostic reports them; OS routing still needs visible validation.
+        let windows = window_tree(root);
+        let same_thread: Vec<_> = windows
+            .iter()
+            .copied()
             .filter(|hwnd| unsafe { GetWindowThreadProcessId(*hwnd, None) } == owner)
             .collect();
-        install_and_replace(root, &targets, active)
+        let foreign_thread: Vec<_> = windows
+            .into_iter()
+            .filter(|hwnd| unsafe { GetWindowThreadProcessId(*hwnd, None) } != owner)
+            .collect();
+
+        // SetWindowSubclass is intentionally restricted to the owner thread.
+        // WebView2's foreign UI-thread children use instance subclassing
+        // instead, so their transparent pixels cannot block the system tray.
+        let newly_hooked = install_foreign_thread_subclasses(root, &foreign_thread)?;
+        if let Err(error) = install_and_replace(root, &same_thread, active) {
+            for hwnd in newly_hooked {
+                remove_foreign_thread_subclass(hwnd);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(super) fn install_and_replace(

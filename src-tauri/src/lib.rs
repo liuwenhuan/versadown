@@ -230,7 +230,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .on_menu_event(|app, event| launcher::handle_launcher_menu_action(app, event.id().as_ref()))
+        .on_menu_event(|app, event| {
+            // Keep the Windows/macOS/Linux native menu pump immediately
+            // available even if an action needs to touch a window or runtime
+            // state while aria2 is recovering.
+            let app = app.clone();
+            let id = event.id().as_ref().to_owned();
+            tauri::async_runtime::spawn(async move {
+                launcher::handle_launcher_menu_action(&app, &id);
+            });
+        })
         .on_window_event(|window, event| {
             if let Some(lifecycle) = window
                 .app_handle()
@@ -261,6 +270,18 @@ pub fn run() {
             )?);
             commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
             store.recover_interrupted_cloud_directories()?;
+            // aria2 persists the short-lived direct URL it received from a
+            // cloud provider. Do this before the native session is loaded so
+            // those URLs cannot run ahead of the provider session check.
+            let mut startup_cloud_providers = Vec::new();
+            for task in store.defer_startup_cloud_downloads()? {
+                if let Ok((provider, _)) = cloud::commands::parse_stable_cloud_source(&task.source)
+                {
+                    if !startup_cloud_providers.contains(&provider) {
+                        startup_cloud_providers.push(provider);
+                    }
+                }
+            }
             let ai_secrets = cloud::DpapiCredentialStore::new(data_dir.join("ai-secrets"))?;
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
@@ -375,20 +396,59 @@ pub fn run() {
                             )
                             .await;
                             match result {
-                                Ok(()) => {
-                                    if let Err(error) = launcher.show() {
-                                        eprintln!("无法显示悬浮窗: {error}");
-                                    }
-                                }
-                                Err(error) => eprintln!("无法初始化悬浮窗输入区域: {error}"),
+                                Ok(()) => {}
+                                // A WebView child can be created slightly after the
+                                // launcher root HWND. The renderer will retry its
+                                // input-region update once mounted; never leave an
+                                // otherwise valid launcher permanently hidden while
+                                // that native refinement catches up.
+                                Err(error) => eprintln!("无法初始化悬浮窗输入区域，将由界面重试: {error}"),
+                            }
+                            if let Err(error) = launcher.show() {
+                                eprintln!("无法显示悬浮窗: {error}");
                             }
                         });
                     }
                 }
             }
+            let startup_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let _ = runtime.initialize().await;
+                let availability = runtime.initialize().await;
                 runtime.start_monitor(std::time::Duration::from_secs(2));
+                if !availability.available {
+                    return;
+                }
+                // The session was loaded with all saved URLs paused. Check the
+                // actual provider connection first, then resume only the
+                // cloud tasks deliberately deferred above. A temporary startup
+                // failure leaves those tasks paused and recoverable; a later
+                // explicit authorization completion uses the same resume path.
+                for provider in startup_cloud_providers {
+                    let mut authorized = false;
+                    for delay in [
+                        std::time::Duration::ZERO,
+                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(8),
+                    ] {
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                        if cloud::commands::cloud_account(startup_app.clone(), provider)
+                            .await
+                            .is_ok()
+                        {
+                            authorized = true;
+                            break;
+                        }
+                    }
+                    if authorized {
+                        let _ = cloud::commands::resume_reauthorized_provider_tasks(
+                            startup_app.clone(),
+                            provider,
+                        )
+                        .await;
+                    }
+                }
             });
             Ok(())
         })

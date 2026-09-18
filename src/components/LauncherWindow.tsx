@@ -85,7 +85,10 @@ export function LauncherWindow() {
       const popup = rect && rect.width > 0 && rect.height > 0
         ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
       const update = applyRegions(popup ? [launcherIconRegion, popup] : [launcherIconRegion]);
-      void update.then(() => { if (!disposed) setInputReady(true); }).catch(() => undefined);
+      // Do not keep the whole launcher hidden if a transient WebView child
+      // HWND update fails during startup. The Rust side retains the previous
+      // safe region and this component retries on every layout/geometry change.
+      void update.finally(() => { if (!disposed) setInputReady(true); }).catch(() => undefined);
       return update;
     };
     const update = syncInput();

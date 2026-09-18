@@ -191,7 +191,13 @@ pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
                     ..
                 }
             ) {
-                reveal_manager(tray.app_handle(), None);
+                // Native tray events run on the platform event loop.  Window
+                // activation must never hold that loop while the download
+                // engine is starting, stopping, or recovering.
+                let app = tray.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    reveal_manager(&app, None);
+                });
             }
         })
         .build(app)
@@ -236,6 +242,14 @@ mod tests {
     fn explicit_exit_gives_aria2_a_bounded_grace_period_after_hiding_windows() {
         assert_eq!(EXIT_TRAY_REMOVE_DELAY.as_secs(), 2);
         assert_eq!(EXIT_ARIA2_SHUTDOWN_TIMEOUT.as_secs(), 7);
+    }
+
+    #[test]
+    fn tray_clicks_are_dispatched_off_the_native_event_loop() {
+        let source = include_str!("launcher.rs");
+        assert!(source.contains(
+            "tauri::async_runtime::spawn(async move {\n                    reveal_manager"
+        ));
     }
 }
 

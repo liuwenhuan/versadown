@@ -371,6 +371,7 @@ impl EngineRuntime {
     async fn retry_locked(&self, slot: &mut EngineSlot) -> EngineAvailability {
         if let Some(service) = slot.service.clone() {
             if service.engine_running().await.ok().flatten() == Some(true) {
+                let resume_after_recovery = self.recovery_resume_candidates();
                 let download_root = self
                     .launch_config
                     .read()
@@ -384,6 +385,8 @@ impl EngineRuntime {
                 }
                 return match recovered {
                     Ok(_) => {
+                        self.resume_recovered_non_cloud_tasks(&service, &resume_after_recovery)
+                            .await;
                         let client = slot.client.clone();
                         Self::start_synchronizer_if_needed(slot, service, client);
                         self.set_state(EngineAvailability::available())
@@ -409,6 +412,7 @@ impl EngineRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         let download_root = launch_config.download_dir.clone();
+        let resume_after_recovery = self.recovery_resume_candidates();
         let (process, client) = match Aria2Process::start(launch_config).await {
             Ok(engine) => engine,
             Err(error) => {
@@ -438,12 +442,53 @@ impl EngineRuntime {
         }
         match recovered {
             Ok(_) => {
+                self.resume_recovered_non_cloud_tasks(&service, &resume_after_recovery)
+                    .await;
                 Self::start_synchronizer_if_needed(slot, service, Some(client));
                 self.set_state(EngineAvailability::available())
             }
             Err(error) => {
                 self.mark_tasks_unavailable(&error.to_string());
                 self.set_state(EngineAvailability::unavailable(error.to_string()))
+            }
+        }
+    }
+
+    /// `--pause=true` makes aria2 load every saved GID without immediately
+    /// touching a saved provider URL. Restore the normal automatic behavior
+    /// for non-cloud work after reconciliation; direct cloud tasks are resumed
+    /// only by the authorization-completion path.
+    fn recovery_resume_candidates(&self) -> Vec<uuid::Uuid> {
+        self.store
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|task| {
+                task.aria_gid.is_some()
+                    && !task.source.starts_with("cloud://")
+                    && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
+                    && matches!(task.status, TaskStatus::Queued | TaskStatus::Downloading)
+            })
+            .map(|task| task.id)
+            .collect()
+    }
+
+    async fn resume_recovered_non_cloud_tasks(
+        &self,
+        service: &Arc<DownloadService>,
+        candidates: &[uuid::Uuid],
+    ) {
+        for &id in candidates {
+            let should_resume = self.store.find(id).is_ok_and(|task| {
+                task.status == TaskStatus::Paused
+                    && task.aria_gid.is_some()
+                    && !task.source.starts_with("cloud://")
+            });
+            if should_resume {
+                // A failed unpause leaves the durable task paused for the
+                // normal engine retry/control path; it must not make startup
+                // itself unavailable.
+                let _ = service.control(id, DownloadAction::Resume).await;
             }
         }
     }

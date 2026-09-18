@@ -44,6 +44,7 @@ fn launch_arguments_disable_remote_rpc_and_enable_persistence() {
         "--rpc-listen-all=false",
         "--rpc-allow-origin-all=false",
         "--save-session-interval=10",
+        "--pause=true",
         "--pause-metadata=true",
         "--continue=true",
         "--state-dir=fixture\\data\\aria2-next-state",

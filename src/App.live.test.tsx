@@ -384,7 +384,7 @@ it('review shares overlapping task reauthorization requests', async () => {
   const begin = deferred<any>();
   state.reauthorizeFailedCloudTask.mockReturnValue(begin.promise);
   render(<App />);
-  fireEvent.click(screen.getByRole('tab', { name: /失败/ }));
+  fireEvent.click(screen.getByRole('tab', { name: /下载中/ }));
   const button = await screen.findByRole('button', { name: '重新授权 重复授权.mp4' });
   fireEvent.click(button);
   fireEvent.click(button);
@@ -401,7 +401,7 @@ it('shows a native authorization failure and allows the Baidu authorization butt
   state.reauthorizeFailedCloudTask.mockRejectedValue({ code: 'storage', message: '授权窗口打开失败，请重试' });
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
   await user.click(await screen.findByRole('button', { name: '重新授权 book.pdf' }));
   expect(await screen.findByRole('status')).toHaveTextContent('授权窗口打开失败，请重试');
   await user.click(screen.getByRole('button', { name: '重新授权 book.pdf' }));
@@ -414,7 +414,7 @@ it('shows the duplicate decision when retry returns a queue projection', async (
   state.taskAction.mockResolvedValue({ queueTask: failed, duplicate: { task: failed, state: 'overwrite_required' } });
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
   await user.click(await screen.findByRole('button', { name: '重新下载 book.pdf' }));
   expect(await screen.findByRole('dialog', { name: '检测到重复下载' })).toBeVisible();
 });
@@ -445,7 +445,7 @@ it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorizat
 
     render(<App />);
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    fireEvent.click(screen.getByRole('tab', { name: /失败/ }));
+    fireEvent.click(screen.getByRole('tab', { name: /下载中/ }));
     fireEvent.click(screen.getByRole('button', { name: '重新授权 需要验证的文件.mp4' }));
     await act(async () => { await Promise.resolve(); });
 
@@ -482,7 +482,7 @@ it('refreshes a task after automatic password renewal without polling a closed a
   });
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
   await user.click(await screen.findByRole('button', { name: '重新授权 自动恢复.mp4' }));
   await screen.findByText('登录已自动恢复，正在继续下载');
   await user.click(screen.getByRole('tab', { name: /下载中/ }));
@@ -762,29 +762,29 @@ it('opens one batch window and parses every torrent dropped on the global input'
   expect(dialog).toHaveTextContent('second.torrent');
 });
 
-it('selects only the current tab tasks with Ctrl+A across all four task tabs', async () => {
+it('selects only the current tab tasks with Ctrl+A across all three task tabs', async () => {
   const groups = [
-    { tab: /下载中/, status: 'downloading' }, { tab: /已完成/, status: 'completed' },
-    { tab: /失败/, status: 'failed' }, { tab: /回收站/, status: 'recycled' },
+    { tab: /下载中/, statuses: ['downloading', 'failed'] }, { tab: /已完成/, statuses: ['completed'] },
+    { tab: /回收站/, statuses: ['recycled'] },
   ] as const;
-  const tasks = groups.flatMap(({ status }) => [1, 2].map(index => ({
+  const tasks = ['downloading', 'failed', 'completed', 'recycled'].flatMap((status) => [1, 2].map(index => ({
     ...oldTask, id: `${status}-${index}`, name: `${status}-${index}.zip`, status,
   })));
   state.list.mockImplementation((scope?: string) => Promise.resolve(
     scope === 'active'
-      ? tasks.filter((task) => task.status === 'downloading')
+      ? tasks.filter((task) => task.status === 'downloading' || task.status === 'failed')
       : scope === 'terminal'
-        ? tasks.filter((task) => task.status !== 'downloading')
+        ? tasks.filter((task) => task.status === 'completed' || task.status === 'recycled')
         : tasks
   ));
   const user = userEvent.setup();
   render(<App />);
   await screen.findByText('downloading-1.zip');
-  for (const { tab, status } of groups) {
+  for (const { tab, statuses } of groups) {
     await user.click(screen.getByRole('tab', { name: tab }));
     fireEvent.keyDown(document, { key: 'a', ctrlKey: true });
     const selected = [...document.querySelectorAll('.task-row[aria-selected="true"]')];
-    expect(selected.map(row => row.getAttribute('data-task-id')).sort()).toEqual([`${status}-1`, `${status}-2`]);
+    expect(selected.map(row => row.getAttribute('data-task-id')).sort()).toEqual(statuses.flatMap((status) => [`${status}-1`, `${status}-2`]).sort());
   }
 });
 
@@ -1744,7 +1744,7 @@ it('replaces a virtual failed directory leaf from its retry root without adding 
     queueTask: retriedRoot,
   });
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
 
   await user.click(await screen.findByRole('button', { name: '展开 Season 1' }));
   expect(screen.getByText('链接生成失败')).toBeVisible();

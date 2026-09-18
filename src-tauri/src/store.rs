@@ -154,6 +154,43 @@ impl TaskStore {
         )?)
     }
 
+    /// Cloud tasks persist an expiring provider URL in aria2's native session.
+    /// Before that session is loaded at application startup, turn only tasks
+    /// that had been actively downloading into an explicit authorization wait.
+    /// The original GID and native checkpoint are retained; a successful
+    /// account check can therefore resume the same task instead of treating it
+    /// as an unrecoverable engine loss.
+    pub fn defer_startup_cloud_downloads(&self) -> Result<Vec<DownloadTask>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT id FROM tasks
+             WHERE source LIKE 'cloud://%' AND aria_gid IS NOT NULL
+               AND status IN ('queued', 'downloading')",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        let now = current_timestamp();
+        for id in &ids {
+            connection.execute(
+                "UPDATE tasks SET status = 'paused', error = ?1,
+                 failure_code = 'authorization_pending', download_speed = 0,
+                 upload_speed = 0, connections = 0, eta_seconds = NULL,
+                 updated_at = ?2 WHERE id = ?3",
+                params!["恢复网盘登录后继续下载", now, id],
+            )?;
+        }
+        ids.into_iter()
+            .map(|id| {
+                Uuid::parse_str(&id)
+                    .map_err(|_| StoreError::InvalidStoredStatus)
+                    .and_then(|id| find_with_connection(&connection, id))
+            })
+            .collect()
+    }
+
     pub fn claim_cloud_directory_leaf_task(
         &self,
         group: Uuid,
@@ -242,7 +279,7 @@ impl TaskStore {
     ) -> Result<(Vec<DownloadTask>, Vec<(Uuid, Uuid)>), StoreError> {
         let (task_ids, leaves) = {
             let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-            let mut statement = connection.prepare("SELECT t.id FROM tasks t JOIN cloud_download_accounts a ON a.id = t.id WHERE a.provider = ?1 AND a.account_id = ?2 AND t.status = 'failed' AND t.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required') AND t.source LIKE ?3 AND NOT EXISTS (SELECT 1 FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id WHERE i.task_id = t.id AND g.status IN ('cancelled', 'recycled', 'completed'))")?;
+            let mut statement = connection.prepare("SELECT t.id FROM tasks t JOIN cloud_download_accounts a ON a.id = t.id WHERE a.provider = ?1 AND a.account_id = ?2 AND ((t.status = 'failed' AND t.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required')) OR (t.status = 'paused' AND t.failure_code = 'authorization_pending')) AND t.source LIKE ?3 AND NOT EXISTS (SELECT 1 FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id WHERE i.task_id = t.id AND g.status IN ('cancelled', 'recycled', 'completed'))")?;
             let task_ids = statement
                 .query_map(
                     params![
@@ -253,7 +290,7 @@ impl TaskStore {
                     |row| row.get::<_, String>(0),
                 )?
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut statement = connection.prepare("SELECT g.id, i.id FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id JOIN cloud_download_accounts a ON a.id = g.id WHERE a.provider = ?1 AND g.provider = ?1 AND a.account_id = ?2 AND i.task_id IS NULL AND i.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required') AND g.status NOT IN ('cancelled', 'recycled', 'completed')")?;
+            let mut statement = connection.prepare("SELECT g.id, i.id FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id JOIN cloud_download_accounts a ON a.id = g.id WHERE a.provider = ?1 AND g.provider = ?1 AND a.account_id = ?2 AND i.task_id IS NULL AND i.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required', 'authorization_pending') AND g.status NOT IN ('cancelled', 'recycled', 'completed')")?;
             let leaves = statement
                 .query_map(params![provider.key(), account], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -874,11 +911,11 @@ impl TaskStore {
     }
 
     pub fn list_active(&self) -> Result<Vec<DownloadTask>, StoreError> {
-        self.list_matching("WHERE status NOT IN ('completed', 'failed', 'cancelled', 'recycled')")
+        self.list_matching("WHERE status NOT IN ('completed', 'cancelled', 'recycled')")
     }
 
     pub fn list_terminal(&self) -> Result<Vec<DownloadTask>, StoreError> {
-        self.list_matching("WHERE status IN ('completed', 'failed', 'cancelled', 'recycled')")
+        self.list_matching("WHERE status IN ('completed', 'cancelled', 'recycled')")
     }
 
     fn list_matching(&self, filter: &str) -> Result<Vec<DownloadTask>, StoreError> {
@@ -1938,6 +1975,75 @@ mod tests {
         cloud::CloudProvider,
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
     };
+
+    #[test]
+    fn startup_defers_only_active_direct_cloud_tasks_and_keeps_them_recoverable() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let cloud = store
+            .create(NewTask {
+                source: "cloud://quark/file-1".into(),
+                name: "cloud.bin".into(),
+                kind: "cloud".into(),
+                is_private: false,
+            })
+            .unwrap();
+        let mut cloud_snapshot = store.find(cloud.id).unwrap();
+        cloud_snapshot.status = TaskStatus::Downloading;
+        cloud_snapshot.aria_gid = Some("cloud-gid".into());
+        store.apply_transfer_snapshot(cloud_snapshot).unwrap();
+
+        let direct = store
+            .create(NewTask::direct("https://example.test/file.bin"))
+            .unwrap();
+        let mut direct_snapshot = store.find(direct.id).unwrap();
+        direct_snapshot.status = TaskStatus::Downloading;
+        direct_snapshot.aria_gid = Some("direct-gid".into());
+        store.apply_transfer_snapshot(direct_snapshot).unwrap();
+
+        let deferred = store.defer_startup_cloud_downloads().unwrap();
+        assert_eq!(deferred.len(), 1);
+        let deferred = &deferred[0];
+        assert_eq!(deferred.id, cloud.id);
+        assert_eq!(deferred.status, TaskStatus::Paused);
+        assert_eq!(deferred.aria_gid.as_deref(), Some("cloud-gid"));
+        assert_eq!(
+            deferred.failure_code.as_deref(),
+            Some("authorization_pending")
+        );
+        assert_eq!(deferred.error.as_deref(), Some("恢复网盘登录后继续下载"));
+        assert_eq!(
+            store.find(direct.id).unwrap().status,
+            TaskStatus::Downloading
+        );
+    }
+
+    #[test]
+    fn reauthorized_lookup_includes_startup_deferred_cloud_task() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask {
+                source: "cloud://quark/file-1".into(),
+                name: "cloud.bin".into(),
+                kind: "cloud".into(),
+                is_private: false,
+            })
+            .unwrap();
+        let mut snapshot = store.find(task.id).unwrap();
+        snapshot.status = TaskStatus::Downloading;
+        snapshot.aria_gid = Some("cloud-gid".into());
+        store.apply_transfer_snapshot(snapshot).unwrap();
+        store
+            .bind_cloud_download_account(task.id, CloudProvider::Quark, "account-1")
+            .unwrap();
+
+        store.defer_startup_cloud_downloads().unwrap();
+        let (tasks, leaves) = store
+            .reauthorized_cloud_downloads(CloudProvider::Quark, "account-1")
+            .unwrap();
+        assert!(leaves.is_empty());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task.id);
+    }
 
     #[test]
     fn post_processing_note_survives_reopen_and_blank_input_clears_it() {

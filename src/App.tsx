@@ -28,7 +28,7 @@ import { installWindowResizePerformanceMode } from './lib/windowResizePerformanc
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
 import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
 
-type TaskListTab = 'active' | 'completed' | 'failed' | 'recycle';
+type TaskListTab = 'active' | 'completed' | 'recycle';
 type TaskSortMode = 'manual' | 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
 type HeaderPanelMode = 'search' | 'download' | null;
 type PrivacyTaskFilter = 'all' | 'private' | 'ordinary';
@@ -40,11 +40,10 @@ const backgroundPurgeFrameDelayMs = 16;
 const initialTaskSorts: Record<TaskListTab, TaskSortMode> = {
   active: defaultTaskSort,
   completed: defaultTaskSort,
-  failed: defaultTaskSort,
   recycle: defaultTaskSort,
 };
-const initialTaskOrders: Record<TaskListTab, string[]> = { active: [], completed: [], failed: [], recycle: [] };
-const taskListTabs: readonly TaskListTab[] = ['active', 'completed', 'failed', 'recycle'];
+const initialTaskOrders: Record<TaskListTab, string[]> = { active: [], completed: [], recycle: [] };
+const taskListTabs: readonly TaskListTab[] = ['active', 'completed', 'recycle'];
 const taskSortModes = new Set<TaskSortMode>(['manual', 'created-desc', 'created-asc', 'progress-asc', 'progress-desc', 'name-asc', 'name-desc', 'size-asc', 'size-desc']);
 
 interface TaskOrderPreferences {
@@ -174,7 +173,7 @@ function TaskSortControl({ value, onChange, privacyFilter, onPrivacyFilterChange
   </div>;
 }
 
-const inactiveStatuses = new Set<QueueTask['status']>(['completed', 'failed', 'cancelled', 'recycled']);
+const inactiveStatuses = new Set<QueueTask['status']>(['completed', 'cancelled', 'recycled']);
 const cloudClient: CloudManagerClient = cloudApi;
 
 function hasMultipleLines(value: string): boolean {
@@ -198,8 +197,13 @@ function isDownloadInput(value: string): boolean {
 
 function taskTabForSearchResult(task: QueueTask): TaskListTab {
   if (task.status === 'completed') return 'completed';
-  if (task.status === 'failed') return 'failed';
   return 'active';
+}
+
+function taskStatusLabel(task: QueueTask): string {
+  if (task.status === 'completed') return '已完成';
+  if (task.status === 'failed') return '失败';
+  return '下载中';
 }
 
 function searchTaskMatches(task: QueueTask, keyword: string): boolean {
@@ -340,14 +344,13 @@ export function App() {
   }), [privacyTaskFilter, privacyVisibleTasks]);
   const activeTasks = useMemo(() => filteredPrivacyTasks.filter((task) => !inactiveStatuses.has(task.status)), [filteredPrivacyTasks]);
   const completedTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'completed'), [filteredPrivacyTasks]);
-  const failedTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'failed'), [filteredPrivacyTasks]);
   const recycledTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'recycled' || task.status === 'cancelled'), [filteredPrivacyTasks]);
   const taskSearchResults = useMemo(() => headerPanel === 'search' && !isDownloadInput(searchInput)
     ? filteredPrivacyTasks.filter((task) => searchTaskMatches(task, searchInput))
     : [], [filteredPrivacyTasks, headerPanel, searchInput]);
   const unsortedVisibleTasks = downloadTab === 'active' ? activeTasks
     : downloadTab === 'completed' ? completedTasks
-      : downloadTab === 'failed' ? failedTasks : recycledTasks;
+      : recycledTasks;
   const visibleTasks = useMemo(() => taskSorts[downloadTab] === 'manual'
     ? applyStoredTaskOrder(unsortedVisibleTasks, taskOrders[downloadTab])
     : sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]), [downloadTab, taskOrders, taskSorts, unsortedVisibleTasks]);
@@ -1501,7 +1504,7 @@ export function App() {
                 : <section className="header-search-results" role="region" aria-label="搜索结果">
                   <header><strong>搜索结果</strong><span>{taskSearchResults.length} 个任务</span><button type="button" aria-label="关闭搜索结果" onClick={() => setHeaderPanel(null)}>×</button></header>
                   {taskSearchResults.length ? <div>{taskSearchResults.map((task) => <button type="button" key={task.id} className="header-search-result" aria-label={`打开任务 ${displayTaskName(task)}`} onClick={() => selectSearchResult(task)}>
-                    <span className={`header-search-status ${taskTabForSearchResult(task)}`}>{taskTabForSearchResult(task) === 'active' ? '下载中' : taskTabForSearchResult(task) === 'completed' ? '已完成' : '失败'}</span>
+                    <span className={`header-search-status ${task.status === 'failed' ? 'failed' : taskTabForSearchResult(task)}`}>{taskStatusLabel(task)}</span>
                     <strong title={displayTaskName(task)}>{displayTaskName(task)}</strong>
                   </button>)}</div> : <p>没有匹配的下载任务</p>}
                 </section>}
@@ -1529,7 +1532,6 @@ export function App() {
             <div className="download-tab-list workspace-tab-list" role="tablist" aria-label="下载任务">
               <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
-              <button role="tab" aria-selected={downloadTab === 'failed'} onClick={() => selectDownloadTab('failed')}>失败 <b>{failedTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'recycle'} onClick={() => selectDownloadTab('recycle')}>回收站 <b>{recycledTasks.length}</b></button>
             </div>
             {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" disabled={purgeInProgress} onClick={requestRecycleClear}>清空</button>}
