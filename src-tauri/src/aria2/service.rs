@@ -59,16 +59,26 @@ impl UriSubmissionOptions {
             options.insert("out".into(), output_name);
         }
         if !self.headers.is_empty() {
-            let headers = self
-                .headers
-                .into_iter()
-                .map(|(name, value)| {
-                    valid_header(&name, &value)
-                        .then(|| format!("{name}: {value}"))
-                        .ok_or(DownloadServiceError::InvalidUriOption("header"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            options.insert("header".into(), headers.join("\n"));
+            let mut headers = Vec::new();
+            for (name, value) in self.headers {
+                if !valid_header(&name, &value) {
+                    return Err(DownloadServiceError::InvalidUriOption("header"));
+                }
+                // aria2 has dedicated per-download options for these two
+                // HTTP fields. Passing them through `header` leaves aria2's
+                // own default User-Agent in place as well, producing two
+                // identities on the wire. UC's CDN rejects that request.
+                if name.eq_ignore_ascii_case("user-agent") {
+                    options.insert("user-agent".into(), value);
+                } else if name.eq_ignore_ascii_case("referer") {
+                    options.insert("referer".into(), value);
+                } else {
+                    headers.push(format!("{name}: {value}"));
+                }
+            }
+            if !headers.is_empty() {
+                options.insert("header".into(), headers.join("\n"));
+            }
         }
         if let Some(proxy) = self.proxy {
             if proxy.trim().is_empty() || proxy.contains(['\r', '\n']) {

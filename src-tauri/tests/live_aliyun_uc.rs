@@ -6,18 +6,22 @@
 //! mutated. Credential bytes, cookies and signed download URLs are never
 //! printed.
 
-use alldownloader_lib::cloud::{
+use alldownloader_lib::{
+    aria2::{Aria2LaunchConfig, Aria2Process},
+    cloud::{
     commands::CloudState, CloudDirectory, CloudError, CloudFile, CloudFileKind, CloudHttpRequest,
     CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShareOptions, CloudUploadTransport,
     CredentialStore, DpapiCredentialStore, ProviderRegistry, ReqwestTransport,
     ResolvedCloudDownload, UploadHttpRequest, UploadHttpResponse,
+    },
+    Aria2Settings, DownloadService, NewTask, TaskStatus, TaskStore,
 };
 use std::{
     collections::BTreeSet,
     error::Error,
     fs, io,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1391,6 +1395,127 @@ fn live_uc_existing_file_download() -> LiveResult<()> {
     .and_then(download_bytes);
     http.report();
     result.map(|_| ())
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing small UC file; verifies the production aria2 handoff without retaining a signed URL or file"]
+fn live_uc_existing_file_aria2_download() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let credentials_root = session_root()?;
+    let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
+        failure(format!("UC credential store initialization failed: {}", error_kind(&error)))
+    })?;
+    if credentials
+        .load(provider.key())
+        .map_err(|error| failure(format!("UC credential decrypt failed: {}", error_kind(&error))))?
+        .is_none()
+    {
+        return Err(failure("UC is not currently authorized"));
+    }
+    let state = CloudState::new(credentials_root)
+        .map_err(|error| failure(format!("UC state initialization failed: {}", error_kind(&error))))?;
+    let http = LiveTransport::new()?;
+    let directory = step(provider, "list root for aria2 existing-file download", || {
+        driver_list(
+            &state,
+            &http,
+            provider,
+            ProviderRegistry::global().get(provider).root_directory_id,
+        )
+    })?;
+    let file = directory
+        .items
+        .into_iter()
+        .filter(|item| {
+            item.kind == CloudFileKind::File && item.size.is_some_and(|size| size <= 1024 * 1024)
+        })
+        .min_by_key(|item| item.size)
+        .ok_or_else(|| failure("UC root has no small file available for aria2 download testing"))?;
+    let resolved = step(provider, "resolve existing-file aria2 download", || {
+        resolve_download(&state, &http, provider, &file.id)
+    })?;
+    http.report();
+
+    // The signed URL and downloaded bytes live only in this temporary test
+    // directory. The durable task intentionally uses a non-sensitive marker.
+    let root = tempfile::tempdir()?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let mut aria2 = Aria2Settings::default();
+    aria2.rpc_port = listener.local_addr()?.port();
+    aria2.rpc_token = format!("uc-live-download-{}", aria2.rpc_port);
+    aria2.max_connections_per_server = 1;
+    drop(listener);
+    let config = Aria2LaunchConfig {
+        binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+        data_dir: root.path().join("data"),
+        download_dir: root.path().join("downloads"),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+        aria2,
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async {
+        let (mut process, client) = Aria2Process::start(config.clone())
+            .await
+            .map_err(|_| failure("UC aria2 test engine failed to start"))?;
+        let store = Arc::new(TaskStore::open_in_memory()?);
+        let service = DownloadService::new(Arc::new(client), Arc::clone(&store));
+        let task = store.create(NewTask {
+            source: format!(
+                "cloud://uc/{}",
+                url::form_urlencoded::byte_serialize(file.id.as_bytes()).collect::<String>()
+            ),
+            name: resolved.name.clone(),
+            kind: "cloud".into(),
+            is_private: true,
+        })?;
+        let output = config.download_dir.join(&resolved.name);
+        let url = resolved.url.clone();
+        let mut options = resolved.into_uri_submission_options();
+        options.directory = Some(config.download_dir.clone());
+        options.max_connections_per_server = Some(1);
+        options.max_tries = Some(1);
+        options.retry_wait_seconds = Some(0);
+
+        let result = async {
+            service
+                .submit_uri_with_options(task.id, vec![url], options)
+                .await
+                .map_err(|_| failure("aria2 did not accept the UC download task"))?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                let current = service
+                    .reconcile_task(task.id)
+                    .await
+                    .map_err(|_| failure("aria2 could not reconcile the UC download task"))?;
+                match current.status {
+                    TaskStatus::Completed => {
+                        let length = fs::metadata(&output)?.len();
+                        if length == 0 {
+                            return Err(failure("aria2 reported a zero-byte UC download"));
+                        }
+                        return Ok(());
+                    }
+                    TaskStatus::Failed => {
+                        return Err(failure("aria2 reported a failed UC download"));
+                    }
+                    _ if tokio::time::Instant::now() >= deadline => {
+                        return Err(failure("aria2 UC download exceeded the 60-second deadline"));
+                    }
+                    _ => tokio::time::sleep(Duration::from_millis(250)).await,
+                }
+            }
+        }
+        .await;
+        let _ = process.terminate_fallback();
+        result
+    });
+    drop(runtime);
+    result
 }
 
 #[test]
