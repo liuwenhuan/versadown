@@ -6,6 +6,24 @@ use super::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
+use tauri::AppHandle;
+
+use crate::{StoreError, TaskStore};
+
+#[path = "quark/download_scheduler.rs"]
+mod download_scheduler;
+
+pub(crate) fn quark_initial_connection_count(
+    store: &TaskStore,
+    task_id: uuid::Uuid,
+    budget: u8,
+) -> Result<u8, StoreError> {
+    download_scheduler::initial_connections_for_task(store, task_id, budget)
+}
+
+pub(crate) fn activate_quark_download_scheduler(app: AppHandle) {
+    download_scheduler::coordinator().activate(app);
+}
 
 pub const QUARK_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
     CloudSharePassCodeConstraint {

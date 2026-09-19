@@ -630,7 +630,16 @@ pub async fn queue_cloud_dispatch(
                         .aria2
                         .max_connections_per_server;
                     configured.proxy = current.proxy;
-                    let configured = if directory_member {
+                    let configured = if provider == CloudProvider::Quark {
+                        let connections = crate::cloud::quark_initial_connection_count(
+                            &state.store,
+                            id,
+                            configured_connections,
+                        )
+                        .map_err(|_| QuarkError::Storage)?;
+                        configured.max_connections_per_server = Some(connections);
+                        configured
+                    } else if directory_member {
                         // A directory spends its per-task concurrency on files,
                         // not HTTP ranges. Each child therefore has one URL
                         // connection while the root admits several children.
@@ -672,7 +681,11 @@ pub async fn queue_cloud_dispatch(
                             .submit_uri_with_options(id, vec![url], options)
                             .await
                     };
-                    submitted.map_err(cloud_download_submission_error)
+                    let submitted = submitted.map_err(cloud_download_submission_error)?;
+                    if provider == CloudProvider::Quark {
+                        crate::cloud::activate_quark_download_scheduler(submit_app.clone());
+                    }
+                    Ok(submitted)
                 },
             )
             .await;

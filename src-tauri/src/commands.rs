@@ -2100,6 +2100,13 @@ async fn run_cloud_directory_group_action(
                 }
             });
         }
+        if action == "resume" && group.provider == CloudProvider::Quark {
+            // Existing directory members resume their current GIDs without
+            // returning through URL submission. Wake Quark's private
+            // coordinator after those GIDs are unpaused so it reapplies the
+            // current connection budget after a long pause.
+            crate::cloud::activate_quark_download_scheduler(app.clone());
+        }
         if let Some(error) = errors.into_iter().next() {
             return Err(format!("部分目录文件操作失败，请重试：{error}"));
         }

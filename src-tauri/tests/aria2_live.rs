@@ -594,6 +594,53 @@ impl Drop for LiveAria2Fixture {
 }
 
 #[tokio::test]
+async fn bundled_aria2_next_changes_active_http_range_parallelism() {
+    let mut fixture = LiveAria2Fixture::start().await;
+    let download = fixture.add_slow_download("parallelism.bin").await;
+    fixture.wait_progress(download.gid()).await;
+
+    fixture
+        .client
+        .change_option(
+            download.gid(),
+            BTreeMap::from([
+                ("split".into(), "2".into()),
+                ("max-connection-per-server".into(), "2".into()),
+            ]),
+        )
+        .await
+        .expect("aria2-next must accept changing HTTP range parallelism");
+    let options = fixture.client.get_option(download.gid()).await.unwrap();
+    assert_eq!(options.get("split").map(String::as_str), Some("2"));
+    assert_eq!(
+        options.get("max-connection-per-server").map(String::as_str),
+        Some("2")
+    );
+
+    fixture
+        .client
+        .change_option(
+            download.gid(),
+            BTreeMap::from([
+                ("split".into(), "1".into()),
+                ("max-connection-per-server".into(), "1".into()),
+            ]),
+        )
+        .await
+        .expect("aria2-next must accept reducing HTTP range parallelism");
+    let options = fixture.client.get_option(download.gid()).await.unwrap();
+    assert_eq!(options.get("split").map(String::as_str), Some("1"));
+    assert_eq!(
+        options.get("max-connection-per-server").map(String::as_str),
+        Some("1")
+    );
+
+    download.release();
+    fixture.wait_complete(download.gid()).await;
+    fixture.save_and_shutdown().await;
+}
+
+#[tokio::test]
 async fn bundled_aria2_downloads_pauses_resumes_and_stops() {
     // Catches missing RPC control, synthetic progress, corrupt range output, and child leaks.
     let mut fixture = LiveAria2Fixture::start().await;
