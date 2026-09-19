@@ -28,6 +28,11 @@ export function AboutPanel({ icon, update, onOpenUpdate }: { icon: string; updat
         <li>在“设置”中选择下载保存位置，并按需要调整网络及下载选项。</li>
       </ol>
     </section>
+    <section className="about-section" aria-labelledby="about-thanks-title">
+      <h3 id="about-thanks-title">感谢</h3>
+      <p className="about-thanks">感谢 <a href="https://aria2.github.io/" target="_blank" rel="noreferrer">aria2</a> 和 <a href="https://github.com/AnInsomniacy/aria2-next" target="_blank" rel="noreferrer">aria2-next</a> 项目。它们解决了最复杂的多协议下载能力；没有这两个项目，就不会有万能下载这个软件。</p>
+      <p className="about-thanks">同时感谢本应用使用的免费开源图标库 <a href="https://lucide.dev/" target="_blank" rel="noreferrer">Lucide</a>。</p>
+    </section>
     <section className="about-section" aria-labelledby="about-declaration-title">
       <h3 id="about-declaration-title">声明</h3>
       <ol className="about-instructions">
