@@ -527,6 +527,9 @@ impl XunleiNativeBackend {
                 .apply_transfer_snapshot(updated)
                 .map_err(|error| error.to_string())?;
             emit_task(app, store, &updated);
+            if action == DownloadAction::Cancel {
+                release_cloud_slot(app, store, &updated);
+            }
             if action == DownloadAction::Resume {
                 if let Some(path) = store
                     .files(updated.id)
@@ -721,10 +724,18 @@ fn emit_task(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
 }
 
 fn release_cloud_slot(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
+    let state = app.state::<crate::commands::AppState>();
+    release_cloud_admission(&state.cloud_download_dispatch, store, task);
+}
+
+fn release_cloud_admission(
+    dispatch: &crate::cloud::download_dispatch::CloudDownloadDispatch,
+    store: &TaskStore,
+    task: &DownloadTask,
+) {
     if task.kind != "cloud" {
         return;
     }
-    let state = app.state::<crate::commands::AppState>();
     let directory_finished = store
         .cloud_directory_group_for_task(task.id)
         .ok()
@@ -740,9 +751,7 @@ fn release_cloud_slot(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
                 )
             })
         });
-    state
-        .cloud_download_dispatch
-        .release_terminal(task.id, directory_finished);
+    dispatch.release_terminal(task.id, directory_finished);
 }
 
 #[cfg(windows)]
@@ -1357,6 +1366,63 @@ mod tests {
         assert_eq!(read_u64(&info, 12), 122_600_000);
         assert_eq!(read_u64(&info, 20), 2_500_000);
         assert_eq!(read_u32(&info, 44), 461_400);
+    }
+
+    #[tokio::test]
+    async fn cancelling_native_cloud_task_releases_its_provider_admission() {
+        use crate::cloud::{
+            download_dispatch::CloudDownloadDispatch, download_scheduler::AdmissionOutcome,
+            CloudProvider,
+        };
+        use std::time::Duration;
+
+        let store = TaskStore::open_in_memory().unwrap();
+        let tasks = (0..5)
+            .map(|index| {
+                store
+                    .create(crate::NewTask {
+                        source: format!("cloud://xunlei/file-{index}"),
+                        name: format!("file-{index}.zip"),
+                        kind: "cloud".into(),
+                        is_private: false,
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let dispatch = CloudDownloadDispatch::default();
+        for task in tasks.iter().take(4) {
+            assert_eq!(
+                dispatch
+                    .scheduler
+                    .enqueue(CloudProvider::Xunlei, task.id)
+                    .await,
+                AdmissionOutcome::Granted
+            );
+        }
+
+        let waiting_dispatch = dispatch.clone();
+        let waiting_id = tasks[4].id;
+        let waiting = tokio::spawn(async move {
+            waiting_dispatch
+                .scheduler
+                .enqueue(CloudProvider::Xunlei, waiting_id)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+
+        let mut cancelled = tasks[0].clone();
+        cancelled.status = TaskStatus::Cancelled;
+        let cancelled = store.apply_transfer_snapshot(cancelled).unwrap();
+        release_cloud_admission(&dispatch, &store, &cancelled);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(250), waiting)
+                .await
+                .expect("the queued Xunlei task should be admitted after cancellation")
+                .unwrap(),
+            AdmissionOutcome::Granted
+        );
     }
 
     #[cfg(windows)]
