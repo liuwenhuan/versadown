@@ -117,7 +117,10 @@ function preserveKnownTaskState(current: QueueTask, snapshot: QueueTask): QueueT
     && !withFiles.statusMessage
     && withFiles.status === 'downloading'
     && withFiles.aria_gid?.startsWith('xunlei-native:')
-    && withFiles.aria_gid === current.aria_gid;
+    && withFiles.aria_gid === current.aria_gid
+    && ((withFiles.completed_length ?? 0) > 0
+      || (withFiles.download_speed ?? 0) > 0
+      || withFiles.progress > 0);
   return keepsConfirmedXunleiSvip
     ? { ...withFiles, statusMessage: current.statusMessage }
     : withFiles;

@@ -50,6 +50,10 @@ describe('upsertTask', () => {
     }]);
     expect(upsertTask([current], { ...incomplete, status: 'paused' })[0].statusMessage)
       .toBeUndefined();
+    expect(upsertTask([current], {
+      ...incomplete, progress: 0, completed_length: 0, download_speed: 0,
+    })[0].statusMessage)
+      .toBeUndefined();
   });
 
   it('does not insert an unrelated snapshot into a parent task children', () => {

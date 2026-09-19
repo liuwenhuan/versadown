@@ -296,6 +296,15 @@ impl XunleiNativeBackend {
                 let Some(api) = api.as_mut() else {
                     return Ok(None);
                 };
+                // Native checkpoint files are meaningful only after the
+                // official backend has actually been selected. Without the
+                // installed SDK, return `None` above and let aria2 apply its
+                // own `.aria2` continuation and overwrite rules.
+                prepare_native_output(
+                    &output_path,
+                    options.allow_overwrite,
+                    options.continue_download,
+                )?;
                 api.set_identity(user_id, peer_id)?;
                 let size = resolved.size_hint().unwrap_or(0);
                 if let Ok(existing) = store.find(task_id) {
@@ -378,7 +387,7 @@ impl XunleiNativeBackend {
     ) {
         let backend = Arc::clone(self);
         tauri::async_runtime::spawn_blocking(move || {
-            let result = (|| -> Result<String, NativeSubmitError> {
+            let result = (|| -> Result<(), NativeSubmitError> {
                 let trace_id = {
                     let mut api = backend
                         .api
@@ -414,7 +423,7 @@ impl XunleiNativeBackend {
                     .lock()
                     .map_err(|_| NativeSubmitError::Incompatible)?
                     .insert(task_native_id, token);
-                Ok("正在使用迅雷svip加速".into())
+                Ok(())
             })();
 
             let Ok(mut task) = store.find(task_id) else {
@@ -423,13 +432,16 @@ impl XunleiNativeBackend {
             if native_id(&task) != Some(task_native_id) || task.status != TaskStatus::Downloading {
                 return;
             }
-            task.status_message = Some(match result {
-                Ok(message) => message,
-                Err(NativeSubmitError::Incompatible) => PLUGIN_UPDATE_MESSAGE.into(),
-                Err(NativeSubmitError::Failed(message)) => {
-                    format!("迅雷加速启用失败，正在使用普通通道：{message}")
+            task.status_message = match result {
+                Ok(()) if task.completed_length > 0 || task.download_speed > 0 => {
+                    Some("正在使用迅雷svip加速".into())
                 }
-            });
+                Ok(()) => None,
+                Err(NativeSubmitError::Incompatible) => Some(PLUGIN_UPDATE_MESSAGE.into()),
+                Err(NativeSubmitError::Failed(message)) => {
+                    Some(format!("迅雷加速启用失败，正在使用普通通道：{message}"))
+                }
+            };
             if let Ok(task) = store.apply_transfer_snapshot(task) {
                 emit_task(&app, &store, &task);
             }
@@ -497,17 +509,11 @@ impl XunleiNativeBackend {
                 }
                 DownloadAction::Resume => {
                     updated.status = TaskStatus::Downloading;
-                    updated.status_message = Some(
-                        if self
-                            .equity_tokens
-                            .lock()
-                            .is_ok_and(|tokens| tokens.contains_key(&native_id))
-                        {
-                            "正在使用迅雷svip加速".into()
-                        } else {
-                            "正在启用迅雷加速".into()
-                        },
-                    );
+                    updated.status_message = self
+                        .equity_tokens
+                        .lock()
+                        .is_ok_and(|tokens| tokens.contains_key(&native_id))
+                        .then(|| "正在启用迅雷加速".into());
                 }
                 DownloadAction::Cancel => {
                     updated.status = TaskStatus::Cancelled;
@@ -581,6 +587,16 @@ impl XunleiNativeBackend {
                 previous = completed;
                 task.completed_length = completed;
                 task.download_speed = native_progress.speed.max(delta);
+                #[cfg(windows)]
+                if completed > 0
+                    && task.status_message.as_deref() != Some("正在使用迅雷svip加速")
+                    && backend
+                        .equity_tokens
+                        .lock()
+                        .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
+                {
+                    task.status_message = Some("正在使用迅雷svip加速".into());
+                }
                 task.progress = total
                     .filter(|total| *total > 0)
                     .map(|total| ((completed.saturating_mul(100) / total).min(100)) as u8)
@@ -640,6 +656,43 @@ impl ResolvedCloudDownload {
                 .flatten()
         })
     }
+}
+
+#[cfg(windows)]
+fn native_checkpoint_path(output: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut path = output.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+#[cfg(windows)]
+fn prepare_native_output(
+    output: &std::path::Path,
+    allow_overwrite: bool,
+    continue_download: bool,
+) -> Result<(), NativeSubmitError> {
+    let checkpoint = native_checkpoint_path(output, ".xltd");
+    let checkpoint_config = native_checkpoint_path(output, ".xltd.cfg");
+    if allow_overwrite {
+        for path in [output, checkpoint.as_path(), checkpoint_config.as_path()] {
+            if path.exists() {
+                std::fs::remove_file(path)
+                    .map_err(|_| NativeSubmitError::Failed("无法覆盖已有的迅雷下载文件".into()))?;
+            }
+        }
+        return Ok(());
+    }
+    if output.exists() {
+        return Err(NativeSubmitError::Failed(
+            "目标文件已存在，请选择覆盖或更换下载位置".into(),
+        ));
+    }
+    if !continue_download && (checkpoint.exists() || checkpoint_config.exists()) {
+        return Err(NativeSubmitError::Failed(
+            "目标位置存在未完成的迅雷文件，请继续原任务或选择覆盖".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn marker_header<'a>(resolved: &'a ResolvedCloudDownload, marker: &str) -> Option<&'a str> {
@@ -1288,6 +1341,37 @@ mod tests {
         assert_eq!(read_u64(&info, 12), 122_600_000);
         assert_eq!(read_u64(&info, 20), 2_500_000);
         assert_eq!(read_u32(&info, 44), 461_400);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_output_conflicts_require_an_explicit_resume_or_overwrite() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("file.zip");
+        let checkpoint = native_checkpoint_path(&output, ".xltd");
+        let checkpoint_config = native_checkpoint_path(&output, ".xltd.cfg");
+
+        std::fs::write(&output, b"complete").unwrap();
+        let error = prepare_native_output(&output, false, false).unwrap_err();
+        assert_eq!(
+            error.user_message(),
+            "目标文件已存在，请选择覆盖或更换下载位置"
+        );
+
+        std::fs::remove_file(&output).unwrap();
+        std::fs::write(&checkpoint, b"partial").unwrap();
+        std::fs::write(&checkpoint_config, b"checkpoint").unwrap();
+        assert!(prepare_native_output(&output, false, true).is_ok());
+        assert_eq!(
+            prepare_native_output(&output, false, false)
+                .unwrap_err()
+                .user_message(),
+            "目标位置存在未完成的迅雷文件，请继续原任务或选择覆盖"
+        );
+
+        prepare_native_output(&output, true, false).unwrap();
+        assert!(!checkpoint.exists());
+        assert!(!checkpoint_config.exists());
     }
 
     #[cfg(windows)]
