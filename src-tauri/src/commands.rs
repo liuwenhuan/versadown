@@ -2234,7 +2234,7 @@ async fn run_local_task_action(
         if !matches!(current.status, TaskStatus::Failed | TaskStatus::Cancelled) {
             return Err("当前任务不能重新下载".to_string());
         }
-        if !cloud_download_requires_restart(&current) {
+        if !cloud_download_requires_signed_url_refresh(&current) {
             if let Some(duplicate) =
                 retry_duplicate_state(&state.store, &current).map_err(|error| error.to_string())?
             {
@@ -2503,9 +2503,17 @@ fn restart_cloud_download_after_unsupported_resume(
     options.native_resume_gid = None;
 }
 
-fn cloud_download_requires_restart(task: &DownloadTask) -> bool {
+/// A cloud provider's signed URL can expire while a local payload remains
+/// resumable.  Do not make the user decide between the existing checkpoint
+/// and a fresh URL: re-resolve the same stable cloud task and let aria2 resume
+/// it.  Error 8 is separately changed to an overwrite below because that
+/// particular endpoint rejected the range request itself.
+fn cloud_download_requires_signed_url_refresh(task: &DownloadTask) -> bool {
     (task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://"))
-        && task.aria_error_code.as_deref() == Some("8")
+        && matches!(
+            task.aria_error_code.as_deref(),
+            Some("6" | "8" | "22" | "24")
+        )
 }
 
 /// Called after event publication; the task worker never blocks the aria2
@@ -2551,7 +2559,7 @@ pub(crate) fn schedule_cloud_download_refresh(app: AppHandle, task: &DownloadTas
         if current.status != TaskStatus::Failed || current.aria_gid != failed.aria_gid {
             return;
         }
-        if !cloud_download_requires_restart(&current)
+        if !cloud_download_requires_signed_url_refresh(&current)
             && !matches!(retry_duplicate_state(&state.store, &current), Ok(None))
         {
             return;
@@ -5745,23 +5753,24 @@ mod tests {
     }
 
     #[test]
-    fn only_cloud_code_eight_retries_bypass_duplicate_confirmation() {
+    fn signed_url_failures_bypass_duplicate_confirmation_for_cloud_tasks() {
         let store = TaskStore::open_in_memory().unwrap();
         let task = store
             .create(NewTask::direct("cloud-share://quark/share/file"))
             .unwrap();
-        let task = DownloadTask {
-            aria_error_code: Some("8".into()),
-            ..task
-        };
-        assert!(cloud_download_requires_restart(&task));
+        for code in ["6", "8", "22", "24"] {
+            assert!(cloud_download_requires_signed_url_refresh(&DownloadTask {
+                aria_error_code: Some(code.into()),
+                ..task.clone()
+            }));
+        }
 
-        assert!(!cloud_download_requires_restart(&DownloadTask {
+        assert!(!cloud_download_requires_signed_url_refresh(&DownloadTask {
             source: "https://example.test/file".into(),
             ..task.clone()
         }));
-        assert!(!cloud_download_requires_restart(&DownloadTask {
-            aria_error_code: Some("22".into()),
+        assert!(!cloud_download_requires_signed_url_refresh(&DownloadTask {
+            aria_error_code: Some("9".into()),
             ..task
         }));
     }
