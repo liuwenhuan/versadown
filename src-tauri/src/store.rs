@@ -156,16 +156,18 @@ impl TaskStore {
 
     /// Cloud tasks persist an expiring provider URL in their download backend.
     /// Before that backend session is loaded, pause every active stable cloud
-    /// source behind the shared authorization check. The original GID and
-    /// checkpoint remain available for native continuation after the provider
-    /// session and signed URL have been refreshed.
+    /// source and every task whose signed URL was rejected behind the shared
+    /// authorization check. The original GID and checkpoint remain available
+    /// for native continuation after the provider session and signed URL have
+    /// been refreshed.
     pub fn defer_startup_cloud_downloads(&self) -> Result<Vec<DownloadTask>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let mut statement = connection.prepare(
             "SELECT id FROM tasks
              WHERE (source LIKE 'cloud://%' OR source LIKE 'cloud-share://%')
                AND (status IN ('queued', 'downloading') OR
-                    (status = 'parsing' AND aria_gid IS NULL))",
+                    (status = 'parsing' AND aria_gid IS NULL) OR
+                    (status = 'failed' AND aria_error_code IN ('6', '8', '22', '24')))",
         )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -2251,6 +2253,52 @@ mod tests {
             assert!(task.error.is_none());
         }
         assert!(store.defer_startup_cloud_downloads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_defers_expired_cloud_urls_for_every_provider() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut expected = Vec::new();
+        for provider in crate::cloud::ProviderRegistry::global().catalog() {
+            let gid = format!("expired-gid-{}", provider.provider.key());
+            let task = store
+                .create(NewTask::direct(format!(
+                    "cloud://{}/expired-url",
+                    provider.provider.key()
+                )))
+                .unwrap();
+            let task = store
+                .apply_transfer_snapshot(DownloadTask {
+                    status: TaskStatus::Failed,
+                    aria_gid: Some(gid.clone()),
+                    aria_error_code: Some("24".into()),
+                    completed_length: 42,
+                    total_length: Some(100),
+                    ..task
+                })
+                .unwrap();
+            store
+                .bind_cloud_download_account(task.id, provider.provider, "owner")
+                .unwrap();
+            expected.push((task.id, provider.provider, gid));
+        }
+
+        let recovered = store.defer_startup_cloud_downloads().unwrap();
+        assert_eq!(recovered.len(), expected.len());
+        for (id, provider, gid) in expected {
+            let task = store.find(id).unwrap();
+            assert_eq!(task.status, TaskStatus::Paused);
+            assert_eq!(task.aria_gid.as_deref(), Some(gid.as_str()));
+            assert_eq!(task.aria_error_code.as_deref(), Some("24"));
+            assert_eq!(task.completed_length, 42);
+            assert_eq!(task.failure_code.as_deref(), Some("authorization_checking"));
+            assert!(store
+                .reauthorized_cloud_downloads(provider, "owner")
+                .unwrap()
+                .0
+                .iter()
+                .any(|candidate| candidate.id == id));
+        }
     }
 
     #[test]

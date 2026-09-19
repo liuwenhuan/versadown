@@ -160,11 +160,13 @@ impl CloudDownloadDispatch {
         // A restored cloud task owns an aria2 GID whose URL is deliberately
         // short-lived. Re-enter dispatch to replace that URL instead of
         // resuming the persisted session directly after application startup.
-        let refreshing_paused_cloud = retry_options
-            .is_some_and(|(_, continue_download)| continue_download)
-            && task.status == TaskStatus::Paused
-            && task.aria_gid.is_some()
-            && (task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://"));
+        let refreshing_paused_cloud =
+            retry_options.is_some_and(|(allow_overwrite, continue_download)| {
+                allow_overwrite || continue_download
+            }) && task.status == TaskStatus::Paused
+                && task.aria_gid.is_some()
+                && (task.source.starts_with("cloud://")
+                    || task.source.starts_with("cloud-share://"));
         if task.status == TaskStatus::Recycled
             || (!native_resume
                 && !refreshing_paused_cloud
@@ -502,5 +504,28 @@ mod tests {
                 .retry_submission_options(task.id, UriSubmissionOptions::default())
                 .continue_download
         );
+    }
+
+    #[tokio::test]
+    async fn paused_cloud_aria_task_can_restart_after_unsupported_resume() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://aliyun/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Paused;
+        task.aria_gid = Some("0123456789abcdef".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+
+        let (queued, _) = dispatch
+            .prepare_expected_with_retry_intent(&store, &task, true, false)
+            .await
+            .unwrap();
+
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert!(queued.aria_gid.is_none());
+        let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
+        assert!(options.allow_overwrite);
+        assert!(!options.continue_download);
     }
 }
