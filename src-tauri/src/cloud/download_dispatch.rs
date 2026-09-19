@@ -40,10 +40,35 @@ struct RetryIntent {
     continue_download: bool,
 }
 
+/// A provider-issued URL is an engine implementation detail, never the
+/// durable identity of a cloud download.  While this marker is set, the GID
+/// remains available solely for the native checkpoint lookup; recovery and
+/// synchronization must not project its (possibly expired) URL back onto the
+/// stable cloud task.
+pub(crate) const CLOUD_URL_REFRESHING: &str = "cloud_url_refreshing";
+pub(crate) const CLOUD_URL_REFRESH_FAILED: &str = "cloud_url_refresh_failed";
+
+pub(crate) fn is_cloud_download_source(source: &str) -> bool {
+    source.starts_with("cloud://") || source.starts_with("cloud-share://")
+}
+
+pub(crate) fn cloud_task_requires_provider_dispatch(task: &DownloadTask) -> bool {
+    is_cloud_download_source(&task.source)
+        && matches!(
+            task.failure_code.as_deref(),
+            Some(
+                "authorization_checking"
+                    | "authorization_recovering"
+                    | "authorization_pending"
+                    | CLOUD_URL_REFRESHING
+                    | CLOUD_URL_REFRESH_FAILED
+            )
+        )
+}
+
 fn signed_cloud_url_requires_refresh(task: &DownloadTask) -> bool {
     task.status == TaskStatus::Failed
-        && task.aria_gid.is_some()
-        && (task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://"))
+        && is_cloud_download_source(&task.source)
         && matches!(
             task.aria_error_code.as_deref(),
             Some("6" | "8" | "22" | "24")
@@ -176,19 +201,15 @@ impl CloudDownloadDispatch {
         let native_resume = retry_options.is_some_and(|(_, continue_download)| continue_download)
             && task.status == TaskStatus::Paused
             && crate::xunlei_native::is_native_gid(task.aria_gid.as_deref());
-        // A restored cloud task owns an aria2 GID whose URL is deliberately
-        // short-lived. Re-enter dispatch to replace that URL instead of
-        // resuming the persisted session directly after application startup.
-        let refreshing_paused_cloud =
-            retry_options.is_some_and(|(allow_overwrite, continue_download)| {
-                allow_overwrite || continue_download
-            }) && task.status == TaskStatus::Paused
-                && task.aria_gid.is_some()
-                && (task.source.starts_with("cloud://")
-                    || task.source.starts_with("cloud-share://"));
+        // Cloud GIDs point at short-lived provider URLs.  Retain the old GID
+        // only as the native checkpoint identity until the fresh URL is
+        // accepted; it must not be treated as the active engine submission.
+        let replacing_cloud_url = is_cloud_download_source(&task.source)
+            && task.aria_gid.is_some()
+            && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref());
         if task.status == TaskStatus::Recycled
             || (!native_resume
-                && !refreshing_paused_cloud
+                && !replacing_cloud_url
                 && task.aria_gid.is_some()
                 && matches!(
                     task.status,
@@ -218,14 +239,19 @@ impl CloudDownloadDispatch {
         }
         self.invalidate(id);
         task.status = TaskStatus::Queued;
-        task.aria_gid = None;
         task.error = None;
-        task.status_message = None;
-        task.failure_code = None;
-        task.aria_error_code = None;
-        task.followed_by_gid = None;
         task.download_speed = 0;
         task.upload_speed = 0;
+        if replacing_cloud_url {
+            task.failure_code = Some(CLOUD_URL_REFRESHING.into());
+            task.status_message = Some("正在刷新网盘下载地址".into());
+        } else {
+            task.aria_gid = None;
+            task.status_message = None;
+            task.failure_code = None;
+            task.aria_error_code = None;
+            task.followed_by_gid = None;
+        }
         let task = store
             .apply_transfer_snapshot(task)
             .map_err(|_| QuarkError::Storage)?;
@@ -257,7 +283,9 @@ impl CloudDownloadDispatch {
     ) -> Result<Option<DownloadTask>, QuarkError> {
         let _guard = self.submission_lock(id).await;
         let mut task = store.find(id).map_err(|_| QuarkError::Storage)?;
-        if task.aria_gid.is_some() {
+        let refreshing_cloud_url = cloud_task_requires_provider_dispatch(&task)
+            && task.failure_code.as_deref() == Some(CLOUD_URL_REFRESHING);
+        if task.aria_gid.is_some() && !refreshing_cloud_url {
             return Ok(None);
         }
         let status = match (action, task.status) {
@@ -271,13 +299,24 @@ impl CloudDownloadDispatch {
         self.invalidate(id);
         task.status = status;
         if action == DownloadAction::Cancel {
-            task.aria_gid = self
-                .task(id)
-                .retry_intent
-                .lock()
-                .unwrap()
-                .original_gid
-                .clone();
+            if refreshing_cloud_url {
+                // The resolver has not submitted a fresh URL.  Detach the
+                // stale session so a later engine restart can dispose of it
+                // without ever reviving this cancelled task.
+                task.aria_gid = None;
+                task.followed_by_gid = None;
+                task.failure_code = None;
+                task.status_message = None;
+                *self.task(id).retry_intent.lock().unwrap() = RetryIntent::default();
+            } else {
+                task.aria_gid = self
+                    .task(id)
+                    .retry_intent
+                    .lock()
+                    .unwrap()
+                    .original_gid
+                    .clone();
+            }
         }
         task.download_speed = 0;
         task.upload_speed = 0;
@@ -289,9 +328,12 @@ impl CloudDownloadDispatch {
 
     fn runnable(&self, store: &TaskStore, id: Uuid, version: u64) -> bool {
         self.task(id).version.load(Ordering::SeqCst) == version
-            && store
-                .find(id)
-                .is_ok_and(|task| task.status == TaskStatus::Queued && task.aria_gid.is_none())
+            && store.find(id).is_ok_and(|task| {
+                task.status == TaskStatus::Queued
+                    && (task.aria_gid.is_none()
+                        || (task.failure_code.as_deref() == Some(CLOUD_URL_REFRESHING)
+                            && cloud_task_requires_provider_dispatch(&task)))
+            })
             && store.cloud_directory_group_for_task(id).is_ok_and(|group| {
                 group.is_none_or(|group| {
                     !matches!(
@@ -364,10 +406,8 @@ impl CloudDownloadDispatch {
             Ok(resolved) => submit(resolved).await,
             Err(error) => Err(error),
         };
-        // Submission may bind a GID and then fail status reconciliation. In that
-        // case aria2 still owns the slot; never oversubscribe by releasing it.
-        if let Ok(task) = store.find(id) {
-            if task.aria_gid.is_some() {
+        match result {
+            Ok(task) => {
                 slot.accepted = !matches!(
                     task.status,
                     TaskStatus::Completed
@@ -376,21 +416,33 @@ impl CloudDownloadDispatch {
                         | TaskStatus::Recycled
                 );
                 *state.retry_intent.lock().unwrap() = RetryIntent::default();
-                return Some(task);
+                Some(task)
             }
-        }
-        match result {
-            Ok(task) => Some(task),
             Err(error) => {
                 let original_gid = state.retry_intent.lock().unwrap().original_gid.clone();
-                if let (Some(original_gid), Ok(mut current)) = (original_gid, store.find(id)) {
-                    current.aria_gid = Some(original_gid);
-                    let _ = store.apply_transfer_snapshot(current);
+                if let Ok(current) = store.find(id) {
+                    // `addUri` may have succeeded and only the immediate
+                    // status projection failed.  A distinct replacement GID
+                    // is already authoritative; do not turn it back into the
+                    // expired checkpoint.
+                    if current.aria_gid.is_some()
+                        && current.aria_gid != original_gid
+                        && !cloud_task_requires_provider_dispatch(&current)
+                    {
+                        slot.accepted = !matches!(
+                            current.status,
+                            TaskStatus::Completed
+                                | TaskStatus::Failed
+                                | TaskStatus::Cancelled
+                                | TaskStatus::Recycled
+                        );
+                        *state.retry_intent.lock().unwrap() = RetryIntent::default();
+                        return Some(current);
+                    }
                 }
                 store
-                    .fail_with_code(
+                    .fail_cloud_url_refresh(
                         id,
-                        Some(super::commands::cloud_failure_code(&error)),
                         super::commands::share_resolution_failure_message(&error),
                     )
                     .ok()
@@ -476,6 +528,7 @@ mod tests {
 
         assert_eq!(queued.status, TaskStatus::Queued);
         assert!(queued.aria_gid.is_none());
+        assert!(queued.failure_code.is_none());
         let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
         assert!(options.continue_download);
         assert_eq!(
@@ -517,7 +570,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(queued.status, TaskStatus::Queued);
-        assert!(queued.aria_gid.is_none());
+        assert_eq!(queued.aria_gid.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(queued.failure_code.as_deref(), Some(CLOUD_URL_REFRESHING));
         assert!(
             dispatch
                 .retry_submission_options(task.id, UriSubmissionOptions::default())
@@ -542,7 +596,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(queued.status, TaskStatus::Queued);
-        assert!(queued.aria_gid.is_none());
+        assert_eq!(queued.aria_gid.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(queued.failure_code.as_deref(), Some(CLOUD_URL_REFRESHING));
         let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
         assert!(options.allow_overwrite);
         assert!(!options.continue_download);
@@ -566,12 +621,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(queued.status, TaskStatus::Queued);
-        assert!(queued.aria_gid.is_none());
+        assert_eq!(queued.aria_gid.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(queued.failure_code.as_deref(), Some(CLOUD_URL_REFRESHING));
         let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
         assert!(options.continue_download);
         assert_eq!(
             options.native_resume_gid.as_deref(),
             Some("0123456789abcdef")
         );
+    }
+
+    #[tokio::test]
+    async fn failed_cloud_url_refresh_keeps_its_checkpoint_out_of_engine_recovery() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud-share://aliyun/share/file"))
+            .unwrap();
+        task.status = TaskStatus::Failed;
+        task.aria_gid = Some("0123456789abcdef".into());
+        task.aria_error_code = Some("24".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+        let (queued, version) = dispatch
+            .prepare_expected_with_retry_intent(&store, &task, false, false)
+            .await
+            .unwrap();
+
+        let result = dispatch
+            .run(
+                &store,
+                CloudProvider::Aliyun,
+                task.id,
+                version,
+                || async { Err::<(), _>(QuarkError::Transport("provider unavailable".into())) },
+                |_: ()| async { unreachable!() },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(queued.aria_gid.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(result.status, TaskStatus::Failed);
+        assert_eq!(result.aria_gid.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(
+            result.failure_code.as_deref(),
+            Some(CLOUD_URL_REFRESH_FAILED)
+        );
+        assert!(cloud_task_requires_provider_dispatch(&result));
+        assert_eq!(result.aria_error_code.as_deref(), Some("24"));
     }
 }

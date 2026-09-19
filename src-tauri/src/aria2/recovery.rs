@@ -166,6 +166,14 @@ impl DownloadService {
                 continue;
             };
 
+            if crate::cloud::download_dispatch::cloud_task_requires_provider_dispatch(&task) {
+                // The persisted engine task still contains a short-lived
+                // provider URL.  Its GID is retained only so the fresh URL can
+                // reuse native byte ranges; never let generic startup recovery
+                // overwrite the provider-dispatch state with this stale URL.
+                continue;
+            }
+
             // A replacement RPC client starts with no in-memory GID mapping.
             // Restore it during recovery so later status/control faults retain
             // the task ID in the local diagnostic log.

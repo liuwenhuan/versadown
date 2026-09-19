@@ -1272,6 +1272,36 @@ impl TaskStore {
         Ok(task)
     }
 
+    /// A cloud task keeps its old GID only as a native continuation checkpoint
+    /// while a provider resolves a replacement URL.  Do not let a resolver or
+    /// submission failure turn that stale URL back into an engine-owned task.
+    pub fn fail_cloud_url_refresh(
+        &self,
+        id: Uuid,
+        message: impl Into<String>,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET status = 'failed', error = ?1,
+             failure_code = 'cloud_url_refresh_failed',
+             status_message = NULL, download_speed = 0, upload_speed = 0,
+             connections = 0, eta_seconds = NULL, updated_at = ?2
+             WHERE id = ?3 AND status = 'queued'
+             AND failure_code = 'cloud_url_refreshing'",
+            params![message.into(), current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return find_with_connection(&connection, id).and_then(|task| {
+                if matches!(task.status, TaskStatus::Cancelled | TaskStatus::Recycled) {
+                    Ok(task)
+                } else {
+                    Err(StoreError::Database(rusqlite::Error::QueryReturnedNoRows))
+                }
+            });
+        }
+        find_with_connection(&connection, id)
+    }
+
     /// A failed task can be reclassified after an explicit retry reaches a
     /// cloud authorization boundary. Do not transition it again: terminal
     /// tasks intentionally do not permit Failed -> Failed transitions.
@@ -1370,6 +1400,48 @@ impl TaskStore {
              WHERE id=?3",
             params![gid, current_timestamp(), id.to_string()],
         )?;
+        find_with_connection(&connection, id)
+    }
+
+    /// Atomically promotes a newly accepted provider URL over the stale GID
+    /// that was retained solely for native continuation.  Unlike generic
+    /// resubmission this intentionally preserves the old progress projection
+    /// until aria2 has reported the replacement GID.
+    pub fn replace_cloud_url_gid(
+        &self,
+        id: Uuid,
+        expected_gid: &str,
+        replacement_gid: &str,
+    ) -> Result<DownloadTask, StoreError> {
+        if expected_gid.is_empty() || replacement_gid.is_empty() {
+            return Err(StoreError::Database(rusqlite::Error::InvalidParameterName(
+                "empty aria2 gid".into(),
+            )));
+        }
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET status = 'parsing', error = NULL, status_message = NULL,
+             failure_code = NULL, aria_gid = ?1, followed_by_gid = NULL,
+             metadata_gid = NULL, download_speed = 0, upload_speed = 0,
+             connections = 0, discovered_nodes = 0, eta_seconds = NULL,
+             aria_error_code = NULL, selection_confirmed = 0,
+             completed_at = NULL, updated_at = ?2
+             WHERE id = ?3 AND aria_gid = ?4 AND status = 'queued'
+             AND failure_code = 'cloud_url_refreshing'",
+            params![
+                replacement_gid,
+                current_timestamp(),
+                id.to_string(),
+                expected_gid
+            ],
+        )?;
+        if changed == 0 {
+            return Err(if find_with_connection(&connection, id).is_ok() {
+                StoreError::Database(rusqlite::Error::QueryReturnedNoRows)
+            } else {
+                StoreError::NotFound(id)
+            });
+        }
         find_with_connection(&connection, id)
     }
 
@@ -2321,6 +2393,36 @@ mod tests {
 
         assert_eq!(rebound.status, TaskStatus::Parsing);
         assert_eq!(rebound.aria_gid.as_deref(), Some("replacement-gid"));
+    }
+
+    #[test]
+    fn cloud_url_replacement_switches_only_after_the_new_gid_is_accepted() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://aliyun/file-id"))
+            .unwrap();
+        let queued = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Queued,
+                aria_gid: Some("0123456789abcdef".into()),
+                failure_code: Some("cloud_url_refreshing".into()),
+                aria_error_code: Some("24".into()),
+                completed_length: 42,
+                total_length: Some(100),
+                ..task
+            })
+            .unwrap();
+
+        let replaced = store
+            .replace_cloud_url_gid(queued.id, "0123456789abcdef", "fedcba9876543210")
+            .unwrap();
+
+        assert_eq!(replaced.status, TaskStatus::Parsing);
+        assert_eq!(replaced.aria_gid.as_deref(), Some("fedcba9876543210"));
+        assert_eq!(replaced.completed_length, 42);
+        assert_eq!(replaced.total_length, Some(100));
+        assert!(replaced.failure_code.is_none());
+        assert!(replaced.aria_error_code.is_none());
     }
 
     #[test]

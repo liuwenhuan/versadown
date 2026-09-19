@@ -2226,12 +2226,14 @@ async fn run_local_task_action(
         return task_action_outcome(&state.store, task, None);
     }
     if action == "resume"
-        && current.aria_gid.is_none()
         && current.status == TaskStatus::Paused
-        && matches!(
-            current.kind.as_str(),
-            "file" | "magnet" | "ed2k" | "hls" | "dash" | "cloud"
-        )
+        && ((current.kind == "cloud"
+            && crate::cloud::download_dispatch::is_cloud_download_source(&current.source))
+            || (current.aria_gid.is_none()
+                && matches!(
+                    current.kind.as_str(),
+                    "file" | "magnet" | "ed2k" | "hls" | "dash" | "cloud"
+                )))
     {
         let task = resubmit_task(
             app.clone(),
@@ -2289,6 +2291,22 @@ pub async fn resolve_duplicate_download(
     ensure_private_task_access(&state, &current)?;
     let resolution = duplicate_state(&state.store, &current).map_err(|error| error.to_string())?;
     let task = match (action.as_str(), resolution) {
+        ("resume", DuplicateDownloadState::ResumeAvailable)
+            if current.status == TaskStatus::Paused
+                && current.kind == "cloud"
+                && crate::cloud::download_dispatch::is_cloud_download_source(&current.source) =>
+        {
+            resubmit_task(
+                app.clone(),
+                &state,
+                current,
+                UriSubmissionOptions {
+                    continue_download: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+        }
         ("resume", DuplicateDownloadState::ResumeAvailable)
             if current.status == TaskStatus::Paused && current.aria_gid.is_some() =>
         {

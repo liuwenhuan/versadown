@@ -465,7 +465,7 @@ impl EngineRuntime {
             .into_iter()
             .filter(|task| {
                 task.aria_gid.is_some()
-                    && !task.source.starts_with("cloud://")
+                    && !crate::cloud::download_dispatch::is_cloud_download_source(&task.source)
                     && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                     && matches!(task.status, TaskStatus::Queued | TaskStatus::Downloading)
             })
@@ -482,7 +482,7 @@ impl EngineRuntime {
             let should_resume = self.store.find(id).is_ok_and(|task| {
                 task.status == TaskStatus::Paused
                     && task.aria_gid.is_some()
-                    && !task.source.starts_with("cloud://")
+                    && !crate::cloud::download_dispatch::is_cloud_download_source(&task.source)
             });
             if should_resume {
                 // A failed unpause leaves the durable task paused for the

@@ -588,6 +588,10 @@ pub async fn queue_cloud_dispatch(
     emit_cloud_dispatch_update(&app, state, &queued);
     let id = queued.id;
     let source = queued.source.clone();
+    let replacing_gid = (queued.failure_code.as_deref()
+        == Some(crate::cloud::download_dispatch::CLOUD_URL_REFRESHING))
+    .then(|| queued.aria_gid.clone())
+    .flatten();
     let directory_member = directory_id.is_some();
     let dispatch = state.cloud_download_dispatch.clone();
     let store = state.store.clone();
@@ -654,16 +658,14 @@ pub async fn queue_cloud_dispatch(
                         .service()
                         .await
                         .map_err(|_| QuarkError::DownloadEngineUnavailable)?;
-                    let replacing_existing_uri =
-                        configured.continue_download || configured.allow_overwrite;
                     let (url, options) = share::share_submission_options(resolved, configured)?;
-                    let submitted = if replacing_existing_uri {
-                        // A saved engine session can publish its old GID while
-                        // this fresh provider URL is being resolved. Atomically
-                        // rebind the accepted replacement instead of rejecting
-                        // that valid checkpoint as an already-submitted task.
+                    let submitted = if let Some(expected_gid) = replacing_gid.as_deref() {
+                        // The old GID is a native checkpoint only.  Replace it
+                        // atomically after aria2 has accepted this freshly
+                        // resolved provider URL; generic recovery can never
+                        // reactivate the saved URL in between.
                         service
-                            .resubmit_uri_with_options(id, vec![url], options)
+                            .replace_cloud_uri_with_options(id, expected_gid, vec![url], options)
                             .await
                     } else {
                         service

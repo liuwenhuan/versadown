@@ -598,6 +598,51 @@ impl DownloadService {
         self.finish_directory_uri(task_id, &gid, directory).await
     }
 
+    /// Replaces a provider-issued URL without ever releasing its previous GID
+    /// for general recovery.  The old GID is a native checkpoint reference
+    /// until aria2 accepts the replacement; only then is the durable cloud task
+    /// switched to the new active engine identity.
+    pub async fn replace_cloud_uri_with_options(
+        &self,
+        task_id: Uuid,
+        expected_gid: &str,
+        mut uris: Vec<String>,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        let _guard = self.operation.lock().await;
+        self.ensure_accepting()?;
+        let mut task = self.task_for_uri_submission(task_id)?;
+        if task.aria_gid.as_deref() != Some(expected_gid)
+            || task.status != TaskStatus::Queued
+            || task.failure_code.as_deref()
+                != Some(crate::cloud::download_dispatch::CLOUD_URL_REFRESHING)
+        {
+            return Err(DownloadServiceError::AlreadySubmitted);
+        }
+        let mut options = self.prepare_uri_options(&mut task, &mut uris, options)?;
+        options.insert("pause".into(), "false".into());
+        let directory = self.prepare_directory_uri(task_id, &mut options)?;
+        let gid = self.add_uri_for_task(task_id, uris, options).await?;
+        if let Err(error) = self
+            .store
+            .replace_cloud_url_gid(task_id, expected_gid, &gid)
+        {
+            let _ = self.api().remove(&gid).await;
+            return Err(error.into());
+        }
+        self.clear_observed_peers(task_id);
+        // Aria2 Next has already transferred the native checkpoint to the new
+        // GID during `addUri`.  Remove the paused old URL only after the
+        // database switch; failure here is harmless because recovery will see
+        // it as an unowned engine entry on the next launch.
+        if expected_gid != gid {
+            if self.api().remove(expected_gid).await.is_err() {
+                let _ = self.api().force_remove(expected_gid).await;
+            }
+        }
+        self.finish_directory_uri(task_id, &gid, directory).await
+    }
+
     pub async fn resubmit_native_media_with_options(
         &self,
         task_id: Uuid,
@@ -1360,6 +1405,7 @@ impl DownloadService {
             .filter(|task| {
                 task.aria_gid.is_some()
                     && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
+                    && !crate::cloud::download_dispatch::cloud_task_requires_provider_dispatch(task)
                     && !matches!(task.status, TaskStatus::Cancelled | TaskStatus::Recycled)
             })
             .collect();
