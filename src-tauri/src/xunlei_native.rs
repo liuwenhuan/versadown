@@ -834,6 +834,16 @@ fn native_call(code: i32, message: &'static str) -> Result<(), NativeSubmitError
     }
 }
 
+#[cfg(windows)]
+fn native_cancel_call(code: i32) -> Result<(), NativeSubmitError> {
+    match code {
+        // Cancellation is idempotent. After an application restart the new
+        // SDK server does not know task IDs owned by the previous process.
+        0 | 0x4E21 => Ok(()),
+        _ => native_call(code, "迅雷原生任务取消失败"),
+    }
+}
+
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
 }
@@ -1135,8 +1145,14 @@ impl WindowsApi {
         native_call(unsafe { (self.stop_task)(id) }, "迅雷原生任务暂停失败")
     }
     fn delete(&mut self, id: u32) -> Result<(), NativeSubmitError> {
+        // The official engine expects an active task to be stopped before it
+        // is deleted. Ignore the stop result here: delete below is the
+        // authoritative operation, and both calls may report task-not-found
+        // for a stale ID restored from an earlier application process.
+        let _ = unsafe { (self.stop_task)(id) };
+        let result = unsafe { (self.delete_task)(id) };
         self.trace_ids.remove(&id);
-        native_call(unsafe { (self.delete_task)(id) }, "迅雷原生任务取消失败")
+        native_cancel_call(result)
     }
 
     fn progress(&self, id: u32) -> Result<NativeProgress, NativeSubmitError> {
@@ -1341,6 +1357,17 @@ mod tests {
         assert_eq!(read_u64(&info, 12), 122_600_000);
         assert_eq!(read_u64(&info, 20), 2_500_000);
         assert_eq!(read_u32(&info, 44), 461_400);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cancel_is_idempotent_for_a_stale_sdk_task_id() {
+        assert!(native_cancel_call(0).is_ok());
+        assert!(native_cancel_call(0x4E21).is_ok());
+        assert_eq!(
+            native_cancel_call(0x4E23).unwrap_err().user_message(),
+            "迅雷原生任务取消失败（错误码 20003）"
+        );
     }
 
     #[cfg(windows)]
