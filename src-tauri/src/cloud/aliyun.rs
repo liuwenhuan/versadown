@@ -782,6 +782,41 @@ mod tests {
     }
 
     #[test]
+    fn aliyun_personal_download_url_recycle_bin_file_is_not_retried() {
+        struct RecycleBinHttp(std::sync::atomic::AtomicUsize);
+        impl CloudHttpTransport for RecycleBinHttp {
+            fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CloudHttpResponse {
+                    status: 403,
+                    body: json!({"code":"ForbiddenFileInTheRecycleBin"}).to_string(),
+                    set_cookies: vec![],
+                })
+            }
+        }
+
+        let credentials = MemoryCredentialStore::default();
+        let http = RecycleBinHttp(std::sync::atomic::AtomicUsize::new(0));
+        let adapter = AliyunShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        let session = AliyunSession {
+            refresh_token: "refresh".into(),
+            access_token: "access".into(),
+            drive_id: "drive".into(),
+            browser_access_ready: true,
+            expires_at: None,
+        };
+
+        assert!(matches!(
+            adapter.personal_download(&session, "file", "file.bin"),
+            Err(QuarkError::SourceFileMissing)
+        ));
+        assert_eq!(http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn aliyun_share_retries_consecutive_block_exceptions_while_listing() {
         let credentials = MemoryCredentialStore::default();
         let http = StatusHttp {
@@ -1485,11 +1520,15 @@ fn pds_resource_api(metadata: &Value) -> Result<String, QuarkError> {
 }
 
 fn aliyun_source_file_missing(response: &CloudHttpResponse) -> bool {
-    response.status == 404
-        && serde_json::from_str::<Value>(&response.body)
-            .ok()
-            .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))
-            .is_some_and(|code| matches!(code.as_str(), "NotFound.File" | "NotFound.FileId"))
+    serde_json::from_str::<Value>(&response.body)
+        .ok()
+        .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|code| {
+            matches!(
+                (response.status, code.as_str()),
+                (404, "NotFound.File" | "NotFound.FileId") | (_, "ForbiddenFileInTheRecycleBin")
+            )
+        })
 }
 
 fn aliyun_share_from_value(
@@ -1847,7 +1886,6 @@ impl AliyunShareAdapter<'_> {
                             QuarkError::Transport(_)
                                 | QuarkError::Provider(_)
                                 | QuarkError::InvalidResponse
-                                | QuarkError::SourceFileMissing
                         ) =>
                 {
                     aliyun_transient_retry_pause(attempt);

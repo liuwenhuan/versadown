@@ -440,12 +440,20 @@ impl CloudDownloadDispatch {
                         return Some(current);
                     }
                 }
-                store
-                    .fail_cloud_url_refresh(
-                        id,
-                        super::commands::share_resolution_failure_message(&error),
-                    )
-                    .ok()
+                let message = super::commands::share_resolution_failure_message(&error);
+                // A replacement retains the expired GID as its local resume
+                // checkpoint, so it needs the guarded failure transition
+                // above. A first-time cloud submission has no checkpoint:
+                // applying that guard to it would reject the update and leave
+                // the visible task queued forever.
+                if store
+                    .find(id)
+                    .is_ok_and(|task| task.failure_code.as_deref() == Some(CLOUD_URL_REFRESHING))
+                {
+                    store.fail_cloud_url_refresh(id, message).ok()
+                } else {
+                    store.fail(id, message).ok()
+                }
             }
         }
     }
@@ -668,5 +676,38 @@ mod tests {
         );
         assert!(cloud_task_requires_provider_dispatch(&result));
         assert_eq!(result.aria_error_code.as_deref(), Some("24"));
+    }
+
+    #[tokio::test]
+    async fn failed_initial_cloud_submission_does_not_remain_queued() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://aliyun/file-id"))
+            .unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+        let (queued, version) = dispatch.prepare_expected(&store, &task).await.unwrap();
+
+        let result = dispatch
+            .run(
+                &store,
+                CloudProvider::Aliyun,
+                task.id,
+                version,
+                || async { Err::<(), _>(QuarkError::Transport("provider unavailable".into())) },
+                |_: ()| async { unreachable!() },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert!(queued.aria_gid.is_none());
+        assert!(queued.failure_code.is_none());
+        assert_eq!(result.status, TaskStatus::Failed);
+        assert!(result.aria_gid.is_none());
+        assert!(result.failure_code.is_none());
+        assert_eq!(
+            result.error.as_deref(),
+            Some("获取网盘下载地址时网络请求失败，请检查网络后重试")
+        );
     }
 }

@@ -837,8 +837,14 @@ impl RecordedTransferResolver for RecordedTransferAdapter {
         entry: &CloudShareResolvedEntry,
         created_file_id: &str,
     ) -> Result<ShareOperationResult<RecordedTransferDownload>, QuarkError> {
-        assert_eq!(created_file_id, "personal-id");
         self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        if created_file_id == "missing-id" {
+            return Ok(ShareOperationResult {
+                result: Err(QuarkError::SourceFileMissing),
+                updated_context: None,
+            });
+        }
+        assert_eq!(created_file_id, "personal-id");
         Ok(ShareOperationResult {
             result: Ok(RecordedTransferDownload::Available(
                 super::super::commands::ResolvedCloudDownload {
@@ -903,6 +909,38 @@ fn pending_recorded_transfer_refreshes_without_resolving_an_expired_share() {
     assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 0);
     assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 0);
     assert_eq!(adapter.refresh_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn missing_recorded_transfer_is_forgotten_before_a_fresh_transfer() {
+    let (store, _, _) = memory_store();
+    let plan = fixture("recorded-transfer-recycle-bin");
+    let source = plan.source_for("f1");
+    let owner = recorded_transfer_owner();
+    store.upsert(&plan).unwrap();
+    store
+        .record_transfer_with_owner(&source, "missing-id", &owner)
+        .unwrap();
+    let adapter = RecordedTransferAdapter {
+        resolve_calls: AtomicU64::new(0),
+        transfer_calls: AtomicU64::new(0),
+        refresh_calls: AtomicU64::new(0),
+    };
+
+    let resolved = resolve_current_share_download(&store, &adapter, &source).unwrap();
+
+    assert_eq!(resolved.url, "https://cdn.example/new-transfer");
+    assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(adapter.refresh_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .reusable_transfer(&source, &owner)
+            .unwrap()
+            .unwrap()
+            .created_file_id,
+        "personal-id"
+    );
 }
 
 #[test]

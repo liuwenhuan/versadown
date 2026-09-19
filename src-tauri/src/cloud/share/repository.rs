@@ -655,6 +655,37 @@ impl CloudSharePlanStore {
         }))
     }
 
+    /// Forget one exact recorded personal-drive file after the provider confirms
+    /// that it no longer exists. A stale record must not keep suppressing a
+    /// new transfer for the same share entry.
+    pub(super) fn forget_unavailable_reusable_transfer(
+        &self,
+        source: &str,
+        created_file_id: &str,
+        owner_fingerprint: &str,
+    ) -> Result<(), QuarkError> {
+        if !valid_owner_fingerprint(owner_fingerprint) {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let (provider, share, fingerprint) = parse_stable_cloud_share_source(source)?;
+        self.update(|document, now| {
+            let key = plan_key(provider, &share);
+            let plan = &mut document.plans.get_mut(&key).ok_or_else(missing_plan)?.plan;
+            let before = plan.transfers.len();
+            plan.transfers.retain(|transfer| {
+                !(transfer.entry_fingerprint == fingerprint
+                    && transfer.created_file_id == created_file_id
+                    && transfer.owner_scheme == CloudShareTransferOwnerScheme::AccountV2
+                    && transfer.owner_fingerprint == owner_fingerprint
+                    && transfer.cleanup_state == CloudShareCleanupState::Pending)
+            });
+            if plan.transfers.len() != before {
+                document.touch(&key, now)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Claims only the exact entry's recorded objects. Completion/settings checks
     /// belong to the caller; this function performs no provider deletion itself.
     pub fn mark_cleanup_attempted(

@@ -357,27 +357,8 @@ pub fn resolve_current_share_download(
     // a normal retry neither depends on the share still existing nor creates a
     // duplicate transfer. The second owner check makes this fail closed after
     // a credential/session rotation.
-    if store.has_pending_transfer(source)? {
-        if let Some(owner) = adapter
-            .transfer_capability()
-            .ok_or(QuarkError::ProviderUnsupported)?
-            .transfer_owner_fingerprint(&entry)?
-        {
-            if let Some(record) = store.reusable_transfer(source, &owner)? {
-                let refreshed = adapter
-                    .recorded_capability()
-                    .ok_or(QuarkError::ProviderUnsupported)?
-                    .refresh_recorded_transfer(&entry, &record.created_file_id)?;
-                if let Some(context) = refreshed.updated_context {
-                    store.update_provider_context(source, &context)?;
-                    entry.plan.provider_context = context;
-                }
-                let RecordedTransferDownload::Available(mut download) = refreshed.result?;
-                validate_direct_url(&download.url)?;
-                download.name = entry.entry.name;
-                return Ok(download);
-            }
-        }
+    if let Some(download) = refresh_reusable_transfer(store, adapter, source, &mut entry)? {
+        return Ok(download);
     }
     let resolved = adapter.resolve_with_context(&entry)?;
     if let Some(context) = resolved.updated_context {
@@ -390,27 +371,7 @@ pub fn resolve_current_share_download(
             if request.source != source {
                 return Err(QuarkError::InvalidResponse);
             }
-            let mut reused = None;
-            if store.has_pending_transfer(source)? {
-                if let Some(owner) = adapter
-                    .transfer_capability()
-                    .ok_or(QuarkError::ProviderUnsupported)?
-                    .transfer_owner_fingerprint(&entry)?
-                {
-                    if let Some(record) = store.reusable_transfer(source, &owner)? {
-                        let refreshed = adapter
-                            .recorded_capability()
-                            .ok_or(QuarkError::ProviderUnsupported)?
-                            .refresh_recorded_transfer(&entry, &record.created_file_id)?;
-                        if let Some(context) = refreshed.updated_context {
-                            store.update_provider_context(source, &context)?;
-                            entry.plan.provider_context = context;
-                        }
-                        let RecordedTransferDownload::Available(download) = refreshed.result?;
-                        reused = Some(download);
-                    }
-                }
-            }
+            let reused = refresh_reusable_transfer(store, adapter, source, &mut entry)?;
             if let Some(download) = reused {
                 download
             } else {
@@ -428,6 +389,50 @@ pub fn resolve_current_share_download(
     validate_direct_url(&download.url)?;
     download.name = entry.entry.name;
     Ok(download)
+}
+
+fn refresh_reusable_transfer(
+    store: &CloudSharePlanStore,
+    adapter: &dyn CloudShareAdapter,
+    source: &str,
+    entry: &mut CloudShareResolvedEntry,
+) -> Result<Option<crate::cloud::commands::ResolvedCloudDownload>, QuarkError> {
+    if !store.has_pending_transfer(source)? {
+        return Ok(None);
+    }
+    let Some(owner) = adapter
+        .transfer_capability()
+        .ok_or(QuarkError::ProviderUnsupported)?
+        .transfer_owner_fingerprint(entry)?
+    else {
+        return Ok(None);
+    };
+    let Some(record) = store.reusable_transfer(source, &owner)? else {
+        return Ok(None);
+    };
+    let refreshed = adapter
+        .recorded_capability()
+        .ok_or(QuarkError::ProviderUnsupported)?
+        .refresh_recorded_transfer(entry, &record.created_file_id)?;
+    if let Some(context) = refreshed.updated_context {
+        store.update_provider_context(source, &context)?;
+        entry.plan.provider_context = context;
+    }
+    match refreshed.result {
+        Ok(RecordedTransferDownload::Available(mut download)) => {
+            validate_direct_url(&download.url)?;
+            download.name = entry.entry.name.clone();
+            Ok(Some(download))
+        }
+        // A saved transfer is merely a cache. If its personal file was
+        // deleted or moved to a recycle bin, remove exactly that record and
+        // continue through the normal share resolution/transfer flow.
+        Err(QuarkError::SourceFileMissing) => {
+            store.forget_unavailable_reusable_transfer(source, &record.created_file_id, &owner)?;
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn share_id(

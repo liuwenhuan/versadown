@@ -1950,6 +1950,21 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             );",
         )?;
     }
+    // `task_output_reservations` was originally created as part of the
+    // pre-v7 migration. Databases that had already recorded that version
+    // before the table was introduced therefore never received it. The
+    // reservation is required before aria2 accepts a new URI, so repair the
+    // independently-created table on every open instead of depending on an
+    // unrelated schema version boundary.
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS task_output_reservations (
+            task_id TEXT PRIMARY KEY NOT NULL,
+            path TEXT NOT NULL COLLATE NOCASE,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS task_output_reservations_path_unique
+            ON task_output_reservations(path COLLATE NOCASE);",
+    )?;
     transaction.execute_batch("PRAGMA user_version = 14;")?;
     transaction.commit()?;
     Ok(())
@@ -2218,6 +2233,32 @@ mod tests {
         cloud::CloudProvider,
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
     };
+
+    #[test]
+    fn migration_repairs_missing_output_reservation_table() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut connection = store.connection.lock().unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE task_output_reservations;
+                 PRAGMA user_version = 14;",
+            )
+            .unwrap();
+
+        migrate(&mut connection).unwrap();
+
+        let table_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'task_output_reservations'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_exists);
+    }
 
     #[test]
     fn startup_orphan_cleanup_preserves_payloads_owned_by_detached_tasks() {
