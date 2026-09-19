@@ -34,6 +34,24 @@ describe('upsertTask', () => {
     expect(upsertTask([current], snapshot)).toEqual([{ ...snapshot, files }]);
   });
 
+  it('keeps a confirmed Xunlei SVIP label across incomplete live snapshots', () => {
+    const current = task({
+      source: 'cloud://xunlei/file-1', kind: 'cloud', aria_gid: 'xunlei-native:42',
+      statusMessage: '正在使用迅雷svip加速',
+    });
+    const incomplete = task({
+      source: 'cloud://xunlei/file-1', kind: 'cloud', aria_gid: 'xunlei-native:42',
+      progress: 11, statusMessage: undefined,
+    });
+
+    expect(upsertTask([current], incomplete)).toEqual([{
+      ...incomplete,
+      statusMessage: '正在使用迅雷svip加速',
+    }]);
+    expect(upsertTask([current], { ...incomplete, status: 'paused' })[0].statusMessage)
+      .toBeUndefined();
+  });
+
   it('does not insert an unrelated snapshot into a parent task children', () => {
     const folder = task({ id: 'folder', children: [task({ id: 'child' })] });
     const result = upsertTask([folder], task({ id: 'task-2' }));

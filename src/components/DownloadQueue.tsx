@@ -215,6 +215,10 @@ function cloudTaskSubtitle(source: string | undefined): string | undefined {
 
 function taskSubtitle(task: QueueTask): string | undefined {
   if (task.error) return task.error;
+  const cloudSubtitle = cloudTaskSubtitle(task.source);
+  if (cloudSubtitle === '迅雷网盘任务' && task.statusMessage === '正在使用迅雷svip加速') {
+    return `${cloudSubtitle} · svip加速`;
+  }
   if (task.statusMessage) return task.statusMessage;
   const hasTransferData = task.progress > 0 || (task.completed_length ?? 0) > 0 || (task.total_length ?? 0) > 0;
   if (task.kind === 'magnet') return hasTransferData ? '磁力任务' : '磁力任务 · 正在获取文件信息';
@@ -223,7 +227,7 @@ function taskSubtitle(task: QueueTask): string | undefined {
   if (task.kind === 'ftp') return 'FTP 下载';
   if (task.kind === 'hls') return 'HLS 流媒体下载';
   if (task.kind === 'dash') return 'MPEG-DASH 流媒体下载';
-  return cloudTaskSubtitle(task.source);
+  return cloudSubtitle;
 }
 
 function isFetchingTaskMetadata(task: QueueTask, subtitle: string | undefined): boolean {

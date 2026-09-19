@@ -1,15 +1,8 @@
 //! Windows-only bridge to the native task API shipped with an installed
-//! Thunder client.  It intentionally does not start or automate that client.
-//! The DLL is retained for the lifetime of the app because its P2SP task state
-//! lives in the module, not in aria2.
+//! Thunder client. It loads the official proxy DLL, whose isolated SDK server
+//! owns P2SP tasks; neither `Thunder.exe` nor an extra Node host is started.
 
-use std::{
-    collections::BTreeMap,
-    io::{BufRead, BufReader, Write},
-    path::PathBuf,
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 #[cfg(windows)]
 use hmac::{Hmac, Mac};
@@ -47,8 +40,6 @@ pub struct XunleiNativeBackend {
     equity_tokens: std::sync::Mutex<BTreeMap<u32, String>>,
     #[cfg(windows)]
     plugin_config_path: Option<PathBuf>,
-    #[cfg(windows)]
-    helper_path: Option<PathBuf>,
 }
 
 impl Default for XunleiNativeBackend {
@@ -60,14 +51,12 @@ impl Default for XunleiNativeBackend {
             equity_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(windows)]
             plugin_config_path: None,
-            #[cfg(windows)]
-            helper_path: None,
         }
     }
 }
 
 impl XunleiNativeBackend {
-    pub(crate) fn with_plugin_paths(plugin_config_path: PathBuf, helper_path: PathBuf) -> Self {
+    pub(crate) fn with_plugin_config(plugin_config_path: PathBuf) -> Self {
         Self {
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
@@ -75,8 +64,6 @@ impl XunleiNativeBackend {
             equity_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(windows)]
             plugin_config_path: Some(plugin_config_path),
-            #[cfg(windows)]
-            helper_path: Some(helper_path),
         }
     }
 
@@ -295,7 +282,7 @@ impl XunleiNativeBackend {
             let cid = marker_header(resolved, CID_MARKER_HEADER).unwrap_or("");
             let gcid = marker_header(resolved, GCID_MARKER_HEADER).unwrap_or("");
 
-            let (native_id, state_directory, client_version) = {
+            let (native_id, client_version) = {
                 let mut api = self
                     .api
                     .lock()
@@ -303,7 +290,6 @@ impl XunleiNativeBackend {
                 if api.is_none() {
                     *api = WindowsApi::load(
                         self.plugin_config_path.as_deref(),
-                        self.helper_path.as_deref(),
                         Some((user_id, peer_id)),
                     )?;
                 }
@@ -312,41 +298,26 @@ impl XunleiNativeBackend {
                 };
                 api.set_identity(user_id, peer_id)?;
                 let size = resolved.size_hint().unwrap_or(0);
-                let reusable = api.reusable_task(&output_directory, &output_name, size)?;
-                let native_id = if let Some((native_id, status)) = reusable {
-                    if status == 5 {
-                        api.stop(native_id)?;
-                        std::thread::sleep(std::time::Duration::from_millis(300));
+                if let Ok(existing) = store.find(task_id) {
+                    if let Some(old_id) = native_id(&existing) {
+                        if api.stop(old_id).is_ok() {
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                        }
                     }
-                    native_id
-                } else {
-                    let failed =
-                        api.failed_zero_data_tasks(&output_directory, &output_name, size)?;
-                    for failed_id in &failed {
-                        api.delete(*failed_id)?;
-                    }
-                    if !failed.is_empty() {
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                        remove_failed_artifacts(&output_path, size)?;
-                    }
-                    api.create_p2sp_task(
-                        &resolved.url,
-                        &output_path,
-                        &output_name,
-                        &output_directory,
-                        referer,
-                        size,
-                        user_agent,
-                        cid,
-                        gcid,
-                    )?
-                };
+                }
+                let native_id = api.create_p2sp_task(
+                    &resolved.url,
+                    &output_path,
+                    &output_name,
+                    &output_directory,
+                    referer,
+                    size,
+                    user_agent,
+                    cid,
+                    gcid,
+                )?;
                 api.start(native_id)?;
-                (
-                    native_id,
-                    api.state_directory.clone(),
-                    api.client_version.clone(),
-                )
+                (native_id, api.client_version.clone())
             };
 
             let mut task = store
@@ -375,13 +346,7 @@ impl XunleiNativeBackend {
                 )
                 .map_err(|_| NativeSubmitError::Failed("无法保存迅雷原生任务".into()))?;
             emit_task(app, store, &task);
-            self.spawn_progress_monitor(
-                app.clone(),
-                Arc::clone(store),
-                task_id,
-                output_path,
-                state_directory,
-            );
+            self.spawn_progress_monitor(app.clone(), Arc::clone(store), task_id, output_path);
             self.spawn_vip_activation(
                 app.clone(),
                 Arc::clone(store),
@@ -492,12 +457,8 @@ impl XunleiNativeBackend {
                     .lock()
                     .map_err(|_| PLUGIN_UPDATE_MESSAGE.to_string())?;
                 if api.is_none() {
-                    *api = WindowsApi::load(
-                        self.plugin_config_path.as_deref(),
-                        self.helper_path.as_deref(),
-                        None,
-                    )
-                    .map_err(|error| error.user_message())?;
+                    *api = WindowsApi::load(self.plugin_config_path.as_deref(), None)
+                        .map_err(|error| error.user_message())?;
                 }
                 let api = api
                     .as_mut()
@@ -561,26 +522,13 @@ impl XunleiNativeBackend {
                 .map_err(|error| error.to_string())?;
             emit_task(app, store, &updated);
             if action == DownloadAction::Resume {
-                let state_directory = self
-                    .api
-                    .lock()
-                    .ok()
-                    .and_then(|api| api.as_ref().map(|api| api.state_directory.clone()));
                 if let Some(path) = store
                     .files(updated.id)
                     .ok()
                     .and_then(|files| files.into_iter().next())
                     .map(|file| PathBuf::from(file.path))
                 {
-                    if let Some(state_directory) = state_directory {
-                        self.spawn_progress_monitor(
-                            app.clone(),
-                            Arc::clone(store),
-                            updated.id,
-                            path,
-                            state_directory,
-                        );
-                    }
+                    self.spawn_progress_monitor(app.clone(), Arc::clone(store), updated.id, path);
                 }
             }
             Ok(updated)
@@ -593,7 +541,6 @@ impl XunleiNativeBackend {
         store: Arc<TaskStore>,
         id: Uuid,
         output_path: PathBuf,
-        state_directory: PathBuf,
     ) {
         let backend = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
@@ -613,15 +560,19 @@ impl XunleiNativeBackend {
                     return;
                 };
                 #[cfg(windows)]
-                let native_progress =
-                    native_progress_in_database(&state_directory, native_task_id).ok();
+                let native_progress = backend.api.lock().ok().and_then(|api| {
+                    api.as_ref()
+                        .and_then(|api| api.progress(native_task_id).ok())
+                });
                 #[cfg(not(windows))]
-                let native_progress: Option<(u64, u64, i32, i32)> = None;
-                let Some((completed, native_total, native_status, native_error_code)) =
-                    native_progress
-                else {
+                let native_progress: Option<NativeProgress> = None;
+                let Some(native_progress) = native_progress else {
                     continue;
                 };
+                let completed = native_progress.completed;
+                let native_total = native_progress.total;
+                let native_status = native_progress.status;
+                let native_error_code = native_progress.error_code;
                 let total = (native_total > 0)
                     .then_some(native_total)
                     .or(task.total_length);
@@ -629,19 +580,19 @@ impl XunleiNativeBackend {
                 let delta = completed.saturating_sub(previous);
                 previous = completed;
                 task.completed_length = completed;
-                task.download_speed = delta;
+                task.download_speed = native_progress.speed.max(delta);
                 task.progress = total
                     .filter(|total| *total > 0)
                     .map(|total| ((completed.saturating_mul(100) / total).min(100)) as u8)
                     .unwrap_or(0);
-                if total.is_some_and(|total| completed >= total) {
+                if native_status == 4 || total.is_some_and(|total| completed >= total) {
                     task.status = TaskStatus::Completed;
                     task.progress = 100;
                     task.download_speed = 0;
                     task.error = None;
                     task.status_message = None;
                     let _ = backend.stop_completed_task(&task);
-                } else if native_status == 9 {
+                } else if native_status == 1 {
                     task.status = TaskStatus::Failed;
                     task.download_speed = 0;
                     task.error = Some(native_failure_message(native_error_code));
@@ -743,121 +694,287 @@ fn release_cloud_slot(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
 
 #[cfg(windows)]
 struct WindowsApi {
-    child: Child,
-    input: ChildStdin,
-    output: BufReader<ChildStdout>,
-    next_request_id: u64,
-    state_directory: PathBuf,
+    // The native module owns worker threads for the lifetime of the process.
+    // Keep the module loaded instead of calling FreeLibrary while they may run.
+    _module: usize,
     client_version: String,
+    trace_ids: BTreeMap<u32, String>,
+    create_p2sp_task: XlCreateP2spTask,
+    delete_task: XlTaskAction,
+    query_task_info: XlQueryTaskInfo,
+    set_app_guid: XlSetString,
+    set_global_ext_info: XlSetGlobalExtInfo,
+    set_origin_connect_count: XlTaskInteger,
+    set_task_equity_token: XlTaskStringKind,
+    set_task_trace_id: XlTaskStringKind,
+    set_task_user_agent: XlTaskString,
+    set_token_mode: XlSetInteger,
+    set_user_info: XlSetUserInfo,
+    start_task: XlTaskAction,
+    stop_task: XlTaskAction,
 }
 
 #[cfg(windows)]
-fn native_progress_in_database(
-    state_directory: &std::path::Path,
-    id: u32,
-) -> Result<(u64, u64, i32, i32), NativeSubmitError> {
-    let database = state_directory.join("TaskDb.dat");
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))?;
-    connection
-        .query_row(
-            "SELECT TotalReceiveSize, ResourceSize, Status, FailureErrorCode
-             FROM TaskBase WHERE TaskId=?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+type XlInit = unsafe extern "system" fn(*const std::ffi::c_char, *const u8) -> i32;
+#[cfg(windows)]
+type XlCreateP2spTask = unsafe extern "system" fn(
+    *const u16,
+    *const u16,
+    *const u16,
+    *const u16,
+    *const u16,
+    *mut u32,
+) -> i32;
+#[cfg(windows)]
+type XlTaskAction = unsafe extern "system" fn(u32) -> i32;
+#[cfg(windows)]
+type XlQueryTaskInfo = unsafe extern "system" fn(u32, *mut u8) -> i32;
+#[cfg(windows)]
+type XlSetString = unsafe extern "system" fn(*const std::ffi::c_char) -> i32;
+#[cfg(windows)]
+type XlSetInteger = unsafe extern "system" fn(i32) -> i32;
+#[cfg(windows)]
+type XlSetUserInfo =
+    unsafe extern "system" fn(*const std::ffi::c_char, *const std::ffi::c_char) -> i32;
+#[cfg(windows)]
+type XlSetGlobalExtInfo = unsafe extern "system" fn(*const std::ffi::c_char, u8) -> i32;
+#[cfg(windows)]
+type XlTaskInteger = unsafe extern "system" fn(u32, i32) -> i32;
+#[cfg(windows)]
+type XlTaskString = unsafe extern "system" fn(u32, *const std::ffi::c_char) -> i32;
+#[cfg(windows)]
+type XlTaskStringKind = unsafe extern "system" fn(u32, i32, *const std::ffi::c_char) -> i32;
+
+#[derive(Clone, Copy, Debug)]
+struct NativeProgress {
+    completed: u64,
+    total: u64,
+    status: i32,
+    error_code: i32,
+    speed: u64,
+}
+
+#[cfg(windows)]
+fn c_string(value: &str) -> Result<std::ffi::CString, NativeSubmitError> {
+    std::ffi::CString::new(value).map_err(|_| NativeSubmitError::Incompatible)
+}
+
+#[cfg(windows)]
+fn wide_string(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain([0]).collect()
+}
+
+#[cfg(windows)]
+fn wide_os(value: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    value.encode_wide().chain([0]).collect()
+}
+
+#[cfg(windows)]
+fn native_call(code: i32, message: &'static str) -> Result<(), NativeSubmitError> {
+    match code {
+        0 => Ok(()),
+        0x4E20 => Err(NativeSubmitError::Incompatible),
+        _ => Err(NativeSubmitError::Failed(format!(
+            "{message}（错误码 {code}）"
+        ))),
+    }
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
+}
+
+fn read_i32(bytes: &[u8], offset: usize) -> i32 {
+    i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap_or_default())
+}
+
+#[cfg(windows)]
+fn decrypt_equity_payload(
+    encrypted: &str,
+    security_key: &str,
+) -> Result<String, NativeSubmitError> {
+    use base64::Engine as _;
+    use windows::{
+        core::PCWSTR,
+        Win32::Security::Cryptography::{
+            BCryptCloseAlgorithmProvider, BCryptDecrypt, BCryptDestroyKey,
+            BCryptGenerateSymmetricKey, BCryptOpenAlgorithmProvider, BCryptSetProperty,
+            BCRYPT_AES_ALGORITHM, BCRYPT_ALG_HANDLE, BCRYPT_BLOCK_PADDING, BCRYPT_CHAINING_MODE,
+            BCRYPT_HANDLE, BCRYPT_KEY_HANDLE,
+        },
+    };
+    use zeroize::Zeroize;
+
+    let mut ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(encrypted)
+        .map_err(|_| NativeSubmitError::Incompatible)?;
+    let mut key_bytes = security_key.as_bytes().to_vec();
+    if key_bytes.len() != 16 {
+        ciphertext.zeroize();
+        key_bytes.zeroize();
+        return Err(NativeSubmitError::Incompatible);
+    }
+
+    let mut algorithm = BCRYPT_ALG_HANDLE::default();
+    let open_status = unsafe {
+        BCryptOpenAlgorithmProvider(
+            &mut algorithm,
+            BCRYPT_AES_ALGORITHM,
+            PCWSTR::null(),
+            Default::default(),
         )
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))
+    };
+    if open_status.0 < 0 {
+        ciphertext.zeroize();
+        key_bytes.zeroize();
+        return Err(NativeSubmitError::Incompatible);
+    }
+
+    let mode_units: Vec<u16> = "ChainingModeCBC".encode_utf16().chain([0]).collect();
+    let mode_bytes = unsafe {
+        std::slice::from_raw_parts(mode_units.as_ptr().cast::<u8>(), mode_units.len() * 2)
+    };
+    let set_status = unsafe {
+        BCryptSetProperty(
+            BCRYPT_HANDLE(algorithm.0),
+            BCRYPT_CHAINING_MODE,
+            mode_bytes,
+            0,
+        )
+    };
+    let mut key = BCRYPT_KEY_HANDLE::default();
+    let key_status = if set_status.0 >= 0 {
+        unsafe { BCryptGenerateSymmetricKey(algorithm, &mut key, None, &key_bytes, 0) }
+    } else {
+        set_status
+    };
+    let result = if key_status.0 >= 0 {
+        let mut iv = key_bytes.clone();
+        let mut plaintext = vec![0u8; ciphertext.len()];
+        let mut plaintext_len = 0u32;
+        let status = unsafe {
+            BCryptDecrypt(
+                key,
+                Some(&ciphertext),
+                None,
+                Some(&mut iv),
+                Some(&mut plaintext),
+                &mut plaintext_len,
+                BCRYPT_BLOCK_PADDING,
+            )
+        };
+        iv.zeroize();
+        if status.0 >= 0 {
+            plaintext.truncate(plaintext_len as usize);
+            let payload: Result<serde_json::Value, _> = serde_json::from_slice(&plaintext);
+            plaintext.zeroize();
+            payload
+                .ok()
+                .and_then(|payload| {
+                    payload
+                        .pointer("/rule/0/id")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|token| !token.is_empty())
+                        .map(str::to_owned)
+                })
+                .ok_or(NativeSubmitError::Incompatible)
+        } else {
+            plaintext.zeroize();
+            Err(NativeSubmitError::Incompatible)
+        }
+    } else {
+        Err(NativeSubmitError::Incompatible)
+    };
+    if !key.0.is_null() {
+        unsafe {
+            let _ = BCryptDestroyKey(key);
+        }
+    }
+    unsafe {
+        let _ = BCryptCloseAlgorithmProvider(algorithm, 0);
+    }
+    ciphertext.zeroize();
+    key_bytes.zeroize();
+    result
 }
 
 #[cfg(windows)]
 impl WindowsApi {
     fn load(
         plugin_config_path: Option<&std::path::Path>,
-        helper_path: Option<&std::path::Path>,
         identity: Option<(&str, &str)>,
     ) -> Result<Option<Self>, NativeSubmitError> {
-        let Some(mut plugin) = configured_or_installed_plugin_config(plugin_config_path) else {
+        use windows::{
+            core::{PCSTR, PCWSTR},
+            Win32::System::LibraryLoader::{
+                GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+            },
+        };
+
+        let Some(plugin) = configured_or_installed_plugin_config(plugin_config_path) else {
             return Ok(None);
         };
-        let sdk_path = plugin.sdk_path.clone();
-        let Some(program_directory) = sdk_path.parent().and_then(std::path::Path::parent) else {
+        let wide_path = wide_os(plugin.sdk_path.as_os_str());
+        let module = unsafe {
+            LoadLibraryExW(
+                PCWSTR(wide_path.as_ptr()),
+                None,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+            )
+        }
+        .map_err(|_| NativeSubmitError::Incompatible)?;
+
+        unsafe fn symbol<T: Copy>(
+            module: windows::Win32::Foundation::HMODULE,
+            name: &'static [u8],
+        ) -> Result<T, NativeSubmitError> {
+            let address = GetProcAddress(module, PCSTR(name.as_ptr()))
+                .ok_or(NativeSubmitError::Incompatible)?;
+            Ok(std::mem::transmute_copy(&address))
+        }
+
+        let init: XlInit = unsafe { symbol(module, b"XL_Init\0")? };
+        let mut init_data = [0u8; 40];
+        init_data[..4].copy_from_slice(&40u32.to_le_bytes());
+        init_data[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+        let version = plugin.client_version.as_bytes();
+        if version.len() > 29 {
             return Err(NativeSubmitError::Incompatible);
+        }
+        init_data[10..10 + version.len()].copy_from_slice(version);
+        let app_key = c_string("xzcGMudGh1bmRlclg7MA^^SDK==edee53fd0b15e8d65dbfe7824f5f^a23")?;
+        if unsafe { init(app_key.as_ptr(), init_data.as_ptr()) } != 0 {
+            return Err(NativeSubmitError::Incompatible);
+        }
+
+        let mut api = Self {
+            _module: module.0 as usize,
+            client_version: plugin.client_version,
+            trace_ids: BTreeMap::new(),
+            create_p2sp_task: unsafe { symbol(module, b"XL_CreateP2spTask\0")? },
+            delete_task: unsafe { symbol(module, b"XL_DeleteTask\0")? },
+            query_task_info: unsafe { symbol(module, b"XL_QueryTaskInfo\0")? },
+            set_app_guid: unsafe { symbol(module, b"XL_SetAppGuid\0")? },
+            set_global_ext_info: unsafe { symbol(module, b"XL_SetGlobalExtInfo\0")? },
+            set_origin_connect_count: unsafe { symbol(module, b"XL_SetOriginConnectCount\0")? },
+            set_task_equity_token: unsafe { symbol(module, b"XL_SetTaskEquityToken\0")? },
+            set_task_trace_id: unsafe { symbol(module, b"XL_SetTaskTraceID\0")? },
+            set_task_user_agent: unsafe { symbol(module, b"XL_SetTaskUserAgent\0")? },
+            set_token_mode: unsafe { symbol(module, b"XL_SetTokenMode\0")? },
+            set_user_info: unsafe { symbol(module, b"XL_SetUserInfo\0")? },
+            start_task: unsafe { symbol(module, b"XL_StartTask\0")? },
+            stop_task: unsafe { symbol(module, b"XL_StopTask\0")? },
         };
-        let addon_path = program_directory.join("dk_addon.node");
-        if !addon_path.is_file() {
-            return Err(NativeSubmitError::Incompatible);
+        if let Some((user_id, peer_id)) = identity {
+            api.set_identity(user_id, peer_id)?;
         }
-
-        let config_directory = plugin_config_path
-            .and_then(std::path::Path::parent)
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(std::env::temp_dir);
-        std::fs::create_dir_all(&config_directory).map_err(|_| NativeSubmitError::Incompatible)?;
-        let helper_path = helper_path
-            .filter(|path| path.is_file())
-            .ok_or(NativeSubmitError::Incompatible)?;
-        let state_directory = config_directory.join("xunlei-native-state");
-
-        use std::os::windows::process::CommandExt;
-        for host in native_helper_hosts(&plugin, helper_path, program_directory) {
-            let mut command = Command::new(&host);
-            command
-                .arg(helper_path)
-                .current_dir(program_directory)
-                .env("ELECTRON_RUN_AS_NODE", "1")
-                .env("XUNLEI_DK_ADDON", &addon_path)
-                .env("XUNLEI_NATIVE_STATE_DIR", &state_directory)
-                .env("XUNLEI_CLIENT_VERSION", &plugin.client_version)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .creation_flags(0x0800_0000);
-            if let Some((user_id, peer_id)) = identity {
-                command
-                    .env("XUNLEI_NATIVE_USER_ID", user_id)
-                    .env("XUNLEI_NATIVE_PEER_ID", peer_id);
-            }
-            let Ok(mut child) = command.spawn() else {
-                continue;
-            };
-            let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
-                let _ = child.kill();
-                let _ = child.wait();
-                continue;
-            };
-            let mut api = Self {
-                child,
-                input,
-                output: BufReader::new(output),
-                next_request_id: 1,
-                state_directory: state_directory.clone(),
-                client_version: plugin.client_version.clone(),
-            };
-            let Ok(ready) = api.read_message() else {
-                continue;
-            };
-            if ready.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
-                eprintln!(
-                    "迅雷原生 helper 初始化失败：{}",
-                    ready
-                        .get("error")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("incompatible")
-                );
-                continue;
-            }
-            if plugin.helper_host_path.as_deref() != Some(host.as_path()) {
-                plugin.helper_host_path = Some(host);
-                if let Some(path) = plugin_config_path {
-                    let _ = write_plugin_config(path, &plugin);
-                }
-            }
-            return Ok(Some(api));
-        }
-        Err(NativeSubmitError::Incompatible)
+        Ok(Some(api))
     }
 
     fn create_p2sp_task(
@@ -872,282 +989,118 @@ impl WindowsApi {
         cid: &str,
         gcid: &str,
     ) -> Result<u32, NativeSubmitError> {
-        let response = self.request(serde_json::json!({
-            "action": "create",
-            "url": url,
-            "savePath": save_path,
-            "name": display_name,
-            "referer": ref_url,
-            "fileSize": file_size,
-            "userAgent": user_agent,
-            "cid": cid,
-            "gcid": gcid,
-        }))?;
-        response
-            .as_u64()
-            .and_then(|id| u32::try_from(id).ok())
-            .filter(|id| *id != 0)
-            .ok_or_else(|| NativeSubmitError::Failed("迅雷原生任务创建失败".into()))
-    }
-
-    fn reusable_task(
-        &self,
-        save_path: &std::path::Path,
-        display_name: &str,
-        file_size: u64,
-    ) -> Result<Option<(u32, i32)>, NativeSubmitError> {
-        let database = self.state_directory.join("TaskDb.dat");
-        reusable_task_in_database(&database, save_path, display_name, file_size)
-    }
-
-    fn failed_zero_data_tasks(
-        &self,
-        save_path: &std::path::Path,
-        display_name: &str,
-        file_size: u64,
-    ) -> Result<Vec<u32>, NativeSubmitError> {
-        let database = self.state_directory.join("TaskDb.dat");
-        failed_zero_data_tasks_in_database(&database, save_path, display_name, file_size)
+        let _ = (file_size, cid, gcid);
+        let url = wide_string(url);
+        let referer = wide_string(ref_url);
+        let cookie = wide_string("");
+        let save_path = wide_os(save_path.as_os_str());
+        let name = wide_string(display_name);
+        let mut task_id = 0u32;
+        let result = unsafe {
+            (self.create_p2sp_task)(
+                url.as_ptr(),
+                referer.as_ptr(),
+                cookie.as_ptr(),
+                save_path.as_ptr(),
+                name.as_ptr(),
+                &mut task_id,
+            )
+        };
+        if result != 0 || task_id == 0 {
+            return Err(NativeSubmitError::Failed(format!(
+                "迅雷原生任务创建失败（错误码 {result}）"
+            )));
+        }
+        let user_agent = c_string(user_agent)?;
+        native_call(
+            unsafe { (self.set_task_user_agent)(task_id, user_agent.as_ptr()) },
+            "迅雷原生任务 User-Agent 设置失败",
+        )?;
+        native_call(
+            unsafe { (self.set_origin_connect_count)(task_id, 2) },
+            "迅雷原生任务连接数设置失败",
+        )?;
+        let trace_id = Uuid::new_v4().to_string();
+        let trace = c_string(&trace_id)?;
+        native_call(
+            unsafe { (self.set_task_trace_id)(task_id, 0, trace.as_ptr()) },
+            "迅雷原生任务加速标识设置失败",
+        )?;
+        self.trace_ids.insert(task_id, trace_id);
+        Ok(task_id)
     }
 
     fn enable_vip(&mut self, id: u32, token: &str) -> Result<(), NativeSubmitError> {
-        self.request(serde_json::json!({
-            "action": "enableVip",
-            "taskId": id,
-            "token": token,
-        }))?;
-        Ok(())
+        let token = c_string(token)?;
+        native_call(
+            unsafe { (self.set_task_equity_token)(id, -1, token.as_ptr()) },
+            "迅雷会员加速令牌注入失败",
+        )
     }
     fn set_identity(&mut self, user_id: &str, peer_id: &str) -> Result<(), NativeSubmitError> {
-        self.request(serde_json::json!({
-            "action": "setIdentity",
-            "userId": user_id,
-            "peerId": peer_id,
-        }))?;
-        Ok(())
+        let user_id = c_string(user_id)?;
+        let empty = c_string("")?;
+        let peer_id = c_string(peer_id)?;
+        let ext = c_string(&format!(
+            "isvip=1,viptype=super,viplevel=,userchannel=,client_peerid={}",
+            peer_id.to_string_lossy()
+        ))?;
+        native_call(
+            unsafe { (self.set_app_guid)(peer_id.as_ptr()) },
+            "迅雷原生设备标识设置失败",
+        )?;
+        native_call(
+            unsafe { (self.set_user_info)(user_id.as_ptr(), empty.as_ptr()) },
+            "迅雷原生账号设置失败",
+        )?;
+        native_call(
+            unsafe { (self.set_global_ext_info)(ext.as_ptr(), 0) },
+            "迅雷会员身份设置失败",
+        )?;
+        native_call(
+            unsafe { (self.set_token_mode)(2) },
+            "迅雷会员令牌模式设置失败",
+        )
     }
     fn decrypt_equity_rule(
         &mut self,
         encrypted: &str,
         security_key: &str,
     ) -> Result<String, NativeSubmitError> {
-        self.request(serde_json::json!({
-            "action": "decryptRule",
-            "data": encrypted,
-            "key": security_key,
-        }))?
-        .as_str()
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .ok_or(NativeSubmitError::Incompatible)
+        decrypt_equity_payload(encrypted, security_key)
     }
     fn wait_for_trace_id(&mut self, id: u32) -> Result<String, NativeSubmitError> {
-        for _ in 0..100 {
-            let value = self.request(serde_json::json!({
-                "action": "taskInfo",
-                "taskId": id,
-            }))?;
-            if let Some(trace_id) = value
-                .get("traceId")
-                .and_then(serde_json::Value::as_str)
-                .filter(|value| !value.is_empty())
-            {
-                return Ok(trace_id.to_owned());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        Err(NativeSubmitError::Failed(
-            "迅雷原生任务未生成加速标识".into(),
-        ))
+        self.trace_ids
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| NativeSubmitError::Failed("迅雷原生任务未生成加速标识".into()))
     }
     fn start(&mut self, id: u32) -> Result<(), NativeSubmitError> {
-        self.task_action("start", id, "迅雷原生任务启动失败")
+        native_call(unsafe { (self.start_task)(id) }, "迅雷原生任务启动失败")
     }
     fn stop(&mut self, id: u32) -> Result<(), NativeSubmitError> {
-        self.task_action("stop", id, "迅雷原生任务暂停失败")
+        native_call(unsafe { (self.stop_task)(id) }, "迅雷原生任务暂停失败")
     }
     fn delete(&mut self, id: u32) -> Result<(), NativeSubmitError> {
-        self.task_action("delete", id, "迅雷原生任务取消失败")
+        self.trace_ids.remove(&id);
+        native_call(unsafe { (self.delete_task)(id) }, "迅雷原生任务取消失败")
     }
 
-    fn progress(&self, id: u32) -> Result<(u64, u64, i32, i32), NativeSubmitError> {
-        native_progress_in_database(&self.state_directory, id)
-    }
-
-    #[cfg(test)]
-    fn accelerated_bytes(&self, id: u32) -> Result<(u64, u64), NativeSubmitError> {
-        let database = self.state_directory.join("TaskDb.dat");
-        let connection = rusqlite::Connection::open_with_flags(
-            database,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))?;
-        connection
-            .query_row(
-                "SELECT VipReceiveSize, FreeDcdnReceiveSize FROM TaskBase WHERE TaskId=?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))
-    }
-
-    #[cfg(test)]
-    fn vip_speed(&mut self, id: u32) -> Result<u64, NativeSubmitError> {
-        self.request(serde_json::json!({
-            "action": "vipSpeed",
-            "taskId": id,
-        }))?
-        .as_u64()
-        .ok_or(NativeSubmitError::Incompatible)
-    }
-
-    fn task_action(
-        &mut self,
-        action: &'static str,
-        id: u32,
-        message: &'static str,
-    ) -> Result<(), NativeSubmitError> {
-        self.request(serde_json::json!({"action": action, "taskId": id}))
-            .map(|_| ())
-            .map_err(|error| match error {
-                NativeSubmitError::Incompatible => error,
-                NativeSubmitError::Failed(_) => NativeSubmitError::Failed(message.into()),
-            })
-    }
-
-    fn request(
-        &mut self,
-        mut request: serde_json::Value,
-    ) -> Result<serde_json::Value, NativeSubmitError> {
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
-        request["id"] = request_id.into();
-        serde_json::to_writer(&mut self.input, &request)
-            .and_then(|_| self.input.write_all(b"\n").map_err(serde_json::Error::io))
-            .and_then(|_| self.input.flush().map_err(serde_json::Error::io))
-            .map_err(|_| NativeSubmitError::Incompatible)?;
-        let response = self.read_message()?;
-        if response.get("id").and_then(serde_json::Value::as_u64) != Some(request_id) {
-            return Err(NativeSubmitError::Incompatible);
-        }
-        if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(NativeSubmitError::Failed("迅雷原生下载调用失败".into()));
-        }
-        Ok(response
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null))
-    }
-
-    fn read_message(&mut self) -> Result<serde_json::Value, NativeSubmitError> {
-        let mut line = String::new();
-        if self
-            .output
-            .read_line(&mut line)
-            .map_err(|_| NativeSubmitError::Incompatible)?
-            == 0
-        {
-            return Err(NativeSubmitError::Incompatible);
-        }
-        serde_json::from_str(&line).map_err(|_| NativeSubmitError::Incompatible)
-    }
-}
-
-#[cfg(windows)]
-fn reusable_task_in_database(
-    database: &std::path::Path,
-    save_path: &std::path::Path,
-    display_name: &str,
-    file_size: u64,
-) -> Result<Option<(u32, i32)>, NativeSubmitError> {
-    if !database.is_file() {
-        return Ok(None);
-    }
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    let mut statement = connection
-        .prepare(
-            "SELECT TaskId, Status, SavePath, TotalReceiveSize FROM TaskBase
-             WHERE Name=?1 COLLATE NOCASE AND (?2=0 OR ResourceSize=?2)
-               AND (Status IN (5, 7) OR (Status=9 AND TotalReceiveSize>0))",
-        )
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    let rows = statement
-        .query_map(rusqlite::params![display_name, file_size], |row| {
-            Ok((
-                row.get::<_, u32>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, u64>(3)?,
-            ))
+    fn progress(&self, id: u32) -> Result<NativeProgress, NativeSubmitError> {
+        let mut info = [0u8; 924];
+        info[..4].copy_from_slice(&924u32.to_le_bytes());
+        native_call(
+            unsafe { (self.query_task_info)(id, info.as_mut_ptr()) },
+            "迅雷原生任务进度暂不可用",
+        )?;
+        Ok(NativeProgress {
+            status: read_i32(&info, 4),
+            error_code: read_i32(&info, 8),
+            total: read_u64(&info, 12),
+            completed: read_u64(&info, 20),
+            speed: read_u32(&info, 44) as u64,
         })
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    let requested_path = normalize_native_save_path(&save_path.to_string_lossy());
-    let mut best: Option<(u32, i32, u64)> = None;
-    for row in rows {
-        let (id, status, recorded_path, received) =
-            row.map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-        if normalize_native_save_path(&recorded_path) != requested_path {
-            continue;
-        }
-        if best.is_none_or(|current| (received, id) > (current.2, current.0)) {
-            best = Some((id, status, received));
-        }
     }
-    Ok(best.map(|(id, status, _)| (id, status)))
-}
-
-#[cfg(windows)]
-fn failed_zero_data_tasks_in_database(
-    database: &std::path::Path,
-    save_path: &std::path::Path,
-    display_name: &str,
-    file_size: u64,
-) -> Result<Vec<u32>, NativeSubmitError> {
-    if !database.is_file() {
-        return Ok(Vec::new());
-    }
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    let mut statement = connection
-        .prepare(
-            "SELECT TaskId, SavePath FROM TaskBase
-             WHERE Name=?1 COLLATE NOCASE AND (?2=0 OR ResourceSize=?2)
-               AND Status=9 AND TotalReceiveSize=0
-             ORDER BY TaskId",
-        )
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    let rows = statement
-        .query_map(rusqlite::params![display_name, file_size], |row| {
-            Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-    let requested_path = normalize_native_save_path(&save_path.to_string_lossy());
-    let mut failed = Vec::new();
-    for row in rows {
-        let (id, recorded_path) =
-            row.map_err(|_| NativeSubmitError::Failed("迅雷原生任务状态暂不可用".into()))?;
-        if normalize_native_save_path(&recorded_path) == requested_path {
-            failed.push(id);
-        }
-    }
-    Ok(failed)
-}
-
-#[cfg(windows)]
-fn normalize_native_save_path(value: &str) -> String {
-    let mut normalized = value.trim().replace('/', "\\");
-    while normalized.len() > 3 && normalized.ends_with('\\') {
-        normalized.pop();
-    }
-    normalized.make_ascii_lowercase();
-    normalized
 }
 
 #[cfg(windows)]
@@ -1156,44 +1109,6 @@ fn native_failure_message(error_code: i32) -> String {
         "迅雷原生任务失败，请重试".into()
     } else {
         format!("迅雷原生任务失败（错误码 {error_code}），请重试")
-    }
-}
-
-#[cfg(windows)]
-fn remove_failed_artifacts(
-    output_path: &std::path::Path,
-    expected_size: u64,
-) -> Result<(), NativeSubmitError> {
-    if let Ok(metadata) = std::fs::metadata(output_path) {
-        if !metadata.is_file()
-            || (metadata.len() != 0 && (expected_size == 0 || metadata.len() != expected_size))
-        {
-            return Err(NativeSubmitError::Failed(
-                "目标文件已存在，无法清理迅雷失败任务的占位文件".into(),
-            ));
-        }
-        std::fs::remove_file(output_path)
-            .map_err(|_| NativeSubmitError::Failed("无法清理迅雷失败任务的占位文件".into()))?;
-    }
-
-    for suffix in [".xltd", ".xltd.cfg"] {
-        let mut temporary = output_path.as_os_str().to_owned();
-        temporary.push(suffix);
-        let temporary = PathBuf::from(temporary);
-        if temporary.is_file() {
-            std::fs::remove_file(temporary)
-                .map_err(|_| NativeSubmitError::Failed("无法清理迅雷失败任务的临时文件".into()))?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-impl Drop for WindowsApi {
-    fn drop(&mut self) {
-        let _ = self.request(serde_json::json!({"action": "shutdown"}));
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -1213,8 +1128,11 @@ fn configured_or_installed_plugin_config(
         .filter(|config| {
             is_download_sdk(&config.sdk_path) && valid_client_version(&config.client_version)
         });
-    if configured.is_some() {
-        return configured;
+    if let Some(config) = configured {
+        if let Some(path) = plugin_config_path {
+            let _ = write_plugin_config(path, &config);
+        }
+        return Some(config);
     }
 
     let discovered = discover_installed_plugin_config()?;
@@ -1233,86 +1151,6 @@ struct XunleiPluginConfig {
     sdk_path: PathBuf,
     #[serde(default)]
     client_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    helper_host_path: Option<PathBuf>,
-}
-
-#[cfg(windows)]
-fn native_helper_hosts(
-    plugin: &XunleiPluginConfig,
-    helper_path: &std::path::Path,
-    program_directory: &std::path::Path,
-) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(path) = plugin
-        .helper_host_path
-        .as_ref()
-        .filter(|path| path.is_file())
-    {
-        candidates.push(path.clone());
-    }
-    if let Some(directory) = helper_path.parent() {
-        candidates.push(directory.join("node.exe"));
-    }
-    if let Some(path) = discover_node_runtime() {
-        candidates.push(path);
-    }
-    // Older Thunder releases accepted ELECTRON_RUN_AS_NODE directly. Keep it
-    // as a compatibility fallback after a real Node runtime for current builds.
-    candidates.push(program_directory.join("Thunder.exe"));
-    candidates.retain(|path| path.is_file());
-    let mut unique = Vec::new();
-    for candidate in candidates {
-        if !unique.iter().any(|path: &PathBuf| {
-            path.to_string_lossy()
-                .eq_ignore_ascii_case(&candidate.to_string_lossy())
-        }) {
-            unique.push(candidate);
-        }
-    }
-    unique
-}
-
-#[cfg(windows)]
-fn discover_node_runtime() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("ALLDOWNLOADER_NODE_RUNTIME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-    {
-        return Some(path);
-    }
-    if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|directory| directory.join("node.exe"))
-            .find(|path| path.is_file())
-    }) {
-        return Some(path);
-    }
-    let mut candidates = Vec::new();
-    if let Some(program_files) = std::env::var_os("ProgramFiles") {
-        candidates.push(PathBuf::from(program_files).join("nodejs").join("node.exe"));
-    }
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(
-            PathBuf::from(local_app_data)
-                .join("Programs")
-                .join("nodejs")
-                .join("node.exe"),
-        );
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE") {
-        candidates.push(
-            PathBuf::from(profile)
-                .join(".cache")
-                .join("codex-runtimes")
-                .join("codex-primary-runtime")
-                .join("dependencies")
-                .join("node")
-                .join("bin")
-                .join("node.exe"),
-        );
-    }
-    candidates.into_iter().find(|path| path.is_file())
 }
 
 #[cfg(windows)]
@@ -1336,13 +1174,15 @@ fn is_download_sdk(path: &std::path::Path) -> bool {
     path.is_file()
         && path
             .file_name()
-            .is_some_and(|name| name.eq_ignore_ascii_case("DownloadSDK.dll"))
+            .is_some_and(|name| name.eq_ignore_ascii_case("DownloadSDKProxy.dll"))
+        && path.with_file_name("DownloadSDK.dll").is_file()
+        && path.with_file_name("DownloadSDKServer.exe").is_file()
 }
 
 #[cfg(windows)]
 fn valid_client_version(version: &str) -> bool {
     !version.is_empty()
-        && version.len() <= 32
+        && version.len() <= 29
         && version
             .bytes()
             .all(|byte| byte.is_ascii_digit() || byte == b'.')
@@ -1386,7 +1226,6 @@ fn discover_installed_plugin_config() -> Option<XunleiPluginConfig> {
                 |sdk_path| XunleiPluginConfig {
                     sdk_path,
                     client_version,
-                    helper_host_path: discover_node_runtime(),
                 },
             )
         })
@@ -1404,7 +1243,7 @@ fn sdk_path_from_install_location(install_location: &std::path::Path) -> Option<
     let path = install_location
         .join("Program")
         .join("SDK")
-        .join("DownloadSDK.dll");
+        .join("DownloadSDKProxy.dll");
     is_download_sdk(&path).then_some(path)
 }
 
@@ -1437,133 +1276,32 @@ mod tests {
     }
 
     #[test]
-    fn helper_can_refresh_the_native_engine_identity_before_vip_injection() {
-        let helper = include_str!("../binaries/xunlei-native-helper.cjs");
-        let identity = helper.find("case 'setIdentity'").unwrap();
-        let user = helper[identity..].find("manager.setUserInfo").unwrap();
-        let vip = helper[identity..].find("manager.setGlobalExtInfo").unwrap();
-        let token_mode = helper[identity..].find("manager.setTokenMode(2)").unwrap();
-        assert!(user < vip && vip < token_mode);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn retry_reuses_the_most_progressed_native_task_for_the_same_destination() {
-        let root = tempfile::tempdir().unwrap();
-        let database = root.path().join("TaskDb.dat");
-        let save_path = root.path().join("下载目录");
-        let recorded_save_path = format!(
-            "{}\\",
-            save_path
-                .to_string_lossy()
-                .replace('/', "\\")
-                .to_ascii_uppercase()
-        );
-        let retry_save_path = PathBuf::from(
-            save_path
-                .to_string_lossy()
-                .replace('\\', "/")
-                .to_ascii_lowercase(),
-        );
-        let connection = rusqlite::Connection::open(&database).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE TaskBase (
-                    TaskId INTEGER PRIMARY KEY,
-                    Status INTEGER NOT NULL,
-                    SavePath TEXT NOT NULL,
-                    Name TEXT NOT NULL,
-                    ResourceSize INTEGER NOT NULL,
-                    TotalReceiveSize INTEGER NOT NULL
-                );",
-            )
-            .unwrap();
-        for (id, status, received) in [(10, 5, 1024), (11, 7, 4096), (12, 9, 0), (13, 9, 8192)] {
-            connection
-                .execute(
-                    "INSERT INTO TaskBase VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        id,
-                        status,
-                        &recorded_save_path,
-                        "文件.zip",
-                        65_536_u64,
-                        received
-                    ],
-                )
-                .unwrap();
-        }
-        drop(connection);
-
-        assert_eq!(
-            reusable_task_in_database(&database, &retry_save_path, "文件.zip", 65_536).unwrap(),
-            Some((13, 9))
-        );
-        assert_eq!(
-            failed_zero_data_tasks_in_database(&database, &retry_save_path, "文件.zip", 65_536,)
-                .unwrap(),
-            vec![12]
-        );
-        assert_eq!(
-            reusable_task_in_database(&database, &retry_save_path, "其他.zip", 65_536).unwrap(),
-            None
-        );
-        assert_eq!(
-            native_failure_message(201),
-            "迅雷原生任务失败（错误码 201），请重试"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn failed_artifact_cleanup_removes_native_temporary_files_but_preserves_real_data() {
-        let root = tempfile::tempdir().unwrap();
-        let placeholder = root.path().join("placeholder.bin");
-        let file = std::fs::File::create(&placeholder).unwrap();
-        file.set_len(65_536).unwrap();
-        drop(file);
-        std::fs::write(
-            root.path().join("placeholder.bin.xltd"),
-            b"sparse placeholder",
-        )
-        .unwrap();
-        std::fs::write(root.path().join("placeholder.bin.xltd.cfg"), b"metadata").unwrap();
-
-        remove_failed_artifacts(&placeholder, 65_536).unwrap();
-        assert!(!placeholder.exists());
-        assert!(!root.path().join("placeholder.bin.xltd").exists());
-        assert!(!root.path().join("placeholder.bin.xltd.cfg").exists());
-
-        std::fs::write(root.path().join("placeholder.bin.xltd"), b"native-only").unwrap();
-        std::fs::write(root.path().join("placeholder.bin.xltd.cfg"), b"metadata").unwrap();
-        remove_failed_artifacts(&placeholder, 65_536).unwrap();
-        assert!(!root.path().join("placeholder.bin.xltd").exists());
-        assert!(!root.path().join("placeholder.bin.xltd.cfg").exists());
-
-        std::fs::write(&placeholder, b"real data").unwrap();
-        assert!(remove_failed_artifacts(&placeholder, 65_536).is_err());
-        assert_eq!(std::fs::read(&placeholder).unwrap(), b"real data");
+    fn native_progress_layout_matches_the_current_proxy_abi() {
+        let mut info = [0u8; 924];
+        info[4..8].copy_from_slice(&3i32.to_le_bytes());
+        info[8..12].copy_from_slice(&(-7i32).to_le_bytes());
+        info[12..20].copy_from_slice(&122_600_000u64.to_le_bytes());
+        info[20..28].copy_from_slice(&2_500_000u64.to_le_bytes());
+        info[44..48].copy_from_slice(&461_400u32.to_le_bytes());
+        assert_eq!(read_i32(&info, 4), 3);
+        assert_eq!(read_i32(&info, 8), -7);
+        assert_eq!(read_u64(&info, 12), 122_600_000);
+        assert_eq!(read_u64(&info, 20), 2_500_000);
+        assert_eq!(read_u32(&info, 44), 461_400);
     }
 
     #[cfg(windows)]
     #[test]
     #[ignore = "requires an installed Thunder client"]
-    fn installed_download_sdk_starts_in_isolated_helper() {
+    fn installed_download_sdk_loads_official_proxy() {
         let root = tempfile::tempdir().unwrap();
         let plugin_config_path = root.path().join("plugins").join("xunlei-native.json");
-        let helper_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join("xunlei-native-helper.cjs");
-        let api = WindowsApi::load(Some(&plugin_config_path), Some(&helper_path), None)
-            .expect("installed helper should be compatible")
+        let api = WindowsApi::load(Some(&plugin_config_path), None)
+            .expect("installed proxy should be compatible")
             .expect("Thunder should be installed");
         let config = read_plugin_config(&plugin_config_path)
             .expect("the discovered SDK path should be persisted for later calls");
         assert!(is_download_sdk(&config.sdk_path));
-        assert!(config
-            .helper_host_path
-            .as_deref()
-            .is_some_and(std::path::Path::is_file));
         drop(api);
     }
 
@@ -1629,6 +1367,11 @@ mod tests {
             }
             Err(error) => panic!("current Xunlei account root should be readable: {error:?}"),
         };
+        let refreshed_credentials =
+            crate::cloud::DpapiCredentialStore::new(session_root.clone()).unwrap();
+        refreshed_credentials
+            .save("xunlei", &serde_json::to_vec(&client.session()).unwrap())
+            .expect("the refreshed live session should be persisted for the download probe");
         let file = root_directory
             .items
             .iter()
@@ -1656,9 +1399,6 @@ mod tests {
         let output_directory = root.join("downloads");
         std::fs::create_dir_all(&output_directory).unwrap();
         let plugin_config_path = root.join("plugins").join("xunlei-native.json");
-        let helper_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries")
-            .join("xunlei-native-helper.cjs");
         let session = client.session();
         let peer_id = if session.web_context.peer_id.is_empty() {
             if session.web_context.device_id.is_empty() {
@@ -1669,15 +1409,12 @@ mod tests {
         } else {
             &session.web_context.peer_id
         };
-        let mut api = WindowsApi::load(
-            Some(&plugin_config_path),
-            Some(&helper_path),
-            Some((&session.user_id, peer_id)),
-        )
-        .expect("official Xunlei helper should start")
-        .expect("Thunder should be installed");
+        let mut api =
+            WindowsApi::load(Some(&plugin_config_path), Some((&session.user_id, peer_id)))
+                .expect("official Xunlei proxy should load")
+                .expect("Thunder should be installed");
         api.set_identity(&session.user_id, peer_id)
-            .expect("running helper should accept the current Xunlei identity");
+            .expect("native proxy should accept the current Xunlei identity");
         let output_name = "midysj-native-live.zip";
         let output_path = output_directory.join(output_name);
         eprintln!(
@@ -1701,11 +1438,6 @@ mod tests {
             .expect("official P2SP task should be created");
         eprintln!("native live task id: {task_id}");
         api.start(task_id).expect("native task should start");
-        let reusable = api
-            .reusable_task(&output_directory, output_name, download.size.unwrap_or(0))
-            .expect("native task database should be readable")
-            .expect("the running native destination should be reusable");
-        assert_eq!(reusable.0, task_id);
         let trace_id = api
             .wait_for_trace_id(task_id)
             .expect("native task should expose its acceleration trace id");
@@ -1727,11 +1459,17 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let paused_at = loop {
-            let (received, total, status, _) = api.progress(task_id).unwrap_or((0, 0, 0, 0));
-            if received >= 512 * 1024 {
-                eprintln!("native live progress before pause: {received}/{total}, status={status}");
+            let progress = api
+                .progress(task_id)
+                .expect("native progress should be readable");
+            assert_ne!(progress.status, 1, "native task failed: {progress:?}");
+            if progress.completed >= 512 * 1024 {
+                eprintln!(
+                    "native live progress before pause: {}/{}, status={}, speed={}",
+                    progress.completed, progress.total, progress.status, progress.speed
+                );
                 api.stop(task_id).expect("native task should pause");
-                break received;
+                break progress.completed;
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1739,10 +1477,24 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_secs(1));
         };
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        api.start(task_id).expect("native task should resume");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let resumed_task_id = api
+            .create_p2sp_task(
+                &download.url,
+                &output_path,
+                output_name,
+                &output_directory,
+                "https://pan.xunlei.com/",
+                download.size.unwrap_or(0),
+                &client.session().profile.user_agent,
+                download.cid.as_deref().unwrap_or(""),
+                download.gcid.as_deref().unwrap_or(""),
+            )
+            .expect("native task should reopen the existing breakpoint data");
+        api.start(resumed_task_id)
+            .expect("recreated native task should resume");
         let resumed_trace_id = api
-            .wait_for_trace_id(task_id)
+            .wait_for_trace_id(resumed_task_id)
             .expect("resumed native task should expose an acceleration trace id");
         let resumed_token = request_equity_token(
             &mut api,
@@ -1756,39 +1508,32 @@ mod tests {
             },
         )
         .expect("resumed SVIP task should receive a fresh acceleration rule");
-        api.enable_vip(task_id, &resumed_token)
+        api.enable_vip(resumed_task_id, &resumed_token)
             .expect("SVIP rule should be restored after resume");
+        let resume_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let resumed_at = loop {
-            let (received, total, status, _) = api.progress(task_id).unwrap_or((0, 0, 0, 0));
-            if received >= paused_at + 512 * 1024 {
-                eprintln!("native live progress after resume: {received}/{total}, status={status}");
-                break received;
+            let progress = api
+                .progress(resumed_task_id)
+                .expect("resumed progress should be readable");
+            assert_ne!(
+                progress.status, 1,
+                "resumed native task failed: {progress:?}"
+            );
+            if progress.completed >= paused_at + 512 * 1024 {
+                eprintln!(
+                    "native live progress after resume: {}/{}, status={}, speed={}",
+                    progress.completed, progress.total, progress.status, progress.speed
+                );
+                break progress.completed;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                std::time::Instant::now() < resume_deadline,
                 "native resume made no progress"
             );
             std::thread::sleep(std::time::Duration::from_secs(1));
         };
         assert!(resumed_at > paused_at);
-
-        let acceleration_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        let (vip_bytes, dcdn_bytes, vip_speed) = loop {
-            let counters = api.accelerated_bytes(task_id).unwrap_or((0, 0));
-            let vip_speed = api.vip_speed(task_id).unwrap_or(0);
-            if counters.0 > 0 || counters.1 > 0 || vip_speed > 0 {
-                break (counters.0, counters.1, vip_speed);
-            }
-            assert!(
-                std::time::Instant::now() < acceleration_deadline,
-                "official native task downloaded data but never used the VIP/DCDN channel"
-            );
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        };
-        eprintln!(
-            "native acceleration verified: vip={vip_bytes}, dcdn={dcdn_bytes}, vip_speed={vip_speed}"
-        );
-        api.stop(task_id).unwrap();
+        api.stop(resumed_task_id).unwrap();
 
         let data_path = std::fs::read_dir(&output_directory)
             .unwrap()
@@ -1803,29 +1548,37 @@ mod tests {
             prefix.iter().any(|byte| *byte != 0),
             "downloaded prefix must contain real data"
         );
-        eprintln!("native live download verified in {}", root.display());
+        eprintln!(
+            "native SVIP token, real download data and resume verified in {}",
+            root.display()
+        );
     }
 
     #[cfg(windows)]
     #[test]
-    fn configured_sdk_path_is_used_without_registry_access() {
+    fn configured_proxy_path_is_used_without_registry_access() {
         let root = tempfile::tempdir().unwrap();
-        let sdk_path = root.path().join("DownloadSDK.dll");
-        std::fs::write(&sdk_path, b"fixture").unwrap();
+        let proxy_path = root.path().join("DownloadSDKProxy.dll");
+        let engine_path = root.path().join("DownloadSDK.dll");
+        let server_path = root.path().join("DownloadSDKServer.exe");
+        std::fs::write(&proxy_path, b"proxy fixture").unwrap();
+        std::fs::write(&engine_path, b"engine fixture").unwrap();
+        std::fs::write(&server_path, b"server fixture").unwrap();
         let plugin_config_path = root.path().join("xunlei-native.json");
-        write_plugin_config(
+        std::fs::write(
             &plugin_config_path,
-            &XunleiPluginConfig {
-                sdk_path: sdk_path.clone(),
-                client_version: "25.1.13.1634".into(),
-                helper_host_path: None,
-            },
+            serde_json::json!({
+                "sdkPath": proxy_path,
+                "clientVersion": "25.1.13.1634"
+            })
+            .to_string(),
         )
         .unwrap();
 
         assert_eq!(
             configured_or_installed_sdk_path(Some(&plugin_config_path)),
-            Some(sdk_path)
+            Some(proxy_path)
         );
+        assert!(!is_download_sdk(&engine_path));
     }
 }

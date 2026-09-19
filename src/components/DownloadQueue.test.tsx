@@ -668,14 +668,16 @@ it('renders silent login recovery and native SVIP acceleration as non-error stat
 
   rerender(<DownloadQueue
     tasks={[{
-      id: 'cloud-recovering', name: 'cloud.bin', kind: 'cloud', status: 'downloading', progress: 39,
+      id: 'cloud-recovering', name: 'cloud.bin', source: 'cloud://xunlei/file-1', kind: 'cloud', status: 'downloading', progress: 39,
       statusMessage: '正在使用迅雷svip加速', aria_gid: 'xunlei-native:42', download_speed: 512_000,
     }]}
     selectedTaskId={null}
     onSelect={() => {}}
     onCommand={() => {}}
   />);
-  expect(screen.getByText('正在使用迅雷svip加速')).not.toHaveClass('task-error');
+  const svip = screen.getByText('迅雷网盘任务 · svip加速');
+  expect(svip).not.toHaveClass('task-error');
+  expect(screen.queryByText('正在使用迅雷svip加速')).not.toBeInTheDocument();
 });
 
 it('does not show file-information loading after a magnet transfer has started', () => {

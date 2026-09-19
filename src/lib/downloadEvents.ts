@@ -100,7 +100,7 @@ function replaceExistingTask(tasks: readonly QueueTask[], snapshot: QueueTask): 
   const next = tasks.map((task) => {
     if (task.id === snapshot.id) {
       changed = true;
-      return preserveKnownBitTorrentFiles(task, snapshot);
+      return preserveKnownTaskState(task, snapshot);
     }
     if (!task.children?.length) return task;
     const children = replaceExistingTask(task.children, snapshot);
@@ -109,6 +109,18 @@ function replaceExistingTask(tasks: readonly QueueTask[], snapshot: QueueTask): 
     return { ...task, children };
   });
   return changed ? next : tasks;
+}
+
+function preserveKnownTaskState(current: QueueTask, snapshot: QueueTask): QueueTask {
+  const withFiles = preserveKnownBitTorrentFiles(current, snapshot);
+  const keepsConfirmedXunleiSvip = current.statusMessage === '正在使用迅雷svip加速'
+    && !withFiles.statusMessage
+    && withFiles.status === 'downloading'
+    && withFiles.aria_gid?.startsWith('xunlei-native:')
+    && withFiles.aria_gid === current.aria_gid;
+  return keepsConfirmedXunleiSvip
+    ? { ...withFiles, statusMessage: current.statusMessage }
+    : withFiles;
 }
 
 function preserveKnownBitTorrentFiles(current: QueueTask, snapshot: QueueTask): QueueTask {
