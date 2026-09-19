@@ -10,9 +10,11 @@ impl CloudDownloadRefreshBudget {
     pub(crate) fn claim(&self, source: &str, error: Option<&str>) -> bool {
         // aria2 HTTP transfer failure. A temporary cloud URL may have expired,
         // or its previous validator may no longer match after it is re-signed.
-        // Re-resolve every valid personal-cloud source once, but do not retry
-        // unrelated network, disk, or permission errors.
-        if !matches!(error, Some("8" | "22" | "24")) {
+        // Native stream code 6 includes exhausted partial-response retries.
+        // Re-resolve once after the engine exhausts its transport retries;
+        // retain the checkpoint rather than treating this as code 8's restart.
+        // Disk, local permission, and unrelated protocol errors are excluded.
+        if !matches!(error, Some("6" | "8" | "22" | "24")) {
             return false;
         }
         if super::commands::parse_stable_cloud_source(source).is_err() {
@@ -94,6 +96,10 @@ mod tests {
         let budget = CloudDownloadRefreshBudget::default();
         assert!(!budget.claim("cloud://baidu/file", Some("9")));
         assert!(!budget.claim("https://example.org/file", Some("22")));
+        assert!(!budget.claim("https://example.org/file", Some("6")));
+        assert!(budget.claim("cloud://pikpak/interrupted", Some("6")));
+        assert!(!budget.claim("cloud://pikpak/interrupted", Some("6")));
+        assert!(!budget.claim("cloud://pikpak/interrupted", Some("22")));
         assert!(budget.claim("cloud://baidu/resume-unsupported", Some("8")));
         assert!(
             !budget.claim("cloud://baidu/resume-unsupported", Some("8")),

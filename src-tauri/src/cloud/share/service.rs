@@ -500,9 +500,11 @@ impl CloudShareRefreshBudget {
     pub fn claim(&self, source: &str, aria_error_code: Option<&str>) -> Result<bool, QuarkError> {
         // 22 and 24 mean the signed URL was rejected.  8 means the CDN
         // cannot resume the partial response. All require a newly resolved
-        // URL; the caller decides whether 8 must restart from zero.
+        // URL; the caller decides whether 8 must restart from zero. Native
+        // stream code 6 also gets one fresh URL after transport retries are
+        // exhausted, but must preserve already verified ranges.
         if !source.starts_with("cloud-share://")
-            || !matches!(aria_error_code, Some("8" | "22" | "24"))
+            || !matches!(aria_error_code, Some("6" | "8" | "22" | "24"))
         {
             return Ok(false);
         }
@@ -598,12 +600,7 @@ pub async fn resubmit_current_cloud_download(
     service
         .compare_and_resubmit_uri_with_options(expected, vec![signed_url], options)
         .await
-        .map_err(|error| match error {
-            crate::aria2::service::DownloadServiceError::InvalidNativeCheckpoint => {
-                QuarkError::Transport(error.to_string())
-            }
-            _ => QuarkError::Transport("aria2 未能接受网盘下载任务".into()),
-        })
+        .map_err(crate::cloud::commands::cloud_download_submission_error)
 }
 
 pub(crate) fn share_submission_options(

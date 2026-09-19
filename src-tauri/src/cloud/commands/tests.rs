@@ -554,6 +554,37 @@ fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secret
 }
 
 #[test]
+fn cloud_download_local_failures_keep_distinct_codes_in_every_error_surface() {
+    use crate::aria2::service::DownloadServiceError;
+    let cases = [
+        (DownloadServiceError::InvalidNativeCheckpoint, "download_checkpoint_invalid", "续传断点"),
+        (DownloadServiceError::ShuttingDown, "download_engine_unavailable", "下载引擎不可用"),
+        (DownloadServiceError::InvalidUriOption("https://secret.example/?token=do-not-leak"), "download_submission_failed", "未能接受任务"),
+    ];
+    for (failure, expected_code, expected_text) in cases {
+        let error = super::cloud_download_submission_error(failure);
+        assert_eq!(cloud_failure_code(&error), expected_code);
+        let message = super::share_resolution_failure_message(&error);
+        assert!(message.contains(expected_text));
+        assert!(!message.contains("网络"));
+        assert!(!message.contains("do-not-leak"));
+        assert!(!requires_cloud_reauthorization_failure(Some(expected_code)));
+        let serialized = serde_json::to_value(&error).unwrap();
+        assert_eq!(serialized["code"], expected_code);
+        assert_eq!(serialized["message"], message);
+        let (directory_code, directory_message) = directory_download_failure_fields(&error);
+        assert_eq!(directory_code, expected_code);
+        assert_eq!(directory_message, message);
+    }
+    let network = QuarkError::Transport("https://secret.example/?token=do-not-leak".into());
+    assert_eq!(cloud_failure_code(&network), "network_error");
+    let message = super::share_resolution_failure_message(&network);
+    assert!(message.contains("网络请求失败"));
+    assert!(!message.contains("do-not-leak"));
+    assert_eq!(directory_download_failure_fields(&network).0, "network_error");
+}
+
+#[test]
 fn quark_share_transfer_failure_keeps_stage_and_provider_code() {
     let error = QuarkError::Provider("__quark_share_failure__:transfer:41016".into());
 

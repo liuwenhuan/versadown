@@ -1527,6 +1527,11 @@ fn refresh_budget_ignores_non_share_and_non_http_failures() {
     let resume_unsupported = fixture("share").source_for("f2");
     assert!(budget.claim(&resume_unsupported, Some("8")).unwrap());
     assert!(!budget.claim(&resume_unsupported, Some("8")).unwrap());
+
+    let interrupted = fixture("share").source_for("interrupted");
+    assert!(budget.claim(&interrupted, Some("6")).unwrap());
+    assert!(!budget.claim(&interrupted, Some("6")).unwrap());
+    assert!(!budget.claim(&interrupted, Some("22")).unwrap());
 }
 
 #[test]

@@ -2,6 +2,19 @@ use super::*;
 pub use crate::cloud::common::*;
 pub(crate) const CLOUD_SHARE_PREPARE_FAILURE: &str = "网盘分享下载准备失败，请重试";
 
+/// Engine failures are local submission failures, not provider HTTP failures.
+/// Do not retain raw engine errors: they can contain signed URLs or local paths.
+pub(crate) fn cloud_download_submission_error(
+    error: crate::aria2::service::DownloadServiceError,
+) -> QuarkError {
+    use crate::aria2::service::DownloadServiceError;
+    match error {
+        DownloadServiceError::InvalidNativeCheckpoint => QuarkError::DownloadCheckpointInvalid,
+        DownloadServiceError::ShuttingDown => QuarkError::DownloadEngineUnavailable,
+        _ => QuarkError::DownloadSubmissionFailed,
+    }
+}
+
 pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
     if let Some((stage, code)) = crate::cloud::quark_share_failure_details(error) {
         let code = code
@@ -43,12 +56,15 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         }
         QuarkError::InvalidResponse => "网盘返回的下载信息无效，请刷新后重试".into(),
         QuarkError::Storage => "安全凭据存储不可用".into(),
+        QuarkError::DownloadCheckpointInvalid
+        | QuarkError::DownloadEngineUnavailable
+        | QuarkError::DownloadSubmissionFailed => error.to_string(),
         QuarkError::Transport(message)
             if message == crate::xunlei_native::PLUGIN_UPDATE_MESSAGE =>
         {
             crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.into()
         }
-        QuarkError::Transport(_) => "网盘分享下载地址网络请求失败，请检查网络后重试".into(),
+        QuarkError::Transport(_) => "获取网盘下载地址时网络请求失败，请检查网络后重试".into(),
         QuarkError::Provider(_) => "网盘分享下载地址请求失败，请稍后重试".into(),
         QuarkError::InvalidInput(_) => "网盘分享下载请求无效，请重新解析分享链接".into(),
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
@@ -73,6 +89,9 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
         QuarkError::SourceFileMissing => "source_file_missing",
+        QuarkError::DownloadCheckpointInvalid => "download_checkpoint_invalid",
+        QuarkError::DownloadEngineUnavailable => "download_engine_unavailable",
+        QuarkError::DownloadSubmissionFailed => "download_submission_failed",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",

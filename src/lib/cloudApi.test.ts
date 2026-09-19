@@ -1,4 +1,5 @@
 import { vi, expect, it } from 'vitest';
+import type { CloudError } from './cloudTypes';
 
 const native = { invoke: vi.fn().mockResolvedValue(undefined) };
 const events = vi.hoisted(() => ({ listen: vi.fn() }));
@@ -6,6 +7,16 @@ const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke, Channel: class { onmessage = (_event: unknown) => {}; } }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: events.listen }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: dialog.open }));
+
+it.each<CloudError>([
+  { code: 'download_checkpoint_invalid', message: '本地下载文件或续传断点已缺失或失效，无法继续下载' },
+  { code: 'download_engine_unavailable', message: '本地下载引擎不可用，请重启应用后重试' },
+  { code: 'download_submission_failed', message: '本地下载引擎未能接受任务，请重试' },
+])('preserves local download failure $code instead of replacing it with a network error', async (error) => {
+  const api = await import('./cloudApi');
+  native.invoke.mockRejectedValueOnce(error);
+  await expect(api.downloadCloudFile('pikpak', 'file-id', 'partial.bin')).rejects.toEqual(error);
+});
 
 it('shares one authorization listener and releases it after the last subscriber', async () => {
   let receive: ((event: { payload: unknown }) => void) | undefined;

@@ -847,18 +847,46 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     nextBreadcrumbs: readonly Breadcrumb[],
     uploaded: readonly CloudFile[]
   ) {
-    const expectedIds = new Set(uploaded
-      .filter((file) => file.parentId === parentId)
-      .map((file) => file.id));
+    // Directory uploads also return descendants. Only their outermost results
+    // determine where to confirm the upload; children stay in their new folder.
+    const uploadedIds = new Set(uploaded.map((file) => file.id));
+    const topLevel = uploaded.filter((file) => !uploadedIds.has(file.parentId));
+    const destinations = [...new Set(topLevel.map((file) => file.parentId))];
+    let destinationName: string | undefined;
+    if (destinations.length === 1 && destinations[0] !== parentId) {
+      const original = await loadDirectory(account, parentId, nextBreadcrumbs);
+      if (!original) return { loaded: false, confirmed: false };
+      const targetId = destinations[0];
+      const target = original.items.find((file) => file.id === targetId && file.kind === 'folder');
+      destinationName = target?.name ?? (targetId === rootId ? '根目录' : '实际上传目录');
+      nextBreadcrumbs = target
+        ? [...nextBreadcrumbs, { id: targetId, name: target.name }]
+        : targetId === rootId
+          ? [{ id: rootId, name: '根目录' }]
+          : [{ id: rootId, name: '根目录' }, { id: targetId, name: destinationName }];
+      parentId = targetId;
+    }
     for (const delay of UPLOAD_DIRECTORY_CONFIRMATION_DELAYS_MS) {
       if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
       const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs);
       if (!refreshed) return { loaded: false, confirmed: false };
-      if (!expectedIds.size || [...expectedIds].every((id) => refreshed.items.some((file) => file.id === id))) {
-        return { loaded: true, confirmed: true };
+      // Mixed file/directory batches may have more than one actual destination.
+      // Confirm each one without navigating repeatedly between directories.
+      const listings = new Map([[parentId, refreshed]]);
+      let lookupFailed = false;
+      for (const targetId of destinations) {
+        if (listings.has(targetId)) continue;
+        try {
+          listings.set(targetId, await client.listCloudDirectory(provider, targetId));
+        } catch {
+          lookupFailed = true;
+        }
+      }
+      if (!lookupFailed && topLevel.every((file) => listings.get(file.parentId)?.items.some((item) => item.id === file.id))) {
+        return { loaded: true, confirmed: true, destinationName };
       }
     }
-    return { loaded: true, confirmed: false };
+    return { loaded: true, confirmed: false, destinationName };
   }
 
   useEffect(() => {
@@ -1083,11 +1111,15 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         setOperation(report);
         const directoryRefresh = refresh
           ? await refreshUploadedDirectory(activeAccount, currentDirectoryId, breadcrumbs, result.uploaded)
-          : { loaded: true, confirmed: true };
+          : { loaded: true, confirmed: true, destinationName: undefined };
         if (!directoryRefresh.loaded) return;
-        const finalReport = directoryRefresh.confirmed
-          ? report
-          : { ...report, message: `${report.message}；服务端目录尚未同步，请稍后刷新确认` };
+        const destinationMessage = directoryRefresh.destinationName
+          ? `；已转到上传目录：${directoryRefresh.destinationName}` : '';
+        const finalReport = {
+          ...report,
+          message: `${report.message}${destinationMessage}${directoryRefresh.confirmed ? '' : '；服务端目录尚未同步，请稍后刷新确认'}`,
+        };
+        setUploadResult(finalReport);
         if (result.cancelled) {
           setOperation(finalReport);
           return;

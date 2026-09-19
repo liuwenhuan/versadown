@@ -43,6 +43,7 @@ fn safe_host(url: &str) -> String {
 fn error_kind(error: &QuarkError) -> &'static str {
     match error {
         QuarkError::NotAuthorized => "not-authorized",
+        QuarkError::AccountMismatch => "account-mismatch",
         QuarkError::AuthorizationExpired => "authorization-expired",
         QuarkError::WebAuthorizationRequired => "web-authorization-required",
         QuarkError::CaptchaRequired => "captcha-required",
@@ -50,6 +51,9 @@ fn error_kind(error: &QuarkError) -> &'static str {
         QuarkError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
         QuarkError::AuthorizationPending => "authorization-pending",
         QuarkError::SourceFileMissing => "source-file-missing",
+        QuarkError::DownloadCheckpointInvalid => "download-checkpoint-invalid",
+        QuarkError::DownloadEngineUnavailable => "download-engine-unavailable",
+        QuarkError::DownloadSubmissionFailed => "download-submission-failed",
         QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         QuarkError::InvalidResponse => "invalid-response",
         QuarkError::Storage => "storage",
@@ -186,9 +190,10 @@ impl CloudHttpTransport for LiveTransport {
 impl CloudUploadTransport for LiveTransport {
     fn send_upload(&self, request: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
         let method = request.method;
+        let length = request.body.len();
         match self.0.send_upload(request) {
             Ok(response) => {
-                eprintln!("live object transfer: {method} -> HTTP {}", response.status);
+                eprintln!("live object transfer: {method} {length} bytes -> HTTP {}", response.status);
                 Ok(response)
             }
             Err(error) => {
@@ -265,6 +270,47 @@ fn download_bytes(url: &str) -> LiveResult<Vec<u8>> {
     download_bytes_with_headers(url, &[])
 }
 
+fn download_bytes_with_native_engine(url: &str) -> LiveResult<Vec<u8>> {
+    use alldownloader_lib::{Aria2Api, Aria2LaunchConfig, Aria2Options, Aria2Process, Aria2Settings};
+    let local = tempfile::tempdir()?;
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = reservation.local_addr()?.port();
+    drop(reservation);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let config = Aria2LaunchConfig {
+            binary: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+            data_dir: local.path().join("state"),
+            download_dir: local.path().join("downloads"),
+            parent_pid: std::process::id(),
+            peer_discovery: false,
+            aria2: Aria2Settings { rpc_port: port, ..Default::default() },
+        };
+        let (_process, rpc) = Aria2Process::start(config).await
+            .map_err(|_| failure("test native engine startup failed"))?;
+        let options = Aria2Options::from([
+            ("pause".into(), "false".into()),
+            ("out".into(), "roundtrip.bin".into()),
+            ("follow-torrent".into(), "false".into()),
+            ("all-proxy".into(), "".into()),
+        ]);
+        let gid = rpc.add_uri(vec![url.into()], options).await
+            .map_err(|_| failure("test native engine submission failed"))?;
+        let started = std::time::Instant::now();
+        loop {
+            let status = rpc.tell_status(&gid).await
+                .map_err(|_| failure("test native engine status failed"))?;
+            if status.status == "complete" {
+                return fs::read(local.path().join("downloads/roundtrip.bin")).map_err(Into::into);
+            }
+            if status.status == "error" || started.elapsed() > Duration::from_secs(600) {
+                return Err(failure(format!("test native transfer failed: code={:?}, completed={}", status.error_code, status.completed_length)));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+}
+
 fn download_bytes_with_headers(url: &str, headers: &[(&str, &str)]) -> LiveResult<Vec<u8>> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -273,7 +319,7 @@ fn download_bytes_with_headers(url: &str, headers: &[(&str, &str)]) -> LiveResul
     for (key, value) in headers {
         request = request.header(*key, *value);
     }
-    let response = request
+    let mut response = request
         .send()
         .map_err(|_| failure("provider direct download transport failed"))?;
     if !response.status().is_success() {
@@ -282,10 +328,10 @@ fn download_bytes_with_headers(url: &str, headers: &[(&str, &str)]) -> LiveResul
             response.status()
         )));
     }
-    Ok(response
-        .bytes()
-        .map_err(|_| failure("provider direct download body read failed"))?
-        .to_vec())
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut response, &mut bytes)
+        .map_err(|_| failure(format!("provider direct download body read failed after {} bytes", bytes.len())))?;
+    Ok(bytes)
 }
 
 fn remove_local(root: &Path) {
@@ -345,6 +391,94 @@ fn xunlei_browser_root_probe(
     eprintln!(
         "Xunlei browser endpoint probe with web_headers={web_headers} succeeded: {count} root entries"
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires an explicitly authorized PikPak account and creates only AllDownloader-IT-* test data"]
+fn live_pikpak_unique_upload_download_roundtrip() -> LiveResult<()> {
+    use sha2::{Digest, Sha256};
+    require_live_authorization()?;
+    let store = session_store()?;
+    let http = LiveTransport::new()?;
+    let client = PikPakClient::new(&http, &store);
+    let local = tempfile::tempdir()?;
+    let base_name = test_name("pikpak-roundtrip", "root");
+    let base = provider_step("roundtrip mkdir", || client.mkdir("0", &base_name))?;
+    let mut root_upload = None;
+    let result = (|| -> LiveResult<()> {
+        let nested = provider_step("roundtrip nested mkdir", || client.mkdir(&base.id, "nested"))?;
+        let nonce = uuid::Uuid::new_v4();
+        for (label, parent, length) in [
+            ("root-small", "0", 1024usize),
+            ("multipart", base.id.as_str(), 12 * 1024 * 1024 + 17),
+            ("nested", nested.id.as_str(), 4097),
+        ] {
+            let mut expected = Vec::with_capacity(length);
+            for block in 0..length.div_ceil(32) {
+                expected.extend_from_slice(&Sha256::digest(format!("{nonce}/{label}/{block}").as_bytes()));
+            }
+            expected.truncate(length);
+            let name = format!("{base_name}-{label}.bin");
+            let payload = local.path().join(&name);
+            fs::write(&payload, &expected)?;
+            eprintln!("roundtrip {label}: uploading {length} bytes");
+            let uploaded = provider_step("roundtrip upload", || client.upload_file(parent, &payload))?;
+            if parent == "0" { root_upload = Some(uploaded.id.clone()); }
+            if uploaded.name != name { return Err(failure("uploaded filename mismatch")); }
+            let mut confirmed = false;
+            for _ in 0..8 {
+                let listing = provider_step("roundtrip confirm actual parent", || client.list(&uploaded.parent_id))?;
+                if listing.items.iter().any(|file| file.id == uploaded.id && file.size == Some(length as u64)) {
+                    confirmed = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+            if !confirmed { return Err(failure(format!("{label}: actual destination did not confirm size"))); }
+            eprintln!("roundtrip {label}: actual directory and size confirmed (redirected={})", uploaded.parent_id != parent);
+            let (url, _) = provider_step("roundtrip resolve", || client.download(&uploaded.id))?;
+            let actual = download_bytes(&url)?;
+            if actual.len() != length || Sha256::digest(&actual) != Sha256::digest(&expected) {
+                return Err(failure(format!("{label}: size/SHA-256 mismatch")));
+            }
+            eprintln!("roundtrip {label}: downloaded {length} bytes; SHA-256 matched");
+            let native = download_bytes_with_native_engine(&url)?;
+            if native.len() != length || Sha256::digest(&native) != Sha256::digest(&expected) {
+                return Err(failure(format!("{label}: native engine size/SHA-256 mismatch")));
+            }
+            eprintln!("roundtrip {label}: bundled aria2-next downloaded {length} bytes; SHA-256 matched");
+        }
+        Ok(())
+    })();
+    // IDs come exclusively from mutations performed by this test. Recycle,
+    // never permanently delete, and do not touch any pre-existing user item.
+    let mut created = vec![base.id];
+    if let Some(id) = root_upload { created.push(id); }
+    let cleanup = provider_step("roundtrip recycle only created items", || client.trash(&created));
+    if cleanup.is_ok() { eprintln!("roundtrip cleanup: only this test's created items moved to recycle bin"); }
+    result.and(cleanup)
+}
+
+#[test]
+#[ignore = "requires explicit existing PikPak task ID; reads remote file without modifying tasks or user files"]
+fn live_pikpak_existing_task_native_download() -> LiveResult<()> {
+    use alldownloader_lib::cloud::commands::parse_stable_cloud_source;
+    use rusqlite::{Connection, OpenFlags};
+    use sha2::{Digest, Sha256};
+    require_live_authorization()?;
+    let task_id = std::env::var("ALLDOWNLOADER_TEST_TASK_ID")?;
+    let data = PathBuf::from(std::env::var("APPDATA")?).join("com.alldownloader.desktop");
+    let db = Connection::open_with_flags(data.join("tasks.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let (source, expected): (String, u64) = db.query_row("SELECT source,total_length FROM tasks WHERE id=?1", [&task_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let (provider, id) = parse_stable_cloud_source(&source)?;
+    if provider.key() != "pikpak" { return Err(failure("existing task is not PikPak")); }
+    let store = session_store()?;
+    let http = LiveTransport::new()?;
+    let (url, _) = provider_step("existing task resolve", || PikPakClient::new(&http, &store).download(&id))?;
+    let bytes = download_bytes_with_native_engine(&url)?;
+    if bytes.len() as u64 != expected { return Err(failure("existing task download length mismatch")); }
+    eprintln!("existing task native download: {} bytes; SHA-256={:x}; original task and files unchanged", bytes.len(), Sha256::digest(&bytes));
     Ok(())
 }
 

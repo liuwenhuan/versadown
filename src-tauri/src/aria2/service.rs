@@ -1669,7 +1669,7 @@ impl DownloadService {
             } else if task.source.starts_with("cloud-share://") {
                 snapshot
                     .error_message
-                    .map(|_| "网盘分享下载失败，请重试或重新解析分享链接".into())
+                    .map(super::types::cloud_share_transfer_error_message)
             } else {
                 snapshot.error_message
             };

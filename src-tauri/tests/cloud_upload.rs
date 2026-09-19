@@ -395,6 +395,36 @@ fn oss_http_200_error_is_not_upload_success() {
 }
 
 #[test]
+fn pikpak_upload_preserves_server_destination_for_instant_and_multipart_uploads() {
+    let local = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(local.path(), b"hello").unwrap();
+    for complete in [true, false] {
+        for (requested, returned, expected) in [
+            ("0", Some("actual-upload-folder"), "actual-upload-folder"),
+            ("selected-folder", Some("selected-folder"), "selected-folder"),
+            ("selected-folder", Some(""), "0"),
+            ("selected-folder", None, "selected-folder"),
+        ] {
+            let server = UploadServer { requests: Mutex::new(Vec::new()), fail_complete: false };
+            let file = upload_pikpak_file(&server, requested, local.path(), |request| {
+                assert_eq!(request["parent_id"], if requested == "0" { "" } else { requested });
+                let mut response = serde_json::json!({
+                    "file": { "id": "uploaded", "name": "hello.txt", "kind": "drive#file",
+                        "phase": if complete { "PHASE_TYPE_COMPLETE" } else { "PHASE_TYPE_PENDING" } },
+                    "resumable": { "params": { "endpoint": "bucket.oss-ap-southeast-1.aliyuncs.com",
+                        "bucket": "bucket", "key": "objects/item", "access_key_id": "temporary-id",
+                        "access_key_secret": "temporary-key", "security_token": "temporary-token" } }
+                });
+                if let Some(parent) = returned { response["file"]["parent_id"] = parent.into(); }
+                Ok(response)
+            }).unwrap();
+            assert_eq!(file.parent_id, expected);
+            assert_eq!(server.requests.lock().unwrap().len(), if complete { 0 } else { 3 });
+        }
+    }
+}
+
+#[test]
 fn pikpak_upload_rejects_the_virtual_recycle_bin_target_before_network() {
     let root = std::env::temp_dir().join(format!("cloud-upload-recycle-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();

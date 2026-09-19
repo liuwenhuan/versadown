@@ -5738,6 +5738,10 @@ mod tests {
         assert!(!unchanged.allow_overwrite);
         assert!(unchanged.continue_download);
         assert_eq!(unchanged.native_resume_gid.as_deref(), Some("old-gid"));
+        restart_cloud_download_after_unsupported_resume(&mut unchanged, Some("6"));
+        assert!(!unchanged.allow_overwrite);
+        assert!(unchanged.continue_download);
+        assert_eq!(unchanged.native_resume_gid.as_deref(), Some("old-gid"));
     }
 
     #[test]

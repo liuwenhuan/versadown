@@ -2297,7 +2297,11 @@ it('keeps selected upload paths and retries only authorization-failed files afte
       failures: []
     });
   const client = createCloudFake({
-    uploadCloudFiles
+    uploadCloudFiles,
+    listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
+      { id: 'uploaded-a', parentId: '0', name: 'a.txt', kind: 'file' },
+      { id: 'uploaded-b', parentId: '0', name: 'b.txt', kind: 'file' },
+    ] })
   });
   render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
 
@@ -2358,6 +2362,44 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
 
   expect(await screen.findByText('已确认.txt')).toBeVisible();
   expect(listCloudDirectory).toHaveBeenCalledTimes(3);
+});
+
+it('confirms redirected PikPak uploads in the actual destination and displays that folder', async () => {
+  const user = userEvent.setup();
+  const folder = { id: 'server-upload-folder', parentId: '0', name: 'My Upload', kind: 'folder' as const };
+  const uploaded = { id: 'uploaded', parentId: folder.id, name: '上传成功.txt', kind: 'file' as const };
+  let destinationReads = 0;
+  const listCloudDirectory = vi.fn(async (_provider, parentId) => parentId === '0'
+    ? { id: '0', items: [folder] }
+    : { id: folder.id, items: ++destinationReads > 1 ? [uploaded] : [] });
+  const client = createCloudFake({ listCloudDirectory, uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded: [uploaded], failures: [] }) });
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传' }));
+  await confirmAllLocalUploads(user);
+  expect(await screen.findByText('上传成功.txt')).toBeVisible();
+  expect(await screen.findByText('已上传 1 项；已转到上传目录：My Upload')).toBeVisible();
+  expect(screen.queryByText(/服务端目录尚未同步/)).not.toBeInTheDocument();
+  expect(destinationReads).toBe(2);
+  expect(listCloudDirectory).toHaveBeenCalledTimes(4);
+});
+
+it.each([false, true])('confirms directory upload roots without mistaking descendants for redirected uploads (mixed=%s)', async (mixed) => {
+  const user = userEvent.setup();
+  const folder = { id: 'new-folder', parentId: '0', name: '新上传目录', kind: 'folder' as const };
+  const child = { id: 'child', parentId: folder.id, name: '子文件.txt', kind: 'file' as const };
+  const redirected = { id: 'redirected', parentId: 'server-upload-folder', name: '单文件.txt', kind: 'file' as const };
+  const listCloudDirectory = vi.fn(async (_provider, parentId) => ({ id: parentId, items: parentId === '0' ? [folder] : [redirected] }));
+  const client = createCloudFake({ listCloudDirectory, uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded: mixed ? [folder, child, redirected] : [folder, child], failures: [] }) });
+  render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传' }));
+  await confirmAllLocalUploads(user);
+  await waitFor(() => expect(listCloudDirectory).toHaveBeenCalledTimes(mixed ? 3 : 2));
+  expect(screen.getByText('新上传目录')).toBeVisible();
+  expect(listCloudDirectory).not.toHaveBeenCalledWith('pikpak', folder.id);
+  expect(screen.queryByText(/服务端目录尚未同步/)).not.toBeInTheDocument();
+  if (mixed) expect(listCloudDirectory).toHaveBeenCalledWith('pikpak', redirected.parentId);
 });
 
 it('refreshes an upload outcome before offering inline reauthorization for expired credentials', async () => {

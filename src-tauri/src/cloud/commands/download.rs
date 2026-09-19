@@ -636,17 +636,12 @@ pub async fn queue_cloud_dispatch(
                         .runtime
                         .service()
                         .await
-                        .map_err(|_| QuarkError::Transport("下载引擎不可用".into()))?;
+                        .map_err(|_| QuarkError::DownloadEngineUnavailable)?;
                     let (url, options) = share::share_submission_options(resolved, configured)?;
                     service
                         .submit_uri_with_options(id, vec![url], options)
                         .await
-                        .map_err(|error| match error {
-                            crate::aria2::service::DownloadServiceError::InvalidNativeCheckpoint => {
-                                QuarkError::Transport(error.to_string())
-                            }
-                            _ => QuarkError::Transport("aria2 未能接受网盘下载任务".into()),
-                        })
+                        .map_err(cloud_download_submission_error)
                 },
             )
             .await;
@@ -852,7 +847,10 @@ pub(crate) fn directory_download_failure_fields(
             "source_file_missing",
             "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载",
         ),
-        QuarkError::Transport(_) => ("network_error", "网络或下载引擎错误"),
+        QuarkError::DownloadCheckpointInvalid => ("download_checkpoint_invalid", "本地下载文件或续传断点已缺失或失效，无法继续下载；请重新创建下载任务从头下载（不会自动覆盖已有文件）"),
+        QuarkError::DownloadEngineUnavailable => ("download_engine_unavailable", "本地下载引擎不可用，请重启应用后重试"),
+        QuarkError::DownloadSubmissionFailed => ("download_submission_failed", "本地下载引擎未能接受任务，请重试；若持续失败请检查下载目录和引擎日志"),
+        QuarkError::Transport(_) => ("network_error", "获取网盘下载地址时网络请求失败，请检查网络后重试"),
         QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
         QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),
         QuarkError::Storage => ("credential_storage_error", "本机凭据或任务存储不可用"),

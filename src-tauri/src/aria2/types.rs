@@ -234,6 +234,8 @@ impl TryFrom<Aria2Status> for TransferSnapshot {
         if let Some(code) = &value.error_code {
             parse_u64("errorCode", code)?;
         }
+        let error_message =
+            transfer_error_message(value.error_code.as_deref(), value.error_message);
         Ok(Self {
             gid: value.gid,
             status: map_aria2_status(&value.status)?,
@@ -245,7 +247,7 @@ impl TryFrom<Aria2Status> for TransferSnapshot {
             progress_percent,
             eta_seconds,
             error_code: value.error_code,
-            error_message: value.error_message,
+            error_message,
             followed_by: value.followed_by,
             files: value
                 .files
@@ -253,6 +255,121 @@ impl TryFrom<Aria2Status> for TransferSnapshot {
                 .map(TransferFile::try_from)
                 .collect::<Result<_, _>>()?,
         })
+    }
+}
+
+pub(crate) const TRUNCATED_RESPONSE_MESSAGE: &str =
+    "下载服务器提前中断传输，文件尚未接收完整；请重试";
+
+pub(crate) fn cloud_share_transfer_error_message(message: String) -> String {
+    if message == TRUNCATED_RESPONSE_MESSAGE {
+        message
+    } else {
+        "网盘分享下载失败，请重试或重新解析分享链接".into()
+    }
+}
+
+fn transfer_error_message(code: Option<&str>, message: Option<String>) -> Option<String> {
+    // Aria2 Next reports a prematurely closed response as error 6. Require
+    // its explicit diagnostic as well: other connection errors must retain
+    // their meaning, and curl's error numbers are not aria2 error numbers.
+    let truncated = code == Some("6")
+        && message.as_deref().is_some_and(|message| {
+            message.split("end of response with ").skip(1).any(|tail| {
+                tail.split_once(" bytes missing")
+                    .is_some_and(|(count, rest)| {
+                        !count.is_empty()
+                            && count.bytes().all(|byte| byte.is_ascii_digit())
+                            && rest
+                                .chars()
+                                .next()
+                                .is_none_or(|next| !next.is_alphanumeric())
+                    })
+            })
+        });
+    if truncated {
+        // Never copy URLs, signatures, or headers attached to the diagnostic.
+        Some(TRUNCATED_RESPONSE_MESSAGE.into())
+    } else {
+        message
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_transfer_preserves_safe_interruption_without_exposing_raw_errors() {
+        assert_eq!(cloud_share_transfer_error_message(TRUNCATED_RESPONSE_MESSAGE.into()), TRUNCATED_RESPONSE_MESSAGE);
+        assert_eq!(cloud_share_transfer_error_message("https://signed.example/file?token=secret".into()), "网盘分享下载失败，请重试或重新解析分享链接");
+    }
+
+    fn error_snapshot(code: Option<&str>, message: Option<&str>) -> TransferSnapshot {
+        TransferSnapshot::try_from(Aria2Status {
+            gid: "fixture-gid".into(),
+            status: "error".into(),
+            total_length: "4194304".into(),
+            completed_length: "1024".into(),
+            download_speed: "0".into(),
+            upload_speed: "0".into(),
+            connections: "0".into(),
+            files: vec![],
+            bittorrent: None,
+            followed_by: vec![],
+            error_code: code.map(str::to_owned),
+            error_message: message.map(str::to_owned),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn truncated_response_error_is_safe_and_preserves_engine_code_and_progress() {
+        for message in [
+            "end of response with 4194304 bytes missing",
+            "GET https://cdn.example/file?signature=secret: end of response with 4194304 bytes missing; Authorization: Bearer secret",
+        ] {
+            let snapshot = error_snapshot(Some("6"), Some(message));
+            assert_eq!(snapshot.error_code.as_deref(), Some("6"));
+            assert_eq!(
+                snapshot.error_message.as_deref(),
+                Some("下载服务器提前中断传输，文件尚未接收完整；请重试")
+            );
+            assert_eq!(snapshot.status, TaskStatus::Failed);
+            assert_eq!(snapshot.completed_length, 1024);
+            assert_eq!(snapshot.total_length, Some(4194304));
+        }
+    }
+
+    #[test]
+    fn unrelated_transfer_errors_are_not_reclassified_as_truncated_responses() {
+        for (code, message) in [
+            (
+                Some("18"),
+                Some("end of response with 4194304 bytes missing"),
+            ),
+            (
+                Some("8"),
+                Some("end of response with 4194304 bytes missing"),
+            ),
+            (None, Some("end of response with 4194304 bytes missing")),
+            (Some("6"), Some("connection refused")),
+            (
+                Some("6"),
+                Some("end of response with unknown bytes missing"),
+            ),
+            (Some("6"), Some("end of response with  bytes missing")),
+            (Some("6"), Some("end of response with -1 bytes missing")),
+            (
+                Some("6"),
+                Some("end of response with 12 bytes missingunexpected"),
+            ),
+            (Some("6"), None),
+        ] {
+            let snapshot = error_snapshot(code, message);
+            assert_eq!(snapshot.error_code.as_deref(), code);
+            assert_eq!(snapshot.error_message.as_deref(), message);
+        }
     }
 }
 

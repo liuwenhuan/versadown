@@ -357,6 +357,12 @@ pub enum CloudError {
     AuthorizationPending,
     #[error("网盘中的源文件已不存在，请刷新网盘列表后重新创建下载")]
     SourceFileMissing,
+    #[error("本地下载文件或续传断点已缺失或失效，无法继续下载；请重新创建下载任务从头下载（不会自动覆盖已有文件）")]
+    DownloadCheckpointInvalid,
+    #[error("本地下载引擎不可用，请重启应用后重试")]
+    DownloadEngineUnavailable,
+    #[error("本地下载引擎未能接受任务，请重试；若持续失败请检查下载目录和引擎日志")]
+    DownloadSubmissionFailed,
     #[error("云盘响应无效，请刷新后重试")]
     InvalidResponse,
     #[error("安全凭据存储不可用")]
@@ -389,6 +395,9 @@ impl Serialize for CloudError {
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
             Self::SourceFileMissing => "source_file_missing",
+            Self::DownloadCheckpointInvalid => "download_checkpoint_invalid",
+            Self::DownloadEngineUnavailable => "download_engine_unavailable",
+            Self::DownloadSubmissionFailed => "download_submission_failed",
             Self::Storage => "credential_storage_error",
             Self::InvalidResponse => "invalid_response",
             Self::Transport(_) => "network_error",
