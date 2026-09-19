@@ -339,6 +339,8 @@ impl Drop for PasswordLoginRequest {
 pub enum CloudError {
     #[error("尚未授权此网盘，请登录后使用")]
     NotAuthorized,
+    #[error("当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务")]
+    AccountMismatch,
     #[error("网盘会话已过期，请重新登录授权")]
     AuthorizationExpired,
     #[error("登录已自动恢复，请重新执行本次操作")]
@@ -376,6 +378,7 @@ impl Serialize for CloudError {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let code = match self {
             Self::NotAuthorized => "not_authorized",
+            Self::AccountMismatch => "account_mismatch",
             Self::AuthorizationExpired => "credentials_expired",
             Self::SessionRenewedRetryOperation => "session_renewed_retry_operation",
             Self::WebAuthorizationRequired => "web_auth_required",
@@ -517,6 +520,13 @@ mod capacity_tests {
             json!({
                 "code":"source_file_missing",
                 "message":"网盘中的源文件已不存在，请刷新网盘列表后重新创建下载"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(QuarkError::AccountMismatch).unwrap(),
+            json!({
+                "code":"account_mismatch",
+                "message":"当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务"
             })
         );
     }

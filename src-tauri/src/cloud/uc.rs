@@ -3,7 +3,8 @@
 //! UC issues browser-cookie sessions rather than a stable public OAuth token.
 //! This adapter therefore retains only the minimal cookie pairs obtained from
 //! the official `drive.uc.cn` web authorization flow.  Signed download URLs
-//! and response cookies are kept in `UcDownload` for immediate use only.
+//! are never persisted. Server-rotated session cookies are retained so a
+//! directory read and the following download resolve use the same session.
 use super::{
     types::required, CloudAccount, CloudAuthMethod, CloudDirectory, CloudDriveUploadProfile,
     CloudFile, CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
@@ -12,7 +13,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{cell::RefCell, collections::BTreeMap, fmt, path::Path};
 
 const API: &str = "https://pc-api.uc.cn/1/clouddrive";
 const WEB: &str = "https://drive.uc.cn";
@@ -153,28 +154,30 @@ pub struct UcDownload {
 }
 
 pub struct UcClient<'a, T: CloudHttpTransport + ?Sized> {
-    session: UcSession,
+    session: RefCell<UcSession>,
     http: &'a T,
 }
 
 impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     pub fn new(session: UcSession, http: &'a T) -> Self {
-        Self { session, http }
+        Self {
+            session: RefCell::new(session),
+            http,
+        }
     }
 
-    pub fn session(&self) -> &UcSession {
-        &self.session
+    pub fn session(&self) -> UcSession {
+        self.session.borrow().clone()
     }
 
-    fn cookie(&self) -> Result<&str, QuarkError> {
-        let has_session = self
-            .session
-            .cookie
+    fn cookie(&self) -> Result<String, QuarkError> {
+        let cookie = self.session.borrow().cookie.clone();
+        let has_session = cookie
             .split(';')
             .filter_map(cookie_pair)
             .any(|(name, _)| name == "__puus");
         if has_session {
-            Ok(&self.session.cookie)
+            Ok(cookie)
         } else {
             Err(QuarkError::AuthorizationExpired)
         }
@@ -184,7 +187,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         Ok(BTreeMap::from([
             ("Accept".into(), "application/json, text/plain, */*".into()),
             ("Accept-Language".into(), "zh-CN,zh;q=0.9".into()),
-            ("Cookie".into(), self.cookie()?.to_owned()),
+            ("Cookie".into(), self.cookie()?),
             (
                 "Content-Type".into(),
                 "application/json;charset=UTF-8".into(),
@@ -219,18 +222,42 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         } else {
             format!("{query}&fr=pc&pr=UCBrowser")
         };
+        let (response, rotated) = self.send_once(method, path, &query, body.clone())?;
+        if rotated && (method == "GET" || (method == "POST" && path == "file/download")) {
+            return self
+                .send_once(method, path, &query, body)
+                .map(|(response, _)| response);
+        }
+        Ok(response)
+    }
+
+    fn send_once(
+        &self,
+        method: &'static str,
+        path: &str,
+        query: &str,
+        body: Option<Value>,
+    ) -> Result<(CloudHttpResponse, bool), QuarkError> {
+        let original_cookie = self.cookie()?;
         let mut headers = self.headers()?;
         if matches!(method, "POST" | "PUT" | "PATCH" | "DELETE") {
-            if let Some(csrf) = cookie_value(self.cookie()?, "csrf_token") {
+            if let Some(csrf) = cookie_value(&original_cookie, "csrf_token") {
                 headers.insert("x-csrf-token".into(), csrf);
             }
         }
-        self.http.send(CloudHttpRequest {
+        let response = self.http.send(CloudHttpRequest {
             method,
             url: format!("{API}/{path}?{query}"),
             headers,
             body: body.map(|value| value.to_string()),
-        })
+        })?;
+        let refreshed_cookie = cookie_for_download(&original_cookie, &response.set_cookies);
+        let session_rotated =
+            cookie_value(&original_cookie, "__puus") != cookie_value(&refreshed_cookie, "__puus");
+        if refreshed_cookie != original_cookie {
+            self.session.borrow_mut().cookie = refreshed_cookie;
+        }
+        Ok((response, session_rotated))
     }
 
     fn request_json(
@@ -270,27 +297,27 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
     /// paused download belongs to a newly restored session.
     fn legacy_session_id(&self) -> Result<String, QuarkError> {
         let cookie = self.cookie()?;
-        Ok(cookie_value(cookie, "__uid")
+        Ok(cookie_value(&cookie, "__uid")
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("uc-{:x}", md5::compute(cookie))))
+            .unwrap_or_else(|| format!("uc-{:x}", md5::compute(&cookie))))
     }
 
     fn persisted_account_id(&self) -> Option<String> {
         self.session
+            .borrow()
             .account_id
-            .as_deref()
-            .map(str::trim)
+            .clone()
+            .map(|id| id.trim().to_owned())
             .filter(|id| {
                 !id.is_empty() && id.chars().count() <= 256 && !id.chars().any(char::is_control)
             })
-            .map(str::to_owned)
     }
 
     /// UC's `b-user-id` cookie is a user identifier issued alongside the web
     /// session. Unlike `__uid`, it is not the `AAR/...` browser-session
     /// marker that changes when a user signs in again.
     fn browser_account_id(&self) -> Result<Option<String>, QuarkError> {
-        Ok(cookie_value(self.cookie()?, "b-user-id").filter(|id| {
+        Ok(cookie_value(&self.cookie()?, "b-user-id").filter(|id| {
             !id.is_empty()
                 && id.chars().count() <= 256
                 && !id.chars().any(char::is_control)
@@ -303,28 +330,28 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             provider: CloudProvider::Uc,
             display_name: self
                 .saved_display_name(&id)
-                .unwrap_or(UC_CARD_DISPLAY_NAME)
-                .to_owned(),
+                .unwrap_or_else(|| UC_CARD_DISPLAY_NAME.to_owned()),
             id,
-            auth_method: self.session.auth_method,
+            auth_method: self.session.borrow().auth_method,
         }
     }
 
     fn has_share_session_cookie(&self) -> Result<bool, QuarkError> {
-        Ok(cookie_value(self.cookie()?, "UDRIVE_TRANSFER_SESS")
+        Ok(cookie_value(&self.cookie()?, "UDRIVE_TRANSFER_SESS")
             .is_some_and(|value| !value.is_empty()))
     }
 
-    fn saved_display_name(&self, account_id: &str) -> Option<&str> {
+    fn saved_display_name(&self, account_id: &str) -> Option<String> {
         self.session
+            .borrow()
             .display_name
-            .as_deref()
+            .clone()
             .filter(|value| !value.is_empty())
             // `__uid` is an opaque, browser-issued session identifier. It
             // was written as a card label by older builds, but is never a
             // user-visible UC account name.
-            .filter(|value| *value != account_id)
-            .filter(|value| *value != UC_CARD_DISPLAY_NAME)
+            .filter(|value| value != account_id)
+            .filter(|value| value != UC_CARD_DISPLAY_NAME)
     }
 
     pub fn has_saved_display_name(&self) -> Result<bool, QuarkError> {
@@ -344,13 +371,12 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         Ok(self.account_with_id(id))
     }
 
-    /// Return the durable UC user identity. Older sessions are upgraded from
-    /// the explicit `b-user-id` cookie or, where available, the member
-    /// endpoint; neither source accepts the rotating `AAR/...` marker.
+    /// Return the durable UC user identity. The live browser cookie/member
+    /// response must take precedence over persisted metadata: UC can switch
+    /// accounts in the same browser profile, leaving an otherwise valid
+    /// encrypted session whose saved account id belongs to the previous user.
+    /// Neither live source accepts the rotating `AAR/...` marker.
     pub fn verified_account_id(&self) -> Result<Option<String>, QuarkError> {
-        if let Some(id) = self.persisted_account_id() {
-            return Ok(Some(id));
-        }
         let browser_account_id = self.browser_account_id()?;
         let response = self.request_json(
             "GET",
@@ -407,7 +433,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
         // Share-transfer ownership is an existing compatibility contract. Its
         // legacy fallback stays local to those plans; personal-download
         // bindings use `verified_account_id` and never rely on this marker.
-        if let Some(id) = cookie_value(self.cookie()?, "__uid").filter(|id| !id.is_empty()) {
+        if let Some(id) = cookie_value(&self.cookie()?, "__uid").filter(|id| !id.is_empty()) {
             return Ok(Some(id));
         }
         self.verified_account_id()
@@ -774,7 +800,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             .pointer("/data/0")
             .ok_or(QuarkError::InvalidResponse)?;
         let url = https_download_url(&required(file, "download_url")?)?;
-        let cookie = cookie_for_download(self.cookie()?, &response.set_cookies);
+        let cookie = cookie_for_download(&self.cookie()?, &response.set_cookies);
         let mut headers = self.headers()?;
         // This is a GET to UC's file CDN rather than a JSON API call. Sending
         // the API Content-Type makes UC reject an otherwise valid signed URL.
@@ -1711,6 +1737,54 @@ mod tests {
     }
 
     #[test]
+    fn uc_safe_read_retries_once_with_the_rotated_server_session() {
+        let http = ShareReplies::new(vec![
+            (
+                json!({"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}),
+                vec!["__puus=fresh-session; Path=/; Secure"],
+            ),
+            (
+                json!({"code":0,"status":200,"data":{"list":[{"fid":"file-1","file_name":"fixture.txt","dir":false}]},"metadata":{"_total":1}}),
+                vec![],
+            ),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=stale-session"), &http);
+
+        let directory = client.directory("0").unwrap();
+
+        assert_eq!(directory.items[0].id, "file-1");
+        assert!(client.session().cookie.contains("__puus=fresh-session"));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].headers["Cookie"].contains("__puus=stale-session"));
+        assert!(requests[1].headers["Cookie"].contains("__puus=fresh-session"));
+    }
+
+    #[test]
+    fn uc_download_retries_a_false_missing_response_after_session_rotation() {
+        let http = ShareReplies::new(vec![
+            (
+                json!({"code":21001,"status":404,"message":"file not found"}),
+                vec!["__puus=fresh-session; Path=/; Secure"],
+            ),
+            (
+                json!({"code":0,"status":200,"data":[{"fid":"file-1","file_name":"fixture.txt","download_url":"https://cdn.example/fixture"}]}),
+                vec![],
+            ),
+        ]);
+        let client = UcClient::new(UcSession::cookie("__puus=stale-session"), &http);
+
+        let download = client.download("file-1").unwrap();
+
+        assert_eq!(download.name, "fixture.txt");
+        assert!(client.session().cookie.contains("__puus=fresh-session"));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].headers["Cookie"].contains("__puus=stale-session"));
+        assert!(requests[1].headers["Cookie"].contains("__puus=fresh-session"));
+    }
+
+    #[test]
     fn uc_web_session_keeps_the_csrf_token_needed_for_share_download_signing() {
         // Break caught: accepting an official web session for directory reads
         // while dropping its csrf cookie makes a subsequently parsed share
@@ -1843,6 +1917,32 @@ mod tests {
 
         assert_eq!(account.id, "uc-user-42");
         assert_eq!(account.display_name, "UC网盘");
+    }
+
+    #[test]
+    fn uc_live_browser_identity_overrides_a_persisted_previous_account() {
+        let mut session =
+            UcSession::cookie("__uid=AAR/current-session; b-user-id=current-user; __puus=session");
+        session.account_id = Some("previous-user".into());
+        let http = Http::new(vec![json!({"code": 0, "data": {}})]);
+        let client = UcClient::new(session, &http);
+
+        let account_id = client
+            .verified_account_id()
+            .expect("the live UC identity should be readable");
+
+        assert_eq!(account_id.as_deref(), Some("current-user"));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn uc_persisted_identity_is_not_accepted_as_a_live_download_owner() {
+        let mut session = UcSession::cookie("__uid=AAR/current-session; __puus=session");
+        session.account_id = Some("previous-user".into());
+        let http = Http::new(vec![json!({"code": 0, "data": {}})]);
+        let client = UcClient::new(session, &http);
+
+        assert_eq!(client.verified_account_id().unwrap(), None);
     }
 
     #[test]

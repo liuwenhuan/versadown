@@ -21,6 +21,9 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
     }
     match error {
         QuarkError::NotAuthorized => "尚未授权此网盘，请登录后使用".into(),
+        QuarkError::AccountMismatch => {
+            "当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务".into()
+        }
         QuarkError::AuthorizationExpired => "网盘会话已过期，请重新登录授权".into(),
         QuarkError::SessionRenewedRetryOperation => "登录已自动恢复，请重新执行本次操作".into(),
         QuarkError::WebAuthorizationRequired => {
@@ -60,6 +63,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
 pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
     match error {
         QuarkError::NotAuthorized => "not_authorized",
+        QuarkError::AccountMismatch => "account_mismatch",
         QuarkError::AuthorizationExpired => "credentials_expired",
         QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",

@@ -508,7 +508,6 @@ pub async fn resume_reauthorized_provider_tasks(
         return Ok(());
     };
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
-    migrate_verified_legacy_uc_startup_downloads(&app, &state, provider, &account_id).await?;
     let (tasks, directory_items) = state
         .store
         .reauthorized_cloud_downloads(provider, &account_id)
@@ -649,59 +648,6 @@ pub async fn resume_reauthorized_provider_tasks(
                     let _ = app.emit("download-task-updated", outcome.payload);
                 }
             }
-        }
-    }
-    Ok(())
-}
-
-/// UC builds before stable member identities bound downloads to the rotating
-/// `__uid` cookie (typically `AAR/...`).  Do not relax the normal owner check:
-/// first resolve each candidate with the current authenticated UC session,
-/// then update only that startup-paused legacy binding.  A file id is scoped
-/// to its UC drive, so a successful resolver response proves the task belongs
-/// to the account that is about to resume it.
-async fn migrate_verified_legacy_uc_startup_downloads(
-    app: &AppHandle,
-    state: &AppState,
-    provider: CloudProvider,
-    account_id: &str,
-) -> Result<(), QuarkError> {
-    if provider != CloudProvider::Uc {
-        return Ok(());
-    }
-    use tauri::Emitter;
-
-    let candidates = state
-        .store
-        .legacy_uc_startup_recovery_downloads()
-        .map_err(|_| QuarkError::Storage)?;
-    for task in candidates {
-        // Never migrate merely because an account is logged in. The signed
-        // URL itself is intentionally discarded; normal resubmission resolves
-        // it again immediately before aria2 receives the task.
-        match resolve_stable_cloud_download(app.clone(), &task.source).await {
-            Ok(_) => {
-                state
-                    .store
-                    .migrate_legacy_uc_startup_download_account(task.id, account_id)
-                    .map_err(|_| QuarkError::Storage)?;
-            }
-            Err(QuarkError::SourceFileMissing) => {
-                if let Some(task) = state
-                    .store
-                    .fail_pending_cloud_source_missing(task.id)
-                    .map_err(|_| QuarkError::Storage)?
-                {
-                    if should_emit_task_update(state, task.is_private) {
-                        if let Ok(payload) =
-                            crate::commands::task_update_payload(&state.store, None, task)
-                        {
-                            let _ = app.emit("download-task-updated", payload);
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
         }
     }
     Ok(())

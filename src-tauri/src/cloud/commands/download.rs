@@ -390,6 +390,25 @@ pub(crate) fn source_duplicate_blocks_submission(
     directory_context.is_none()
 }
 
+pub(crate) fn validate_download_account(
+    current: Option<&str>,
+    expected: &str,
+) -> Result<(), QuarkError> {
+    let current = current
+        .filter(|account_id| !account_id.trim().is_empty())
+        .ok_or(QuarkError::NotAuthorized)?;
+    if current != expected {
+        return Err(QuarkError::AccountMismatch);
+    }
+    Ok(())
+}
+
+pub(crate) fn require_task_download_owner(owner: Option<String>) -> Result<String, QuarkError> {
+    owner
+        .filter(|account_id| !account_id.trim().is_empty())
+        .ok_or(QuarkError::AccountMismatch)
+}
+
 pub(crate) fn require_download_account(
     app: &AppHandle,
     provider: CloudProvider,
@@ -399,32 +418,19 @@ pub(crate) fn require_download_account(
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
     let record = cloud.auth_supervisor.record(&cloud.store, provider)?;
-    if record.account_id.as_deref() != Some(expected) {
-        return Err(QuarkError::NotAuthorized);
-    }
-    Ok(())
+    validate_download_account(record.account_id.as_deref(), expected)
 }
 
-async fn download_account(app: AppHandle, provider: CloudProvider) -> Result<String, QuarkError> {
-    run(app, provider, move |state, http| {
-        if let Some(id) = state
-            .auth_supervisor
-            .record(&state.store, provider)?
-            .account_id
-        {
-            return Ok(id);
-        }
-        let account = restore_account(provider, &state.store, http)?;
-        state.auth_supervisor.ready_locked(
-            &state.store,
-            provider,
-            Some(account.id.clone()),
-            Some(account.auth_method),
-            auth_supervisor::session_expiry(&state.store, provider)?,
-        )?;
-        Ok(account.id)
-    })
-    .await
+fn download_account(app: &AppHandle, provider: CloudProvider) -> Result<String, QuarkError> {
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    cloud
+        .auth_supervisor
+        .record(&cloud.store, provider)?
+        .account_id
+        .filter(|account_id| !account_id.trim().is_empty())
+        .ok_or(QuarkError::NotAuthorized)
 }
 
 pub(crate) async fn submit_cloud_file(
@@ -465,7 +471,7 @@ pub(crate) async fn submit_cloud_file(
         }
     }
 
-    let account_id = download_account(app.clone(), provider).await?;
+    let account_id = download_account(&app, provider)?;
     if let Some(context) = directory_context {
         state
             .store
@@ -680,13 +686,12 @@ fn check_dispatch_owner(
     provider: CloudProvider,
     id: uuid::Uuid,
 ) -> Result<(), QuarkError> {
-    if let Some(owner) = store
-        .cloud_download_account(id)
-        .map_err(|_| QuarkError::Storage)?
-    {
-        require_download_account(app, provider, &owner)?;
-    }
-    Ok(())
+    let owner = require_task_download_owner(
+        store
+            .cloud_download_account(id)
+            .map_err(|_| QuarkError::Storage)?,
+    )?;
+    require_download_account(app, provider, &owner)
 }
 
 pub(crate) fn emit_cloud_dispatch_update(app: &AppHandle, state: &AppState, task: &DownloadTask) {
@@ -828,6 +833,10 @@ pub(crate) fn directory_download_failure_fields(
         QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
             ("credentials_expired", "网盘会话已过期")
         }
+        QuarkError::AccountMismatch => (
+            "account_mismatch",
+            "当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务",
+        ),
         QuarkError::SessionRenewedRetryOperation => (
             "session_renewed_retry_operation",
             "登录已自动恢复，请重新执行本次操作",
@@ -1220,7 +1229,7 @@ pub async fn cloud_download_directory(
     directory_name: String,
     private_download: Option<bool>,
 ) -> Result<CloudDirectoryDownloadOutcome, QuarkError> {
-    let account_id = download_account(app.clone(), provider).await?;
+    let account_id = download_account(&app, provider)?;
     let planned_directory_id = directory_id.clone();
     let plan = run_session_work(
         app.clone(),

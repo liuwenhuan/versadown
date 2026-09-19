@@ -23,6 +23,16 @@ impl DriveOps for TianyiDriver<'_> {
             }
         }
     }
+    fn verified_account(&mut self) -> Result<CloudAccount, CloudError> {
+        let provider = CloudProvider::Tianyi;
+        if self.store.load(provider.key())?.is_none() {
+            return Err(CloudError::NotAuthorized);
+        }
+        let session: tianyi::TianyiSession = load_provider_session(provider, &self.store)?;
+        // The card may deliberately use the generic `tianyi-web` identity,
+        // but a download owner must come from Tianyi's authenticated profile.
+        tianyi::TianyiClient::new(session, &self.http).account()
+    }
     fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
         tianyi::TianyiClient::new(
             load_provider_session(CloudProvider::Tianyi, &self.store)?,

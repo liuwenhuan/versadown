@@ -189,7 +189,7 @@ pub(crate) fn finalize_uc_web_authorization(
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
-    let client = uc::UcClient::new(session.clone(), http);
+    let client = uc::UcClient::new(session, http);
     // A cookie pair only says that the WebView completed part of its flow.
     // Verify the exact first read the workspace needs before replacing the
     // stored account and closing the official authorization window.
@@ -197,7 +197,9 @@ pub(crate) fn finalize_uc_web_authorization(
     // The official UC page captures the nickname before this call, but the
     // directory read remains the authorization proof. A page which has not
     // populated its profile yet must still preserve a verified login.
-    let account = match client.verified_account_id() {
+    let account_id = client.verified_account_id();
+    session = client.session();
+    let account = match account_id {
         Ok(Some(account_id)) => {
             session.account_id = Some(account_id);
             uc::UcClient::new(session.clone(), http).web_account()?

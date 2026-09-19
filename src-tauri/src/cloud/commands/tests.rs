@@ -5,9 +5,9 @@ use std::{
 };
 
 use super::{
-    cloud_failure_code, create_cloud_task, password_webview_data_directory_from_root,
-    prepare_baidu_account_login, recover_provider_password_session,
-    requires_cloud_reauthorization_failure, resolve_download,
+    cloud_failure_code, create_cloud_task, directory_download_failure_fields,
+    password_webview_data_directory_from_root, prepare_baidu_account_login,
+    recover_provider_password_session, requires_cloud_reauthorization_failure, resolve_download,
     retry_read_with_refreshed_web_session,
 };
 use crate::cloud::share::{CloudShareDownloadEntry, CloudShareDownloadSelection};
@@ -311,6 +311,41 @@ fn only_authorization_failures_request_a_new_official_login() {
     assert!(!requires_cloud_reauthorization_failure(Some(
         cloud_failure_code(&QuarkError::Provider("temporary failure".into()),)
     )));
+    assert!(!requires_cloud_reauthorization_failure(Some(
+        cloud_failure_code(&QuarkError::AccountMismatch,)
+    )));
+    assert_eq!(
+        directory_download_failure_fields(&QuarkError::AccountMismatch),
+        (
+            "account_mismatch",
+            "当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务"
+        )
+    );
+}
+
+#[test]
+fn persisted_download_owner_is_the_only_account_comparison_source() {
+    assert!(super::validate_download_account(Some("current-user"), "current-user").is_ok());
+    assert!(matches!(
+        super::validate_download_account(Some("other-user"), "task-owner"),
+        Err(QuarkError::AccountMismatch)
+    ));
+    assert!(matches!(
+        super::validate_download_account(None, "task-owner"),
+        Err(QuarkError::NotAuthorized)
+    ));
+    assert!(matches!(
+        super::validate_download_account(Some("   "), "task-owner"),
+        Err(QuarkError::NotAuthorized)
+    ));
+    assert!(matches!(
+        super::require_task_download_owner(None),
+        Err(QuarkError::AccountMismatch)
+    ));
+    assert_eq!(
+        super::require_task_download_owner(Some("task-owner".into())).unwrap(),
+        "task-owner"
+    );
 }
 
 #[test]
@@ -461,6 +496,10 @@ fn web_session_refresh_never_retries_a_provider_captcha_challenge() {
 fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secrets() {
     let typed = [
         (QuarkError::NotAuthorized, "尚未授权此网盘，请登录后使用"),
+        (
+            QuarkError::AccountMismatch,
+            "当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务",
+        ),
         (
             QuarkError::AuthorizationExpired,
             "网盘会话已过期，请重新登录授权",

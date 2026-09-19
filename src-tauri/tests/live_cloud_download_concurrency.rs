@@ -109,6 +109,7 @@ fn proxy_url(proxy: &ProxySettings) -> Result<url::Url, &'static str> {
 fn cloud_error_kind(error: &CloudError) -> &'static str {
     match error {
         CloudError::NotAuthorized => "session-missing",
+        CloudError::AccountMismatch => "account-mismatch",
         CloudError::AuthorizationExpired => "session-expired",
         CloudError::SessionRenewedRetryOperation => "session-renewed-retry-needed",
         CloudError::WebAuthorizationRequired => "web-authorization-required",

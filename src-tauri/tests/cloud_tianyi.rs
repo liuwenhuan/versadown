@@ -225,6 +225,34 @@ fn tianyi_browser_identity_reaches_account_directory_and_download_requests() {
 }
 
 #[test]
+fn tianyi_download_owner_uses_the_live_profile_instead_of_the_generic_card_identity() {
+    use alldownloader_lib::cloud::{
+        CloudProvider, CredentialStore, MemoryCredentialStore, ProviderRegistry,
+    };
+
+    let store = MemoryCredentialStore::default();
+    let mut session = TianyiSession::cookie("COOKIE_LOGIN_USER=current; SSON=session");
+    session.apply_browser_context(&serde_json::json!({
+        "browser_id":"1234567890abcdef1234567890abcdef", "user_agent":"OfficialBrowser/140"
+    }));
+    store
+        .save("tianyi", &serde_json::to_vec(&session).unwrap())
+        .unwrap();
+    let http = RecordingHttp::sequence(&[
+        r#"{"res_code":0,"userInfo":{"userId":"account-b","nickName":"Bob"}}"#,
+    ]);
+    let mut driver = ProviderRegistry::global().driver(CloudProvider::Tianyi, &store, &http);
+
+    assert_eq!(driver.account().unwrap().id, "tianyi-web");
+    assert_eq!(driver.verified_account().unwrap().id, "account-b");
+    let requests = http.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0]
+        .url
+        .contains("/api/open/user/getUserInfoForPortal.action"));
+}
+
+#[test]
 fn tianyi_maps_files_and_passes_cookie_to_the_resolved_download() {
     let http = RecordingHttp::sequence(&[
         r#"{"res_code":0,"fileListAO":{"fileList":[{"id":"f1","name":"photo.jpg","isFolder":false,"size":9}]}}"#,

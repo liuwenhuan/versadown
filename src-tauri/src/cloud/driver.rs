@@ -10,6 +10,12 @@ pub trait DriveOps {
     fn account(&mut self) -> Result<CloudAccount, CloudError> {
         Err(CloudError::ProviderUnsupported)
     }
+    /// Resolve the account that owns new or resumed personal-drive work.
+    /// Connectors whose card identity is intentionally generic can override
+    /// this with a stronger live identity probe.
+    fn verified_account(&mut self) -> Result<CloudAccount, CloudError> {
+        self.account()
+    }
     fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
         Err(CloudError::ProviderUnsupported)
     }
@@ -197,6 +203,9 @@ impl<'a> ProviderDriver<'a> {
     pub fn account(&mut self) -> Result<CloudAccount, CloudError> {
         self.backend.account()
     }
+    pub fn verified_account(&mut self) -> Result<CloudAccount, CloudError> {
+        self.backend.verified_account()
+    }
     pub fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
         self.backend.storage_capacity()
     }
@@ -347,6 +356,14 @@ mod capacity_tests {
     struct CapacityBackend;
 
     impl DriveOps for CapacityBackend {
+        fn account(&mut self) -> Result<CloudAccount, CloudError> {
+            Ok(CloudAccount {
+                provider: CloudProvider::Quark,
+                id: "live-owner".into(),
+                display_name: "Live Owner".into(),
+                auth_method: CloudAuthMethod::Web,
+            })
+        }
         fn storage_capacity(&mut self) -> Result<CloudStorageCapacity, CloudError> {
             Ok(CloudStorageCapacity::Limited {
                 total_bytes: 100,
@@ -373,5 +390,15 @@ mod capacity_tests {
                 used_bytes: 25,
             }
         );
+    }
+
+    #[test]
+    fn provider_driver_verified_account_defaults_to_the_connectors_live_account() {
+        let capabilities = ProviderRegistry::global()
+            .get(CloudProvider::Quark)
+            .capabilities;
+        let mut driver = ProviderDriver::new(capabilities, Box::new(CapacityBackend));
+
+        assert_eq!(driver.verified_account().unwrap().id, "live-owner");
     }
 }

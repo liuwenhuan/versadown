@@ -9,12 +9,12 @@ pub fn restore_account(
 ) -> Result<CloudAccount, QuarkError> {
     ProviderRegistry::global()
         .driver(provider, store, http)
-        .account()
+        .verified_account()
 }
 
-/// A legacy persisted session may be usable even though it predates the
-/// authorization-maintenance record. Record the verified account identity so
-/// startup recovery can safely match deferred downloads to this session.
+/// Keep the persisted owner aligned with the credentials in the provider's
+/// single authorization slot. Startup recovery and later downloads can then
+/// compare task ownership without querying the provider again.
 fn record_restored_account(
     state: &CloudState,
     provider: CloudProvider,
@@ -160,9 +160,16 @@ fn validate_share_options(
             CloudProvider::Quark | CloudProvider::Pikpak | CloudProvider::Uc
         );
         let has_valid_provider_format = if requires_four_alphanumeric_characters {
-            pass_code.chars().count() == 4 && pass_code.chars().all(|character| character.is_ascii_alphanumeric())
+            pass_code.chars().count() == 4
+                && pass_code
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
         } else {
-            let max_length = if provider == CloudProvider::Aliyun { 64 } else { 32 };
+            let max_length = if provider == CloudProvider::Aliyun {
+                64
+            } else {
+                32
+            };
             !pass_code.is_empty() && pass_code.chars().count() <= max_length
         };
         if !has_valid_provider_format {
@@ -418,10 +425,20 @@ mod tests {
     }
 
     #[test]
-    fn restored_legacy_session_records_the_verified_account_for_startup_recovery() {
+    fn startup_reconnect_replaces_the_persisted_account_owner() {
         let root = tempfile::tempdir().unwrap();
         let state = CloudState::new(root.path().join("sessions")).unwrap();
         state.store.save("uc", b"uc-session=fixture").unwrap();
+        state
+            .auth_supervisor
+            .ready(
+                &state.store,
+                CloudProvider::Uc,
+                Some("previous-account".into()),
+                Some(CloudAuthMethod::Web),
+                None,
+            )
+            .unwrap();
         let account = CloudAccount {
             provider: CloudProvider::Uc,
             id: "uc-account-1".into(),

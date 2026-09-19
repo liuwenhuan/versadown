@@ -75,6 +75,7 @@ fn unique_name(provider: CloudProvider, suffix: &str) -> String {
 fn error_kind(error: &CloudError) -> &'static str {
     match error {
         CloudError::NotAuthorized => "not-authorized",
+        CloudError::AccountMismatch => "account-mismatch",
         CloudError::AuthorizationExpired => "authorization-expired",
         CloudError::WebAuthorizationRequired => "web-authorization-required",
         CloudError::CaptchaRequired => "captcha-required",

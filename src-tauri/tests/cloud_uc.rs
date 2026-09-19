@@ -81,6 +81,72 @@ fn uc_driver_waits_until_the_created_directory_is_ready_for_child_operations() {
 }
 
 #[test]
+fn uc_driver_persists_a_rotated_session_after_retrying_a_directory_read() {
+    let store = MemoryCredentialStore::default();
+    store
+        .save(
+            "uc",
+            &serde_json::to_vec(&UcSession::cookie("__puus=stale-session")).unwrap(),
+        )
+        .unwrap();
+    let http = RecordingHttp {
+        responses: Mutex::new(VecDeque::from([
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"code":0,"status":200,"data":{"list":[]},"metadata":{"_total":0}}"#
+                    .into(),
+                set_cookies: vec!["__puus=fresh-session; Path=/; Secure".into()],
+            },
+            CloudHttpResponse {
+                status: 200,
+                body: r#"{"code":0,"status":200,"data":{"list":[{"fid":"file-1","file_name":"fixture.txt","dir":false}]},"metadata":{"_total":1}}"#
+                    .into(),
+                ..Default::default()
+            },
+        ])),
+        requests: Mutex::new(Vec::new()),
+    };
+
+    let directory = ProviderRegistry::global()
+        .driver(CloudProvider::Uc, &store, &http)
+        .list_directory("0")
+        .unwrap();
+
+    assert_eq!(directory.items[0].id, "file-1");
+    let saved: UcSession = serde_json::from_slice(&store.load("uc").unwrap().unwrap()).unwrap();
+    assert!(saved.cookie.contains("__puus=fresh-session"));
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].headers["Cookie"].contains("__puus=fresh-session"));
+}
+
+#[test]
+fn uc_driver_replaces_stale_account_metadata_after_a_browser_account_switch() {
+    let store = MemoryCredentialStore::default();
+    let mut session =
+        UcSession::cookie("__uid=AAR/current-session; b-user-id=current-user; __puus=session");
+    session.account_id = Some("previous-user".into());
+    session.display_name = Some("previous nickname".into());
+    store
+        .save("uc", &serde_json::to_vec(&session).unwrap())
+        .unwrap();
+    let http = RecordingHttp::sequence([
+        r#"{"code":0,"status":200,"data":{"total_capacity":100,"use_capacity":1}}"#,
+    ]);
+
+    let account = ProviderRegistry::global()
+        .driver(CloudProvider::Uc, &store, &http)
+        .account()
+        .expect("the live browser account should replace stale metadata");
+
+    assert_eq!(account.id, "current-user");
+    assert_eq!(account.display_name, "UC网盘");
+    let saved: UcSession = serde_json::from_slice(&store.load("uc").unwrap().unwrap()).unwrap();
+    assert_eq!(saved.account_id.as_deref(), Some("current-user"));
+    assert_eq!(saved.display_name, None);
+}
+
+#[test]
 fn uc_restores_only_session_cookie_pairs_from_the_official_web_flow() {
     // Break caught: serializing browser cookie attributes or accepting a missing
     // authenticated UC session makes restored credentials either unsafe or unusable.

@@ -501,6 +501,7 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
     }
     match error {
         QuarkError::NotAuthorized => "not_authorized",
+        QuarkError::AccountMismatch => "account_mismatch",
         QuarkError::AuthorizationExpired => "credentials_expired",
         QuarkError::SessionRenewedRetryOperation => "session_renewed_retry_operation",
         QuarkError::PikpakOperationVerificationRequired(_) => {

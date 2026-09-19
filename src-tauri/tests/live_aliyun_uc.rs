@@ -233,8 +233,21 @@ impl CloudHttpTransport for LiveTransport {
                 } else {
                     String::new()
                 };
+                let mut set_cookie_names = response
+                    .set_cookies
+                    .iter()
+                    .filter_map(|cookie| cookie.split_once('=').map(|(name, _)| name.trim()))
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>();
+                set_cookie_names.sort_unstable();
+                set_cookie_names.dedup();
+                let set_cookie_contract = if set_cookie_names.is_empty() {
+                    String::new()
+                } else {
+                    format!("; set-cookie-names={}", set_cookie_names.join(","))
+                };
                 self.observations.lock().unwrap().push(format!(
-                    "{method} {endpoint}; HTTP {}; code={code}; status={status}; message={message:?}; data={data_shape}({data_keys}); keys={keys}{upload_contract}{share_list_contract}{download_url_contract}{metadata_download_url_contract}",
+                    "{method} {endpoint}; HTTP {}; code={code}; status={status}; message={message:?}; data={data_shape}({data_keys}); keys={keys}{upload_contract}{share_list_contract}{download_url_contract}{metadata_download_url_contract}{set_cookie_contract}",
                     response.status,
                 ));
                 Ok(response)
@@ -274,6 +287,7 @@ fn failure(message: impl Into<String>) -> Box<dyn Error> {
 fn error_kind(error: &CloudError) -> &'static str {
     match error {
         CloudError::NotAuthorized => "not-authorized",
+        CloudError::AccountMismatch => "account-mismatch",
         CloudError::AuthorizationExpired => "authorization-expired",
         CloudError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         CloudError::WebAuthorizationRequired => "web-authorization-required",
@@ -1481,6 +1495,151 @@ fn live_uc_pending_download_account_binding() -> LiveResult<()> {
 }
 
 #[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and a pending UC task; compares only redacted account/session relationships"]
+fn live_uc_current_session_and_pending_task_owners_are_consistent() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let credentials_root = session_root()?;
+    let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
+        failure(format!(
+            "UC credential store initialization failed: {}",
+            error_kind(&error)
+        ))
+    })?;
+    let bytes = credentials
+        .load(provider.key())?
+        .ok_or_else(|| failure("UC is not currently authorized"))?;
+    let session: UcSession =
+        serde_json::from_slice(&bytes).map_err(|_| failure("UC session has an invalid shape"))?;
+    let persisted_account_id = session.account_id.clone();
+    let current_uid = session
+        .cookie
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find_map(|(name, value)| (name == "__uid" && !value.is_empty()).then(|| value.to_owned()));
+    let mut server_session = session;
+    server_session.account_id = None;
+    let http = LiveTransport::new()?;
+    let server_account_id = UcClient::new(server_session, &http)
+        .verified_account_id()?
+        .ok_or_else(|| failure("UC did not expose a stable current account identity"))?;
+    let state = CloudState::new(credentials_root)?;
+    let record = state.auth_supervisor.record(&state.store, provider)?;
+
+    let app_data = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| failure("APPDATA is required for the task store"))?
+        .join("com.alldownloader.desktop");
+    let connection = Connection::open_with_flags(
+        app_data.join("tasks.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT t.source, a.account_id FROM tasks t
+         JOIN cloud_download_accounts a ON a.id = t.id
+         WHERE a.provider = 'uc'
+           AND t.source LIKE 'cloud://uc/%'
+           AND t.status = 'paused'
+           AND t.failure_code = 'authorization_pending'",
+    )?;
+    let pending = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let stable_owner_matches = pending
+        .iter()
+        .filter(|(_, owner)| owner == &server_account_id)
+        .count();
+    let current_uid_matches = current_uid.as_ref().map_or(0, |current_uid| {
+        pending
+            .iter()
+            .filter(|(_, owner)| owner == current_uid)
+            .count()
+    });
+    let mut resolvable = 0;
+    let mut source_missing = 0;
+    for (source, _) in &pending {
+        let (_, file_id) =
+            parse_stable_cloud_source(source).map_err(|error| failure(error_kind(&error)))?;
+        match resolve_download(&state, &http, provider, &file_id) {
+            Ok(_) => resolvable += 1,
+            Err(CloudError::SourceFileMissing) => source_missing += 1,
+            Err(error) => {
+                return Err(failure(format!(
+                    "UC pending source ownership check failed: {}",
+                    error_kind(&error)
+                )))
+            }
+        }
+    }
+    let persisted_matches_server = persisted_account_id.as_deref() == Some(&server_account_id);
+    let supervisor_matches_server = record.account_id.as_deref() == Some(&server_account_id);
+    http.report();
+    eprintln!(
+        "LIVE-E2E uc owner consistency: pending={}; persisted-matches-server={persisted_matches_server}; supervisor-matches-server={supervisor_matches_server}; stable-owner-matches={stable_owner_matches}; current-uid-matches={current_uid_matches}; resolvable={resolvable}; source-missing={source_missing}",
+        pending.len(),
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; reconciles only the saved UC account metadata with the current authenticated browser session"]
+fn live_uc_reconciles_saved_account_with_the_current_browser_user() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let credentials_root = session_root()?;
+    let state = CloudState::new(credentials_root)?;
+    let http = LiveTransport::new()?;
+
+    let account = ProviderRegistry::global()
+        .driver(provider, &state.store, &http)
+        .verified_account()
+        .map_err(|error| {
+            failure(format!(
+                "UC current account reconciliation failed: {}",
+                error_kind(&error)
+            ))
+        })?;
+    state.auth_supervisor.ready(
+        &state.store,
+        provider,
+        Some(account.id.clone()),
+        Some(account.auth_method),
+        None,
+    )?;
+    let saved: UcSession = serde_json::from_slice(
+        &state
+            .store
+            .load(provider.key())?
+            .ok_or_else(|| failure("UC is not currently authorized"))?,
+    )
+    .map_err(|_| failure("UC session has an invalid shape"))?;
+    let mut live_session = saved.clone();
+    live_session.account_id = None;
+    let live_account_id = UcClient::new(live_session, &http)
+        .verified_account_id()?
+        .ok_or_else(|| failure("UC did not expose a stable current account identity"))?;
+    let reconciled = account.id == live_account_id
+        && saved.account_id.as_deref() == Some(live_account_id.as_str())
+        && state
+            .auth_supervisor
+            .record(&state.store, provider)?
+            .account_id
+            .as_deref()
+            == Some(live_account_id.as_str());
+
+    http.report();
+    eprintln!("LIVE-E2E uc saved account reconciliation: reconciled={reconciled}");
+    if !reconciled {
+        return Err(failure(
+            "the saved UC account identity still differs from the current browser user",
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; read-only check that UC exposes a stable member identity"]
 fn live_uc_member_identity_is_not_a_rotating_browser_marker() -> LiveResult<()> {
     require_live_authorization()?;
@@ -1591,6 +1750,96 @@ fn live_uc_legacy_pending_download_sources_are_classified_by_current_session() -
         "LIVE-E2E uc legacy pending sources: candidates={}; resolvable={resolvable}; source-missing={missing}; exact-id-in-root={exact_id_in_root}; same-name-in-root={same_name_in_root}",
         sources.len(),
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and ALLDOWNLOADER_LIVE_UC_FILE_NAME; read-only comparison of the current root object and a paused task source"]
+fn live_uc_named_root_file_and_pending_task_identity() -> LiveResult<()> {
+    require_live_authorization()?;
+    let provider = CloudProvider::Uc;
+    let file_name = std::env::var("ALLDOWNLOADER_LIVE_UC_FILE_NAME")
+        .map_err(|_| failure("ALLDOWNLOADER_LIVE_UC_FILE_NAME is required"))?;
+    let state = CloudState::new(session_root()?).map_err(|error| {
+        failure(format!(
+            "UC state initialization failed: {}",
+            error_kind(&error)
+        ))
+    })?;
+    let http = LiveTransport::new()?;
+    let root = driver_list(
+        &state,
+        &http,
+        provider,
+        ProviderRegistry::global().get(provider).root_directory_id,
+    )?;
+    let root_ids = root
+        .items
+        .iter()
+        .filter(|item| item.kind == "file" && item.name == file_name)
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    let root_file_count = root.items.iter().filter(|item| item.kind == "file").count();
+    let root_folder_count = root
+        .items
+        .iter()
+        .filter(|item| item.kind == "folder")
+        .count();
+
+    let app_data = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| failure("APPDATA is required for the task store"))?
+        .join("com.alldownloader.desktop");
+    let connection = Connection::open_with_flags(
+        app_data.join("tasks.sqlite"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT t.source FROM tasks t
+         JOIN cloud_download_accounts a ON a.id = t.id
+         WHERE a.provider = 'uc'
+           AND t.name = ?1
+           AND t.source LIKE 'cloud://uc/%'
+           AND t.status = 'paused'
+           AND t.failure_code = 'authorization_pending'",
+    )?;
+    let task_ids = statement
+        .query_map([file_name.as_str()], |row| row.get::<_, String>(0))?
+        .map(|source| {
+            let source = source?;
+            parse_stable_cloud_source(&source)
+                .map(|(_, file_id)| file_id)
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let root_resolvable = root_ids
+        .iter()
+        .filter(|file_id| resolve_download(&state, &http, provider, file_id).is_ok())
+        .count();
+    let task_resolvable = task_ids
+        .iter()
+        .filter(|file_id| resolve_download(&state, &http, provider, file_id).is_ok())
+        .count();
+    let same_object = task_ids
+        .iter()
+        .any(|task_id| root_ids.iter().any(|root_id| root_id == task_id));
+    http.report();
+    eprintln!(
+        "LIVE-E2E uc named file identity: root-files={root_file_count}; root-folders={root_folder_count}; root-matches={}; pending-tasks={}; same-object={same_object}; root-resolvable={root_resolvable}; task-resolvable={task_resolvable}",
+        root_ids.len(),
+        task_ids.len(),
+    );
+    if root_ids.is_empty() {
+        return Err(failure(
+            "the named UC file was not returned by a fresh root listing",
+        ));
+    }
+    if root_resolvable != root_ids.len() {
+        return Err(failure(
+            "a named UC root file could not resolve a current download URL",
+        ));
+    }
     Ok(())
 }
 
