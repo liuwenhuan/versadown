@@ -104,6 +104,14 @@ fn request_equity_token(
     api: &mut WindowsApi,
     request: NativeEquityRequest<'_>,
 ) -> Result<String, NativeSubmitError> {
+    let (encrypted, security_key) = request_equity_rule(request)?;
+    api.decrypt_equity_rule(&encrypted, &security_key)
+}
+
+#[cfg(windows)]
+fn request_equity_rule(
+    request: NativeEquityRequest<'_>,
+) -> Result<(String, String), NativeSubmitError> {
     use crate::cloud::{CloudHttpRequest, CloudHttpTransport, ReqwestTransport};
 
     const CLIENT_ID: &str = "XW-G4v1H72tgfJym";
@@ -194,13 +202,14 @@ fn request_equity_token(
             "迅雷会员加速权限不可用（代码 {code}: {message}）"
         )));
     }
-    api.decrypt_equity_rule(
+    Ok((
         envelope
             .get("data")
             .and_then(serde_json::Value::as_str)
-            .ok_or(NativeSubmitError::Incompatible)?,
-        &security_key,
-    )
+            .ok_or(NativeSubmitError::Incompatible)?
+            .to_owned(),
+        security_key,
+    ))
 }
 
 #[derive(Debug)]
@@ -286,7 +295,7 @@ impl XunleiNativeBackend {
             let cid = marker_header(resolved, CID_MARKER_HEADER).unwrap_or("");
             let gcid = marker_header(resolved, GCID_MARKER_HEADER).unwrap_or("");
 
-            let native_id = {
+            let (native_id, state_directory, client_version) = {
                 let mut api = self
                     .api
                     .lock()
@@ -333,25 +342,11 @@ impl XunleiNativeBackend {
                     )?
                 };
                 api.start(native_id)?;
-                let trace_id = api.wait_for_trace_id(native_id)?;
-                let client_version = api.client_version.clone();
-                let token = request_equity_token(
-                    api,
-                    NativeEquityRequest {
-                        access_token,
-                        user_id,
-                        peer_id,
-                        client_version: &client_version,
-                        trace_id: &trace_id,
-                        resource_url: &resolved.url,
-                    },
-                )?;
-                api.enable_vip(native_id, &token)?;
-                self.equity_tokens
-                    .lock()
-                    .map_err(|_| NativeSubmitError::Incompatible)?
-                    .insert(native_id, token);
-                native_id
+                (
+                    native_id,
+                    api.state_directory.clone(),
+                    api.client_version.clone(),
+                )
             };
 
             let mut task = store
@@ -361,6 +356,7 @@ impl XunleiNativeBackend {
             task.followed_by_gid = None;
             task.status = TaskStatus::Downloading;
             task.error = None;
+            task.status_message = Some("正在启用迅雷加速".into());
             task.failure_code = None;
             task.aria_error_code = None;
             task.total_length = resolved.size_hint();
@@ -379,9 +375,100 @@ impl XunleiNativeBackend {
                 )
                 .map_err(|_| NativeSubmitError::Failed("无法保存迅雷原生任务".into()))?;
             emit_task(app, store, &task);
-            self.spawn_progress_monitor(app.clone(), Arc::clone(store), task_id, output_path);
+            self.spawn_progress_monitor(
+                app.clone(),
+                Arc::clone(store),
+                task_id,
+                output_path,
+                state_directory,
+            );
+            self.spawn_vip_activation(
+                app.clone(),
+                Arc::clone(store),
+                task_id,
+                native_id,
+                access_token.to_owned(),
+                user_id.to_owned(),
+                peer_id.to_owned(),
+                client_version,
+                resolved.url.clone(),
+            );
             Ok(Some(task))
         }
+    }
+
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_vip_activation(
+        self: &Arc<Self>,
+        app: AppHandle,
+        store: Arc<TaskStore>,
+        task_id: Uuid,
+        task_native_id: u32,
+        access_token: String,
+        user_id: String,
+        peer_id: String,
+        client_version: String,
+        resource_url: String,
+    ) {
+        let backend = Arc::clone(self);
+        tauri::async_runtime::spawn_blocking(move || {
+            let result = (|| -> Result<String, NativeSubmitError> {
+                let trace_id = {
+                    let mut api = backend
+                        .api
+                        .lock()
+                        .map_err(|_| NativeSubmitError::Incompatible)?;
+                    api.as_mut()
+                        .ok_or(NativeSubmitError::Incompatible)?
+                        .wait_for_trace_id(task_native_id)?
+                };
+                let (encrypted, security_key) = request_equity_rule(NativeEquityRequest {
+                    access_token: &access_token,
+                    user_id: &user_id,
+                    peer_id: &peer_id,
+                    client_version: &client_version,
+                    trace_id: &trace_id,
+                    resource_url: &resource_url,
+                })?;
+                if !store.find(task_id).is_ok_and(|task| {
+                    task.status == TaskStatus::Downloading
+                        && native_id(&task) == Some(task_native_id)
+                }) {
+                    return Err(NativeSubmitError::Failed("迅雷原生任务已暂停".into()));
+                }
+                let mut api = backend
+                    .api
+                    .lock()
+                    .map_err(|_| NativeSubmitError::Incompatible)?;
+                let api = api.as_mut().ok_or(NativeSubmitError::Incompatible)?;
+                let token = api.decrypt_equity_rule(&encrypted, &security_key)?;
+                api.enable_vip(task_native_id, &token)?;
+                backend
+                    .equity_tokens
+                    .lock()
+                    .map_err(|_| NativeSubmitError::Incompatible)?
+                    .insert(task_native_id, token);
+                Ok("正在使用迅雷svip加速".into())
+            })();
+
+            let Ok(mut task) = store.find(task_id) else {
+                return;
+            };
+            if native_id(&task) != Some(task_native_id) || task.status != TaskStatus::Downloading {
+                return;
+            }
+            task.status_message = Some(match result {
+                Ok(message) => message,
+                Err(NativeSubmitError::Incompatible) => PLUGIN_UPDATE_MESSAGE.into(),
+                Err(NativeSubmitError::Failed(message)) => {
+                    format!("迅雷加速启用失败，正在使用普通通道：{message}")
+                }
+            });
+            if let Ok(task) = store.apply_transfer_snapshot(task) {
+                emit_task(&app, &store, &task);
+            }
+        });
     }
 
     pub fn control(
@@ -443,9 +530,28 @@ impl XunleiNativeBackend {
 
             let mut updated = task;
             match action {
-                DownloadAction::Pause => updated.status = TaskStatus::Paused,
-                DownloadAction::Resume => updated.status = TaskStatus::Downloading,
-                DownloadAction::Cancel => updated.status = TaskStatus::Cancelled,
+                DownloadAction::Pause => {
+                    updated.status = TaskStatus::Paused;
+                    updated.status_message = None;
+                }
+                DownloadAction::Resume => {
+                    updated.status = TaskStatus::Downloading;
+                    updated.status_message = Some(
+                        if self
+                            .equity_tokens
+                            .lock()
+                            .is_ok_and(|tokens| tokens.contains_key(&native_id))
+                        {
+                            "正在使用迅雷svip加速".into()
+                        } else {
+                            "正在启用迅雷加速".into()
+                        },
+                    );
+                }
+                DownloadAction::Cancel => {
+                    updated.status = TaskStatus::Cancelled;
+                    updated.status_message = None;
+                }
             }
             updated.download_speed = 0;
             updated.error = None;
@@ -455,13 +561,26 @@ impl XunleiNativeBackend {
                 .map_err(|error| error.to_string())?;
             emit_task(app, store, &updated);
             if action == DownloadAction::Resume {
+                let state_directory = self
+                    .api
+                    .lock()
+                    .ok()
+                    .and_then(|api| api.as_ref().map(|api| api.state_directory.clone()));
                 if let Some(path) = store
                     .files(updated.id)
                     .ok()
                     .and_then(|files| files.into_iter().next())
                     .map(|file| PathBuf::from(file.path))
                 {
-                    self.spawn_progress_monitor(app.clone(), Arc::clone(store), updated.id, path);
+                    if let Some(state_directory) = state_directory {
+                        self.spawn_progress_monitor(
+                            app.clone(),
+                            Arc::clone(store),
+                            updated.id,
+                            path,
+                            state_directory,
+                        );
+                    }
                 }
             }
             Ok(updated)
@@ -474,11 +593,14 @@ impl XunleiNativeBackend {
         store: Arc<TaskStore>,
         id: Uuid,
         output_path: PathBuf,
+        state_directory: PathBuf,
     ) {
         let backend = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            let mut previous = 0_u64;
-            let mut unchanged = 0_u8;
+            let mut previous = store
+                .find(id)
+                .map(|task| task.completed_length)
+                .unwrap_or(0);
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let Ok(mut task) = store.find(id) else { return };
@@ -491,11 +613,8 @@ impl XunleiNativeBackend {
                     return;
                 };
                 #[cfg(windows)]
-                let native_progress = backend
-                    .api
-                    .lock()
-                    .ok()
-                    .and_then(|api| api.as_ref()?.progress(native_task_id).ok());
+                let native_progress =
+                    native_progress_in_database(&state_directory, native_task_id).ok();
                 #[cfg(not(windows))]
                 let native_progress: Option<(u64, u64, i32, i32)> = None;
                 let Some((completed, native_total, native_status, native_error_code)) =
@@ -509,11 +628,6 @@ impl XunleiNativeBackend {
                 task.total_length = total;
                 let delta = completed.saturating_sub(previous);
                 previous = completed;
-                unchanged = if delta == 0 {
-                    unchanged.saturating_add(1)
-                } else {
-                    0
-                };
                 task.completed_length = completed;
                 task.download_speed = delta;
                 task.progress = total
@@ -525,15 +639,13 @@ impl XunleiNativeBackend {
                     task.progress = 100;
                     task.download_speed = 0;
                     task.error = None;
+                    task.status_message = None;
                     let _ = backend.stop_completed_task(&task);
                 } else if native_status == 9 {
                     task.status = TaskStatus::Failed;
                     task.download_speed = 0;
                     task.error = Some(native_failure_message(native_error_code));
-                } else if unchanged >= 120 {
-                    task.status = TaskStatus::Failed;
-                    task.download_speed = 0;
-                    task.error = Some("迅雷原生任务长时间未返回数据，请重试".into());
+                    task.status_message = None;
                 }
                 let Ok(updated) = store.apply_transfer_snapshot_with_files(
                     task.clone(),
@@ -640,22 +752,42 @@ struct WindowsApi {
 }
 
 #[cfg(windows)]
+fn native_progress_in_database(
+    state_directory: &std::path::Path,
+    id: u32,
+) -> Result<(u64, u64, i32, i32), NativeSubmitError> {
+    let database = state_directory.join("TaskDb.dat");
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))?;
+    connection
+        .query_row(
+            "SELECT TotalReceiveSize, ResourceSize, Status, FailureErrorCode
+             FROM TaskBase WHERE TaskId=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))
+}
+
+#[cfg(windows)]
 impl WindowsApi {
     fn load(
         plugin_config_path: Option<&std::path::Path>,
         helper_path: Option<&std::path::Path>,
         identity: Option<(&str, &str)>,
     ) -> Result<Option<Self>, NativeSubmitError> {
-        let Some(plugin) = configured_or_installed_plugin_config(plugin_config_path) else {
+        let Some(mut plugin) = configured_or_installed_plugin_config(plugin_config_path) else {
             return Ok(None);
         };
-        let sdk_path = plugin.sdk_path;
+        let sdk_path = plugin.sdk_path.clone();
         let Some(program_directory) = sdk_path.parent().and_then(std::path::Path::parent) else {
             return Err(NativeSubmitError::Incompatible);
         };
         let addon_path = program_directory.join("dk_addon.node");
-        let thunder_path = program_directory.join("Thunder.exe");
-        if !addon_path.is_file() || !thunder_path.is_file() {
+        if !addon_path.is_file() {
             return Err(NativeSubmitError::Incompatible);
         }
 
@@ -670,48 +802,62 @@ impl WindowsApi {
         let state_directory = config_directory.join("xunlei-native-state");
 
         use std::os::windows::process::CommandExt;
-        let mut command = Command::new(&thunder_path);
-        command
-            .arg(helper_path)
-            .current_dir(program_directory)
-            .env("ELECTRON_RUN_AS_NODE", "1")
-            .env("XUNLEI_DK_ADDON", &addon_path)
-            .env("XUNLEI_NATIVE_STATE_DIR", &state_directory)
-            .env("XUNLEI_CLIENT_VERSION", &plugin.client_version)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(0x0800_0000);
-        if let Some((user_id, peer_id)) = identity {
+        for host in native_helper_hosts(&plugin, helper_path, program_directory) {
+            let mut command = Command::new(&host);
             command
-                .env("XUNLEI_NATIVE_USER_ID", user_id)
-                .env("XUNLEI_NATIVE_PEER_ID", peer_id);
+                .arg(helper_path)
+                .current_dir(program_directory)
+                .env("ELECTRON_RUN_AS_NODE", "1")
+                .env("XUNLEI_DK_ADDON", &addon_path)
+                .env("XUNLEI_NATIVE_STATE_DIR", &state_directory)
+                .env("XUNLEI_CLIENT_VERSION", &plugin.client_version)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .creation_flags(0x0800_0000);
+            if let Some((user_id, peer_id)) = identity {
+                command
+                    .env("XUNLEI_NATIVE_USER_ID", user_id)
+                    .env("XUNLEI_NATIVE_PEER_ID", peer_id);
+            }
+            let Ok(mut child) = command.spawn() else {
+                continue;
+            };
+            let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
+                let _ = child.kill();
+                let _ = child.wait();
+                continue;
+            };
+            let mut api = Self {
+                child,
+                input,
+                output: BufReader::new(output),
+                next_request_id: 1,
+                state_directory: state_directory.clone(),
+                client_version: plugin.client_version.clone(),
+            };
+            let Ok(ready) = api.read_message() else {
+                continue;
+            };
+            if ready.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
+                eprintln!(
+                    "迅雷原生 helper 初始化失败：{}",
+                    ready
+                        .get("error")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("incompatible")
+                );
+                continue;
+            }
+            if plugin.helper_host_path.as_deref() != Some(host.as_path()) {
+                plugin.helper_host_path = Some(host);
+                if let Some(path) = plugin_config_path {
+                    let _ = write_plugin_config(path, &plugin);
+                }
+            }
+            return Ok(Some(api));
         }
-        let mut child = command
-            .spawn()
-            .map_err(|_| NativeSubmitError::Incompatible)?;
-        let input = child.stdin.take().ok_or(NativeSubmitError::Incompatible)?;
-        let output = child.stdout.take().ok_or(NativeSubmitError::Incompatible)?;
-        let mut api = Self {
-            child,
-            input,
-            output: BufReader::new(output),
-            next_request_id: 1,
-            state_directory,
-            client_version: plugin.client_version,
-        };
-        let ready = api.read_message()?;
-        if ready.get("ready").and_then(serde_json::Value::as_bool) != Some(true) {
-            eprintln!(
-                "迅雷原生 helper 初始化失败：{}",
-                ready
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("incompatible")
-            );
-            return Err(NativeSubmitError::Incompatible);
-        }
-        Ok(Some(api))
+        Err(NativeSubmitError::Incompatible)
     }
 
     fn create_p2sp_task(
@@ -825,20 +971,7 @@ impl WindowsApi {
     }
 
     fn progress(&self, id: u32) -> Result<(u64, u64, i32, i32), NativeSubmitError> {
-        let database = self.state_directory.join("TaskDb.dat");
-        let connection = rusqlite::Connection::open_with_flags(
-            database,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))?;
-        connection
-            .query_row(
-                "SELECT TotalReceiveSize, ResourceSize, Status, FailureErrorCode
-                 FROM TaskBase WHERE TaskId=?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(|_| NativeSubmitError::Failed("迅雷原生任务进度暂不可用".into()))
+        native_progress_in_database(&self.state_directory, id)
     }
 
     #[cfg(test)]
@@ -1100,6 +1233,86 @@ struct XunleiPluginConfig {
     sdk_path: PathBuf,
     #[serde(default)]
     client_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    helper_host_path: Option<PathBuf>,
+}
+
+#[cfg(windows)]
+fn native_helper_hosts(
+    plugin: &XunleiPluginConfig,
+    helper_path: &std::path::Path,
+    program_directory: &std::path::Path,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = plugin
+        .helper_host_path
+        .as_ref()
+        .filter(|path| path.is_file())
+    {
+        candidates.push(path.clone());
+    }
+    if let Some(directory) = helper_path.parent() {
+        candidates.push(directory.join("node.exe"));
+    }
+    if let Some(path) = discover_node_runtime() {
+        candidates.push(path);
+    }
+    // Older Thunder releases accepted ELECTRON_RUN_AS_NODE directly. Keep it
+    // as a compatibility fallback after a real Node runtime for current builds.
+    candidates.push(program_directory.join("Thunder.exe"));
+    candidates.retain(|path| path.is_file());
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if !unique.iter().any(|path: &PathBuf| {
+            path.to_string_lossy()
+                .eq_ignore_ascii_case(&candidate.to_string_lossy())
+        }) {
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+#[cfg(windows)]
+fn discover_node_runtime() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ALLDOWNLOADER_NODE_RUNTIME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Some(path);
+    }
+    if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join("node.exe"))
+            .find(|path| path.is_file())
+    }) {
+        return Some(path);
+    }
+    let mut candidates = Vec::new();
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        candidates.push(PathBuf::from(program_files).join("nodejs").join("node.exe"));
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("nodejs")
+                .join("node.exe"),
+        );
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        candidates.push(
+            PathBuf::from(profile)
+                .join(".cache")
+                .join("codex-runtimes")
+                .join("codex-primary-runtime")
+                .join("dependencies")
+                .join("node")
+                .join("bin")
+                .join("node.exe"),
+        );
+    }
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 #[cfg(windows)]
@@ -1173,6 +1386,7 @@ fn discover_installed_plugin_config() -> Option<XunleiPluginConfig> {
                 |sdk_path| XunleiPluginConfig {
                     sdk_path,
                     client_version,
+                    helper_host_path: discover_node_runtime(),
                 },
             )
         })
@@ -1346,6 +1560,10 @@ mod tests {
         let config = read_plugin_config(&plugin_config_path)
             .expect("the discovered SDK path should be persisted for later calls");
         assert!(is_download_sdk(&config.sdk_path));
+        assert!(config
+            .helper_host_path
+            .as_deref()
+            .is_some_and(std::path::Path::is_file));
         drop(api);
     }
 
@@ -1366,26 +1584,51 @@ mod tests {
                 PathBuf::from(std::env::var_os("APPDATA").unwrap())
                     .join("com.alldownloader.desktop")
             });
-        let session: crate::cloud::xunlei::XunleiSession = if let Ok(json) =
-            std::env::var("ALLDOWNLOADER_XUNLEI_SESSION_JSON")
-        {
-            serde_json::from_str(&json).expect("in-memory Xunlei session should be valid")
-        } else {
-            let credentials =
-                crate::cloud::DpapiCredentialStore::new(app_data.join("cloud-sessions")).unwrap();
-            serde_json::from_slice(
-                &credentials
-                    .load("xunlei")
-                    .expect("saved Xunlei session should be readable")
-                    .expect("saved Xunlei session should exist"),
-            )
-            .unwrap()
+        let session_root = app_data.join("cloud-sessions");
+        let load_session = || {
+            if let Ok(json) = std::env::var("ALLDOWNLOADER_XUNLEI_SESSION_JSON") {
+                serde_json::from_str(&json).expect("in-memory Xunlei session should be valid")
+            } else {
+                let credentials =
+                    crate::cloud::DpapiCredentialStore::new(session_root.clone()).unwrap();
+                serde_json::from_slice(
+                    &credentials
+                        .load("xunlei")
+                        .expect("saved Xunlei session should be readable")
+                        .expect("saved Xunlei session should exist"),
+                )
+                .unwrap()
+            }
         };
         let http = crate::cloud::ReqwestTransport::new().unwrap();
-        let client = crate::cloud::xunlei::XunleiClient::new(session, &http);
-        let root_directory = client
-            .directory("0")
-            .expect("current Xunlei account root should be readable");
+        let mut client = crate::cloud::xunlei::XunleiClient::new(load_session(), &http);
+        let root_directory = match client.directory("0") {
+            Ok(directory) => directory,
+            Err(crate::cloud::QuarkError::AuthorizationExpired)
+            | Err(crate::cloud::QuarkError::NotAuthorized)
+            | Err(crate::cloud::QuarkError::WebAuthorizationRequired) => {
+                let credentials =
+                    crate::cloud::DpapiCredentialStore::new(session_root.clone()).unwrap();
+                let credential = crate::cloud::load_password_credential(
+                    &credentials,
+                    crate::cloud::CloudProvider::Xunlei,
+                )
+                .unwrap()
+                .expect("expired live session should have a saved Xunlei password");
+                crate::cloud::commands::recover_provider_password_session(
+                    crate::cloud::CloudProvider::Xunlei,
+                    &credentials,
+                    &http,
+                    &credential,
+                )
+                .expect("saved Xunlei password should silently recover the live session");
+                client = crate::cloud::xunlei::XunleiClient::new(load_session(), &http);
+                client
+                    .directory("0")
+                    .expect("recovered Xunlei account root should be readable")
+            }
+            Err(error) => panic!("current Xunlei account root should be readable: {error:?}"),
+        };
         let file = root_directory
             .items
             .iter()
@@ -1575,6 +1818,7 @@ mod tests {
             &XunleiPluginConfig {
                 sdk_path: sdk_path.clone(),
                 client_version: "25.1.13.1634".into(),
+                helper_host_path: None,
             },
         )
         .unwrap();

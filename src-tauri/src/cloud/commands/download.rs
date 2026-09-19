@@ -998,6 +998,7 @@ pub(crate) fn cloud_directory_group_task_outcome(
                 status: queue_task.status,
                 progress: queue_task.progress,
                 error: queue_task.error.clone(),
+                status_message: queue_task.status_message.clone(),
                 failure_code: None,
                 aria_gid: None,
                 followed_by_gid: None,

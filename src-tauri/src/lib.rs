@@ -278,13 +278,15 @@ pub fn run() {
             // those URLs cannot run ahead of the provider session check.
             let mut startup_cloud_providers = Vec::new();
             for task in store.defer_startup_cloud_downloads()? {
-                if let Ok((provider, _)) = cloud::commands::parse_stable_cloud_source(&task.source)
+                if let Ok(provider) =
+                    cloud::commands::cloud_provider_from_download_source(&task.source)
                 {
                     if !startup_cloud_providers.contains(&provider) {
                         startup_cloud_providers.push(provider);
                     }
                 }
             }
+            let startup_store = std::sync::Arc::clone(&store);
             let ai_secrets = cloud::DpapiCredentialStore::new(data_dir.join("ai-secrets"))?;
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
@@ -446,40 +448,72 @@ pub fn run() {
             }
             let startup_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let availability = runtime.initialize().await;
+                let _availability = runtime.initialize().await;
                 runtime.start_monitor(std::time::Duration::from_secs(2));
-                if !availability.available {
-                    return;
-                }
-                // The session was loaded with all saved URLs paused. Check the
-                // actual provider connection first, then resume only the
-                // cloud tasks deliberately deferred above. A temporary startup
-                // failure leaves those tasks paused and recoverable; a later
-                // explicit authorization completion uses the same resume path.
-                for provider in startup_cloud_providers {
-                    let mut authorized = false;
-                    for delay in [
-                        std::time::Duration::ZERO,
-                        std::time::Duration::from_secs(2),
-                        std::time::Duration::from_secs(8),
-                    ] {
-                        if !delay.is_zero() {
-                            tokio::time::sleep(delay).await;
-                        }
-                        if cloud::commands::cloud_account(startup_app.clone(), provider)
-                            .await
-                            .is_ok()
-                        {
-                            authorized = true;
-                            break;
+                let emit_updates = |tasks: Vec<DownloadTask>| {
+                    let state = startup_app.state::<commands::AppState>();
+                    for task in tasks {
+                        if commands::should_emit_task_update(&state, task.is_private) {
+                            if let Ok(payload) =
+                                commands::task_update_payload(&startup_store, None, task)
+                            {
+                                let _ = startup_app.emit("download-task-updated", payload);
+                            }
                         }
                     }
-                    if authorized {
+                };
+                for provider in startup_cloud_providers {
+                    let account = match cloud::commands::validate_current_provider_session(
+                        startup_app.clone(),
+                        provider,
+                    )
+                    .await
+                    {
+                        Ok(account) => Ok(account),
+                        Err(error)
+                            if cloud::commands::should_attempt_silent_provider_recovery(&error) =>
+                        {
+                            if let Ok(tasks) =
+                                startup_store.set_startup_cloud_authorization_recovering(provider)
+                            {
+                                emit_updates(tasks);
+                            }
+                            cloud::commands::silently_recover_provider_session(
+                                startup_app.clone(),
+                                provider,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if account.is_ok() {
                         let _ = cloud::commands::resume_reauthorized_provider_tasks(
                             startup_app.clone(),
                             provider,
                         )
                         .await;
+                        // The provider has one active authorization slot. Any
+                        // task bound to another account must ask for that
+                        // account instead of staying in an indefinite check.
+                        if let Ok(tasks) =
+                            startup_store.set_startup_cloud_authorization_required(provider)
+                        {
+                            emit_updates(tasks);
+                        }
+                    } else if let Err(error) = account {
+                        let tasks =
+                            if cloud::commands::should_attempt_silent_provider_recovery(&error) {
+                                startup_store.set_startup_cloud_authorization_required(provider)
+                            } else {
+                                startup_store.set_startup_cloud_authorization_check_failed(
+                                    provider,
+                                    cloud::commands::cloud_failure_code(&error),
+                                    &cloud::commands::share_resolution_failure_message(&error),
+                                )
+                            };
+                        if let Ok(tasks) = tasks {
+                            emit_updates(tasks);
+                        }
                     }
                 }
             });

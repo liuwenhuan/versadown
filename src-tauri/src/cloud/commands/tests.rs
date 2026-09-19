@@ -8,7 +8,8 @@ use super::{
     cloud_failure_code, create_cloud_task, directory_download_failure_fields,
     password_webview_data_directory_from_root, prepare_baidu_account_login,
     recover_provider_password_session, requires_cloud_reauthorization_failure, resolve_download,
-    retry_read_with_refreshed_web_session,
+    retry_read_with_refreshed_web_session, should_attempt_silent_provider_recovery,
+    should_release_startup_directory_pause,
 };
 use crate::cloud::share::{CloudShareDownloadEntry, CloudShareDownloadSelection};
 use crate::cloud::{
@@ -22,7 +23,7 @@ use crate::cloud::{
     CloudPasswordCredential, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
     SessionWorkKind, QUARK_DESKTOP_USER_AGENT,
 };
-use crate::TaskStore;
+use crate::{TaskStatus, TaskStore};
 
 #[test]
 fn failed_share_preparation_without_an_aria_task_can_be_readded() {
@@ -45,6 +46,22 @@ fn failed_share_preparation_without_an_aria_task_can_be_readded() {
 
     assert!(super::share_commands::is_retryable_cloud_share_prepare(
         &failed
+    ));
+}
+
+#[test]
+fn only_startup_recovery_releases_an_interrupted_directory_pause() {
+    assert!(should_release_startup_directory_pause(
+        TaskStatus::Paused,
+        true
+    ));
+    assert!(!should_release_startup_directory_pause(
+        TaskStatus::Paused,
+        false
+    ));
+    assert!(!should_release_startup_directory_pause(
+        TaskStatus::Downloading,
+        true
     ));
 }
 
@@ -299,11 +316,20 @@ fn provider_metadata_controls_upload_picker_title_and_preserves_selection() {
 
 #[test]
 fn only_authorization_failures_request_a_new_official_login() {
+    assert!(should_attempt_silent_provider_recovery(
+        &QuarkError::AuthorizationExpired
+    ));
+    assert!(!should_attempt_silent_provider_recovery(
+        &QuarkError::Transport("offline".into())
+    ));
     assert!(requires_cloud_reauthorization_failure(Some(
         cloud_failure_code(&QuarkError::AuthorizationExpired,)
     )));
     assert!(requires_cloud_reauthorization_failure(Some(
         cloud_failure_code(&QuarkError::CaptchaRequired,)
+    )));
+    assert!(requires_cloud_reauthorization_failure(Some(
+        "authorization_pending"
     )));
     assert!(!requires_cloud_reauthorization_failure(Some(
         cloud_failure_code(&QuarkError::Transport("offline".into()),)
@@ -557,9 +583,21 @@ fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secret
 fn cloud_download_local_failures_keep_distinct_codes_in_every_error_surface() {
     use crate::aria2::service::DownloadServiceError;
     let cases = [
-        (DownloadServiceError::InvalidNativeCheckpoint, "download_checkpoint_invalid", "续传断点"),
-        (DownloadServiceError::ShuttingDown, "download_engine_unavailable", "下载引擎不可用"),
-        (DownloadServiceError::InvalidUriOption("https://secret.example/?token=do-not-leak"), "download_submission_failed", "未能接受任务"),
+        (
+            DownloadServiceError::InvalidNativeCheckpoint,
+            "download_checkpoint_invalid",
+            "续传断点",
+        ),
+        (
+            DownloadServiceError::ShuttingDown,
+            "download_engine_unavailable",
+            "下载引擎不可用",
+        ),
+        (
+            DownloadServiceError::InvalidUriOption("https://secret.example/?token=do-not-leak"),
+            "download_submission_failed",
+            "未能接受任务",
+        ),
     ];
     for (failure, expected_code, expected_text) in cases {
         let error = super::cloud_download_submission_error(failure);
@@ -581,7 +619,10 @@ fn cloud_download_local_failures_keep_distinct_codes_in_every_error_surface() {
     let message = super::share_resolution_failure_message(&network);
     assert!(message.contains("网络请求失败"));
     assert!(!message.contains("do-not-leak"));
-    assert_eq!(directory_download_failure_fields(&network).0, "network_error");
+    assert_eq!(
+        directory_download_failure_fields(&network).0,
+        "network_error"
+    );
 }
 
 #[test]

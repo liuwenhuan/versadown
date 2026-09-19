@@ -33,7 +33,7 @@ pub fn reauthorization_provider(
 ) -> Result<CloudProvider, QuarkError> {
     match store.find(id) {
         Ok(task)
-            if task.status == TaskStatus::Failed
+            if matches!(task.status, TaskStatus::Failed | TaskStatus::Paused)
                 && requires_cloud_reauthorization_failure(task.failure_code.as_deref()) =>
         {
             return cloud_provider_from_download_source(&task.source)
@@ -61,7 +61,7 @@ pub fn reauthorization_provider(
             }
             let eligible = if let Some(task_id) = item.task_id {
                 store.find(task_id).is_ok_and(|task| {
-                    task.status == TaskStatus::Failed
+                    matches!(task.status, TaskStatus::Failed | TaskStatus::Paused)
                         && requires_cloud_reauthorization_failure(task.failure_code.as_deref())
                 })
             } else {
@@ -378,6 +378,122 @@ pub(crate) fn cloud_provider_from_download_source(
     parse_stable_cloud_source(source).map(|(provider, _)| provider)
 }
 
+fn record_provider_account_locked(
+    state: &CloudState,
+    provider: CloudProvider,
+    account: &CloudAccount,
+) -> Result<(), QuarkError> {
+    state.auth_supervisor.ready_locked(
+        &state.store,
+        provider,
+        Some(account.id.clone()),
+        Some(account.auth_method),
+        auth_supervisor::session_expiry(&state.store, provider)?,
+    )
+}
+
+pub(crate) async fn validate_current_provider_session(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<CloudAccount, QuarkError> {
+    run(app, provider, move |state, http| {
+        if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
+            return Err(QuarkError::NotAuthorized);
+        }
+        let account = restore_account(provider, &state.store, http)?;
+        record_provider_account_locked(state, provider, &account)?;
+        Ok(account)
+    })
+    .await
+}
+
+pub(crate) async fn silently_recover_provider_session(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<CloudAccount, QuarkError> {
+    let recovery_app = app.clone();
+    run(app, provider, move |state, http| {
+        if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
+            return Err(QuarkError::NotAuthorized);
+        }
+        let recovered = recover_authorization(&recovery_app, state, provider, http, true);
+        if let Err(error) = recovered {
+            let can_try_password = browser_login::supports_browser_password(provider)
+                && !matches!(error, QuarkError::CaptchaRequired)
+                && browser_login::can_fallback_to_browser(&error);
+            let Some(credential) = (if can_try_password {
+                load_password_credential(&state.store, provider)?
+            } else {
+                None
+            }) else {
+                return Err(error);
+            };
+            let account = browser_password_login(
+                &recovery_app,
+                provider,
+                &state.store,
+                http,
+                credential.username(),
+                credential.password(),
+                Some(credential.account_id()),
+                false,
+            )?;
+            record_provider_account_locked(state, provider, &account)?;
+            return Ok(account);
+        }
+        let account = restore_account(provider, &state.store, http)?;
+        record_provider_account_locked(state, provider, &account)?;
+        Ok(account)
+    })
+    .await
+}
+
+/// Startup and explicit recovery share one policy: validate the current
+/// provider session first, then silently refresh credentials/profile state.
+/// This function never opens a user-visible authorization window.
+pub(crate) async fn restore_provider_session(
+    app: AppHandle,
+    provider: CloudProvider,
+) -> Result<CloudAccount, QuarkError> {
+    match validate_current_provider_session(app.clone(), provider).await {
+        Ok(account) => Ok(account),
+        Err(error) if should_attempt_silent_provider_recovery(&error) => {
+            silently_recover_provider_session(app, provider).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn should_attempt_silent_provider_recovery(error: &QuarkError) -> bool {
+    matches!(
+        error,
+        QuarkError::NotAuthorized
+            | QuarkError::AuthorizationExpired
+            | QuarkError::WebAuthorizationRequired
+            | QuarkError::AuthorizationPending
+            | QuarkError::CaptchaRequired
+    )
+}
+
+pub(crate) fn should_release_startup_directory_pause(
+    group_status: TaskStatus,
+    waiting_for_startup_authorization: bool,
+) -> bool {
+    group_status == TaskStatus::Paused && waiting_for_startup_authorization
+}
+
+async fn publish_silent_recovery(
+    app: AppHandle,
+    provider: CloudProvider,
+    account: CloudAccount,
+) -> Result<(), QuarkError> {
+    let publish_app = app.clone();
+    run(app, provider, move |state, _| {
+        publish_authorization_completion(&publish_app, state, &account)
+    })
+    .await
+}
+
 /// Explicitly recover the provider; durable account-bound failures are discovered after success.
 #[tauri::command]
 pub async fn cloud_reauthorize_failed_task(
@@ -416,65 +532,18 @@ pub async fn cloud_reauthorize_failed_task(
     }
 
     let requested_provider = reauthorization_provider(&state.store, id)?;
+    let expected_account = state
+        .store
+        .cloud_download_account(id)
+        .map_err(|_| QuarkError::Storage)?;
 
-    // Explicit action verification is different from background cookie
-    // recovery. A valid directory session cannot prove downloads work.
-    // Always open the official page when the user asks to reauthorize Baidu.
-    if requested_provider == CloudProvider::Baidu {
-        return cloud_begin_authorization(app, requested_provider).await;
-    }
-
-    if browser_login::supports_browser_password(requested_provider) {
-        let browser_app = app.clone();
-        let recovered = run(app.clone(), requested_provider, move |state, http| {
-            if auth_supervisor::is_manually_disconnected(&state.store, requested_provider)? {
-                return Err(QuarkError::NotAuthorized);
-            }
-            let Some(credential) = load_password_credential(&state.store, requested_provider)?
-            else {
-                return Ok(false);
-            };
-            let recovered =
-                match recover_authorization(&browser_app, state, requested_provider, http, true) {
-                    Ok(()) => Ok(true),
-                    Err(error)
-                        if browser_login::can_fallback_to_browser(&error)
-                            || matches!(error, QuarkError::CaptchaRequired) =>
-                    {
-                        browser_password_login(
-                            &browser_app,
-                            requested_provider,
-                            &state.store,
-                            http,
-                            credential.username(),
-                            credential.password(),
-                            Some(credential.account_id()),
-                            matches!(error, QuarkError::CaptchaRequired),
-                        )?;
-                        Ok(true)
-                    }
-                    Err(error) => Err(error),
-                }?;
-            if recovered {
-                state.auth_supervisor.ready_locked(
-                    &state.store,
-                    requested_provider,
-                    Some(credential.account_id().to_owned()),
-                    Some(CloudAuthMethod::Password),
-                    auth_supervisor::session_expiry(&state.store, requested_provider)?,
-                )?;
-                let account = CloudAccount {
-                    provider: requested_provider,
-                    id: credential.account_id().into(),
-                    display_name: credential.username().into(),
-                    auth_method: CloudAuthMethod::Password,
-                };
-                publish_authorization_completion(&browser_app, state, &account)?;
-            }
-            Ok(recovered)
-        })
-        .await?;
-        if recovered {
+    match restore_provider_session(app.clone(), requested_provider).await {
+        Ok(account)
+            if expected_account
+                .as_deref()
+                .is_none_or(|expected| expected == account.id) =>
+        {
+            publish_silent_recovery(app.clone(), requested_provider, account).await?;
             return Ok(CloudAuthorization {
                 provider: requested_provider,
                 window_label: String::new(),
@@ -482,6 +551,9 @@ pub async fn cloud_reauthorize_failed_task(
                 completed: true,
             });
         }
+        Ok(_) => {}
+        Err(error) if should_attempt_silent_provider_recovery(&error) => {}
+        Err(error) => return Err(error),
     }
     cloud_begin_authorization(app, requested_provider).await
 }
@@ -529,24 +601,40 @@ pub async fn resume_reauthorized_provider_tasks(
         if !should_emit_task_update(&state, task.is_private) {
             continue;
         }
-        if state
+        let waiting_for_startup_authorization = task.status == TaskStatus::Paused
+            && matches!(
+                task.failure_code.as_deref(),
+                Some(
+                    "authorization_checking" | "authorization_recovering" | "authorization_pending"
+                )
+            );
+        if let Some(group) = state
             .store
             .cloud_directory_group_for_task(id)
             .map_err(|_| QuarkError::Storage)?
-            .is_some_and(|group| {
-                matches!(
-                    group.status,
-                    TaskStatus::Paused
-                        | TaskStatus::Cancelled
-                        | TaskStatus::Recycled
-                        | TaskStatus::Completed
-                )
-            })
         {
-            continue;
+            if should_release_startup_directory_pause(
+                group.status,
+                waiting_for_startup_authorization,
+            ) {
+                // Startup recovery pauses interrupted directories before any
+                // provider work. Once that provider has recovered, release
+                // only this protection pause. A manually paused directory has
+                // no startup authorization marker and remains paused.
+                state
+                    .store
+                    .set_cloud_directory_paused(group.id, false)
+                    .map_err(|_| QuarkError::Storage)?;
+            } else if matches!(
+                group.status,
+                TaskStatus::Paused
+                    | TaskStatus::Cancelled
+                    | TaskStatus::Recycled
+                    | TaskStatus::Completed
+            ) {
+                continue;
+            }
         }
-        let waiting_for_startup_authorization = task.status == TaskStatus::Paused
-            && task.failure_code.as_deref() == Some("authorization_pending");
         if !(waiting_for_startup_authorization
             || (task.status == TaskStatus::Failed
                 && requires_cloud_reauthorization_failure(task.failure_code.as_deref())))

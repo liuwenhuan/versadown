@@ -636,7 +636,7 @@ it('shows the shared loading indicator while a restored cloud task waits for log
   render(<DownloadQueue
     tasks={[{
       id: 'cloud-waiting', name: 'cloud.bin', kind: 'cloud', status: 'paused', progress: 0,
-      error: '恢复网盘登录后继续下载', failure_code: 'authorization_pending',
+      error: '恢复网盘登录后继续下载', failure_code: 'authorization_pending', reauthorization_required: true,
     }]}
     selectedTaskId={null}
     onSelect={() => {}}
@@ -647,6 +647,35 @@ it('shows the shared loading indicator while a restored cloud task waits for log
   expect(message).toBeVisible();
   expect(message.closest('.task-subtitle')).not.toHaveClass('task-error');
   expect(message.querySelector('.task-metadata-indicator')).toBeVisible();
+  expect(screen.getByRole('button', { name: '重新授权 cloud.bin' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '继续 cloud.bin' })).not.toBeInTheDocument();
+});
+
+it('renders silent login recovery and native SVIP acceleration as non-error status text', () => {
+  const { rerender } = render(<DownloadQueue
+    tasks={[{
+      id: 'cloud-recovering', name: 'cloud.bin', kind: 'cloud', status: 'paused', progress: 38,
+      statusMessage: '正在自动恢复网盘登录', failure_code: 'authorization_recovering',
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+  const recovering = screen.getByText('正在自动恢复网盘登录');
+  expect(recovering).not.toHaveClass('task-error');
+  expect(recovering.querySelector('.task-metadata-indicator')).toBeVisible();
+  expect(screen.getByText('登录恢复中')).toBeVisible();
+
+  rerender(<DownloadQueue
+    tasks={[{
+      id: 'cloud-recovering', name: 'cloud.bin', kind: 'cloud', status: 'downloading', progress: 39,
+      statusMessage: '正在使用迅雷svip加速', aria_gid: 'xunlei-native:42', download_speed: 512_000,
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+  expect(screen.getByText('正在使用迅雷svip加速')).not.toHaveClass('task-error');
 });
 
 it('does not show file-information loading after a magnet transfer has started', () => {

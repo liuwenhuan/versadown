@@ -154,21 +154,16 @@ impl TaskStore {
         )?)
     }
 
-    /// Cloud tasks persist an expiring provider URL in aria2's native session.
-    /// Before that session is loaded at application startup, turn only tasks
-    /// that had been actively downloading into an explicit authorization wait.
-    /// Include interrupted dispatches without a GID: their in-memory resolver
-    /// does not survive restart. Share dispatches become manually resumable
-    /// because their plan, rather than a personal-drive account, owns recovery.
-    /// The original GID and native checkpoint are retained; a successful
-    /// account check can therefore resume the same task instead of treating it
-    /// as an unrecoverable engine loss.
+    /// Cloud tasks persist an expiring provider URL in their download backend.
+    /// Before that backend session is loaded, pause every active stable cloud
+    /// source behind the shared authorization check. The original GID and
+    /// checkpoint remain available for native continuation after the provider
+    /// session and signed URL have been refreshed.
     pub fn defer_startup_cloud_downloads(&self) -> Result<Vec<DownloadTask>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let mut statement = connection.prepare(
             "SELECT id FROM tasks
-             WHERE (source LIKE 'cloud://%' OR
-                    (source LIKE 'cloud-share://%' AND aria_gid IS NULL))
+             WHERE (source LIKE 'cloud://%' OR source LIKE 'cloud-share://%')
                AND (status IN ('queued', 'downloading') OR
                     (status = 'parsing' AND aria_gid IS NULL))",
         )?;
@@ -180,19 +175,13 @@ impl TaskStore {
         let now = current_timestamp();
         for id in &ids {
             connection.execute(
-                "UPDATE tasks SET status = 'paused',
-                 error = CASE WHEN source LIKE 'cloud://%' THEN ?1 ELSE ?4 END,
-                 failure_code = CASE WHEN source LIKE 'cloud://%'
-                     THEN 'authorization_pending' ELSE 'interrupted_submission' END,
+                "UPDATE tasks SET status = 'paused', error = NULL,
+                 status_message = ?1,
+                 failure_code = 'authorization_checking',
                  download_speed = 0,
                  upload_speed = 0, connections = 0, eta_seconds = NULL,
                  updated_at = ?2 WHERE id = ?3",
-                params![
-                    "恢复网盘登录后继续下载",
-                    now,
-                    id,
-                    "上次网盘下载准备被中断，可继续下载"
-                ],
+                params!["正在检查网盘登录状态", now, id],
             )?;
         }
         ids.into_iter()
@@ -202,6 +191,73 @@ impl TaskStore {
                     .and_then(|id| find_with_connection(&connection, id))
             })
             .collect()
+    }
+
+    pub fn set_startup_cloud_authorization_recovering(
+        &self,
+        provider: CloudProvider,
+    ) -> Result<Vec<DownloadTask>, StoreError> {
+        self.update_startup_cloud_authorization(
+            provider,
+            "authorization_recovering",
+            None,
+            Some("正在自动恢复网盘登录"),
+        )
+    }
+
+    pub fn set_startup_cloud_authorization_required(
+        &self,
+        provider: CloudProvider,
+    ) -> Result<Vec<DownloadTask>, StoreError> {
+        self.update_startup_cloud_authorization(
+            provider,
+            "authorization_pending",
+            Some("恢复网盘登录后继续下载"),
+            None,
+        )
+    }
+
+    pub fn set_startup_cloud_authorization_check_failed(
+        &self,
+        provider: CloudProvider,
+        failure_code: &str,
+        message: &str,
+    ) -> Result<Vec<DownloadTask>, StoreError> {
+        self.update_startup_cloud_authorization(provider, failure_code, Some(message), None)
+    }
+
+    fn update_startup_cloud_authorization(
+        &self,
+        provider: CloudProvider,
+        failure_code: &str,
+        error: Option<&str>,
+        status_message: Option<&str>,
+    ) -> Result<Vec<DownloadTask>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let direct = format!("cloud://{}/%", provider.key());
+        let share = format!("cloud-share://{}/%", provider.key());
+        connection.execute(
+            "UPDATE tasks SET failure_code = ?1, error = ?2, status_message = ?3,
+             updated_at = ?4 WHERE status = 'paused'
+             AND failure_code IN ('authorization_checking', 'authorization_recovering')
+             AND (source LIKE ?5 OR source LIKE ?6)",
+            params![
+                failure_code,
+                error,
+                status_message,
+                current_timestamp(),
+                direct,
+                share
+            ],
+        )?;
+        let mut statement = connection.prepare(&format!(
+            "{TASK_SELECT} WHERE status = 'paused' AND failure_code = ?1
+             AND (source LIKE ?2 OR source LIKE ?3)"
+        ))?;
+        let tasks = statement
+            .query_map(params![failure_code, direct, share], task_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(tasks)
     }
 
     pub fn claim_cloud_directory_leaf_task(
@@ -292,13 +348,14 @@ impl TaskStore {
     ) -> Result<(Vec<DownloadTask>, Vec<(Uuid, Uuid)>), StoreError> {
         let (task_ids, leaves) = {
             let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-            let mut statement = connection.prepare("SELECT t.id FROM tasks t JOIN cloud_download_accounts a ON a.id = t.id WHERE a.provider = ?1 AND a.account_id = ?2 AND ((t.status = 'failed' AND t.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required')) OR (t.status = 'paused' AND t.failure_code = 'authorization_pending')) AND t.source LIKE ?3 AND NOT EXISTS (SELECT 1 FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id WHERE i.task_id = t.id AND g.status IN ('cancelled', 'recycled', 'completed'))")?;
+            let mut statement = connection.prepare("SELECT t.id FROM tasks t JOIN cloud_download_accounts a ON a.id = t.id WHERE a.provider = ?1 AND a.account_id = ?2 AND ((t.status = 'failed' AND t.failure_code IN ('not_authorized', 'credentials_expired', 'web_auth_required')) OR (t.status = 'paused' AND t.failure_code IN ('authorization_checking', 'authorization_recovering', 'authorization_pending'))) AND (t.source LIKE ?3 OR t.source LIKE ?4) AND NOT EXISTS (SELECT 1 FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id = i.group_id WHERE i.task_id = t.id AND g.status IN ('cancelled', 'recycled', 'completed'))")?;
             let task_ids = statement
                 .query_map(
                     params![
                         provider.key(),
                         account,
-                        format!("cloud://{}/%", provider.key())
+                        format!("cloud://{}/%", provider.key()),
+                        format!("cloud-share://{}/%", provider.key())
                     ],
                     |row| row.get::<_, String>(0),
                 )?
@@ -371,6 +428,7 @@ impl TaskStore {
             status: TaskStatus::Parsing,
             progress: 0,
             error: None,
+            status_message: None,
             failure_code: None,
             aria_gid: None,
             followed_by_gid: None,
@@ -1442,14 +1500,14 @@ impl TaskStore {
         let changed = transaction.execute(
             "UPDATE tasks SET name = ?1, status = ?2, progress = ?3, error = ?4, failure_code = ?5, aria_gid = ?6, followed_by_gid = ?7,
              total_length = ?8, completed_length = ?9, download_speed = ?10, upload_speed = ?11,
-             connections = ?12, discovered_nodes = ?13, eta_seconds = ?14, aria_error_code = ?15, updated_at = ?16, completed_at = ?17, p2p_sharing = ?18 WHERE id = ?19",
+             connections = ?12, discovered_nodes = ?13, eta_seconds = ?14, aria_error_code = ?15, updated_at = ?16, completed_at = ?17, p2p_sharing = ?18, status_message = ?19 WHERE id = ?20",
             params![
                 snapshot.name, snapshot.status.as_db(), snapshot.progress, snapshot.error, snapshot.failure_code, snapshot.aria_gid,
                 snapshot.followed_by_gid, snapshot.total_length.map(|value| sqlite_i64("total_length", value)).transpose()?,
                 sqlite_i64("completed_length", snapshot.completed_length)?, sqlite_i64("download_speed", snapshot.download_speed)?,
                 sqlite_i64("upload_speed", snapshot.upload_speed)?, snapshot.connections, snapshot.discovered_nodes,
                 snapshot.eta_seconds.map(|value| sqlite_i64("eta_seconds", value)).transpose()?,
-                snapshot.aria_error_code, current_timestamp(), completed_at, snapshot.p2p_sharing, snapshot.id.to_string(),
+                snapshot.aria_error_code, current_timestamp(), completed_at, snapshot.p2p_sharing, snapshot.status_message, snapshot.id.to_string(),
             ],
         )?;
         if changed == 0 {
@@ -1684,7 +1742,7 @@ fn remove_managed_payload_file(
     Ok(ManagedFileRemoval::Removed)
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note, p2p_sharing FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note, p2p_sharing, status_message FROM tasks";
 const CLOUD_DIRECTORY_GROUP_SELECT: &str = "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note FROM cloud_directory_groups";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
@@ -1787,6 +1845,9 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             "ALTER TABLE tasks ADD COLUMN p2p_sharing INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
+    if !column_exists(&transaction, "tasks", "status_message")? {
+        transaction.execute_batch("ALTER TABLE tasks ADD COLUMN status_message TEXT;")?;
+    }
     if !column_exists(&transaction, "cloud_directory_groups", "is_private")? {
         transaction.execute_batch(
             "ALTER TABLE cloud_directory_groups ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0;",
@@ -1814,7 +1875,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             );",
         )?;
     }
-    transaction.execute_batch("PRAGMA user_version = 13;")?;
+    transaction.execute_batch("PRAGMA user_version = 14;")?;
     transaction.commit()?;
     Ok(())
 }
@@ -1929,6 +1990,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         status: TaskStatus::from_db(&status).ok_or(rusqlite::Error::InvalidQuery)?,
         progress: row.get(5)?,
         error: row.get(6)?,
+        status_message: row.get(25)?,
         failure_code: row.get(7)?,
         aria_gid: row.get(8)?,
         followed_by_gid: row.get(9)?,
@@ -2170,7 +2232,7 @@ mod tests {
         let store = TaskStore::open_path(&database).unwrap();
         let recovered = store.defer_startup_cloud_downloads().unwrap();
         assert_eq!(recovered.len(), expected.len());
-        for (id, scheme, provider) in expected {
+        for (id, _scheme, provider) in expected {
             let task = store.find(id).unwrap();
             assert_eq!(task.status, TaskStatus::Paused);
             assert_eq!(task.completed_length, 153_694_208);
@@ -2183,18 +2245,10 @@ mod tests {
             let (ready, _) = store
                 .reauthorized_cloud_downloads(provider, "owner")
                 .unwrap();
-            assert_eq!(
-                ready.iter().any(|candidate| candidate.id == id),
-                scheme == "cloud"
-            );
-            assert_eq!(
-                task.failure_code.as_deref(),
-                Some(if scheme == "cloud" {
-                    "authorization_pending"
-                } else {
-                    "interrupted_submission"
-                })
-            );
+            assert!(ready.iter().any(|candidate| candidate.id == id));
+            assert_eq!(task.failure_code.as_deref(), Some("authorization_checking"));
+            assert_eq!(task.status_message.as_deref(), Some("正在检查网盘登录状态"));
+            assert!(task.error.is_none());
         }
         assert!(store.defer_startup_cloud_downloads().unwrap().is_empty());
     }
@@ -2219,12 +2273,6 @@ mod tests {
                 untouched.push(store.apply_transfer_snapshot(task).unwrap());
             }
         }
-        let mut share = store
-            .create(NewTask::direct("cloud-share://pikpak/linked"))
-            .unwrap();
-        share.status = TaskStatus::Queued;
-        share.aria_gid = Some("existing-share-gid".into());
-        untouched.push(store.apply_transfer_snapshot(share).unwrap());
         let mut direct = store
             .create(NewTask::direct("https://example.test/file"))
             .unwrap();
@@ -2289,7 +2337,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_defers_only_active_direct_cloud_tasks_and_keeps_them_recoverable() {
+    fn startup_defers_active_cloud_tasks_for_silent_authorization_recovery() {
         let store = TaskStore::open_in_memory().unwrap();
         let cloud = store
             .create(NewTask {
@@ -2320,13 +2368,54 @@ mod tests {
         assert_eq!(deferred.aria_gid.as_deref(), Some("cloud-gid"));
         assert_eq!(
             deferred.failure_code.as_deref(),
-            Some("authorization_pending")
+            Some("authorization_checking")
         );
-        assert_eq!(deferred.error.as_deref(), Some("恢复网盘登录后继续下载"));
+        assert!(deferred.error.is_none());
+        assert_eq!(
+            deferred.status_message.as_deref(),
+            Some("正在检查网盘登录状态")
+        );
         assert_eq!(
             store.find(direct.id).unwrap().status,
             TaskStatus::Downloading
         );
+    }
+
+    #[test]
+    fn startup_authorization_prompts_only_after_silent_recovery_fails() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud-share://xunlei/share/file"))
+            .unwrap();
+        task.status = TaskStatus::Downloading;
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        store.defer_startup_cloud_downloads().unwrap();
+
+        let recovering = store
+            .set_startup_cloud_authorization_recovering(CloudProvider::Xunlei)
+            .unwrap();
+        assert_eq!(recovering.len(), 1);
+        assert_eq!(
+            recovering[0].failure_code.as_deref(),
+            Some("authorization_recovering")
+        );
+        assert_eq!(
+            recovering[0].status_message.as_deref(),
+            Some("正在自动恢复网盘登录")
+        );
+        assert!(recovering[0].error.is_none());
+
+        let required = store
+            .set_startup_cloud_authorization_required(CloudProvider::Xunlei)
+            .unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].id, task.id);
+        assert_eq!(
+            required[0].failure_code.as_deref(),
+            Some("authorization_pending")
+        );
+        assert_eq!(required[0].error.as_deref(), Some("恢复网盘登录后继续下载"));
+        assert!(required[0].status_message.is_none());
     }
 
     #[test]

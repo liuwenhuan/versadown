@@ -1289,6 +1289,7 @@ pub(crate) fn queue_task_payload_from_task(
         status: task.status,
         progress: task.progress,
         error: task.error,
+        status_message: task.status_message,
         failure_code: task.failure_code,
         reauthorization_required,
         aria_gid: task.aria_gid,
@@ -1370,6 +1371,7 @@ fn virtual_cloud_directory_item_payload(
         status,
         progress: 0,
         error,
+        status_message: None,
         failure_code,
         reauthorization_required,
         aria_gid: None,
@@ -1412,6 +1414,7 @@ fn cloud_directory_folder_payload(
         status: TaskStatus::Queued,
         progress: 0,
         error: None,
+        status_message: None,
         failure_code: None,
         reauthorization_required: false,
         aria_gid: None,
@@ -1663,11 +1666,27 @@ fn aggregate_cloud_directory_folder(
         kind: "folder".to_string(),
         status,
         progress,
-        error: (status == TaskStatus::Failed)
-            .then(|| leaves.iter().find_map(|item| item.error.clone()))
+        error: matches!(status, TaskStatus::Failed | TaskStatus::Paused)
+            .then(|| {
+                leaves
+                    .iter()
+                    .find(|item| item.status == status && item.error.is_some())
+                    .and_then(|item| item.error.clone())
+            })
             .flatten(),
-        failure_code: None,
-        reauthorization_required: status == TaskStatus::Failed
+        status_message: leaves
+            .iter()
+            .find(|item| item.status == status && item.status_message.is_some())
+            .and_then(|item| item.status_message.clone()),
+        failure_code: matches!(status, TaskStatus::Failed | TaskStatus::Paused)
+            .then(|| {
+                leaves
+                    .iter()
+                    .find(|item| item.status == status && item.failure_code.is_some())
+                    .and_then(|item| item.failure_code.clone())
+            })
+            .flatten(),
+        reauthorization_required: matches!(status, TaskStatus::Failed | TaskStatus::Paused)
             && leaves.iter().any(|item| item.reauthorization_required),
         aria_gid: None,
         followed_by_gid: None,
@@ -4158,6 +4177,46 @@ mod tests {
             serde_json::to_value(&projected[0]).unwrap()["reauthorization_required"],
             true
         );
+    }
+
+    #[test]
+    fn paused_cloud_directory_projects_its_authorization_recovery_state() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Xunlei,
+                    "cloud://xunlei/root",
+                    "迅雷目录",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "file-1",
+                    &["迅雷目录"],
+                    "cloud.bin",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+        let mut task = store
+            .create(NewTask::direct("cloud://xunlei/file-1"))
+            .unwrap();
+        task.status = TaskStatus::Paused;
+        task.failure_code = Some("authorization_pending".into());
+        task.error = Some("恢复网盘登录后继续下载".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+        store.set_cloud_directory_paused(group.id, true).unwrap();
+
+        let root = cloud_directory_group_queue_task(&store, group.id).unwrap();
+
+        assert_eq!(root.status, TaskStatus::Paused);
+        assert_eq!(root.failure_code.as_deref(), Some("authorization_pending"));
+        assert_eq!(root.error.as_deref(), Some("恢复网盘登录后继续下载"));
+        assert!(root.reauthorization_required);
     }
 
     #[test]

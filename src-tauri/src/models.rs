@@ -291,6 +291,10 @@ pub struct DownloadTask {
     pub status: TaskStatus,
     pub progress: u8,
     pub error: Option<String>,
+    /// Non-terminal progress information such as authorization recovery or
+    /// provider-native acceleration. This must never drive retry decisions.
+    #[serde(default)]
+    pub status_message: Option<String>,
     /// Stable, user-safe classification for a terminal cloud failure. This is
     /// intentionally separate from aria2's numeric error code so the UI can
     /// offer the correct next action without parsing localized text.
@@ -397,6 +401,8 @@ pub struct QueueTaskPayload {
     pub status: TaskStatus,
     pub progress: u8,
     pub error: Option<String>,
+    #[serde(default, rename = "statusMessage")]
+    pub status_message: Option<String>,
     /// Stable, user-safe classification for a terminal cloud failure. This is
     /// intentionally separate from aria2's numeric error code so the UI can
     /// offer the correct next action without parsing localized text.

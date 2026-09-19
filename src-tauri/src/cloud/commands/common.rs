@@ -107,7 +107,12 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
 pub(crate) fn requires_cloud_reauthorization_failure(code: Option<&str>) -> bool {
     matches!(
         code,
-        Some("not_authorized" | "credentials_expired" | "web_auth_required")
+        Some(
+            "not_authorized"
+                | "credentials_expired"
+                | "web_auth_required"
+                | "authorization_pending"
+        )
     )
 }
 

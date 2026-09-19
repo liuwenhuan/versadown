@@ -231,13 +231,19 @@ function isFetchingTaskMetadata(task: QueueTask, subtitle: string | undefined): 
     && task.status === 'downloading'
     && (task.kind === 'magnet' || task.kind === 'torrent')
     && Boolean(subtitle?.match(/正在获取(?:完整)?(?:文件|种子)信息/));
-  return metadataPending || isWaitingForCloudAuthorization(task);
+  return metadataPending || isWaitingForCloudAuthorization(task) || isRecoveringCloudAuthorization(task);
 }
 
 function isWaitingForCloudAuthorization(task: QueueTask): boolean {
   return task.status === 'paused'
     && task.failure_code === 'authorization_pending'
     && task.error === '恢复网盘登录后继续下载';
+}
+
+function isRecoveringCloudAuthorization(task: QueueTask): boolean {
+  return task.status === 'paused'
+    && (task.failure_code === 'authorization_checking'
+      || task.failure_code === 'authorization_recovering');
 }
 
 function taskPeerMetric(task: QueueTask): string | undefined {
@@ -300,7 +306,9 @@ function isPrivateTask(task: QueueTask): boolean {
 function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> {
   const commands: Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
-  if (task.status === 'paused') commands.push({ command: 'resume', label: '继续下载' });
+  if (task.status === 'paused') commands.push(task.reauthorization_required
+    ? { command: 'reauthorize', label: '重新授权' }
+    : { command: 'resume', label: '继续下载' });
   if (task.status === 'failed') commands.push(task.reauthorization_required
     ? { command: 'reauthorize', label: '重新授权' }
     : { command: 'retry', label: '重新下载' });
@@ -429,7 +437,8 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const nodeName = displayTaskName(node);
     const fileIsSelected = node.selected !== false;
     const selectionAction = node.status === 'paused' || !fileIsSelected ? 'resume' as const : 'pause' as const;
-    const primaryAction = node.status === 'downloading' ? 'pause' as const
+    const primaryAction = node.reauthorization_required ? 'reauthorize' as const
+      : node.status === 'downloading' ? 'pause' as const
       : node.status === 'paused' ? 'resume' as const
         : node.status === 'failed' ? (node.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
     const isBtFile = isBtFileTree && node.file_index !== undefined;
@@ -731,8 +740,10 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
         const subtitle = taskSubtitle(task);
         const fetchingMetadata = isFetchingTaskMetadata(task, subtitle);
         const waitingForCloudAuthorization = isWaitingForCloudAuthorization(task);
+        const recoveringCloudAuthorization = isRecoveringCloudAuthorization(task);
         const peerMetric = taskPeerMetric(task);
-        const primaryAction = task.status === 'downloading' ? 'pause' as const
+        const primaryAction = task.reauthorization_required ? 'reauthorize' as const
+          : task.status === 'downloading' ? 'pause' as const
           : task.status === 'paused' ? 'resume' as const
           : task.status === 'failed' ? (task.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
         const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : primaryAction === 'reauthorize' ? '重新授权' : '重新下载';
@@ -749,7 +760,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
               <span className="task-copy"><b title={taskName}>{taskName}</b>{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}</span>
             </div>
-            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>P2P 分享中</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error && !waitingForCloudAuthorization ? ' task-error' : ''}`} title={subtitle}>{subtitle}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">已暂停</span> : <>{eta && <span className="transfer-eta">剩余 {eta}</span>}{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></div></div>}
+            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>P2P 分享中</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error && !waitingForCloudAuthorization ? ' task-error' : ''}`} title={subtitle}>{subtitle}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">{recoveringCloudAuthorization ? '登录恢复中' : '已暂停'}</span> : <>{eta && <span className="transfer-eta">剩余 {eta}</span>}{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></div></div>}
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasPlayableMedia ? `播放 ${taskName}` : completedFileType ? `${associatedFileLabels[completedFileType]} ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasPlayableMedia ? '播放视频或音频' : completedFileType ? '使用系统默认应用打开' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasPlayableMedia ? 'play_videos' : completedFileType ? 'open_file' : 'open_directory'); }}><ActionIcon action={completedHasPlayableMedia ? 'play' : completedFileType ?? 'folder'} /></button>}
