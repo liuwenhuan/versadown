@@ -433,6 +433,23 @@ fn download_account(app: &AppHandle, provider: CloudProvider) -> Result<String, 
         .ok_or(QuarkError::NotAuthorized)
 }
 
+/// Public-share downloads may not have an authenticated account. When one is
+/// already ready, persist it with the local task so a later authorization
+/// recovery remains scoped to the account that created the download.
+pub(crate) fn ready_cloud_download_account(
+    app: &AppHandle,
+    provider: CloudProvider,
+) -> Result<Option<String>, QuarkError> {
+    let cloud = app
+        .try_state::<Arc<CloudState>>()
+        .ok_or(QuarkError::Storage)?;
+    let record = cloud.auth_supervisor.record(&cloud.store, provider)?;
+    Ok((record.health == auth_supervisor::AuthHealth::Ready)
+        .then_some(record.account_id)
+        .flatten()
+        .filter(|account| !account.trim().is_empty()))
+}
+
 pub(crate) async fn submit_cloud_file(
     app: AppHandle,
     state: &AppState,

@@ -75,6 +75,114 @@ pub fn reauthorization_provider(
     Err(QuarkError::InvalidInput("当前任务不需要重新授权".into()))
 }
 
+fn reauthorization_owner_ids(
+    store: &TaskStore,
+    id: uuid::Uuid,
+    provider: CloudProvider,
+) -> Result<Vec<uuid::Uuid>, QuarkError> {
+    let mut ids = Vec::new();
+    let task = match store.find(id) {
+        Ok(task) => Some(task),
+        Err(crate::StoreError::NotFound(_)) => None,
+        Err(_) => return Err(QuarkError::Storage),
+    };
+    if let Some(task) = &task {
+        if cloud_provider_from_download_source(&task.source).ok() != Some(provider) {
+            return Err(QuarkError::InvalidInput("网盘任务来源无效".into()));
+        }
+        ids.push(task.id);
+    }
+    let group = if task.is_some() {
+        store
+            .cloud_directory_group_for_task(id)
+            .map_err(|_| QuarkError::Storage)?
+    } else {
+        store
+            .cloud_directory_group(id)
+            .map_err(|_| QuarkError::Storage)?
+    };
+    if let Some(group) = group {
+        if group.provider != provider {
+            return Err(QuarkError::InvalidInput("网盘任务来源无效".into()));
+        }
+        ids.push(group.id);
+        for item in store
+            .cloud_directory_group_items(group.id)
+            .map_err(|_| QuarkError::Storage)?
+        {
+            let Some(task_id) = item.task_id else {
+                continue;
+            };
+            let task = store.find(task_id).map_err(|_| QuarkError::Storage)?;
+            if cloud_provider_from_download_source(&task.source).ok() != Some(provider) {
+                return Err(QuarkError::Storage);
+            }
+            ids.push(task_id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.is_empty() {
+        return Err(QuarkError::InvalidInput("当前任务不需要重新授权".into()));
+    }
+    Ok(ids)
+}
+
+fn reauthorization_owner(
+    store: &TaskStore,
+    id: uuid::Uuid,
+    provider: CloudProvider,
+) -> Result<Option<String>, QuarkError> {
+    let mut owner = None;
+    for candidate in reauthorization_owner_ids(store, id, provider)? {
+        let Some(candidate_owner) = store
+            .cloud_download_account(candidate)
+            .map_err(|_| QuarkError::Storage)?
+        else {
+            continue;
+        };
+        if let Some(existing) = owner.as_deref() {
+            if existing != candidate_owner {
+                return Err(QuarkError::Storage);
+            }
+        } else {
+            owner = Some(candidate_owner);
+        }
+    }
+    Ok(owner)
+}
+
+/// Legacy share tasks predate durable account ownership. An explicit
+/// reauthorization is the only safe moment to adopt them into the current
+/// account: future automatic recovery can then remain account-scoped.
+pub(crate) fn bind_reauthorized_cloud_task_owner(
+    store: &TaskStore,
+    id: uuid::Uuid,
+    provider: CloudProvider,
+    account: &str,
+) -> Result<(), QuarkError> {
+    if account.trim().is_empty() {
+        return Err(QuarkError::NotAuthorized);
+    }
+    let ids = reauthorization_owner_ids(store, id, provider)?;
+    for candidate in &ids {
+        if let Some(existing) = store
+            .cloud_download_account(*candidate)
+            .map_err(|_| QuarkError::Storage)?
+        {
+            if existing != account {
+                return Err(QuarkError::AccountMismatch);
+            }
+        }
+    }
+    for candidate in ids {
+        store
+            .bind_cloud_download_account(candidate, provider, account)
+            .map_err(|_| QuarkError::Storage)?;
+    }
+    Ok(())
+}
+
 /// Explicit authorization only: background refresh must never close interactive UI.
 fn publish_authorization_completion(
     app: &AppHandle,
@@ -532,10 +640,7 @@ pub async fn cloud_reauthorize_failed_task(
     }
 
     let requested_provider = reauthorization_provider(&state.store, id)?;
-    let expected_account = state
-        .store
-        .cloud_download_account(id)
-        .map_err(|_| QuarkError::Storage)?;
+    let expected_account = reauthorization_owner(&state.store, id, requested_provider)?;
 
     match restore_provider_session(app.clone(), requested_provider).await {
         Ok(account)
@@ -543,6 +648,7 @@ pub async fn cloud_reauthorize_failed_task(
                 .as_deref()
                 .is_none_or(|expected| expected == account.id) =>
         {
+            bind_reauthorized_cloud_task_owner(&state.store, id, requested_provider, &account.id)?;
             publish_silent_recovery(app.clone(), requested_provider, account).await?;
             return Ok(CloudAuthorization {
                 provider: requested_provider,

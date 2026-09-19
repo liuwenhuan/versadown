@@ -5,9 +5,10 @@ use std::{
 };
 
 use super::{
-    cloud_failure_code, create_cloud_task, directory_download_failure_fields,
-    password_webview_data_directory_from_root, prepare_baidu_account_login,
-    recover_provider_password_session, requires_cloud_reauthorization_failure, resolve_download,
+    bind_reauthorized_cloud_task_owner, cloud_failure_code, create_cloud_task,
+    directory_download_failure_fields, password_webview_data_directory_from_root,
+    prepare_baidu_account_login, recover_provider_password_session,
+    requires_cloud_reauthorization_failure, resolve_download,
     retry_read_with_refreshed_web_session, should_attempt_silent_provider_recovery,
     should_release_startup_directory_pause,
 };
@@ -47,6 +48,75 @@ fn failed_share_preparation_without_an_aria_task_can_be_readded() {
     assert!(super::share_commands::is_retryable_cloud_share_prepare(
         &failed
     ));
+}
+
+#[test]
+fn reauthorization_claims_legacy_unbound_share_directory_tasks_for_every_provider() {
+    use crate::models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem};
+
+    for provider in CloudProvider::ALL {
+        let store = TaskStore::open_in_memory().unwrap();
+        let source = crate::cloud::share::stable_share_source(provider, "share", "file");
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    provider,
+                    &source,
+                    "Share",
+                    std::path::Path::new("C:/downloads"),
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    &source,
+                    &["Share"],
+                    "file.bin",
+                    Some(7),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap()[0].id;
+        let task = store
+            .prepare_cloud_share_directory_leaf_task(
+                group.id,
+                item,
+                crate::NewTask {
+                    source,
+                    name: "file.bin".into(),
+                    kind: "cloud".into(),
+                    is_private: false,
+                },
+                None,
+            )
+            .unwrap();
+        store.transition(task.id, TaskStatus::Queued).unwrap();
+        store.defer_startup_cloud_downloads().unwrap();
+        store
+            .set_startup_cloud_authorization_required(provider)
+            .unwrap();
+
+        assert!(store
+            .reauthorized_cloud_downloads(provider, "alice")
+            .unwrap()
+            .0
+            .is_empty());
+
+        bind_reauthorized_cloud_task_owner(&store, group.id, provider, "alice").unwrap();
+
+        assert_eq!(
+            store.cloud_download_account(group.id).unwrap().as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            store.cloud_download_account(task.id).unwrap().as_deref(),
+            Some("alice")
+        );
+        let (recovered, _) = store
+            .reauthorized_cloud_downloads(provider, "alice")
+            .unwrap();
+        assert_eq!(
+            recovered.iter().map(|task| task.id).collect::<Vec<_>>(),
+            vec![task.id]
+        );
+    }
 }
 
 #[test]

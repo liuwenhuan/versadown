@@ -140,7 +140,7 @@ pub(crate) async fn submit_cloud_share_file_internal(
     private_download: bool,
     on_created: Option<tauri::ipc::Channel<QueueTaskPayload>>,
 ) -> Result<CloudShareFileSubmission, QuarkError> {
-    share::parse_stable_cloud_share_source(&source)?;
+    let (provider, _, _) = share::parse_stable_cloud_share_source(&source)?;
     let _source_submission = state.cloud_download_sources.acquire(&source).await?;
     // Directory leaves have their own persisted output path below the chosen
     // directory root. They must not be de-duplicated against a prior
@@ -187,6 +187,12 @@ pub(crate) async fn submit_cloud_share_file_internal(
         .clone()
         .into_aria2_options()
         .map_err(|_| QuarkError::InvalidInput("下载路径或文件名无效".into()))?;
+    let owner = ready_cloud_download_account(&app, provider)?;
+    if let (Some(account), Some(context)) = (owner.as_deref(), directory_context) {
+        // Verify the existing group before a new leaf is created. A session
+        // switch cannot leave an orphaned parsing task behind.
+        bind_reauthorized_cloud_task_owner(&state.store, context.group_id, provider, account)?;
+    }
     let retry = retryable_cloud_share_task_for_submission(
         &state.store,
         &source,
@@ -221,6 +227,9 @@ pub(crate) async fn submit_cloud_share_file_internal(
             .set_private(task.id, private_download)
             .map_err(|_| QuarkError::Storage)?
     };
+    if let Some(account) = owner.as_deref() {
+        bind_reauthorized_cloud_task_owner(&state.store, prepared.id, provider, &account)?;
+    }
     if cloud
         .share_plans
         .reserve_local_task(&source, prepared.id)
