@@ -344,9 +344,10 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
         }
         let normalized = normalize_queryless_unicode_path(source, &url);
         let path = url.path().to_ascii_lowercase();
-        let kind = if path.ends_with(".torrent") {
-            CandidateKind::Torrent
-        } else if path.ends_with(".m3u8") {
+        // Remote URLs, including URLs ending in `.torrent`, are ordinary
+        // downloads. Only a local torrent file explicitly provided to the app
+        // enters the BT metadata/selection flow.
+        let kind = if path.ends_with(".m3u8") {
             CandidateKind::Hls
         } else if path.ends_with(".mpd") {
             CandidateKind::Dash
@@ -651,6 +652,22 @@ mod tests {
         assert!(values[0].valid);
         assert_eq!(values[0].kind, Some(CandidateKind::Torrent));
         assert_eq!(values[0].input, r"C:\Downloads\release.torrent");
+    }
+
+    #[test]
+    fn treats_remote_torrent_urls_as_ordinary_downloads() {
+        assert_eq!(
+            validate_download_input("https://example.test/release.torrent?token=temporary")
+                .unwrap()
+                .kind,
+            CandidateKind::Direct
+        );
+        assert_eq!(
+            validate_download_input("ftp://example.test/release.torrent")
+                .unwrap()
+                .kind,
+            CandidateKind::Ftp
+        );
     }
 
     #[test]

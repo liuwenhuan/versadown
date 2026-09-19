@@ -18,6 +18,7 @@ mod launcher_input;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
+mod output_path;
 mod parser;
 mod policy;
 mod privacy;
@@ -56,6 +57,7 @@ pub use models::{
     DuplicateDownloadState, FtpSegment, LauncherVisibility, MagnetMetadataSettings, NewTask,
     ProxySettings, TaskStatus,
 };
+pub(crate) use output_path::reserve_unique_output_path;
 pub use parser::{
     classify_input, extract_candidates, extract_cloud_share_candidate, scan_download_inputs,
     validate_download_input, validate_task_source, Candidate, CandidateKind, CloudShareCandidate,

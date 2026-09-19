@@ -966,6 +966,74 @@ impl TaskStore {
             })
     }
 
+    /// Returns the output path reserved for this task before its download is
+    /// submitted. Reservations make independently sourced downloads choose
+    /// different local names even before aria2 has created a payload file.
+    pub fn reserved_output_path(&self, id: Uuid) -> Result<Option<std::path::PathBuf>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection
+            .query_row(
+                "SELECT path FROM task_output_reservations WHERE task_id = ?1",
+                [id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|path| path.map(std::path::PathBuf::from))
+            .map_err(StoreError::from)
+    }
+
+    /// Claims a concrete output path for a task. The comparison deliberately
+    /// follows Windows' case-insensitive file-name behavior, because Windows
+    /// is a supported target and the same payload directory can be shared by
+    /// HTTP, FTP, and cloud downloads.
+    pub fn reserve_output_path(&self, id: Uuid, path: &Path) -> Result<bool, StoreError> {
+        let path = path.to_string_lossy().into_owned();
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.unchecked_transaction()?;
+        if find_with_transaction(&transaction, id)?.is_none() {
+            return Err(StoreError::NotFound(id));
+        }
+        let current = transaction
+            .query_row(
+                "SELECT path FROM task_output_reservations WHERE task_id = ?1",
+                [id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(current) = current {
+            return Ok(current.eq_ignore_ascii_case(&path));
+        }
+        let occupied = transaction
+            .query_row(
+                "SELECT 1 FROM task_output_reservations WHERE path = ?1 COLLATE NOCASE LIMIT 1",
+                [&path],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if occupied {
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO task_output_reservations (task_id, path) VALUES (?1, ?2)",
+            params![id.to_string(), path],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn rename_task(&self, id: Uuid, name: &str) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![name, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
+    }
+
     /// Removes only the durable task record. `task_files` rows cascade, while
     /// the actual downloaded payload is never touched by this operation.
     pub fn remove_task_record(&self, id: Uuid) -> Result<(), StoreError> {
@@ -1659,6 +1727,13 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             PRIMARY KEY(task_id, file_index),
             FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
          );
+         CREATE TABLE IF NOT EXISTS task_output_reservations (
+            task_id TEXT PRIMARY KEY NOT NULL,
+            path TEXT NOT NULL COLLATE NOCASE,
+            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS task_output_reservations_path_unique
+            ON task_output_reservations(path COLLATE NOCASE);
          CREATE TABLE IF NOT EXISTS cloud_directory_groups (
             id TEXT PRIMARY KEY NOT NULL,
             provider TEXT NOT NULL,

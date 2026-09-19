@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::{
     aria2::{DownloadAction, EventSink, UriSubmissionOptions},
     bandwidth::BandwidthLimiter,
-    DownloadTask, StoreError, TaskStatus, TaskStore,
+    reserve_unique_output_path, DownloadTask, StoreError, TaskStatus, TaskStore,
 };
 
 const ANONYMOUS_PASSWORD: &str = "anonymous@alldownloader.local";
@@ -290,7 +290,7 @@ impl FtpDownloadEngine {
         if !valid_output_name(&output_name) {
             return Err(FtpDownloadError::InvalidOption("输出文件名无效"));
         }
-        let output = directory.join(output_name);
+        let output = reserve_unique_output_path(&self.store, task_id, &directory, &output_name)?;
         if options.allow_overwrite {
             if tokio::fs::try_exists(&output).await? {
                 tokio::fs::remove_file(&output).await?;

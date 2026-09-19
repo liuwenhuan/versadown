@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use alldownloader_lib::{
@@ -26,6 +29,7 @@ struct RecordingAria2 {
     status_error_message: Option<String>,
     completed_status_error_message: Option<String>,
     cancel_release: Option<Arc<tokio::sync::Notify>>,
+    next_gid: AtomicUsize,
 }
 
 impl RecordingAria2 {
@@ -96,7 +100,7 @@ async fn unconfirmed_magnet_metadata_is_not_published_to_the_queue() {
             is_private: false,
         })
         .unwrap();
-    let service = DownloadService::new(api, Arc::clone(&store)).with_events(events.clone());
+    let service = DownloadService::new(api.clone(), Arc::clone(&store)).with_events(events.clone());
 
     let prepared = service
         .prepare_magnet(task.id, task.source.clone())
@@ -105,6 +109,12 @@ async fn unconfirmed_magnet_metadata_is_not_published_to_the_queue() {
 
     assert_eq!(prepared.status, TaskStatus::AwaitingUser);
     assert!(events.tasks.lock().unwrap().is_empty());
+    assert_eq!(
+        api.added_options()[0]
+            .get("follow-torrent")
+            .map(String::as_str),
+        Some("true")
+    );
 }
 
 #[async_trait]
@@ -120,7 +130,10 @@ impl Aria2Api for RecordingAria2 {
         if self.add_error {
             Err(Aria2Error::Transport)
         } else {
-            Ok("gid-1".to_string())
+            Ok(format!(
+                "gid-{}",
+                self.next_gid.fetch_add(1, Ordering::Relaxed) + 1
+            ))
         }
     }
     async fn tell_status(&self, gid: &str) -> Result<Aria2Status, Aria2Error> {
@@ -363,6 +376,74 @@ fn cloud_directory_members_always_use_one_connection() {
 }
 
 #[tokio::test]
+async fn uri_downloads_keep_torrent_files_as_regular_files() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let http = prepare_download("https://example.test/release.torrent", &store)
+        .unwrap()
+        .task;
+    let ftp = prepare_download("ftp://example.test/release.torrent", &store)
+        .unwrap()
+        .task;
+    assert_eq!(http.kind, "file");
+    assert_eq!(ftp.kind, "ftp");
+
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+    service
+        .submit_uri_with_options(http.id, vec![http.source], UriSubmissionOptions::default())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        api.added_options()[0]
+            .get("follow-torrent")
+            .map(String::as_str),
+        Some("false")
+    );
+}
+
+#[tokio::test]
+async fn independently_sourced_downloads_reserve_distinct_output_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let first = prepare_download("https://one.example.test/releases/archive.zip", &store)
+        .unwrap()
+        .task;
+    let second = prepare_download("https://two.example.test/releases/archive.zip", &store)
+        .unwrap()
+        .task;
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store.clone());
+    let options = || UriSubmissionOptions {
+        directory: Some(directory.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let first = service
+        .submit_uri_with_options(first.id, vec![first.source], options())
+        .await
+        .unwrap();
+    let second = service
+        .submit_uri_with_options(second.id, vec![second.source], options())
+        .await
+        .unwrap();
+
+    assert_eq!(first.name, "archive.zip");
+    assert_eq!(second.name, "archive (1).zip");
+    assert_eq!(
+        api.added_options()
+            .iter()
+            .map(|options| options.get("out").map(String::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some("archive.zip"), Some("archive (1).zip")]
+    );
+    assert!(api
+        .added_options()
+        .iter()
+        .all(|options| options.get("auto-file-renaming").map(String::as_str) == Some("false")));
+}
+
+#[tokio::test]
 async fn cloud_download_policy_sends_capped_connections_and_spaced_bounded_retries() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = prepare_download("https://example.test/cloud-file.bin", &store)
@@ -381,8 +462,11 @@ async fn cloud_download_policy_sends_capped_connections_and_spaced_bounded_retri
     assert_eq!(
         api.added_options(),
         vec![BTreeMap::from([
+            ("auto-file-renaming".into(), "false".into()),
+            ("follow-torrent".into(), "false".into()),
             ("max-connection-per-server".into(), "1".into()),
             ("max-tries".into(), "5".into()),
+            ("pause".into(), "false".into()),
             ("retry-wait".into(), "3".into()),
             ("split".into(), "1".into()),
         ])]
@@ -1342,13 +1426,14 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
         vec![BTreeMap::from([
             ("dir".into(), "D:/Downloads".into()),
             ("out".into(), "wallpaper.jpg".into()),
-            (
-                "header".into(),
-                "Cookie: sid=web; __puus=fresh\nReferer: https://pan.quark.cn/".into(),
-            ),
+            ("header".into(), "Cookie: sid=web; __puus=fresh".into(),),
+            ("referer".into(), "https://pan.quark.cn/".into()),
             ("all-proxy".into(), "http://127.0.0.1:7890".into()),
             ("allow-overwrite".into(), "true".into()),
+            ("auto-file-renaming".into(), "false".into()),
             ("continue".into(), "false".into()),
+            ("follow-torrent".into(), "false".into()),
+            ("pause".into(), "false".into()),
             ("remove-control-file".into(), "true".into()),
         ])]
     );
@@ -1440,7 +1525,10 @@ async fn overwrite_submission_starts_fresh_instead_of_inheriting_global_resume()
         api.added_options(),
         vec![BTreeMap::from([
             ("allow-overwrite".into(), "true".into()),
+            ("auto-file-renaming".into(), "false".into()),
             ("continue".into(), "false".into()),
+            ("follow-torrent".into(), "false".into()),
+            ("pause".into(), "false".into()),
             ("remove-control-file".into(), "true".into()),
         ])],
         "an explicit overwrite must discard stale aria2 state instead of inheriting --continue=true"

@@ -357,8 +357,14 @@ impl DownloadService {
         &self,
         task_id: Uuid,
         uris: Vec<String>,
-        options: Aria2Options,
+        mut options: Aria2Options,
     ) -> Result<String, Aria2Error> {
+        // `addUri` normally follows a downloaded .torrent and turns it into a
+        // BT payload. URI submissions represent ordinary HTTP/FTP/cloud files;
+        // the magnet path below explicitly opts back in.
+        options
+            .entry("follow-torrent".into())
+            .or_insert_with(|| "false".into());
         let api = self.api();
         let result = api.add_uri(uris, options).await;
         let task_id = task_id.to_string();
@@ -478,14 +484,14 @@ impl DownloadService {
         mut uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
-        let task = self.store.find(task_id)?;
-        let options = self.prepare_uri_options(&task, &mut uris, options)?;
+        let mut task = self.store.find(task_id)?;
+        let options = self.prepare_uri_options(&mut task, &mut uris, options)?;
         self.submit_uri(task_id, uris, options).await
     }
 
     fn prepare_uri_options(
         &self,
-        task: &DownloadTask,
+        task: &mut DownloadTask,
         uris: &mut Vec<String>,
         mut options: UriSubmissionOptions,
     ) -> Result<Aria2Options, DownloadServiceError> {
@@ -503,7 +509,12 @@ impl DownloadService {
                 uris.push(checkpoint.uri.clone());
             }
         }
+        self.reserve_uri_output(task, &mut options)?;
         let mut result = options.into_aria2_options()?;
+        // Output paths are allocated by the application, rather than left to
+        // aria2's implicit renaming. This keeps the durable task name and the
+        // actual file path aligned across HTTP and cloud submissions.
+        result.insert("auto-file-renaming".into(), "false".into());
         if checkpoint.is_some() {
             // Native checkpoints restore independently of `continue`. Never
             // fall back to treating a preallocated file's length as progress.
@@ -512,6 +523,37 @@ impl DownloadService {
             result.insert("auto-file-renaming".into(), "false".into());
         }
         Ok(result)
+    }
+
+    fn reserve_uri_output(
+        &self,
+        task: &mut DownloadTask,
+        options: &mut UriSubmissionOptions,
+    ) -> Result<(), DownloadServiceError> {
+        let Some(directory) = options.directory.as_ref() else {
+            return Ok(());
+        };
+        let requested_name = options.output_name.as_deref().unwrap_or(task.name.as_str());
+        if !valid_output_name(requested_name) {
+            return Err(DownloadServiceError::InvalidUriOption("output name"));
+        }
+        let output =
+            crate::reserve_unique_output_path(&self.store, task.id, directory, requested_name)?;
+        let output_directory = output
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or(DownloadServiceError::InvalidUriOption("output directory"))?;
+        let output_name = output
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or(DownloadServiceError::InvalidUriOption("output name"))?
+            .to_owned();
+        options.directory = Some(output_directory);
+        options.output_name = Some(output_name.clone());
+        if task.name != output_name {
+            *task = self.store.rename_task(task.id, &output_name)?;
+        }
+        Ok(())
     }
 
     pub async fn submit_native_media_with_options(
@@ -541,8 +583,8 @@ impl DownloadService {
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        let task = self.task_for_uri_submission(task_id)?;
-        let mut options = self.prepare_uri_options(&task, &mut uris, options)?;
+        let mut task = self.task_for_uri_submission(task_id)?;
+        let mut options = self.prepare_uri_options(&mut task, &mut uris, options)?;
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.add_uri_for_task(task_id, uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {
@@ -589,7 +631,7 @@ impl DownloadService {
     ) -> Result<Option<DownloadTask>, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
-        let current = self.store.find(expected.id)?;
+        let mut current = self.store.find(expected.id)?;
         if current.status != expected.status
             || current.aria_gid != expected.aria_gid
             || !matches!(
@@ -603,7 +645,7 @@ impl DownloadService {
             return Ok(None);
         }
         validate_task_source(&current.kind, &current.source)?;
-        let mut options = self.prepare_uri_options(&current, &mut uris, options)?;
+        let mut options = self.prepare_uri_options(&mut current, &mut uris, options)?;
         // See `submit_uri`: restored sessions start paused, while this is an
         // explicit retry and should preserve normal immediate submission.
         options.insert("pause".into(), "false".into());
@@ -1126,6 +1168,7 @@ impl DownloadService {
             .transpose()?
             .filter(|indices| !indices.is_empty());
         let mut aria_options = options.clone().into_aria2_options()?;
+        aria_options.insert("follow-torrent".into(), "true".into());
         aria_options.insert("pause-metadata".into(), "true".into());
         // A magnet resolves to a torrent after metadata retrieval. Keep this on
         // the metadata task so its followed download verifies an existing payload

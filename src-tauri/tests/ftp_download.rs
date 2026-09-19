@@ -876,6 +876,18 @@ async fn ftp_engine_resumes_a_partial_file_and_completes_the_existing_task() {
             is_private: false,
         })
         .unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(
+                0,
+                output.to_string_lossy().into_owned(),
+                payload.len() as u64,
+                9,
+                true,
+            )],
+        )
+        .unwrap();
     let engine = Arc::new(FtpDownloadEngine::new(
         directory.path(),
         Arc::clone(&store),
