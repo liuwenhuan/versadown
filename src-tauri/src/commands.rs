@@ -2262,7 +2262,8 @@ async fn run_local_task_action(
                 return task_action_outcome(&state.store, current, Some(duplicate));
             }
         }
-        let task = resubmit_task(app.clone(), &state, current, Default::default()).await?;
+        let options = cloud_retry_submission_options(&current);
+        let task = resubmit_task(app.clone(), &state, current, options).await?;
         return task_action_outcome(&state.store, task, None);
     }
     let action = match action.as_str() {
@@ -2538,6 +2539,18 @@ fn restart_cloud_download_after_unsupported_resume(
     options.allow_overwrite = true;
     options.continue_download = false;
     options.native_resume_gid = None;
+}
+
+/// A cloud retry obtains a fresh provider URL, but the partial local payload
+/// remains the same managed download. Request continuation so DownloadService
+/// validates its native checkpoint before aria2 sees the new URL. Error 8 is
+/// handled separately because that server explicitly rejected the Range.
+fn cloud_retry_submission_options(task: &DownloadTask) -> UriSubmissionOptions {
+    UriSubmissionOptions {
+        continue_download: task.source.starts_with("cloud://")
+            || task.source.starts_with("cloud-share://"),
+        ..Default::default()
+    }
 }
 
 /// A cloud provider's signed URL can expire while a local payload remains
@@ -5827,6 +5840,25 @@ mod tests {
         assert!(!unchanged.allow_overwrite);
         assert!(unchanged.continue_download);
         assert_eq!(unchanged.native_resume_gid.as_deref(), Some("old-gid"));
+    }
+
+    #[test]
+    fn cloud_retry_requests_checkpoint_verified_continuation() {
+        let store = TaskStore::open_in_memory().unwrap();
+        for source in [
+            "cloud://quark/file-id",
+            "cloud-share://quark/share-id/file-id",
+        ] {
+            let task = store.create(NewTask::direct(source)).unwrap();
+            let options = cloud_retry_submission_options(&task);
+            assert!(options.continue_download, "{source}");
+            assert!(!options.allow_overwrite, "{source}");
+        }
+
+        let task = store
+            .create(NewTask::direct("https://example.test/file"))
+            .unwrap();
+        assert!(!cloud_retry_submission_options(&task).continue_download);
     }
 
     #[test]
