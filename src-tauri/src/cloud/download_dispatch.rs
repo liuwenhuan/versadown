@@ -40,6 +40,16 @@ struct RetryIntent {
     continue_download: bool,
 }
 
+fn signed_cloud_url_requires_refresh(task: &DownloadTask) -> bool {
+    task.status == TaskStatus::Failed
+        && task.aria_gid.is_some()
+        && (task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://"))
+        && matches!(
+            task.aria_error_code.as_deref(),
+            Some("6" | "8" | "22" | "24")
+        )
+}
+
 #[derive(Clone, Default)]
 pub struct CloudDownloadDispatch {
     pub scheduler: CloudDownloadScheduler,
@@ -154,6 +164,15 @@ impl CloudDownloadDispatch {
                 "任务状态已变化，本次提交已跳过".into(),
             ));
         }
+        let signed_url_refresh = signed_cloud_url_requires_refresh(&task);
+        let retry_options = retry_options.map(|(allow_overwrite, continue_download)| {
+            let allow_overwrite = allow_overwrite
+                || (signed_url_refresh && task.aria_error_code.as_deref() == Some("8"));
+            (
+                allow_overwrite,
+                (continue_download || signed_url_refresh) && !allow_overwrite,
+            )
+        });
         let native_resume = retry_options.is_some_and(|(_, continue_download)| continue_download)
             && task.status == TaskStatus::Paused
             && crate::xunlei_native::is_native_gid(task.aria_gid.as_deref());
@@ -527,5 +546,32 @@ mod tests {
         let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
         assert!(options.allow_overwrite);
         assert!(!options.continue_download);
+    }
+
+    #[tokio::test]
+    async fn failed_cloud_aria_task_refreshes_its_signed_url_with_its_checkpoint() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://aliyun/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Failed;
+        task.aria_gid = Some("0123456789abcdef".into());
+        task.aria_error_code = Some("24".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+
+        let (queued, _) = dispatch
+            .prepare_expected_with_retry_intent(&store, &task, false, false)
+            .await
+            .unwrap();
+
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert!(queued.aria_gid.is_none());
+        let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
+        assert!(options.continue_download);
+        assert_eq!(
+            options.native_resume_gid.as_deref(),
+            Some("0123456789abcdef")
+        );
     }
 }

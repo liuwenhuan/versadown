@@ -585,6 +585,9 @@ impl DownloadService {
         self.ensure_accepting()?;
         let mut task = self.task_for_uri_submission(task_id)?;
         let mut options = self.prepare_uri_options(&mut task, &mut uris, options)?;
+        // Restored sessions are globally paused. A re-submitted cloud URL is
+        // an explicit retry and must begin once its replacement GID is bound.
+        options.insert("pause".into(), "false".into());
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
         let gid = self.add_uri_for_task(task_id, uris, options).await?;
         if let Err(error) = self.store.rebind_for_resubmission(task_id, &gid) {

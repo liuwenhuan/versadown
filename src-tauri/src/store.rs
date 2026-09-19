@@ -1356,7 +1356,8 @@ impl TaskStore {
         if !matches!(
             current.status,
             TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Completed
-        ) {
+        ) && !(current.status == TaskStatus::Queued && current.aria_gid.is_none())
+        {
             return Err(StoreError::InvalidTransition {
                 from: current.status,
                 to: TaskStatus::Parsing,
@@ -2299,6 +2300,27 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.id == id));
         }
+    }
+
+    #[test]
+    fn queued_cloud_dispatch_can_atomically_bind_a_replacement_gid() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://aliyun/file-id"))
+            .unwrap();
+        let queued = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Queued,
+                ..task
+            })
+            .unwrap();
+
+        let rebound = store
+            .rebind_for_resubmission(queued.id, "replacement-gid")
+            .unwrap();
+
+        assert_eq!(rebound.status, TaskStatus::Parsing);
+        assert_eq!(rebound.aria_gid.as_deref(), Some("replacement-gid"));
     }
 
     #[test]

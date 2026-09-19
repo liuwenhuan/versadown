@@ -654,11 +654,23 @@ pub async fn queue_cloud_dispatch(
                         .service()
                         .await
                         .map_err(|_| QuarkError::DownloadEngineUnavailable)?;
+                    let replacing_existing_uri =
+                        configured.continue_download || configured.allow_overwrite;
                     let (url, options) = share::share_submission_options(resolved, configured)?;
-                    service
-                        .submit_uri_with_options(id, vec![url], options)
-                        .await
-                        .map_err(cloud_download_submission_error)
+                    let submitted = if replacing_existing_uri {
+                        // A saved engine session can publish its old GID while
+                        // this fresh provider URL is being resolved. Atomically
+                        // rebind the accepted replacement instead of rejecting
+                        // that valid checkpoint as an already-submitted task.
+                        service
+                            .resubmit_uri_with_options(id, vec![url], options)
+                            .await
+                    } else {
+                        service
+                            .submit_uri_with_options(id, vec![url], options)
+                            .await
+                    };
+                    submitted.map_err(cloud_download_submission_error)
                 },
             )
             .await;
