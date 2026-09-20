@@ -23,6 +23,7 @@ use serde_json::Value;
 struct RecordingAria2 {
     calls: Mutex<Vec<String>>,
     uris: Mutex<Vec<Vec<String>>>,
+    changed_uris: Mutex<Vec<(Vec<String>, Vec<String>)>>,
     options: Mutex<Vec<Aria2Options>>,
     add_error: bool,
     pause_error: bool,
@@ -44,6 +45,9 @@ impl RecordingAria2 {
     }
     fn added_options(&self) -> Vec<Aria2Options> {
         self.options.lock().unwrap().clone()
+    }
+    fn changed_uris(&self) -> Vec<(Vec<String>, Vec<String>)> {
+        self.changed_uris.lock().unwrap().clone()
     }
     fn active(gid: &str) -> Aria2Status {
         Aria2Status {
@@ -85,6 +89,95 @@ fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> Dow
             is_private: false,
         })
         .unwrap()
+}
+
+#[tokio::test]
+async fn cloud_url_refresh_reuses_existing_gid_and_preserves_native_checkpoint_uri() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_path(&directory.path().join("tasks.sqlite")).unwrap());
+    let api = RecordingAria2::successful();
+    let task = store
+        .create(NewTask {
+            source: "cloud://pikpak/file-id".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let task = store
+        .apply_transfer_snapshot(DownloadTask {
+            status: TaskStatus::Queued,
+            aria_gid: Some("0123456789abcdef".into()),
+            failure_code: Some("cloud_url_refreshing".into()),
+            completed_length: 128,
+            total_length: Some(1_024),
+            ..task
+        })
+        .unwrap();
+    let payload = directory.path().join("file.bin");
+    std::fs::File::create(&payload)
+        .unwrap()
+        .set_len(1_024)
+        .unwrap();
+    store
+        .upsert_files(
+            task.id,
+            &[(0, payload.to_string_lossy().into_owned(), 1_024, 128, true)],
+        )
+        .unwrap();
+    let state_directory = directory.path().join("aria2-next-state/stream");
+    std::fs::create_dir_all(&state_directory).unwrap();
+    let checkpoint = rusqlite::Connection::open(state_directory.join("state.db")).unwrap();
+    checkpoint
+        .execute_batch("CREATE TABLE downloads (gid TEXT PRIMARY KEY, uri TEXT, path TEXT, total_length INTEGER, completed_length INTEGER, completed_ranges TEXT);")
+        .unwrap();
+    checkpoint
+        .execute(
+            "INSERT INTO downloads VALUES (?1, ?2, ?3, 1024, 128, '0-128')",
+            rusqlite::params![
+                "0123456789abcdef",
+                "https://expired.example.test/file",
+                payload.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+    let service = DownloadService::new(api.clone(), Arc::clone(&store));
+
+    let refreshed = service
+        .replace_cloud_uri_with_options(
+            task.id,
+            "0123456789abcdef",
+            vec!["https://fresh.example.test/file".into()],
+            UriSubmissionOptions {
+                directory: Some(directory.path().to_path_buf()),
+                output_name: Some("file.bin".into()),
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(refreshed.aria_gid.as_deref(), Some("0123456789abcdef"));
+    assert!(
+        !api.calls().iter().any(|call| call == "aria2.addUri"),
+        "refreshing a signed URL must not create a second download for the same output"
+    );
+    assert!(
+        api.calls().iter().any(|call| call == "aria2.changeUri"),
+        "the fresh provider URL must be added to the existing download"
+    );
+    assert_eq!(
+        api.changed_uris(),
+        vec![(
+            vec!["https://expired.example.test/file".to_string()],
+            vec![
+                "https://fresh.example.test/file".to_string(),
+                "https://expired.example.test/file".to_string(),
+            ]
+        )],
+        "the atomic URI rotation must leave the checkpoint URI available for range restoration"
+    );
 }
 
 #[tokio::test]
@@ -202,6 +295,21 @@ impl Aria2Api for RecordingAria2 {
         _: BTreeMap<String, String>,
     ) -> Result<String, Aria2Error> {
         unimplemented!()
+    }
+    async fn change_uri(
+        &self,
+        _: &str,
+        _: u32,
+        del_uris: Vec<String>,
+        add_uris: Vec<String>,
+        _: u32,
+    ) -> Result<(u32, u32), Aria2Error> {
+        self.record("aria2.changeUri");
+        self.changed_uris
+            .lock()
+            .unwrap()
+            .push((del_uris.clone(), add_uris.clone()));
+        Ok((del_uris.len() as u32, add_uris.len() as u32))
     }
     async fn get_option(&self, _: &str) -> Result<BTreeMap<String, String>, Aria2Error> {
         unimplemented!()
@@ -621,7 +729,7 @@ async fn scheduler_gidless_pause_cancel_resume_never_dispatches_stale_work() {
 }
 
 #[tokio::test]
-async fn scheduler_gidless_resume_retains_confirmed_overwrite_intent() {
+async fn scheduler_paused_refresh_retains_checkpoint_and_confirmed_overwrite_intent() {
     use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
     let dispatch = CloudDownloadDispatch::default();
     let store = TaskStore::open_in_memory().unwrap();
@@ -639,7 +747,7 @@ async fn scheduler_gidless_resume_retains_confirmed_overwrite_intent() {
         .await
         .unwrap()
         .unwrap();
-    assert!(paused.aria_gid.is_none());
+    assert_eq!(paused.aria_gid.as_deref(), Some("stale-gid"));
 
     let options = dispatch.retry_submission_options(
         task.id,

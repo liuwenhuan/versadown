@@ -64,9 +64,6 @@ pub struct ProviderDescriptor {
     pub share_hosts: &'static [&'static str],
     /// URL path prefixes understood by the existing provider share protocols.
     pub share_patterns: &'static [&'static str],
-    /// Legacy candidate classification does not authorize share adapter requests.
-    #[serde(skip)]
-    candidate_aliases: &'static [(&'static str, &'static str)],
     pub max_upload_concurrency: usize,
     pub download_concurrency: DownloadConcurrencyPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,19 +198,6 @@ impl ProviderRegistry {
     pub fn for_share_url(&self, url: &Url) -> Option<&ProviderDescriptor> {
         self.descriptors.iter().find(|descriptor| {
             descriptor.provider.is_enabled() && descriptor.accepts_share_url(url)
-        })
-    }
-
-    pub fn for_candidate_url(&self, url: &Url) -> Option<&ProviderDescriptor> {
-        self.for_share_url(url).or_else(|| {
-            if !matches!(url.scheme(), "https" | "http") {
-                return None;
-            }
-            self.descriptors.iter().find(|d| {
-                d.candidate_aliases.iter().any(|(host, prefix)| {
-                    url.host_str() == Some(*host) && url.path().starts_with(prefix)
-                })
-            })
         })
     }
 
@@ -365,15 +349,6 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Uc => &["https://drive.uc.cn", "https://pc-api.uc.cn"],
             Pikpak | Aliyun | Xunlei => &[],
         },
-        candidate_aliases: match provider {
-            Quark => &[("pan.quark.cn", "/"), ("quark.cn", "/s/")],
-            Pikpak => &[
-                ("mypikpak.com", "/"),
-                ("www.mypikpak.com", "/"),
-                ("pikpak.me", "/"),
-            ],
-            _ => &[],
-        },
         authorization: CloudAuthorizationCapabilities {
             provider,
             web: true,
@@ -447,8 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_exposes_each_provider_share_code_constraint(
-    ) {
+    fn catalog_exposes_each_provider_share_code_constraint() {
         // Break caught: the shared UI must receive each provider's own share
         // code contract before it submits a server-rejected share creation.
         let catalog = ProviderRegistry::global().catalog();

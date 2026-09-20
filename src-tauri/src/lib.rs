@@ -65,7 +65,7 @@ pub use parser::{
 };
 pub use policy::{validate_processing, PolicyError, ProcessAction, ProcessStep};
 pub use processing::{plan_processing, ProcessingHint, Resource};
-pub use store::{IncompatibleTaskPurgeReport, StoreError, TaskStore};
+pub use store::{StoreError, TaskStore};
 pub use window_lifecycle::{
     manager_close_disposition, should_prevent_implicit_exit, ApplicationLifecycle,
     ManagerCloseDisposition,
@@ -200,11 +200,6 @@ impl EngineStateSink for TauriDownloadEvents {
     fn engine_state_updated(&self, state: &EngineAvailability) {
         let _ = self.app.emit("download-engine-state-updated", state);
     }
-}
-
-#[tauri::command]
-fn app_version_command() -> String {
-    app_version()
 }
 
 #[tauri::command]
@@ -509,7 +504,6 @@ pub fn run() {
             launcher_drag::drag_launcher_window,
             launcher_input::set_launcher_input_regions,
             launcher_input::launcher_input_hit_test_for_test,
-            app_version_command,
             check_for_app_update,
             local_upload_picker::local_upload_entries,
             main_window_interaction_state,
@@ -526,7 +520,6 @@ pub fn run() {
             commands::open_task_directory,
             commands::open_task_file,
             commands::play_task_videos,
-            commands::remove_task_record,
             commands::recycle_task,
             commands::purge_recycled_tasks,
             commands::select_files,
@@ -548,7 +541,6 @@ pub fn run() {
             cloud::commands::cloud_complete_authorization,
             cloud::commands::cloud_open_operation_verification,
             cloud::commands::cloud_completed_authorization,
-            cloud::commands::resume_reauthorized_provider_tasks,
             cloud::commands::cloud_reauthorize_failed_task,
             cloud::commands::cloud_login_password,
             cloud::commands::cloud_saved_password_credentials,
@@ -575,12 +567,10 @@ pub fn run() {
             cloud::commands::cloud_control_upload,
             cloud::commands::cloud_logout,
             launcher::set_launcher_window_visible,
-            launcher::start_launcher_dragging,
             launcher::show_launcher_menu,
             launcher::run_launcher_menu_action,
             launcher::launcher_manager_visible,
             launcher::launcher_interaction_snapshot,
-            launcher::hide_manager_for_test,
             launcher::manager_window_snapshot,
             launcher::activate_launcher_menu_for_test,
             window_lifecycle::request_native_manager_close_for_test,

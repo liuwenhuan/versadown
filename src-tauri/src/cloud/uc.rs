@@ -354,13 +354,6 @@ impl<'a, T: CloudHttpTransport + ?Sized> UcClient<'a, T> {
             .filter(|value| value != UC_CARD_DISPLAY_NAME)
     }
 
-    pub fn has_saved_display_name(&self) -> Result<bool, QuarkError> {
-        let id = self
-            .persisted_account_id()
-            .unwrap_or(self.legacy_session_id()?);
-        Ok(self.saved_display_name(&id).is_some())
-    }
-
     /// Build the account shown from a browser-issued UC session. The official
     /// page's visible nickname is retained with the encrypted session, so the
     /// card can be restored without replaying opaque browser context.

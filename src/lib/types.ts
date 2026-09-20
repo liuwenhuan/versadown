@@ -129,16 +129,6 @@ export type ParseDownloadResult =
   | { shareAccessCodeRequired: CloudShareAccessCodeRequired; task?: never; confirmation?: never; duplicate?: never }
   | { duplicate: DuplicateDownload; task?: never; confirmation?: never; shareAccessCodeRequired?: never };
 
-export type Provider = 'quark' | 'pikpak';
-
-export interface CloudItem {
-  id: string;
-  name: string;
-  kind: 'folder' | 'file';
-  size?: string;
-  modified: string;
-}
-
 export type ProxyProtocol = 'http' | 'https';
 export type LauncherVisibility = 'always' | 'downloading' | 'hidden';
 

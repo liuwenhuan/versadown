@@ -107,9 +107,9 @@ it('prepares every candidate without starting it and discards an abandoned nativ
     requires_confirmation: true,
     resources: []
   }).mockResolvedValueOnce(undefined);
-  const { discardPreparedDownload, prepareDownload } = await import('./api');
+  const { discardPreparedDownload, parseDownload } = await import('./api');
 
-  await prepareDownload('https://example.test/archive.zip');
+  await parseDownload('https://example.test/archive.zip', undefined, true);
   await discardPreparedDownload('task-1');
 
   expect(native.invoke).toHaveBeenNthCalledWith(1, 'parse_download', {
@@ -129,9 +129,9 @@ it('treats an indexed magnet file list as ready even while aria2 metadata is unr
     requires_confirmation: true,
     resources: [{ id: '1', name: 'large torrent/preview.bin', size: '1 B', selected: true }],
   });
-  const { prepareDownload } = await import('./api');
+  const { parseDownload } = await import('./api');
 
-  await expect(prepareDownload('magnet:?xt=urn:btih:large')).resolves.toMatchObject({
+  await expect(parseDownload('magnet:?xt=urn:btih:large', undefined, true)).resolves.toMatchObject({
     confirmation: {
       taskId: 'magnet-preview',
       isBitTorrent: true,
@@ -162,9 +162,9 @@ it('marks an empty magnet file list as pending until a complete list is availabl
     requires_confirmation: true,
     resources: [],
   });
-  const { prepareDownload } = await import('./api');
+  const { parseDownload } = await import('./api');
 
-  await expect(prepareDownload('magnet:?xt=urn:btih:waiting')).resolves.toMatchObject({
+  await expect(parseDownload('magnet:?xt=urn:btih:waiting', undefined, true)).resolves.toMatchObject({
     confirmation: { fileListPending: true },
   });
 });
@@ -179,9 +179,9 @@ it('keeps a followed magnet file list ready after aria2 creates its child', asyn
     requires_confirmation: true,
     resources: [{ id: '137', name: 'large torrent/complete.bin', size: '1 B', selected: true }],
   });
-  const { prepareDownload } = await import('./api');
+  const { parseDownload } = await import('./api');
 
-  await expect(prepareDownload('magnet:?xt=urn:btih:complete')).resolves.toMatchObject({
+  await expect(parseDownload('magnet:?xt=urn:btih:complete', undefined, true)).resolves.toMatchObject({
     confirmation: { fileListPending: false },
   });
 });

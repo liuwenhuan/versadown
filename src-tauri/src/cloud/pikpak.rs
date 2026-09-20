@@ -1561,24 +1561,26 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
     }
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
         reject_pikpak_recycle_bin_source(id)?;
-        let cached = self.request(
-            "GET",
-            format!("{DRIVE}/drive/v1/files/{}?usage=CACHE", encoded(id)),
-            None,
-        )
-        .map_err(download_source_missing_from_http_404)?;
+        let cached = self
+            .request(
+                "GET",
+                format!("{DRIVE}/drive/v1/files/{}?usage=CACHE", encoded(id)),
+                None,
+            )
+            .map_err(download_source_missing_from_http_404)?;
         if let Some(url) = cached["web_content_link"]
             .as_str()
             .filter(|url| url.starts_with("https://"))
         {
             return Ok((url.into(), required(&cached, "name")?));
         }
-        let fetched = self.request(
-            "GET",
-            format!("{DRIVE}/drive/v1/files/{}?usage=FETCH", encoded(id)),
-            None,
-        )
-        .map_err(download_source_missing_from_http_404)?;
+        let fetched = self
+            .request(
+                "GET",
+                format!("{DRIVE}/drive/v1/files/{}?usage=FETCH", encoded(id)),
+                None,
+            )
+            .map_err(download_source_missing_from_http_404)?;
         let url = fetched["web_content_link"]
             .as_str()
             .filter(|url| url.starts_with("https://"))

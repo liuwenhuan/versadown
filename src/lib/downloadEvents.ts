@@ -24,13 +24,6 @@ function collectDescendantIds(task: QueueTask, ids: Set<string>): void {
   }
 }
 
-export function mergeInitialTasks(current: readonly QueueTask[], snapshots: readonly QueueTask[]): QueueTask[] {
-  const liveTasks = indexTasks(current);
-  return snapshots.reduceRight<QueueTask[]>((merged, snapshot) => (
-    containsTask(merged, snapshot.id) ? merged : upsertTask(merged, preserveLiveTasks(snapshot, liveTasks))
-  ), [...current]);
-}
-
 export function mergeTaskSnapshot(
   current: readonly QueueTask[],
   snapshots: readonly QueueTask[],
@@ -91,10 +84,6 @@ function preserveLiveTasks(snapshot: QueueTask, liveTasks: ReadonlyMap<string, Q
   return children.some((child, index) => child !== snapshot.children![index]) ? { ...snapshot, children } : snapshot;
 }
 
-function containsTask(tasks: readonly QueueTask[], id: string): boolean {
-  return tasks.some((task) => task.id === id || (task.children ? containsTask(task.children, id) : false));
-}
-
 function replaceExistingTask(tasks: readonly QueueTask[], snapshot: QueueTask): QueueTask[] | readonly QueueTask[] {
   let changed = false;
   const next = tasks.map((task) => {
@@ -143,15 +132,6 @@ export function formatBytes(value: number | undefined): string {
 
 export function formatSpeed(value: number | undefined): string {
   return value === undefined ? '未知' : `${formatBytes(value)}/s`;
-}
-
-export function formatCompactSpeed(value: number): string {
-  if (!Number.isFinite(value) || value < 0) return '—';
-  if (value < 1024) return `${Math.round(value)}B`;
-  if (value < 1024 * 1024) return `${Math.round(value / 1024)}K`;
-  if (value < 1024 ** 3) return `${(value / (1024 ** 2)).toFixed(1)}M`;
-  if (value < 1024 ** 4) return `${(value / (1024 ** 3)).toFixed(1)}G`;
-  return `${(value / (1024 ** 4)).toFixed(1)}T`;
 }
 
 export function formatEta(seconds: number | undefined): string {

@@ -31,7 +31,7 @@ vi.mock('./lib/api', () => ({
   defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } },
   getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
-  moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, setTaskPrivacy: state.setTaskPrivacy, removeTaskRecord: vi.fn(), resolveDuplicateDownload: state.resolveDuplicate
+  moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, setTaskPrivacy: state.setTaskPrivacy, resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -63,8 +63,6 @@ vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
   scaleFactor: state.scaleFactor,
   startDragging: state.startDragging
 }) }));
-vi.mock('./lib/mainWindow', () => ({ mainWindowIsMaximized: vi.fn().mockResolvedValue(false), runMainWindowAction: vi.fn() }));
-
 import { App } from './App';
 
 const oldTask: QueueTask = { id: 'task-1', name: 'archive.iso', kind: 'file', status: 'downloading', progress: 10, total_length: 100, completed_length: 10 };
@@ -601,6 +599,15 @@ it('renders the total download speed in bold', async () => {
   } finally {
     stylesheet.remove();
   }
+});
+
+it('does not offer manual ordering from the task sort menu', async () => {
+  const user = userEvent.setup();
+  render(<App />);
+
+  await user.click(await screen.findByRole('button', { name: '排序任务' }));
+  const menu = screen.getByRole('menu', { name: '任务排序' });
+  expect(within(menu).queryByRole('menuitemradio', { name: '按手动拖动顺序' })).not.toBeInTheDocument();
 });
 
 it('sorts only the active task tab from the menu beside total speed', async () => {

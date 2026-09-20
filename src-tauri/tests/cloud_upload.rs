@@ -401,11 +401,18 @@ fn pikpak_upload_preserves_server_destination_for_instant_and_multipart_uploads(
     for complete in [true, false] {
         for (requested, returned, expected) in [
             ("0", Some("actual-upload-folder"), "actual-upload-folder"),
-            ("selected-folder", Some("selected-folder"), "selected-folder"),
+            (
+                "selected-folder",
+                Some("selected-folder"),
+                "selected-folder",
+            ),
             ("selected-folder", Some(""), "0"),
             ("selected-folder", None, "selected-folder"),
         ] {
-            let server = UploadServer { requests: Mutex::new(Vec::new()), fail_complete: false };
+            let server = UploadServer {
+                requests: Mutex::new(Vec::new()),
+                fail_complete: false,
+            };
             let file = upload_pikpak_file(&server, requested, local.path(), |request| {
                 assert_eq!(request["parent_id"], if requested == "0" { "" } else { requested });
                 let mut response = serde_json::json!({
@@ -419,7 +426,10 @@ fn pikpak_upload_preserves_server_destination_for_instant_and_multipart_uploads(
                 Ok(response)
             }).unwrap();
             assert_eq!(file.parent_id, expected);
-            assert_eq!(server.requests.lock().unwrap().len(), if complete { 0 } else { 3 });
+            assert_eq!(
+                server.requests.lock().unwrap().len(),
+                if complete { 0 } else { 3 }
+            );
         }
     }
 }

@@ -1855,9 +1855,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .find(|current| current.fsid == file.fsid)
-            .ok_or_else(|| {
-                QuarkError::SourceFileMissing
-            })?;
+            .ok_or_else(|| QuarkError::SourceFileMissing)?;
         let file = &current;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

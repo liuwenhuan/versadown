@@ -241,6 +241,7 @@ fn failure(message: impl Into<String>) -> Box<dyn Error> {
 fn provider_error_kind(error: &QuarkError) -> &'static str {
     match error {
         QuarkError::NotAuthorized => "not-authorized",
+        QuarkError::AccountMismatch => "account-mismatch",
         QuarkError::AuthorizationExpired => "authorization-expired",
         QuarkError::WebAuthorizationRequired => "web-authorization-required",
         QuarkError::CaptchaRequired => "captcha-required",
@@ -250,6 +251,9 @@ fn provider_error_kind(error: &QuarkError) -> &'static str {
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak-regional-membership-restricted",
         QuarkError::AuthorizationPending => "authorization-pending",
         QuarkError::SourceFileMissing => "source-file-missing",
+        QuarkError::DownloadCheckpointInvalid => "download-checkpoint-invalid",
+        QuarkError::DownloadEngineUnavailable => "download-engine-unavailable",
+        QuarkError::DownloadSubmissionFailed => "download-submission-failed",
         QuarkError::SessionRenewedRetryOperation => "session-renewed-retry-operation",
         QuarkError::InvalidResponse => "invalid-response",
         QuarkError::Storage => "storage",

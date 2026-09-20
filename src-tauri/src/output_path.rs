@@ -56,7 +56,10 @@ pub(crate) fn reserve_unique_output_path(
 }
 
 fn output_or_control_file_exists(path: &Path) -> bool {
-    path.exists() || PathBuf::from(format!("{}.aria2", path.to_string_lossy())).exists()
+    path.exists()
+        || [".aria2", ".xltd", ".xltd.cfg"]
+            .iter()
+            .any(|suffix| PathBuf::from(format!("{}{suffix}", path.to_string_lossy())).exists())
 }
 
 fn suffixed_output_name(preferred_name: &str, suffix: u32) -> String {
@@ -114,5 +117,21 @@ mod tests {
             store.reserved_output_path(second.id).unwrap(),
             Some(second_path)
         );
+    }
+
+    #[test]
+    fn new_download_avoids_output_reserved_by_xunlei_checkpoint_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/archive.zip"))
+            .unwrap();
+        std::fs::write(directory.path().join("archive.zip.xltd"), b"partial").unwrap();
+        std::fs::write(directory.path().join("archive.zip.xltd.cfg"), b"checkpoint").unwrap();
+
+        let path =
+            reserve_unique_output_path(&store, task.id, directory.path(), "archive.zip").unwrap();
+
+        assert_eq!(path, directory.path().join("archive (1).zip"));
     }
 }

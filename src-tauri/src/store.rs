@@ -44,8 +44,7 @@ pub enum StoreError {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct IncompatibleTaskPurgeReport {
-    pub removed_tasks: usize,
+pub(crate) struct IncompatiblePayloadPurgeReport {
     pub removed_files: usize,
     pub skipped_outside_files: usize,
 }
@@ -1160,61 +1159,11 @@ impl TaskStore {
         self.fail_with_code(id, None, message)
     }
 
-    /// Removes explicitly identified nonterminal tasks and their payloads. Paths
-    /// outside the configured download root are never touched.
-    pub fn purge_incompatible_tasks(
-        &self,
-        ids: &[Uuid],
-        download_root: &Path,
-    ) -> Result<IncompatibleTaskPurgeReport, StoreError> {
-        let root = std::fs::canonicalize(download_root)?;
-        let mut tasks = Vec::new();
-        for id in ids {
-            match self.find(*id) {
-                Ok(task)
-                    if !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled) =>
-                {
-                    tasks.push(task)
-                }
-                Ok(_) | Err(StoreError::NotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        let mut report = IncompatibleTaskPurgeReport::default();
-
-        for task in &tasks {
-            for file in self.files(task.id)? {
-                let path = std::path::PathBuf::from(file.path);
-                match remove_managed_payload_file(&root, &path)? {
-                    ManagedFileRemoval::Removed => report.removed_files += 1,
-                    ManagedFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
-                    ManagedFileRemoval::Missing => {}
-                }
-                let mut sidecar = path.into_os_string();
-                sidecar.push(".aria2");
-                match remove_managed_payload_file(&root, Path::new(&sidecar))? {
-                    ManagedFileRemoval::Removed => report.removed_files += 1,
-                    ManagedFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
-                    ManagedFileRemoval::Missing => {}
-                }
-            }
-        }
-
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let transaction = connection.unchecked_transaction()?;
-        for task in &tasks {
-            transaction.execute("DELETE FROM tasks WHERE id = ?1", [task.id.to_string()])?;
-        }
-        transaction.commit()?;
-        report.removed_tasks = tasks.len();
-        Ok(report)
-    }
-
-    pub fn purge_incompatible_payload_paths(
+    pub(crate) fn purge_incompatible_payload_paths(
         &self,
         paths: &[String],
         download_root: &Path,
-    ) -> Result<IncompatibleTaskPurgeReport, StoreError> {
+    ) -> Result<IncompatiblePayloadPurgeReport, StoreError> {
         let root = std::fs::canonicalize(download_root)?;
         // A refreshed cloud URL can lose its old GID before the process exits.
         // Engine ownership is not file ownership: retain payloads/control files
@@ -1231,7 +1180,7 @@ impl TaskStore {
                 .filter_map(|path| std::fs::canonicalize(path).ok())
                 .collect::<HashSet<_>>()
         };
-        let mut report = IncompatibleTaskPurgeReport::default();
+        let mut report = IncompatiblePayloadPurgeReport::default();
         for value in paths {
             let path = std::path::PathBuf::from(value);
             for candidate in [
@@ -1298,26 +1247,6 @@ impl TaskStore {
                     Err(StoreError::Database(rusqlite::Error::QueryReturnedNoRows))
                 }
             });
-        }
-        find_with_connection(&connection, id)
-    }
-
-    /// A failed task can be reclassified after an explicit retry reaches a
-    /// cloud authorization boundary. Do not transition it again: terminal
-    /// tasks intentionally do not permit Failed -> Failed transitions.
-    pub fn update_failed_failure(
-        &self,
-        id: Uuid,
-        failure_code: Option<&str>,
-        message: impl AsRef<str>,
-    ) -> Result<DownloadTask, StoreError> {
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let changed = connection.execute(
-            "UPDATE tasks SET error = ?1, failure_code = ?2, updated_at = ?3 WHERE id = ?4 AND status = 'failed'",
-            params![message.as_ref(), failure_code, current_timestamp(), id.to_string()],
-        )?;
-        if changed == 0 {
-            return Err(StoreError::NotFound(id));
         }
         find_with_connection(&connection, id)
     }
@@ -1476,21 +1405,6 @@ impl TaskStore {
         let changed=connection.execute("UPDATE tasks SET aria_gid=?1,metadata_gid=?1,status='awaiting_user',selection_confirmed=0,updated_at=?2 WHERE id=?3",params![gid,current_timestamp(),id.to_string()])?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
-        }
-        find_with_connection(&connection, id)
-    }
-
-    pub fn bind_metadata_alias(&self, id: Uuid, gid: &str) -> Result<DownloadTask, StoreError> {
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let changed = connection.execute(
-            "UPDATE tasks SET metadata_gid=?1,updated_at=?2 WHERE id=?3 AND metadata_gid IS NULL",
-            params![gid, current_timestamp(), id.to_string()],
-        )?;
-        if changed == 0 {
-            return match find_with_connection(&connection, id) {
-                Ok(_) => Err(StoreError::Database(rusqlite::Error::QueryReturnedNoRows)),
-                Err(error) => Err(error),
-            };
         }
         find_with_connection(&connection, id)
     }

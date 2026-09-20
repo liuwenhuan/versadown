@@ -664,7 +664,6 @@ pub async fn cloud_reauthorize_failed_task(
     cloud_begin_authorization(app, requested_provider).await
 }
 
-#[tauri::command]
 pub async fn resume_reauthorized_provider_tasks(
     app: AppHandle,
     provider: CloudProvider,

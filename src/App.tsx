@@ -116,9 +116,6 @@ function isPrivateTask(task: QueueTask): boolean {
 }
 
 const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mode: TaskSortMode; label: string; ariaLabel: string }> }> = [
-  { label: '自定义顺序', options: [
-    { mode: 'manual', label: '手动拖动', ariaLabel: '按手动拖动顺序' },
-  ] },
   { label: '按创建时间', options: [
     { mode: 'created-desc', label: '从新到旧', ariaLabel: '按创建时间从新到旧' },
     { mode: 'created-asc', label: '从旧到新', ariaLabel: '按创建时间从旧到新' },

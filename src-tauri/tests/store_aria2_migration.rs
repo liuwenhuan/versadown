@@ -290,6 +290,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             status: TaskStatus::Downloading,
             progress: 25,
             error: None,
+            status_message: None,
             failure_code: None,
             aria_gid: Some("gid-42".to_string()),
             followed_by_gid: Some("next-gid".to_string()),

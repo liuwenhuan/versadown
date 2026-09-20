@@ -46,13 +46,6 @@ impl Aria2DebugLogger {
         })
     }
 
-    pub fn bind_task(&self, task_id: &str, gid: &str) {
-        if let Ok(mut task_ids) = self.task_ids.lock() {
-            task_ids.insert(gid.to_owned(), task_id.to_owned());
-        }
-        self.record("task_bound", Some(task_id), Some(gid), "ok", None);
-    }
-
     pub fn record_task_operation(
         &self,
         operation: &str,
@@ -230,6 +223,16 @@ pub trait Aria2Api: Send + Sync {
         Err(Aria2Error::Transport)
     }
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error>;
+    async fn change_uri(
+        &self,
+        _gid: &str,
+        _file_index: u32,
+        _del_uris: Vec<String>,
+        _add_uris: Vec<String>,
+        _position: u32,
+    ) -> Result<(u32, u32), Aria2Error> {
+        Err(Aria2Error::Transport)
+    }
     async fn get_option(&self, gid: &str) -> Result<Aria2Options, Aria2Error>;
     async fn save_session(&self) -> Result<String, Aria2Error>;
     async fn shutdown(&self) -> Result<String, Aria2Error>;
@@ -478,6 +481,26 @@ impl Aria2Api for Aria2RpcClient {
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error> {
         self.call("aria2.changeOption", vec![json!(gid), json!(options)])
             .await
+    }
+    async fn change_uri(
+        &self,
+        gid: &str,
+        file_index: u32,
+        del_uris: Vec<String>,
+        add_uris: Vec<String>,
+        position: u32,
+    ) -> Result<(u32, u32), Aria2Error> {
+        self.call(
+            "aria2.changeUri",
+            vec![
+                json!(gid),
+                json!(file_index),
+                json!(del_uris),
+                json!(add_uris),
+                json!(position),
+            ],
+        )
+        .await
     }
     async fn get_option(&self, gid: &str) -> Result<Aria2Options, Aria2Error> {
         self.call("aria2.getOption", vec![json!(gid)]).await

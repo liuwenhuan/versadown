@@ -370,6 +370,7 @@ async fn every_wrapper_uses_the_documented_method_and_parameter_order() {
                 "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
                 "aria2.getGlobalStat" => json!({"downloadSpeed":"1","uploadSpeed":"0","numActive":"1","numWaiting":"0","numStopped":"0","numStoppedTotal":"0"}),
                 "aria2.getOption" => json!({"dir":"downloads"}),
+                "aria2.changeUri" => json!([1, 1]),
                 _ => json!("OK"),
             };
             Json(json!({"jsonrpc":"2.0","id":body["id"],"result":result}))
@@ -401,6 +402,19 @@ async fn every_wrapper_uses_the_documented_method_and_parameter_order() {
         .change_option("g", BTreeMap::from([("select-file".into(), "1,3".into())]))
         .await
         .unwrap();
+    assert_eq!(
+        client
+            .change_uri(
+                "g",
+                1,
+                vec!["https://old.example/file".into()],
+                vec!["https://fresh.example/file".into()],
+                0,
+            )
+            .await
+            .unwrap(),
+        (1, 1)
+    );
     assert_eq!(client.get_option("g").await.unwrap()["dir"], "downloads");
     client.save_session().await.unwrap();
     client.shutdown().await.unwrap();
@@ -416,6 +430,16 @@ async fn every_wrapper_uses_the_documented_method_and_parameter_order() {
         ("aria2.remove", json!(["g"])),
         ("aria2.forceRemove", json!(["g"])),
         ("aria2.changeOption", json!(["g",{"select-file":"1,3"}])),
+        (
+            "aria2.changeUri",
+            json!([
+                "g",
+                1,
+                ["https://old.example/file"],
+                ["https://fresh.example/file"],
+                0
+            ]),
+        ),
         ("aria2.getOption", json!(["g"])),
         ("aria2.saveSession", json!([])),
         ("aria2.shutdown", json!([])),

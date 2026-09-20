@@ -88,6 +88,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             "0",
             NoPassword,
             false,
+            false,
             true,
             "https://pan.quark.cn/s/example",
         ),
@@ -97,6 +98,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             "0",
             RustDirect,
             true,
+            true,
             false,
             "https://mypikpak.com/s/example",
         ),
@@ -105,6 +107,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             "baidu",
             "/",
             RustDirect,
+            true,
             false,
             true,
             "https://pan.baidu.com/s/1example",
@@ -115,6 +118,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             "-11",
             RustDirect,
             true,
+            true,
             false,
             "https://cloud.189.cn/t/example",
         ),
@@ -123,6 +127,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             "aliyun",
             "root",
             OfficialWebView,
+            false,
             true,
             true,
             "https://www.alipan.com/s/example",
@@ -134,6 +139,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             OfficialWebView,
             true,
             true,
+            true,
             "https://pan.xunlei.com/s/example",
         ),
         (
@@ -142,13 +148,14 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             "0",
             OfficialWebView,
             false,
+            false,
             true,
             "https://drive.uc.cn/s/example",
         ),
     ];
     let registry = ProviderRegistry::global();
     let descriptors = registry.all();
-    for (provider, key, root, password_mode, scheduled, transfer, share_url) in rows {
+    for (provider, key, root, password_mode, password, scheduled, transfer, share_url) in rows {
         let descriptor = descriptors
             .iter()
             .find(|d| d.provider == provider)
@@ -166,10 +173,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
         assert_eq!(descriptor.recycle_bin_directory_id, recycle);
         assert_eq!(descriptor.authorization.password_login_mode, password_mode);
         assert!(descriptor.authorization.web);
-        assert_eq!(
-            descriptor.authorization.password,
-            password_mode == RustDirect
-        );
+        assert_eq!(descriptor.authorization.password, password);
         assert!(descriptor.capabilities.list && descriptor.capabilities.download);
         assert!(descriptor.capabilities.upload);
         assert_eq!(descriptor.max_upload_concurrency, 2);
@@ -942,7 +946,7 @@ fn new_providers_have_stable_sources_and_declared_login_methods() {
         ("cloud://baidu/f1", CloudProvider::Baidu, true),
         ("cloud://tianyi/f1", CloudProvider::Tianyi, true),
         ("cloud://aliyun/f1", CloudProvider::Aliyun, false),
-        ("cloud://xunlei/f1", CloudProvider::Xunlei, false),
+        ("cloud://xunlei/f1", CloudProvider::Xunlei, true),
         ("cloud://uc/f1", CloudProvider::Uc, false),
     ] {
         assert_eq!(parse_stable_cloud_source(source).unwrap().0, provider);
@@ -1152,7 +1156,9 @@ fn restore_account_dispatches_each_new_provider_without_falling_back_to_unsuppor
         restore_account(
             CloudProvider::Uc,
             &uc,
-            &RecordingHttp::sequence([r#"{"code":0,"status":200,"data":{"nickname":"uc"}}"#]),
+            &RecordingHttp::sequence([
+                r#"{"code":0,"status":200,"data":{"user_id":"u1","nickname":"uc"}}"#,
+            ]),
         )
         .unwrap()
         .provider,

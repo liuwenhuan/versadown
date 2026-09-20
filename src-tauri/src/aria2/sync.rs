@@ -22,7 +22,6 @@ pub struct TransferSynchronizer {
     service: Arc<DownloadService>,
     wake: Arc<Notify>,
     websocket: watch::Sender<Option<Aria2RpcClient>>,
-    restart_config: Option<super::Aria2LaunchConfig>,
 }
 impl TransferSynchronizer {
     pub fn new(service: Arc<DownloadService>) -> Self {
@@ -30,15 +29,10 @@ impl TransferSynchronizer {
             service,
             wake: Arc::new(Notify::new()),
             websocket: watch::channel(None).0,
-            restart_config: None,
         }
     }
     pub fn with_websocket(self, client: Aria2RpcClient) -> Self {
         self.websocket.send_replace(Some(client));
-        self
-    }
-    pub fn with_restart_config(mut self, config: super::Aria2LaunchConfig) -> Self {
-        self.restart_config = Some(config);
         self
     }
     pub fn poll_interval(&self) -> Result<Duration, DownloadServiceError> {
@@ -66,15 +60,6 @@ impl TransferSynchronizer {
         loop {
             if *cancel.borrow() || !self.service.is_accepting() {
                 break;
-            }
-            if let Some(config) = self.restart_config.as_ref() {
-                // Only an observed owned-child exit spends the automatic restart budget.
-                // HTTP/WS outages alone never launch a second sidecar.
-                if let Ok(Some(report)) = self.service.restart_if_exited(config.clone()).await {
-                    // Task recovery can fail after process replacement. The WS endpoint
-                    // and secret must still advance to the newly running child.
-                    self.websocket.send_replace(Some(report.client));
-                }
             }
             tokio::select! {
                 _ = cancel.changed() => break,

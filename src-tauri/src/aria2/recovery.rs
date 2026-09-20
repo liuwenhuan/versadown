@@ -1,13 +1,7 @@
 use super::{Aria2Api, Aria2Status, DownloadService, DownloadServiceError};
 use crate::{DownloadTask, TaskStatus};
 use serde::Serialize;
-use std::{
-    collections::BTreeSet,
-    future::Future,
-    path::Path,
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 const EMPTY_STARTUP_SNAPSHOT_RETRIES: usize = 10;
 const EMPTY_STARTUP_SNAPSHOT_RETRY_DELAY: Duration = Duration::from_millis(200);
@@ -89,30 +83,6 @@ pub struct RecoveryReport {
     pub removed_engine_tasks: usize,
     pub removed_files: usize,
     pub failed: usize,
-}
-
-#[derive(Debug)]
-pub struct RestartReport {
-    pub client: super::Aria2RpcClient,
-    pub recovery: Result<RecoveryReport, DownloadServiceError>,
-}
-
-#[derive(Default)]
-pub struct RestartBudget {
-    attempted: AtomicBool,
-}
-
-impl RestartBudget {
-    pub async fn run_once<T, E, F, Fut>(&self, restart: F) -> Option<Result<T, E>>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<T, E>>,
-    {
-        if self.attempted.swap(true, Ordering::AcqRel) {
-            return None;
-        }
-        Some(restart().await)
-    }
 }
 
 impl DownloadService {
@@ -260,28 +230,6 @@ impl DownloadService {
             api.remove_download_result(&status.gid).await?;
         } else if api.remove(&status.gid).await.is_err() {
             api.force_remove(&status.gid).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn mark_engine_unavailable(&self) -> Result<(), DownloadServiceError> {
-        let _guard = self.operation.lock().await;
-        let store = self.store();
-        for mut task in store.list()? {
-            if task.aria_gid.is_some()
-                && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
-                && matches!(
-                    task.status,
-                    TaskStatus::Downloading | TaskStatus::Queued | TaskStatus::AwaitingUser
-                )
-            {
-                task.error = Some("下载引擎不可用".into());
-                task.download_speed = 0;
-                task.upload_speed = 0;
-                task.eta_seconds = None;
-                let task = store.apply_transfer_snapshot(task)?;
-                self.publish_task(&task)?;
-            }
         }
         Ok(())
     }

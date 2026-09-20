@@ -1,7 +1,5 @@
 use super::*;
 
-pub const MY_SHARES_DIRECTORY_ID: &str = "__all_downloader_my_shares__";
-
 pub fn restore_account(
     provider: CloudProvider,
     store: &impl CredentialStore,

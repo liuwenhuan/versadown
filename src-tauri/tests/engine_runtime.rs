@@ -158,7 +158,7 @@ async fn runtime_reconfigures_to_the_saved_rpc_port_and_token_immediately() {
         RpcSecret::from_token(updated.aria2.rpc_token).unwrap(),
     )
     .unwrap();
-    assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
+    assert_eq!(client.get_version().await.unwrap().version, "2.8.0");
     assert!(runtime.shutdown(Duration::from_secs(5)).await.child_stopped);
 }
 

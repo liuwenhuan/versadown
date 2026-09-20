@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_partial_download_without_a_verified_checkpoint_fails_closed() {
+    fn detached_partial_download_without_a_verified_checkpoint_defers_to_aria2() {
         let root = tempfile::tempdir().unwrap();
         let store = TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap();
         let task = store
@@ -222,10 +222,7 @@ mod tests {
             },
         );
 
-        assert!(matches!(
-            result,
-            Err(DownloadServiceError::InvalidNativeCheckpoint)
-        ));
+        assert!(result.unwrap().is_none());
     }
 }
 
@@ -280,11 +277,8 @@ fn resume_checkpoint(
         None => super::native_resume::checkpoint_for_task(store, task),
     };
     let legacy_control = super::native_resume::has_legacy_control(store, task);
-    let detached_partial_payload = gid.is_none() && task.completed_length > 0;
     if checkpoint.is_none()
-        && (options.native_resume_gid.is_some()
-            || (gid.is_some() && !legacy_control)
-            || (detached_partial_payload && !legacy_control))
+        && (options.native_resume_gid.is_some() || (gid.is_some() && !legacy_control))
     {
         return Err(DownloadServiceError::InvalidNativeCheckpoint);
     }
@@ -292,7 +286,7 @@ fn resume_checkpoint(
 }
 
 pub struct DownloadService {
-    api: std::sync::RwLock<Arc<dyn Aria2Api>>,
+    api: Arc<dyn Aria2Api>,
     store: Arc<TaskStore>,
     accepting: AtomicBool,
     process: std::sync::Mutex<Option<Aria2Process>>,
@@ -302,13 +296,12 @@ pub struct DownloadService {
     resume_versions: std::sync::Mutex<BTreeMap<String, u64>>,
     observed_peers: std::sync::Mutex<HashMap<Uuid, HashSet<String>>>,
     pub(super) operation: tokio::sync::Mutex<()>,
-    restart_budget: super::recovery::RestartBudget,
 }
 
 impl DownloadService {
     pub fn new(api: Arc<dyn Aria2Api>, store: Arc<TaskStore>) -> Self {
         Self {
-            api: std::sync::RwLock::new(api),
+            api,
             store,
             accepting: AtomicBool::new(true),
             process: std::sync::Mutex::new(None),
@@ -318,7 +311,6 @@ impl DownloadService {
             resume_versions: Default::default(),
             observed_peers: Default::default(),
             operation: Default::default(),
-            restart_budget: Default::default(),
         }
     }
 
@@ -338,7 +330,7 @@ impl DownloadService {
     }
 
     pub fn api(&self) -> Arc<dyn Aria2Api> {
-        Arc::clone(&self.api.read().unwrap_or_else(|e| e.into_inner()))
+        Arc::clone(&self.api)
     }
     pub fn store(&self) -> Arc<TaskStore> {
         Arc::clone(&self.store)
@@ -407,6 +399,24 @@ impl DownloadService {
         api.record_task_operation(
             "aria2.tellStatus",
             &task_id,
+            Some(gid),
+            result.as_ref().err(),
+        );
+        result
+    }
+
+    async fn change_uri_for_task(
+        &self,
+        task_id: Uuid,
+        gid: &str,
+        del_uris: Vec<String>,
+        add_uris: Vec<String>,
+    ) -> Result<(u32, u32), Aria2Error> {
+        let api = self.api();
+        let result = api.change_uri(gid, 1, del_uris, add_uris, 0).await;
+        api.record_task_operation(
+            "aria2.changeUri",
+            &task_id.to_string(),
             Some(gid),
             result.as_ref().err(),
         );
@@ -618,6 +628,59 @@ impl DownloadService {
                 != Some(crate::cloud::download_dispatch::CLOUD_URL_REFRESHING)
         {
             return Err(DownloadServiceError::AlreadySubmitted);
+        }
+        let status = self.tell_status_for_task(task_id, expected_gid).await?;
+        if matches!(status.status.as_str(), "active" | "waiting" | "paused") {
+            let checkpoint = super::native_resume::checkpoint(&self.store, &task, expected_gid);
+            let mut mutable_options = options.clone().into_aria2_options()?;
+            for immutable in [
+                "dir",
+                "out",
+                "continue",
+                "allow-overwrite",
+                "remove-control-file",
+                "auto-file-renaming",
+            ] {
+                mutable_options.remove(immutable);
+            }
+            if !mutable_options.is_empty() {
+                self.api()
+                    .change_option(expected_gid, mutable_options)
+                    .await?;
+            }
+            let checkpoint_uri = checkpoint.map(|checkpoint| checkpoint.uri);
+            if let Some(checkpoint_uri) = checkpoint_uri.as_ref() {
+                if !uris.contains(checkpoint_uri) {
+                    // Aria2 Next matches this URI before restoring the native
+                    // ranges. Rotate it atomically with the fresh mirror so the
+                    // preallocated payload is never mistaken for an unrelated
+                    // existing file when the paused GID is resumed.
+                    uris.push(checkpoint_uri.clone());
+                }
+            }
+            self.change_uri_for_task(
+                task_id,
+                expected_gid,
+                checkpoint_uri.into_iter().collect(),
+                uris,
+            )
+            .await?;
+            let directory = self
+                .store
+                .cloud_directory_group_for_task(task_id)?
+                .map(|group| group.id);
+            if directory.is_none() && status.status == "paused" {
+                self.unpause_gid(expected_gid).await?;
+            }
+            self.store
+                .replace_cloud_url_gid(task_id, expected_gid, expected_gid)?;
+            self.clear_observed_peers(task_id);
+            return if directory.is_some() {
+                self.finish_directory_uri(task_id, expected_gid, directory)
+                    .await
+            } else {
+                self.reconcile_task_unlocked(task_id).await
+            };
         }
         let mut options = self.prepare_uri_options(&mut task, &mut uris, options)?;
         options.insert("pause".into(), "false".into());
@@ -1644,42 +1707,6 @@ impl DownloadService {
             .unwrap_or_else(|e| e.into_inner())
             .as_mut()
             .map(|child| child.is_running().map_err(Into::into))
-            .transpose()
-    }
-
-    pub async fn restart_if_exited(
-        &self,
-        config: super::Aria2LaunchConfig,
-    ) -> Result<Option<super::recovery::RestartReport>, DownloadServiceError> {
-        self.ensure_accepting()?;
-        if self.engine_running().await? != Some(false) {
-            return Ok(None);
-        }
-        self.mark_engine_unavailable().await?;
-        let download_root = config.download_dir.clone();
-        self.restart_budget
-            .run_once(|| async {
-                let client = {
-                    let _guard = self.operation.lock().await;
-                    self.ensure_accepting()?;
-                    let (mut process, client) = Aria2Process::start(config).await?;
-                    let mut owned = self.process.lock().unwrap_or_else(|e| e.into_inner());
-                    if !self.is_accepting() {
-                        process.terminate_fallback()?;
-                        return Err(DownloadServiceError::ShuttingDown);
-                    }
-                    *owned = Some(process);
-                    *self.api.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(client.clone());
-                    self.observed_peers
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .clear();
-                    client
-                };
-                let recovery = self.recover_native(&download_root).await;
-                Ok::<_, DownloadServiceError>(super::recovery::RestartReport { client, recovery })
-            })
-            .await
             .transpose()
     }
 

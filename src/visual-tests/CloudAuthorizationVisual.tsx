@@ -1,4 +1,3 @@
-import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { CloudManager } from '../components/CloudManager';
 import type { CloudProvider } from '../lib/cloudTypes';

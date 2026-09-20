@@ -1,4 +1,4 @@
-import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, ParseResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
+import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 
@@ -120,10 +120,6 @@ export async function parseDownload(input: string, accessCode?: string, requireC
   };
 }
 
-export function prepareDownload(input: string, accessCode?: string): Promise<ParseDownloadResult> {
-  return parseDownload(input, accessCode, true);
-}
-
 export async function discardPreparedDownload(taskId: string): Promise<void> {
   if (isTauriRuntime()) await invoke('discard_prepared_download', { taskId });
 }
@@ -217,10 +213,6 @@ export async function playTaskVideos(taskId: string): Promise<void> {
 
 export async function resolveDuplicateDownload(taskId: string, action: 'resume' | 'restart_missing' | 'overwrite'): Promise<QueueTask | undefined> {
   return isTauriRuntime() ? invoke<QueueTask>('resolve_duplicate_download', { taskId, action }) : undefined;
-}
-
-export async function removeTaskRecord(taskId: string): Promise<void> {
-  if (isTauriRuntime()) await invoke('remove_task_record', { taskId });
 }
 
 export async function moveTaskToRecycle(taskId: string): Promise<QueueTask | undefined> {

@@ -23,7 +23,6 @@ const EXIT_ARIA2_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::fr
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LauncherInteractionSnapshot {
-    pub drag_requests: usize,
     pub menu_requests: usize,
     pub bounds_update_requests: usize,
     pub input_region_update_requests: usize,
@@ -46,7 +45,6 @@ pub struct ExitWindowSnapshot {
 
 pub struct LauncherInteractionState {
     background_test: bool,
-    drag_requests: AtomicUsize,
     menu_requests: AtomicUsize,
     // Regression sentinel: popup transitions must never update native bounds.
     bounds_update_requests: AtomicUsize,
@@ -61,7 +59,6 @@ impl LauncherInteractionState {
     pub fn new(background_test: bool) -> Self {
         Self {
             background_test,
-            drag_requests: AtomicUsize::new(0),
             menu_requests: AtomicUsize::new(0),
             bounds_update_requests: AtomicUsize::new(0),
             input_region_update_requests: AtomicUsize::new(0),
@@ -70,10 +67,6 @@ impl LauncherInteractionState {
 
     pub fn is_background_test(&self) -> bool {
         self.background_test
-    }
-
-    pub fn record_drag(&self) {
-        self.drag_requests.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_menu(&self) {
@@ -87,7 +80,6 @@ impl LauncherInteractionState {
 
     pub fn snapshot(&self) -> LauncherInteractionSnapshot {
         LauncherInteractionSnapshot {
-            drag_requests: self.drag_requests.load(Ordering::Relaxed),
             menu_requests: self.menu_requests.load(Ordering::Relaxed),
             bounds_update_requests: self.bounds_update_requests.load(Ordering::Relaxed),
             input_region_update_requests: self.input_region_update_requests.load(Ordering::Relaxed),
@@ -297,18 +289,6 @@ pub fn set_launcher_window_visible(
 }
 
 #[tauri::command]
-pub fn start_launcher_dragging(
-    window: WebviewWindow,
-    interaction: State<'_, LauncherInteractionState>,
-) -> Result<(), String> {
-    interaction.record_drag();
-    if interaction.is_background_test() {
-        return Ok(());
-    }
-    window.start_dragging().map_err(|error| error.to_string())
-}
-
-#[tauri::command]
 pub fn show_launcher_menu(
     window: WebviewWindow,
     interaction: State<'_, LauncherInteractionState>,
@@ -351,15 +331,6 @@ pub fn launcher_interaction_snapshot(
         return Err("交互观测仅在后台测试模式可用".to_string());
     }
     Ok(interaction.snapshot())
-}
-
-#[tauri::command]
-pub fn hide_manager_for_test(app: AppHandle) -> Result<(), String> {
-    require_background_ui_test()?;
-    let manager = app
-        .get_webview_window("main")
-        .ok_or_else(|| "下载管理器窗口不存在".to_string())?;
-    manager.hide().map_err(|error| error.to_string())
 }
 
 #[tauri::command]

@@ -37,9 +37,7 @@ $publishedSidecarDir = Join-Path $publishedDir 'binaries'
 $sidecarName = 'aria2-next-x86_64-pc-windows-msvc.exe'
 $sidecarSource = Join-Path $projectRoot "src-tauri\binaries\$sidecarName"
 $publishedSidecar = Join-Path $publishedSidecarDir $sidecarName
-$xunleiHelperName = 'xunlei-native-helper.cjs'
-$xunleiHelperSource = Join-Path $projectRoot "src-tauri\binaries\$xunleiHelperName"
-$publishedXunleiHelper = Join-Path $publishedSidecarDir $xunleiHelperName
+$retiredXunleiHelper = Join-Path $publishedSidecarDir 'xunlei-native-helper.cjs'
 $legacyPublishedSidecar = Join-Path $publishedSidecarDir 'aria2c-x86_64-pc-windows-msvc.exe'
 $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
 
@@ -80,8 +78,8 @@ function Get-FrontendSignature {
         $frontendInputs += Get-ChildItem -LiteralPath $publicDir -File -Recurse
     }
 
-    $signatureLines = foreach ($input in $frontendInputs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object { $_.FullName }) {
-        $path = if ($input -is [System.IO.FileInfo]) { $input.FullName } else { [string]$input }
+    $signatureLines = foreach ($file in $frontendInputs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object { $_.FullName }) {
+        $path = if ($file -is [System.IO.FileInfo]) { $file.FullName } else { [string]$file }
         $relativePath = $path.Substring($ProjectRoot.Length).TrimStart([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar))
         '{0}:{1}' -f $relativePath, (Get-FileSha256 -Path $path)
     }
@@ -107,6 +105,92 @@ function Save-FrontendSignature {
     $cacheDir = Join-Path $ProjectRoot '.tools\build-cache'
     New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
     Set-Content -LiteralPath (Join-Path $cacheDir 'frontend.sha256') -Value $Signature -NoNewline
+}
+
+function Get-QuickRustSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    $tauriRoot = Join-Path $ProjectRoot 'src-tauri'
+    $rustInputs = @(
+        (Join-Path $ProjectRoot 'scripts\build-windows.ps1'),
+        (Join-Path $tauriRoot 'Cargo.toml'),
+        (Join-Path $tauriRoot 'Cargo.lock'),
+        (Join-Path $tauriRoot 'build.rs'),
+        (Join-Path $tauriRoot 'tauri.conf.json'),
+        (Join-Path $tauriRoot 'vendor\tao\Cargo.toml')
+    )
+    foreach ($sourceDirectory in @(
+        (Join-Path $tauriRoot 'src'),
+        (Join-Path $tauriRoot 'vendor\tao\src')
+    )) {
+        if (Test-Path -LiteralPath $sourceDirectory) {
+            $rustInputs += Get-ChildItem -LiteralPath $sourceDirectory -File -Recurse
+        }
+    }
+
+    $signatureLines = foreach ($file in $rustInputs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object { $_.FullName }) {
+        $path = if ($file -is [System.IO.FileInfo]) { $file.FullName } else { [string]$file }
+        $relativePath = $path.Substring($ProjectRoot.Length).TrimStart([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar))
+        '{0}:{1}' -f $relativePath, (Get-FileSha256 -Path $path)
+    }
+    $signatureBytes = [System.Text.Encoding]::UTF8.GetBytes(($signatureLines -join "`n"))
+    $signatureHasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return -join ($signatureHasher.ComputeHash($signatureBytes) | ForEach-Object { $_.ToString('x2') })
+    } finally {
+        $signatureHasher.Dispose()
+    }
+}
+
+function Reset-QuickRustBuildIfInputsChanged {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$CargoCommand,
+
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot,
+
+        [Parameter(Mandatory)]
+        [string]$TargetRoot
+    )
+
+    $signature = Get-QuickRustSignature -ProjectRoot $ProjectRoot
+    $signatureFile = Join-Path $ProjectRoot '.tools\build-cache\rust-quick.sha256'
+    $previousSignature = if (Test-Path -LiteralPath $signatureFile) { (Get-Content -LiteralPath $signatureFile -Raw).Trim() } else { '' }
+    if ($signature -eq $previousSignature) {
+        Write-Host 'Rust inputs unchanged; reusing quick build cache.'
+        return $signature
+    }
+
+    Write-Host 'Rust inputs changed: invalidating cached alldownloader artifacts.'
+    $manifest = Join-Path $ProjectRoot 'src-tauri\Cargo.toml'
+    # Keep cargo's clean output visible, but do not let it become part of the
+    # function result: callers persist that result as the source signature.
+    & $CargoCommand clean --manifest-path $manifest --target-dir $TargetRoot --profile quick -p alldownloader | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Quick Rust cache invalidation failed with exit code $LASTEXITCODE."
+    }
+    return $signature
+}
+
+function Save-QuickRustSignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot,
+
+        [Parameter(Mandatory)]
+        [string]$Signature
+    )
+
+    $cacheDir = Join-Path $ProjectRoot '.tools\build-cache'
+    New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+    Set-Content -LiteralPath (Join-Path $cacheDir 'rust-quick.sha256') -Value $Signature -NoNewline
 }
 
 function Invoke-FrontendBuild {
@@ -183,7 +267,7 @@ function Invoke-MsvcBuild {
         $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && call "{3}" exec tauri build --runner "{4}"' -f $VcvVars, $TargetRoot, $incremental, $PnpmCommand, $CargoCommand
     } elseif ($Profile -eq 'quick') {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && "{3}" build --manifest-path "{4}" --profile quick --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $CargoCommand, $manifest
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && "{3}" build --manifest-path "{4}" --profile quick --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $CargoCommand, $manifest
     } else {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
         $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && "{3}" build --manifest-path "{4}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $CargoCommand, $manifest
@@ -211,18 +295,15 @@ function Publish-BuildOutput {
         [string]$PublishedSidecar,
 
         [Parameter(Mandatory)]
-        [string]$XunleiHelperSource,
-
-        [Parameter(Mandatory)]
-        [string]$PublishedXunleiHelper,
+        [string]$RetiredXunleiHelper,
 
         [Parameter(Mandatory)]
         [string]$LegacyPublishedSidecar
     )
 
-    foreach ($input in @($BuiltBinary, $SidecarSource, $XunleiHelperSource)) {
-        if (-not (Test-Path -LiteralPath $input -PathType Leaf)) {
-            throw "Publish input was not found: $input"
+    foreach ($publishInput in @($BuiltBinary, $SidecarSource)) {
+        if (-not (Test-Path -LiteralPath $publishInput -PathType Leaf)) {
+            throw "Publish input was not found: $publishInput"
         }
     }
 
@@ -230,14 +311,15 @@ function Publish-BuildOutput {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PublishedSidecar) | Out-Null
     Copy-Item -LiteralPath $BuiltBinary -Destination $PublishedBinary -Force
     Copy-Item -LiteralPath $SidecarSource -Destination $PublishedSidecar -Force
-    Copy-Item -LiteralPath $XunleiHelperSource -Destination $PublishedXunleiHelper -Force
+    if (Test-Path -LiteralPath $RetiredXunleiHelper -PathType Leaf) {
+        Remove-Item -LiteralPath $RetiredXunleiHelper -Force
+    }
     if (Test-Path -LiteralPath $LegacyPublishedSidecar -PathType Leaf) {
         Remove-Item -LiteralPath $LegacyPublishedSidecar -Force
     }
 
     Write-Host "Published ($Mode): $PublishedBinary"
     Write-Host "Published ($Mode): $PublishedSidecar"
-    Write-Host "Published ($Mode): $PublishedXunleiHelper"
 }
 
 if ($DryRun) {
@@ -247,6 +329,7 @@ if ($DryRun) {
     Write-Host "Published executable: $publishedBinary"
     if ($Mode -eq 'Quick') {
         Write-Host 'Frontend: rebuild only when its source signature changes.'
+        Write-Host 'Rust: recompile the alldownloader package when its source signature changes.'
     } elseif ($Installer) {
         Write-Host 'Frontend: Tauri executes the production beforeBuildCommand.'
     } else {
@@ -265,6 +348,7 @@ if (-not (Test-Path -LiteralPath $vcvars)) {
 }
 
 Set-Location $projectRoot
+$quickRustSignature = $null
 if ($Installer) {
     # Tauri owns beforeBuildCommand for a package build, so it performs the
     # frontend production build exactly once.
@@ -272,8 +356,17 @@ if ($Installer) {
     Save-FrontendSignature -ProjectRoot $projectRoot -Signature (Get-FrontendSignature -ProjectRoot $projectRoot)
 } else {
     Ensure-FrontendBuild -PnpmCommand $pnpmCommand -ProjectRoot $projectRoot -Force:($Mode -eq 'Release')
+    if ($Mode -eq 'Quick') {
+        $quickRustSignature = Reset-QuickRustBuildIfInputsChanged -CargoCommand $cargoCommand -ProjectRoot $projectRoot -TargetRoot $targetRoot
+    }
     Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $cargoCommand -PnpmCommand $pnpmCommand -TargetRoot $targetRoot -Profile $profile
+    if ($null -ne $quickRustSignature) {
+        # Persist the post-build state rather than the pre-build snapshot. This
+        # prevents a stale signature from making a later quick build reuse an
+        # executable compiled from older Rust sources.
+        Save-QuickRustSignature -ProjectRoot $projectRoot -Signature (Get-QuickRustSignature -ProjectRoot $projectRoot)
+    }
 }
 
 $builtBinary = Join-Path $targetRoot "$profile\alldownloader.exe"
-Publish-BuildOutput -BuiltBinary $builtBinary -PublishedBinary $publishedBinary -SidecarSource $sidecarSource -PublishedSidecar $publishedSidecar -XunleiHelperSource $xunleiHelperSource -PublishedXunleiHelper $publishedXunleiHelper -LegacyPublishedSidecar $legacyPublishedSidecar
+Publish-BuildOutput -BuiltBinary $builtBinary -PublishedBinary $publishedBinary -SidecarSource $sidecarSource -PublishedSidecar $publishedSidecar -RetiredXunleiHelper $retiredXunleiHelper -LegacyPublishedSidecar $legacyPublishedSidecar

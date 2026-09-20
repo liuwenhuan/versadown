@@ -2584,12 +2584,13 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             if modern_web {
                 download_poll_delay(started.elapsed())?;
             }
-            let value = self.request(
-                "GET",
-                self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
-                None,
-            )
-            .map_err(download_source_missing_from_http_404)?;
+            let value = self
+                .request(
+                    "GET",
+                    self.drive_url(&format!("/drive/v1/files/{}", encoded(id))),
+                    None,
+                )
+                .map_err(download_source_missing_from_http_404)?;
             let file = value.get("data").unwrap_or(&value);
             if file
                 .get("id")

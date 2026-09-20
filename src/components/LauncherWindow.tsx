@@ -92,7 +92,7 @@ export function LauncherWindow() {
       void update.finally(() => { if (!disposed) setInputReady(true); }).catch(() => undefined);
       return update;
     };
-    const update = syncInput();
+    void syncInput();
     // The menu can change its actual input rectangle as settings expand.
     const observer = element && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncInput) : null;
     if (element) observer?.observe(element);

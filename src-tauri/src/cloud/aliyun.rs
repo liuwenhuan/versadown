@@ -1089,27 +1089,6 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
         Err(QuarkError::InvalidResponse)
     }
 
-    /// Validate an official browser refresh token before it replaces the old session.
-    /// There is intentionally no username/password login API in this adapter.
-    pub fn authorize_browser_refresh_token(
-        &self,
-        refresh_token: &str,
-    ) -> Result<CloudAccount, QuarkError> {
-        if refresh_token.trim().is_empty() {
-            return Err(QuarkError::InvalidInput("缺少网页登录刷新令牌".into()));
-        }
-        let session = self.refresh(&AliyunSession {
-            refresh_token: refresh_token.into(),
-            access_token: String::new(),
-            drive_id: String::new(),
-            browser_access_ready: false,
-            expires_at: None,
-        })?;
-        let (account, _) = self.validate(&session)?;
-        self.save(&session)?;
-        Ok(account)
-    }
-
     /// Accept an official browser session before rotating its refresh token.
     /// The access token was just issued by the authenticated web page, and
     /// validating it directly prevents a needless first refresh from trapping a

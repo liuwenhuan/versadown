@@ -176,11 +176,6 @@ export async function openLauncherNewDownload(input: string) {
   await emitTo('main', 'launcher-new-download', input);
 }
 
-export async function startLauncherDragging() {
-  if (!isTauriRuntime()) return;
-  await invoke('start_launcher_dragging');
-}
-
 export async function showLauncherMenu() {
   if (!isTauriRuntime()) return;
   await invoke('show_launcher_menu');

@@ -55,6 +55,9 @@ winreg = "0.55"
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 report-debug-tool = []
+# Quick Windows builds use this explicitly so their runnable artifact matches
+# the release executable and does not allocate a console window.
+gui-subsystem = []
 
 # 日常可运行验证使用的中间配置。它与正式发布目标隔离，保留
 # 增量编译，并以较低优化级别缩短 Rust 与链接阶段的耗时。

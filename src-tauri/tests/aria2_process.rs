@@ -121,7 +121,7 @@ async fn bundled_sidecar_is_authenticated_saves_session_and_exits() {
     let root = tempfile::tempdir().unwrap();
     let (mut child, client) = Aria2Process::start(config(root.path())).await.unwrap();
     assert!(child.is_running().unwrap());
-    assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
+    assert_eq!(client.get_version().await.unwrap().version, "2.8.0");
     let unauthenticated =
         Aria2RpcClient::new(client.endpoint().as_str(), RpcSecret::from_bytes([0; 32])).unwrap();
     assert!(unauthenticated.get_global_stat().await.is_err());
@@ -158,7 +158,7 @@ async fn bundled_sidecar_writes_native_and_rpc_debug_logs_when_enabled() {
     let rpc_token = launch.aria2.rpc_token.clone();
     let (mut child, client) = Aria2Process::start(launch).await.unwrap();
 
-    assert_eq!(client.get_version().await.unwrap().version, "2.7.5");
+    assert_eq!(client.get_version().await.unwrap().version, "2.8.0");
     assert_eq!(client.shutdown().await.unwrap(), "OK");
     assert!(child.wait_for_exit(Duration::from_secs(5)).await.unwrap());
 

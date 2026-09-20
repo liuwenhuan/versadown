@@ -301,8 +301,14 @@ mod tests {
 
     #[test]
     fn share_transfer_preserves_safe_interruption_without_exposing_raw_errors() {
-        assert_eq!(cloud_share_transfer_error_message(TRUNCATED_RESPONSE_MESSAGE.into()), TRUNCATED_RESPONSE_MESSAGE);
-        assert_eq!(cloud_share_transfer_error_message("https://signed.example/file?token=secret".into()), "网盘分享下载失败，请重试或重新解析分享链接");
+        assert_eq!(
+            cloud_share_transfer_error_message(TRUNCATED_RESPONSE_MESSAGE.into()),
+            TRUNCATED_RESPONSE_MESSAGE
+        );
+        assert_eq!(
+            cloud_share_transfer_error_message("https://signed.example/file?token=secret".into()),
+            "网盘分享下载失败，请重试或重新解析分享链接"
+        );
     }
 
     fn error_snapshot(code: Option<&str>, message: Option<&str>) -> TransferSnapshot {

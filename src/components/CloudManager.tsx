@@ -1002,7 +1002,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     }
   }
 
-  async function completeWebAuthorization(fromPolling: boolean) {
+  async function completeWebAuthorization() {
     const generation = authorizationGeneration.current;
     if (!webAuthorizationActive.current || !authorizationRegistered.current || authorizationCompletionInFlight.current === generation) return;
     authorizationCompletionInFlight.current = generation;
@@ -1071,7 +1071,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const poll = () => {
       timer = window.setTimeout(async () => {
         if (!current()) return;
-        await completeWebAuthorizationRef.current(true);
+        await completeWebAuthorizationRef.current();
         if (current()) poll();
       }, authorizationWatchdogMs);
     };
@@ -1431,7 +1431,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? '正在自动登录…' : '登录'}</button>
         </>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
-        {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization(false)}>我已完成授权</button>}
+        {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization()}>我已完成授权</button>}
       </form>
       {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${showAuthorizationError ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}</>}
     </section>;

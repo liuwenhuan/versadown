@@ -1,4 +1,3 @@
-import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { DownloadQueue } from '../components/DownloadQueue';
 import { QueueTask } from '../lib/types';

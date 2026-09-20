@@ -261,7 +261,11 @@ pub fn upload_pikpak_file(
     // PikPak may route a root upload into its managed upload folder. Keep
     // the server's destination, not the directory that initiated the upload.
     let actual_parent = init["file"]["parent_id"].as_str().unwrap_or(parent);
-    let actual_parent = if actual_parent.is_empty() { "0" } else { actual_parent };
+    let actual_parent = if actual_parent.is_empty() {
+        "0"
+    } else {
+        actual_parent
+    };
     let file = parse_pikpak_file(&init["file"], actual_parent)?;
     if init["file"]["phase"] == "PHASE_TYPE_COMPLETE" {
         return Ok(file);

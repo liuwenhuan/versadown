@@ -1,131 +1,7 @@
 use alldownloader_lib::{
-    launcher_hexagon_points, launcher_hexagon_region, launcher_live_regions, launcher_menu_entries,
-    launcher_native_chrome_policy, launcher_window_style_without_frame,
-    should_apply_launcher_window_visibility, tray_menu_entries, AppSettings,
-    LauncherInteractionState, LauncherLiveRegions, LauncherPoint, LauncherRegion,
-    LauncherVisibility,
+    launcher_menu_entries, should_apply_launcher_window_visibility, tray_menu_entries, AppSettings,
+    LauncherInteractionState, LauncherVisibility,
 };
-
-#[test]
-fn launcher_disables_windows_non_client_rendering_transitions_border_and_rounding() {
-    let policy = launcher_native_chrome_policy();
-
-    assert!(policy.disable_non_client_rendering);
-    assert!(policy.disable_transitions);
-    assert_eq!(policy.border_color, 0xffff_fffe);
-    assert_eq!(policy.corner_preference, 1);
-}
-
-#[test]
-fn compact_launcher_style_removes_all_native_window_decorations() {
-    // Caption, system menu and resize-frame bits all make a transparent HWND render a native shell.
-    assert_eq!(
-        launcher_window_style_without_frame(0x14CB_0000),
-        0x1400_0000
-    );
-}
-
-#[test]
-fn compact_region_follows_the_icon_inside_a_larger_windows_webview() {
-    // The actual client origin need not be half the outer/inner size difference.
-    let region = launcher_hexagon_region((7, 13), (343, 182), 1.75);
-
-    assert_eq!(
-        region,
-        LauncherRegion {
-            x: 238,
-            y: 83,
-            width: 112,
-            height: 112
-        }
-    );
-}
-
-#[test]
-fn compact_region_matches_the_full_rendered_icon_hexagon() {
-    let region = LauncherRegion {
-        x: 141,
-        y: 8,
-        width: 84,
-        height: 84,
-    };
-
-    assert_eq!(
-        launcher_hexagon_points(region),
-        [
-            LauncherPoint { x: 183, y: 15 },
-            LauncherPoint { x: 215, y: 33 },
-            LauncherPoint { x: 215, y: 67 },
-            LauncherPoint { x: 183, y: 85 },
-            LauncherPoint { x: 152, y: 67 },
-            LauncherPoint { x: 152, y: 33 },
-        ]
-    );
-}
-
-#[test]
-fn compact_region_uses_the_same_outline_when_the_native_clip_is_removed() {
-    let region = LauncherRegion {
-        x: 0,
-        y: 0,
-        width: 128,
-        height: 128,
-    };
-
-    assert_eq!(
-        launcher_hexagon_points(region),
-        [
-            LauncherPoint { x: 64, y: 10 },
-            LauncherPoint { x: 112, y: 38 },
-            LauncherPoint { x: 112, y: 91 },
-            LauncherPoint { x: 64, y: 118 },
-            LauncherPoint { x: 16, y: 91 },
-            LauncherPoint { x: 16, y: 38 },
-        ]
-    );
-}
-
-#[test]
-fn live_region_contains_only_the_hexagon_and_short_speed_strip() {
-    assert_eq!(
-        launcher_live_regions((0, 0), (146, 64), 1.0),
-        LauncherLiveRegions {
-            hexagon: LauncherRegion {
-                x: 0,
-                y: 0,
-                width: 64,
-                height: 64,
-            },
-            speed: LauncherRegion {
-                x: 54,
-                y: 20,
-                width: 92,
-                height: 25,
-            },
-        }
-    );
-}
-
-#[test]
-fn launcher_clip_tracks_the_visible_polygon_at_common_dpi_scales() {
-    // Independently specified SVG geometry; native rounding must follow it at every DPI.
-    let polygon = [
-        (50.0, 7.8125),
-        (87.5, 29.296875),
-        (87.5, 70.703125),
-        (50.0, 92.1875),
-        (12.5, 70.703125),
-        (12.5, 29.296875),
-    ];
-    for scale in [1.0, 1.01, 1.1, 1.25, 1.3, 1.5, 1.55, 1.75, 2.0, 2.5, 3.0] {
-        let region = launcher_hexagon_region((3, 7), (640, 480), scale);
-        let expected = polygon.map(|(x, y)| LauncherPoint {
-            x: region.x + (x * f64::from(region.width) / 100.0).round() as i32,
-            y: region.y + (y * f64::from(region.height) / 100.0).round() as i32,
-        });
-        assert_eq!(launcher_hexagon_points(region), expected, "scale {scale}");
-    }
-}
 
 #[test]
 fn launcher_context_menu_contains_the_required_actions() {
@@ -160,14 +36,12 @@ fn tray_context_menu_matches_the_launcher_actions_when_manager_is_hidden() {
 }
 
 #[test]
-fn background_interaction_state_records_drag_and_menu_without_native_ui() {
+fn background_interaction_state_records_menu_without_native_ui() {
     let state = LauncherInteractionState::new(true);
-    state.record_drag();
     state.record_menu();
 
     let snapshot = state.snapshot();
     assert!(state.is_background_test());
-    assert_eq!(snapshot.drag_requests, 1);
     assert_eq!(snapshot.menu_requests, 1);
 }
 

@@ -12,7 +12,6 @@ export const beginCloudAuthorization = (provider: CloudProvider) => invoke<Cloud
 export const openCloudOperationVerification = (provider: CloudProvider, expectedAccountId: string) => invoke<void>('cloud_open_operation_verification', { provider, expectedAccountId });
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
 export const getCompletedCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount | null>('cloud_completed_authorization', { provider });
-export const resumeReauthorizedProviderTasks = (provider: CloudProvider) => invoke<void>('resume_reauthorized_provider_tasks', { provider });
 const authorizationSubscribers = new Set<{ provider: CloudProvider; receive: (event: CloudAuthorizationStateEvent) => void }>();
 let authorizationListener: Promise<() => void> | null = null;
 export async function subscribeCloudAuthorization(provider: CloudProvider, receive: (event: CloudAuthorizationStateEvent) => void): Promise<() => void> {

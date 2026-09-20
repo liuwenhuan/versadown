@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatCompactSpeed, formatEta, formatSpeed, upsertTask, mergeInitialTasks, mergeTaskSnapshot, reconcileTaskSnapshot } from './downloadEvents';
+import { formatBytes, formatEta, formatSpeed, upsertTask, mergeTaskSnapshot, reconcileTaskSnapshot } from './downloadEvents';
 import type { QueueTask } from './types';
 
 function task(overrides: Partial<QueueTask> = {}): QueueTask {
@@ -83,7 +83,6 @@ describe('upsertTask', () => {
   it('preserves grouping for initial and refresh snapshots in either arrival order', () => {
     const child = task({ id: 'member' });
     const root = task({ id: 'root', kind: 'folder', children: [child] });
-    expect(mergeInitialTasks([child], [root])).toEqual([root]);
     expect(mergeTaskSnapshot([child], [root])).toEqual([root]);
     expect(mergeTaskSnapshot([], [child, root])).toEqual([root]);
     expect(mergeTaskSnapshot([], [root, child])).toEqual([root]);
@@ -98,17 +97,10 @@ describe('upsertTask', () => {
     }
   );
 
-  it('does not overwrite a newer directory with the initial list', () => {
-    const root = task({ id: 'root', kind: 'folder', children: [task({ id: 'member', progress: 90 })] });
-    expect(mergeInitialTasks([root], [{ ...root, children: [task({ id: 'member', progress: 10 })] }]))
-      .toEqual([root]);
-  });
-
   it('moves a protected live member into a stale directory without losing its newer progress', () => {
     const child = task({ id: 'member', progress: 90 });
     const root = task({ id: 'root', kind: 'folder', children: [task({ id: 'subdir', children: [{ ...child, progress: 10 }] })] });
     const expected = { ...root, children: [{ ...root.children![0], children: [child] }] };
-    expect(mergeInitialTasks([child], [root])).toEqual([expected]);
     expect(mergeTaskSnapshot([child], [root], new Set([child.id]))).toEqual([expected]);
   });
 });
@@ -144,13 +136,6 @@ describe('transfer formatters', () => {
     expect(formatBytes(1_572_864)).toBe('1.5 MB');
     expect(formatSpeed(524_288)).toBe('512 KB/s');
     expect(formatEta(65)).toBe('1 分 5 秒');
-  });
-
-  it('formats a speed value compactly enough for the 48px launcher', () => {
-    expect(formatCompactSpeed(870_400)).toBe('850K');
-    expect(formatCompactSpeed(1_258_291)).toBe('1.2M');
-    expect(formatCompactSpeed(1024 ** 3)).toBe('1.0G');
-    expect(formatCompactSpeed(1024 ** 4)).toBe('1.0T');
   });
 
   it('does not invent a percentage when aria2 reports an unknown total', () => {
