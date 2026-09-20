@@ -28,6 +28,8 @@ pub(crate) const CID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Cid";
 pub(crate) const GCID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Gcid";
 const NATIVE_GID_PREFIX: &str = "xunlei-native:";
 pub(crate) const PLUGIN_UPDATE_MESSAGE: &str = "迅雷云盘插件需要更新";
+pub(crate) const NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE: &str =
+    "迅雷原生下载后端不可用，当前断点无法由普通下载继续；请安装或更新迅雷后重试，或选择重新下载";
 
 pub(crate) fn is_native_gid(gid: Option<&str>) -> bool {
     gid.is_some_and(|value| value.starts_with(NATIVE_GID_PREFIX))
@@ -84,15 +86,6 @@ struct NativeEquityRequest<'a> {
     client_version: &'a str,
     trace_id: &'a str,
     resource_url: &'a str,
-}
-
-#[cfg(windows)]
-fn request_equity_token(
-    api: &mut WindowsApi,
-    request: NativeEquityRequest<'_>,
-) -> Result<String, NativeSubmitError> {
-    let (encrypted, security_key) = request_equity_rule(request)?;
-    api.decrypt_equity_rule(&encrypted, &security_key)
 }
 
 #[cfg(windows)]
@@ -161,7 +154,7 @@ fn request_equity_rule(
         })
         .map_err(|_| NativeSubmitError::Failed("迅雷会员加速通道网络请求失败".into()))?;
     if !(200..300).contains(&response.status) {
-        return Err(NativeSubmitError::Failed("迅雷会员加速通道请求失败".into()));
+        return Err(equity_rule_request_failure(response.status));
     }
     let envelope: serde_json::Value =
         serde_json::from_str(&response.body).map_err(|_| NativeSubmitError::Incompatible)?;
@@ -197,6 +190,18 @@ fn request_equity_rule(
             .to_owned(),
         security_key,
     ))
+}
+
+#[cfg(windows)]
+fn equity_rule_request_failure(status: u16) -> NativeSubmitError {
+    // These status codes mean the endpoint or request shape is no longer
+    // accepted. They are not membership denials or transient server faults,
+    // so continuing to advertise native SVIP support would be misleading.
+    if matches!(status, 400 | 404 | 405 | 410 | 415 | 426 | 501) {
+        NativeSubmitError::Incompatible
+    } else {
+        NativeSubmitError::Failed("迅雷会员加速通道请求失败".into())
+    }
 }
 
 #[derive(Debug)]
@@ -257,16 +262,27 @@ impl XunleiNativeBackend {
                 .directory
                 .clone()
                 .ok_or_else(|| NativeSubmitError::Failed("迅雷原生下载缺少保存目录".into()))?;
-            let output_name = options
+            let requested_output_name = options
                 .output_name
                 .clone()
                 .unwrap_or_else(|| resolved.name.clone());
-            if output_name.is_empty() || output_name.contains(['/', '\\']) {
+            if requested_output_name.is_empty() || requested_output_name.contains(['/', '\\']) {
                 return Err(NativeSubmitError::Failed("迅雷原生下载文件名无效".into()));
             }
             std::fs::create_dir_all(&output_directory)
                 .map_err(|_| NativeSubmitError::Failed("无法创建迅雷下载目录".into()))?;
-            let output_path = output_directory.join(&output_name);
+            let output_path = crate::reserve_unique_output_path(
+                store,
+                task_id,
+                &output_directory,
+                &requested_output_name,
+            )
+            .map_err(|_| NativeSubmitError::Failed("无法分配迅雷下载文件名".into()))?;
+            let output_name = output_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| NativeSubmitError::Failed("迅雷原生下载文件名无效".into()))?
+                .to_owned();
             let referer = resolved
                 .headers
                 .iter()
@@ -281,6 +297,14 @@ impl XunleiNativeBackend {
                 .unwrap_or("Mozilla/5.0");
             let cid = marker_header(resolved, CID_MARKER_HEADER).unwrap_or("");
             let gcid = marker_header(resolved, GCID_MARKER_HEADER).unwrap_or("");
+            // `prepare_expected_with_retry_intent` deliberately clears the
+            // durable GID before resolving a fresh cloud URL. Keep the old
+            // SDK identity from the retry intent so the stopped task cannot
+            // block its own checkpoint from being reopened.
+            let prior_native_id = store
+                .find(task_id)
+                .ok()
+                .and_then(|task| prior_native_task_id(&task, options));
 
             let (native_id, client_version) = {
                 let mut api = self
@@ -307,11 +331,9 @@ impl XunleiNativeBackend {
                 )?;
                 api.set_identity(user_id, peer_id)?;
                 let size = resolved.size_hint().unwrap_or(0);
-                if let Ok(existing) = store.find(task_id) {
-                    if let Some(old_id) = native_id(&existing) {
-                        if api.stop(old_id).is_ok() {
-                            std::thread::sleep(std::time::Duration::from_millis(300));
-                        }
+                if let Some(old_id) = prior_native_id {
+                    if api.stop(old_id).is_ok() {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
                     }
                 }
                 let native_id = api.create_p2sp_task(
@@ -332,6 +354,7 @@ impl XunleiNativeBackend {
             let mut task = store
                 .find(task_id)
                 .map_err(|_| NativeSubmitError::Failed("下载任务已不存在".into()))?;
+            task.name.clone_from(&output_name);
             task.aria_gid = Some(format!("{NATIVE_GID_PREFIX}{native_id}"));
             task.followed_by_gid = None;
             task.status = TaskStatus::Downloading;
@@ -557,6 +580,7 @@ impl XunleiNativeBackend {
                 .find(id)
                 .map(|task| task.completed_length)
                 .unwrap_or(0);
+            let mut progress_failures = 0u8;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let Ok(mut task) = store.find(id) else { return };
@@ -569,14 +593,32 @@ impl XunleiNativeBackend {
                     return;
                 };
                 #[cfg(windows)]
-                let native_progress = backend.api.lock().ok().and_then(|api| {
-                    api.as_ref()
-                        .and_then(|api| api.progress(native_task_id).ok())
-                });
+                let native_progress = backend
+                    .api
+                    .lock()
+                    .ok()
+                    .and_then(|api| api.as_ref().map(|api| api.progress(native_task_id)));
                 #[cfg(not(windows))]
-                let native_progress: Option<NativeProgress> = None;
-                let Some(native_progress) = native_progress else {
-                    continue;
+                let native_progress: Option<
+                    Result<NativeProgress, NativeSubmitError>,
+                > = None;
+                let native_progress = match native_progress {
+                    Some(Ok(progress)) => {
+                        progress_failures = 0;
+                        progress
+                    }
+                    Some(Err(_)) | None => {
+                        progress_failures = progress_failures.saturating_add(1);
+                        if !pause_after_native_progress_failures(&mut task, progress_failures) {
+                            continue;
+                        }
+                        let Ok(updated) = store.apply_transfer_snapshot(task) else {
+                            return;
+                        };
+                        emit_task(&app, &store, &updated);
+                        release_cloud_slot(&app, &store, &updated);
+                        return;
+                    }
                 };
                 let completed = native_progress.completed;
                 let native_total = native_progress.total;
@@ -685,6 +727,12 @@ fn prepare_native_output(
         }
         return Ok(());
     }
+    // A native resume is safe only with the SDK's own checkpoint. The payload
+    // may already exist (and is often preallocated), so it must not be
+    // mistaken for a duplicate once that checkpoint is present.
+    if continue_download && checkpoint.is_file() {
+        return Ok(());
+    }
     if output.exists() {
         return Err(NativeSubmitError::Failed(
             "目标文件已存在，请选择覆盖或更换下载位置".into(),
@@ -707,11 +755,19 @@ fn marker_header<'a>(resolved: &'a ResolvedCloudDownload, marker: &str) -> Optio
 }
 
 fn native_id(task: &DownloadTask) -> Option<u32> {
-    task.aria_gid
-        .as_deref()?
-        .strip_prefix(NATIVE_GID_PREFIX)?
-        .parse()
-        .ok()
+    native_task_id_from_gid(task.aria_gid.as_deref())
+}
+
+fn native_task_id_from_gid(gid: Option<&str>) -> Option<u32> {
+    gid?.strip_prefix(NATIVE_GID_PREFIX)?.parse().ok()
+}
+
+fn prior_native_task_id(task: &DownloadTask, options: &UriSubmissionOptions) -> Option<u32> {
+    options
+        .continue_download
+        .then(|| native_task_id_from_gid(options.native_resume_gid.as_deref()))
+        .flatten()
+        .or_else(|| native_id(task))
 }
 
 fn emit_task(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
@@ -816,6 +872,22 @@ struct NativeProgress {
     speed: u64,
 }
 
+const NATIVE_PROGRESS_FAILURE_LIMIT: u8 = 3;
+
+fn pause_after_native_progress_failures(task: &mut DownloadTask, failures: u8) -> bool {
+    if failures < NATIVE_PROGRESS_FAILURE_LIMIT {
+        return false;
+    }
+    task.status = TaskStatus::Paused;
+    task.download_speed = 0;
+    task.upload_speed = 0;
+    task.error = None;
+    task.failure_code = None;
+    task.aria_error_code = None;
+    task.status_message = Some("迅雷原生任务已停止，点击开始可继续下载".into());
+    true
+}
+
 #[cfg(windows)]
 fn c_string(value: &str) -> Result<std::ffi::CString, NativeSubmitError> {
     std::ffi::CString::new(value).map_err(|_| NativeSubmitError::Incompatible)
@@ -844,12 +916,15 @@ fn native_call(code: i32, message: &'static str) -> Result<(), NativeSubmitError
 }
 
 #[cfg(windows)]
-fn native_cancel_call(code: i32) -> Result<(), NativeSubmitError> {
+fn native_stale_task_action_call(
+    code: i32,
+    message: &'static str,
+) -> Result<(), NativeSubmitError> {
     match code {
-        // Cancellation is idempotent. After an application restart the new
-        // SDK server does not know task IDs owned by the previous process.
-        0 | 0x4E21 => Ok(()),
-        _ => native_call(code, "迅雷原生任务取消失败"),
+        // Pause and cancellation are idempotent. If the SDK server restarted,
+        // it no longer knows IDs owned by the previous server instance.
+        0 | 0x4E20 | 0x4E21 => Ok(()),
+        _ => native_call(code, message),
     }
 }
 
@@ -1151,7 +1226,7 @@ impl WindowsApi {
         native_call(unsafe { (self.start_task)(id) }, "迅雷原生任务启动失败")
     }
     fn stop(&mut self, id: u32) -> Result<(), NativeSubmitError> {
-        native_call(unsafe { (self.stop_task)(id) }, "迅雷原生任务暂停失败")
+        native_stale_task_action_call(unsafe { (self.stop_task)(id) }, "迅雷原生任务暂停失败")
     }
     fn delete(&mut self, id: u32) -> Result<(), NativeSubmitError> {
         // The official engine expects an active task to be stopped before it
@@ -1161,7 +1236,7 @@ impl WindowsApi {
         let _ = unsafe { (self.stop_task)(id) };
         let result = unsafe { (self.delete_task)(id) };
         self.trace_ids.remove(&id);
-        native_cancel_call(result)
+        native_stale_task_action_call(result, "迅雷原生任务取消失败")
     }
 
     fn progress(&self, id: u32) -> Result<NativeProgress, NativeSubmitError> {
@@ -1328,10 +1403,36 @@ fn sdk_path_from_install_location(install_location: &std::path::Path) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn request_equity_token(
+        api: &mut WindowsApi,
+        request: NativeEquityRequest<'_>,
+    ) -> Result<String, NativeSubmitError> {
+        let (encrypted, security_key) = request_equity_rule(request)?;
+        api.decrypt_equity_rule(&encrypted, &security_key)
+    }
     #[test]
     fn native_gid_is_not_an_aria_gid() {
         assert!(is_native_gid(Some("xunlei-native:42")));
         assert!(!is_native_gid(Some("0123456789abcdef")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejected_equity_endpoint_shape_requires_a_plugin_update() {
+        assert!(matches!(
+            equity_rule_request_failure(404),
+            NativeSubmitError::Incompatible
+        ));
+        assert!(matches!(
+            equity_rule_request_failure(415),
+            NativeSubmitError::Incompatible
+        ));
+        assert_eq!(
+            equity_rule_request_failure(503).user_message(),
+            "迅雷会员加速通道请求失败"
+        );
     }
 
     #[test]
@@ -1366,6 +1467,26 @@ mod tests {
         assert_eq!(read_u64(&info, 12), 122_600_000);
         assert_eq!(read_u64(&info, 20), 2_500_000);
         assert_eq!(read_u32(&info, 44), 461_400);
+    }
+
+    #[test]
+    fn repeated_native_progress_failures_switch_the_task_to_resumable_pause() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(crate::NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Downloading;
+        task.download_speed = 876_544;
+        task.status_message = Some("正在使用迅雷svip加速".into());
+
+        assert!(!pause_after_native_progress_failures(&mut task, 2));
+        assert_eq!(task.status, TaskStatus::Downloading);
+
+        assert!(pause_after_native_progress_failures(&mut task, 3));
+        assert_eq!(task.status, TaskStatus::Paused);
+        assert_eq!(task.download_speed, 0);
+        assert!(task.error.is_none());
+        assert!(task.status_message.is_some());
     }
 
     #[tokio::test]
@@ -1427,11 +1548,14 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn native_cancel_is_idempotent_for_a_stale_sdk_task_id() {
-        assert!(native_cancel_call(0).is_ok());
-        assert!(native_cancel_call(0x4E21).is_ok());
+    fn native_stop_and_cancel_are_idempotent_after_sdk_server_restart() {
+        assert!(native_stale_task_action_call(0, "action").is_ok());
+        assert!(native_stale_task_action_call(0x4E20, "action").is_ok());
+        assert!(native_stale_task_action_call(0x4E21, "action").is_ok());
         assert_eq!(
-            native_cancel_call(0x4E23).unwrap_err().user_message(),
+            native_stale_task_action_call(0x4E23, "迅雷原生任务取消失败")
+                .unwrap_err()
+                .user_message(),
             "迅雷原生任务取消失败（错误码 20003）"
         );
     }
@@ -1452,9 +1576,20 @@ mod tests {
         );
 
         std::fs::remove_file(&output).unwrap();
+        std::fs::write(&output, b"partial payload").unwrap();
+        assert_eq!(
+            prepare_native_output(&output, false, true)
+                .unwrap_err()
+                .user_message(),
+            "目标文件已存在，请选择覆盖或更换下载位置"
+        );
+        std::fs::remove_file(&output).unwrap();
         std::fs::write(&checkpoint, b"partial").unwrap();
         std::fs::write(&checkpoint_config, b"checkpoint").unwrap();
         assert!(prepare_native_output(&output, false, true).is_ok());
+        std::fs::write(&output, b"partial payload").unwrap();
+        assert!(prepare_native_output(&output, false, true).is_ok());
+        std::fs::remove_file(&output).unwrap();
         assert_eq!(
             prepare_native_output(&output, false, false)
                 .unwrap_err()
@@ -1465,6 +1600,23 @@ mod tests {
         prepare_native_output(&output, true, false).unwrap();
         assert!(!checkpoint.exists());
         assert!(!checkpoint_config.exists());
+    }
+
+    #[test]
+    fn native_resume_keeps_the_previous_sdk_task_id_after_the_task_is_queued() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(crate::NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Queued;
+        task.aria_gid = None;
+        let options = UriSubmissionOptions {
+            continue_download: true,
+            native_resume_gid: Some("xunlei-native:42".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(prior_native_task_id(&task, &options), Some(42));
     }
 
     #[cfg(windows)]

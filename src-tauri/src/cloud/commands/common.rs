@@ -60,9 +60,13 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         | QuarkError::DownloadEngineUnavailable
         | QuarkError::DownloadSubmissionFailed => error.to_string(),
         QuarkError::Transport(message)
-            if message == crate::xunlei_native::PLUGIN_UPDATE_MESSAGE =>
+            if matches!(
+                message.as_str(),
+                crate::xunlei_native::PLUGIN_UPDATE_MESSAGE
+                    | crate::xunlei_native::NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE
+            ) =>
         {
-            crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.into()
+            message.clone()
         }
         QuarkError::Transport(_) => "获取网盘下载地址时网络请求失败，请检查网络后重试".into(),
         QuarkError::Provider(_) => "网盘分享下载地址请求失败，请稍后重试".into(),

@@ -647,6 +647,7 @@ pub async fn queue_cloud_dispatch(
                     } else {
                         apply_cloud_download_policy(provider, configured_connections, configured)
                     };
+                    let mut xunlei_native_plugin_update_required = false;
                     if provider == CloudProvider::Xunlei {
                         match state.xunlei_native_backend.submit(
                             &submit_app,
@@ -656,7 +657,20 @@ pub async fn queue_cloud_dispatch(
                             &configured,
                         ) {
                             Ok(Some(task)) => return Ok(task),
-                            Ok(None) => {}
+                            Ok(None) => {
+                                xunlei_native_plugin_update_required =
+                                    xunlei_native_fallback_allowed(
+                                        configured.native_resume_gid.as_deref(),
+                                        false,
+                                    )?;
+                            }
+                            Err(crate::xunlei_native::NativeSubmitError::Incompatible) => {
+                                xunlei_native_plugin_update_required =
+                                    xunlei_native_fallback_allowed(
+                                        configured.native_resume_gid.as_deref(),
+                                        true,
+                                    )?;
+                            }
                             Err(error) => {
                                 return Err(QuarkError::Transport(error.user_message()));
                             }
@@ -682,6 +696,17 @@ pub async fn queue_cloud_dispatch(
                             .await
                     };
                     let submitted = submitted.map_err(cloud_download_submission_error)?;
+                    let submitted = if xunlei_native_plugin_update_required {
+                        let mut submitted = submitted;
+                        submitted.status_message =
+                            Some(crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.into());
+                        state
+                            .store
+                            .apply_transfer_snapshot(submitted)
+                            .map_err(|_| QuarkError::Storage)?
+                    } else {
+                        submitted
+                    };
                     if provider == CloudProvider::Quark {
                         crate::cloud::activate_quark_download_scheduler(submit_app.clone());
                     }
@@ -763,6 +788,24 @@ pub fn apply_cloud_download_policy(
         options.retry_wait_seconds = Some(3);
     }
     options
+}
+
+/// aria2 can resume its own checkpoint, but it cannot validate the private
+/// range map saved by Thunder. A native retry must therefore remain on the
+/// native backend when the retry intent contains a native task identity.
+fn xunlei_native_fallback_allowed(
+    native_resume_gid: Option<&str>,
+    plugin_update_required: bool,
+) -> Result<bool, QuarkError> {
+    if crate::xunlei_native::is_native_gid(native_resume_gid) {
+        let message = if plugin_update_required {
+            crate::xunlei_native::PLUGIN_UPDATE_MESSAGE
+        } else {
+            crate::xunlei_native::NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE
+        };
+        return Err(QuarkError::Transport(message.into()));
+    }
+    Ok(plugin_update_required)
 }
 
 /// Directory parallelism is expressed as several files, never ranges of the
@@ -1634,6 +1677,25 @@ impl ResolvedCloudDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xunlei_native_unavailability_only_falls_back_without_a_native_checkpoint() {
+        assert!(!xunlei_native_fallback_allowed(None, false).unwrap());
+        assert!(xunlei_native_fallback_allowed(None, true).unwrap());
+
+        assert_eq!(
+            super::share_resolution_failure_message(
+                &xunlei_native_fallback_allowed(Some("xunlei-native:42"), false).unwrap_err(),
+            ),
+            crate::xunlei_native::NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE,
+        );
+        assert_eq!(
+            super::share_resolution_failure_message(
+                &xunlei_native_fallback_allowed(Some("xunlei-native:42"), true).unwrap_err(),
+            ),
+            crate::xunlei_native::PLUGIN_UPDATE_MESSAGE,
+        );
+    }
 
     #[test]
     fn directory_leaf_source_matches_do_not_block_distinct_output_paths() {

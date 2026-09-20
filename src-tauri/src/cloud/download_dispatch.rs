@@ -143,6 +143,19 @@ impl CloudDownloadDispatch {
         self.task(id).changed.notify_waiters();
     }
 
+    /// A fresh cloud submission replaces the engine submission that previously
+    /// owned this task. Its old provider admission must not make the new
+    /// resolver look like a duplicate of itself.
+    fn release_replaced_admission(&self, id: Uuid) {
+        let directory = *self.task(id).directory.lock().unwrap();
+        if let Some(directory) = directory {
+            self.scheduler
+                .release_directory_member(directory.id, id, false);
+        } else {
+            self.scheduler.release(id);
+        }
+    }
+
     pub async fn prepare(
         &self,
         store: &TaskStore,
@@ -238,6 +251,7 @@ impl CloudDownloadDispatch {
             }
         }
         self.invalidate(id);
+        self.release_replaced_admission(id);
         task.status = TaskStatus::Queued;
         task.error = None;
         task.download_speed = 0;
@@ -542,6 +556,41 @@ mod tests {
         assert_eq!(
             options.native_resume_gid.as_deref(),
             Some("xunlei-native:42")
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_native_xunlei_directory_member_releases_its_previous_admission() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        task.status = TaskStatus::Paused;
+        task.aria_gid = Some("xunlei-native:42".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+        let directory_id = Uuid::new_v4();
+        dispatch.configure_directory(task.id, directory_id, 2);
+
+        assert_eq!(
+            dispatch
+                .scheduler
+                .enqueue_directory(CloudProvider::Xunlei, directory_id, task.id, 2)
+                .await,
+            AdmissionOutcome::Granted
+        );
+
+        dispatch
+            .prepare_expected_with_retry_intent(&store, &task, false, true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            dispatch
+                .scheduler
+                .enqueue_directory(CloudProvider::Xunlei, directory_id, task.id, 2)
+                .await,
+            AdmissionOutcome::Granted
         );
     }
 
