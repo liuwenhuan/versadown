@@ -3444,12 +3444,16 @@ fn purge_recycled_task_records(
         for id in ids {
             remove_task_payload_files(store, *id)?;
         }
+        for path in &native_checkpoints {
+            remove_recorded_download_file(path)?;
+        }
         for directory in directories {
             remove_empty_download_directory(&directory)?;
         }
-    }
-    for path in native_checkpoints {
-        remove_recorded_download_file(&path)?;
+    } else {
+        for path in &native_checkpoints {
+            remove_recorded_download_file(path)?;
+        }
     }
     let linked_cloud_tasks = tasks
         .iter()
@@ -5723,6 +5727,87 @@ mod tests {
             .unwrap();
 
         assert!(!payload.exists());
+        assert!(!output_root.exists());
+        assert!(store.cloud_directory_group(group.id).unwrap().is_none());
+        assert!(matches!(
+            store.find(task.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_purge_removes_xunlei_directory_after_native_checkpoints() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let cloud = Arc::new(
+            crate::cloud::commands::CloudState::new(directory.path().join("cloud")).unwrap(),
+        );
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Xunlei,
+                    "remote-directory",
+                    "Series",
+                    directory.path(),
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "remote-file",
+                    &["Series"],
+                    "episode.mkv",
+                    Some(7),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+        let output_root = directory.path().join("Series");
+        let payload = output_root.join("episode.mkv");
+        let checkpoint = PathBuf::from(format!("{}.xltd", payload.display()));
+        let checkpoint_config = PathBuf::from(format!("{}.xltd.cfg", payload.display()));
+        fs::create_dir_all(&output_root).unwrap();
+        fs::write(&payload, b"payload").unwrap();
+        fs::write(&checkpoint, b"checkpoint").unwrap();
+        fs::write(&checkpoint_config, b"config").unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                aria_gid: Some("xunlei-native:7".into()),
+                total_length: Some(7),
+                completed_length: 7,
+                ..task
+            })
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 7, 7, true)],
+            )
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+        store.recycle_cloud_directory_group(group.id).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(purge_recycled_task_batch(
+                Arc::clone(&store),
+                Arc::clone(&cloud),
+                vec![group.id.to_string()],
+                true,
+            ))
+            .unwrap();
+
+        assert!(!payload.exists());
+        assert!(!checkpoint.exists());
+        assert!(!checkpoint_config.exists());
         assert!(!output_root.exists());
         assert!(store.cloud_directory_group(group.id).unwrap().is_none());
         assert!(matches!(
