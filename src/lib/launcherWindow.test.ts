@@ -163,14 +163,14 @@ it('reveals the main task list without forwarding a parse request', async () => 
   expect(native.emitTo).not.toHaveBeenCalled();
 });
 
-it('restores and reveals the active-downloads task list on a launcher double click', async () => {
-  await launcherWindow.openLauncherActiveDownloads();
+it('restores and reveals the all-tasks list on a launcher double click', async () => {
+  await launcherWindow.openLauncherAllTasks();
 
   expect(native.getByLabel).toHaveBeenCalledWith('main');
   expect(native.calls).toEqual(['unminimize', 'show', 'focus', 'emit']);
   expect(native.emitTo).toHaveBeenCalledWith(
     'main',
-    'launcher-open-active-downloads'
+    'launcher-open-all-tasks'
   );
 });
 

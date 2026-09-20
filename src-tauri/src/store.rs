@@ -977,11 +977,11 @@ impl TaskStore {
     }
 
     pub fn list_active(&self) -> Result<Vec<DownloadTask>, StoreError> {
-        self.list_matching("WHERE status NOT IN ('completed', 'cancelled', 'recycled')")
+        self.list_matching("WHERE status NOT IN ('completed', 'failed', 'cancelled', 'recycled')")
     }
 
     pub fn list_terminal(&self) -> Result<Vec<DownloadTask>, StoreError> {
-        self.list_matching("WHERE status IN ('completed', 'cancelled', 'recycled')")
+        self.list_matching("WHERE status IN ('completed', 'failed', 'cancelled', 'recycled')")
     }
 
     fn list_matching(&self, filter: &str) -> Result<Vec<DownloadTask>, StoreError> {

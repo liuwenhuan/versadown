@@ -1322,21 +1322,11 @@ fn task_is_active(status: TaskStatus) -> bool {
     )
 }
 
-/// Failed tasks stay in the download tab so users can retry them without
-/// switching to a separate terminal tab. This is deliberately separate from
-/// `task_is_active`, which controls operations on a running task.
-fn task_is_listed_in_active_tab(status: TaskStatus) -> bool {
-    !matches!(
-        status,
-        TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Recycled
-    )
-}
-
 fn status_in_scope(status: TaskStatus, scope: Option<&str>) -> Result<bool, String> {
     match scope {
         None | Some("all") => Ok(true),
-        Some("active") => Ok(task_is_listed_in_active_tab(status)),
-        Some("terminal") => Ok(!task_is_listed_in_active_tab(status)),
+        Some("active") => Ok(task_is_active(status)),
+        Some("terminal") => Ok(!task_is_active(status)),
         Some(_) => Err("任务列表范围无效".to_string()),
     }
 }
@@ -2881,6 +2871,104 @@ fn recycle_cloud_directory_group(
         .recycle_cloud_directory_group(group.id)
         .map_err(|error| error.to_string())?;
     cloud_directory_group_queue_task(store, group.id)
+}
+
+fn recycle_local_task_for_permanent_deletion(
+    store: &TaskStore,
+    task_id: Uuid,
+) -> Result<(), String> {
+    let task = store.find(task_id).map_err(|error| error.to_string())?;
+    match task.status {
+        TaskStatus::Recycled | TaskStatus::Cancelled => Ok(()),
+        TaskStatus::Completed | TaskStatus::Failed => {
+            store
+                .transition(task_id, TaskStatus::Recycled)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        _ => Err("任务仍在运行，无法删除".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn delete_tasks(
+    task_ids: Vec<String>,
+    delete_files: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+    cloud: State<'_, Arc<crate::cloud::commands::CloudState>>,
+) -> Result<(), String> {
+    let mut local_task_ids = Vec::new();
+    let mut group_ids = Vec::new();
+    let mut seen_local_task_ids = HashSet::new();
+    let mut seen_group_ids = HashSet::new();
+
+    for task_id in &task_ids {
+        let id = Uuid::parse_str(task_id).map_err(|_| "任务 ID 无效".to_string())?;
+        if let Some(group) = state
+            .store
+            .cloud_directory_group(id)
+            .map_err(|error| error.to_string())?
+        {
+            ensure_private_group_access(&state, &group)?;
+            if seen_group_ids.insert(group.id) {
+                group_ids.push(group.id);
+            }
+            continue;
+        }
+        if let Some(group) = state
+            .store
+            .cloud_directory_group_for_task(id)
+            .map_err(|error| error.to_string())?
+        {
+            ensure_private_group_access(&state, &group)?;
+            if seen_group_ids.insert(group.id) {
+                group_ids.push(group.id);
+            }
+            continue;
+        }
+        let task = state.store.find(id).map_err(|error| error.to_string())?;
+        ensure_private_task_access(&state, &task)?;
+        if seen_local_task_ids.insert(id) {
+            local_task_ids.push(id);
+        }
+    }
+
+    for group_id in &group_ids {
+        let group = state
+            .store
+            .cloud_directory_group(*group_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "目录下载任务不存在".to_string())?;
+        if task_is_active(group.status) {
+            run_cloud_directory_group_action(app.clone(), &state, &group, "cancel").await?;
+        }
+        recycle_cloud_directory_group(&state.store, *group_id)?;
+    }
+
+    for task_id in &local_task_ids {
+        let task = state
+            .store
+            .find(*task_id)
+            .map_err(|error| error.to_string())?;
+        if task_is_active(task.status) {
+            run_local_task_action(task_id.to_string(), "cancel".to_string(), app.clone()).await?;
+        }
+        recycle_local_task_for_permanent_deletion(&state.store, *task_id)?;
+    }
+
+    let purge_ids = group_ids
+        .into_iter()
+        .chain(local_task_ids)
+        .map(|id| id.to_string())
+        .collect();
+    purge_recycled_task_batch(
+        Arc::clone(&state.store),
+        Arc::clone(cloud.inner()),
+        purge_ids,
+        delete_files,
+    )
+    .await
 }
 
 fn remove_recorded_download_file(path: &Path) -> Result<(), String> {
@@ -5523,6 +5611,31 @@ mod tests {
             store.find(cancelled.id).unwrap().status,
             TaskStatus::Cancelled
         );
+    }
+
+    #[test]
+    fn permanent_deletion_preparation_recycles_completed_and_failed_tasks() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let completed = store
+            .create(NewTask::direct("https://example.test/completed.zip"))
+            .unwrap();
+        let completed = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                ..completed
+            })
+            .unwrap();
+        let failed = store
+            .create(NewTask::direct("https://example.test/failed.zip"))
+            .unwrap();
+        let failed = store.fail(failed.id, "fixture").unwrap();
+
+        recycle_local_task_for_permanent_deletion(&store, completed.id).unwrap();
+        recycle_local_task_for_permanent_deletion(&store, failed.id).unwrap();
+
+        assert_eq!(store.find(completed.id).unwrap().status, TaskStatus::Recycled);
+        assert_eq!(store.find(failed.id).unwrap().status, TaskStatus::Recycled);
     }
 
     #[cfg(windows)]

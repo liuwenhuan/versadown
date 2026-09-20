@@ -704,6 +704,8 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
       expect(getComputedStyle(list).minHeight).toBe('0');
       expect(getComputedStyle(list).overflowX).toBe('hidden');
       const refresh = screen.getByRole('button', { name: '刷新' });
+      const breadcrumbs = screen.getByRole('navigation', { name: '当前目录' });
+      expect(refresh.compareDocumentPosition(breadcrumbs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(getComputedStyle(refresh).display).toBe('grid');
       expect(getComputedStyle(refresh).placeItems).toBe('center');
       expect(getComputedStyle(refresh).padding).toBe('0px');
@@ -1853,7 +1855,9 @@ it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
   render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
 
   const recycleBin = await screen.findByText('回收站');
+  expect(screen.queryByRole('checkbox', { name: '选择 回收站' })).not.toBeInTheDocument();
   await user.click(recycleBin);
+  expect(screen.queryByRole('toolbar', { name: /已选择/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '下载' })).not.toBeInTheDocument();
   fireEvent.keyDown(screen.getByRole('tree', { name: 'PikPak网盘文件' }), { key: 'Delete' });
   expect(screen.queryByRole('alertdialog', { name: '确认移入回收站' })).not.toBeInTheDocument();
@@ -1864,6 +1868,25 @@ it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
   expect(screen.queryByRole('menuitem', { name: '删除' })).not.toBeInTheDocument();
   fireEvent.doubleClick(recycleBin);
   await waitFor(() => expect(client.listCloudDirectory).toHaveBeenLastCalledWith('pikpak', recycleBinId));
+});
+
+it('keeps root virtual folders out of selection while retaining their navigation menu', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+
+  const recycleBin = await screen.findByText('回收站');
+  const myShares = screen.getByText('我的分享');
+  expect(screen.queryByRole('checkbox', { name: '选择 回收站' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('checkbox', { name: '选择 我的分享' })).not.toBeInTheDocument();
+
+  await user.click(recycleBin);
+  await user.click(myShares);
+  expect(screen.queryByRole('toolbar', { name: /已选择/ })).not.toBeInTheDocument();
+
+  fireEvent.contextMenu(myShares, { clientX: 300, clientY: 240 });
+  expect(screen.getByRole('menuitem', { name: '打开' })).toBeVisible();
+  expect(screen.queryByRole('toolbar', { name: /已选择/ })).not.toBeInTheDocument();
 });
 
 it('queues a selected cloud folder as one directory parent task', async () => {

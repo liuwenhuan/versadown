@@ -162,11 +162,11 @@ export async function openLauncherManager() {
   await mainWindow?.setFocus();
 }
 
-/** Activates the manager and switches it to the active-downloads task tab. */
-export async function openLauncherActiveDownloads() {
+/** Activates the manager and switches it to the all-tasks tab. */
+export async function openLauncherAllTasks() {
   if (!isTauriRuntime()) return;
   await openLauncherManager();
-  await emitTo('main', 'launcher-open-active-downloads');
+  await emitTo('main', 'launcher-open-all-tasks');
 }
 
 /** Opens the manager's normal new-task dialog only for accepted dropped input. */

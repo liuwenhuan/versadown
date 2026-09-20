@@ -39,7 +39,7 @@ vi.mock('../lib/launcherWindow', () => ({
   beginLauncherPointerDrag: state.beginLauncherPointerDrag,
   runNativeLauncherDrag: state.runNativeLauncherDrag,
   moveLauncherPointerDrag: state.moveLauncherPointerDrag,
-  openLauncherActiveDownloads: state.openActiveDownloads,
+  openLauncherAllTasks: state.openActiveDownloads,
   openLauncherNewDownload: state.openNewDownload,
   stageDroppedTorrent: state.stageDroppedTorrent,
 }));

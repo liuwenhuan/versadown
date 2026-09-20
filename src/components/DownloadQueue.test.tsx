@@ -105,7 +105,7 @@ it('uses one queued control with the regular task menu until aria2 promotes the 
   await user.click(queued);
   expect(screen.getByRole('menu', { name: 'waiting.zip 任务菜单' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '取消任务' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
 
   rerender(<DownloadQueue tasks={[
     { id: 'queued-task', name: 'waiting.zip', kind: 'file', status: 'downloading', progress: 0 },
@@ -990,7 +990,7 @@ it('offers cleanup retry only from the typed completed-task state', async () => 
   expect(onCommand).toHaveBeenLastCalledWith('cleanup-pending', 'retry_cleanup');
 });
 
-it('keeps destructive cancellation in the menu while the row exposes pause and more actions', async () => {
+it('keeps permanent deletion in the menu while the row exposes pause and more actions', async () => {
   const user = userEvent.setup();
   render(<DownloadQueue
     tasks={[{ id: 'active-actions', name: 'game.zip', kind: 'file', status: 'downloading', progress: 25 }]}
@@ -1004,7 +1004,7 @@ it('keeps destructive cancellation in the menu while the row exposes pause and m
   expect(screen.queryByRole('button', { name: '取消 game.zip' })).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '更多操作 game.zip' }));
   expect(screen.getByRole('menu', { name: 'game.zip 任务菜单' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '取消任务' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
 });
 
 it('offers real state-aware commands when an active task is right-clicked', async () => {
@@ -1020,7 +1020,7 @@ it('offers real state-aware commands when an active task is right-clicked', asyn
   fireEvent.contextMenu(screen.getByText('game.zip'), { clientX: 280, clientY: 180 });
   expect(screen.getByRole('menu', { name: 'game.zip 任务菜单' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '暂停下载' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '取消任务' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '重新下载' })).not.toBeInTheDocument();
 
@@ -1102,7 +1102,7 @@ it('shows both privacy actions for a mixed multi-selection and forwards the requ
   expect(onBatchCommand).toHaveBeenCalledWith(['ordinary', 'private'], 'move_to_private');
 });
 
-it('offers cancellation for an invalid link left unsubmitted in parsing state', async () => {
+it('offers permanent deletion for an invalid link left unsubmitted in parsing state', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();
   render(<DownloadQueue
@@ -1113,9 +1113,9 @@ it('offers cancellation for an invalid link left unsubmitted in parsing state', 
   />);
 
   fireEvent.contextMenu(screen.getByText('非法下载链接'));
-  await user.click(screen.getByRole('menuitem', { name: '取消任务' }));
+  await user.click(screen.getByRole('menuitem', { name: '删除任务' }));
 
-  expect(onCommand).toHaveBeenCalledWith('invalid-link', 'cancel');
+  expect(onCommand).toHaveBeenCalledWith('invalid-link', 'delete');
 });
 
 it('keeps modifier-selected tasks together and exposes only batch-safe menu actions', async () => {
@@ -1298,7 +1298,7 @@ it('selects a contiguous task range with Shift-click', () => {
   expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
 });
 
-it('offers terminal-task cleanup without showing invalid transfer commands', () => {
+it('offers terminal-task deletion without showing invalid transfer commands', () => {
   render(<DownloadQueue
     tasks={[{ id: 'done-1', name: 'finished.iso', source: 'https://example.com/finished.iso', kind: 'file', status: 'completed', progress: 100 }]}
     selectedTaskId={null}
@@ -1309,7 +1309,7 @@ it('offers terminal-task cleanup without showing invalid transfer commands', () 
   fireEvent.contextMenu(screen.getByText('finished.iso'));
   expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '复制下载链接' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '移入回收站' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '暂停下载' })).not.toBeInTheDocument();
   expect(screen.queryByRole('menuitem', { name: '取消任务' })).not.toBeInTheDocument();
 });
@@ -1343,7 +1343,7 @@ it('dismisses the task menu with Escape', () => {
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
 });
 
-it('offers permanent deletion only for a task already in the recycle bin', () => {
+it('uses the same deletion action for a legacy recycled task', () => {
   render(<DownloadQueue
     tasks={[{ id: 'recycled-1', name: 'old.iso', kind: 'file', status: 'recycled', progress: 100 }]}
     selectedTaskId={null}
@@ -1352,7 +1352,7 @@ it('offers permanent deletion only for a task already in the recycle bin', () =>
   />);
 
   fireEvent.contextMenu(screen.getByText('old.iso'));
-  expect(screen.getByRole('menuitem', { name: '彻底删除…' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '移入回收站' })).not.toBeInTheDocument();
   expect(screen.queryByRole('menuitem', { name: '重新下载' })).not.toBeInTheDocument();
 });

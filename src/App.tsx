@@ -15,7 +15,7 @@ import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusToast } from './components/EngineStatusBanner';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { reconcileTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
@@ -29,7 +29,7 @@ import { installWindowResizePerformanceMode } from './lib/windowResizePerformanc
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
 import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
 
-type TaskListTab = 'active' | 'completed' | 'recycle';
+type TaskListTab = 'all' | 'active' | 'completed' | 'failed';
 type TaskSortMode = 'manual' | 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
 type HeaderPanelMode = 'search' | 'download' | null;
 type PrivacyTaskFilter = 'all' | 'private' | 'ordinary';
@@ -39,12 +39,13 @@ const taskOrderStorageKey = 'task-list-order-v1';
 const backgroundPurgeFrameSize = 24;
 const backgroundPurgeFrameDelayMs = 16;
 const initialTaskSorts: Record<TaskListTab, TaskSortMode> = {
+  all: defaultTaskSort,
   active: defaultTaskSort,
   completed: defaultTaskSort,
-  recycle: defaultTaskSort,
+  failed: defaultTaskSort,
 };
-const initialTaskOrders: Record<TaskListTab, string[]> = { active: [], completed: [], recycle: [] };
-const taskListTabs: readonly TaskListTab[] = ['active', 'completed', 'recycle'];
+const initialTaskOrders: Record<TaskListTab, string[]> = { all: [], active: [], completed: [], failed: [] };
+const taskListTabs: readonly TaskListTab[] = ['all', 'active', 'completed', 'failed'];
 const taskSortModes = new Set<TaskSortMode>(['manual', 'created-desc', 'created-asc', 'progress-asc', 'progress-desc', 'name-asc', 'name-desc', 'size-asc', 'size-desc']);
 
 interface TaskOrderPreferences {
@@ -184,7 +185,13 @@ function TaskSortControl({ value, onChange, privacyFilter, onPrivacyFilterChange
   </div>;
 }
 
-const inactiveStatuses = new Set<QueueTask['status']>(['completed', 'cancelled', 'recycled']);
+const hiddenTaskStatuses = new Set<QueueTask['status']>(['cancelled', 'recycled']);
+const completedOrFailedStatuses = new Set<QueueTask['status']>(['completed', 'failed']);
+
+function isActiveDownloadTask(status: QueueTask['status']) {
+  return !hiddenTaskStatuses.has(status) && !completedOrFailedStatuses.has(status);
+}
+
 const cloudClient: CloudManagerClient = cloudApi;
 
 function hasMultipleLines(value: string): boolean {
@@ -208,6 +215,7 @@ function isDownloadInput(value: string): boolean {
 
 function taskTabForSearchResult(task: QueueTask): TaskListTab {
   if (task.status === 'completed') return 'completed';
+  if (task.status === 'failed') return 'failed';
   return 'active';
 }
 
@@ -323,7 +331,7 @@ export function App() {
   const [view, setView] = useState<ManagerView | 'about'>('downloads');
   const [cloudPage, setCloudPage] = useState<CloudWorkspacePage>('management');
   const [authorizedCloudProviders, setAuthorizedCloudProviders] = useState<readonly ProviderDescriptor[]>([]);
-  const [downloadTab, setDownloadTab] = useState<TaskListTab>('active');
+  const [downloadTab, setDownloadTab] = useState<TaskListTab>('all');
   const [taskOrderPreferences, setTaskOrderPreferences] = useState<TaskOrderPreferences>(loadTaskOrderPreferences);
   const taskSorts = taskOrderPreferences.sorts;
   const taskOrders = taskOrderPreferences.orders;
@@ -341,7 +349,6 @@ export function App() {
   const [newDownloadInput, setNewDownloadInput] = useState('');
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
-  const [purgeInProgress, setPurgeInProgress] = useState(false);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [taskReauthorization, setTaskReauthorization] = useState<CloudAuthorization | null>(null);
   const taskAuthorizationActive = useRef(false);
@@ -354,20 +361,22 @@ export function App() {
     if (privacyTaskFilter === 'all') return true;
     return privacyTaskFilter === 'private' ? isPrivateTask(task) : !isPrivateTask(task);
   }), [privacyTaskFilter, privacyVisibleTasks]);
-  const activeTasks = useMemo(() => filteredPrivacyTasks.filter((task) => !inactiveStatuses.has(task.status)), [filteredPrivacyTasks]);
-  const completedTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'completed'), [filteredPrivacyTasks]);
-  const recycledTasks = useMemo(() => filteredPrivacyTasks.filter((task) => task.status === 'recycled' || task.status === 'cancelled'), [filteredPrivacyTasks]);
+  const allTasks = useMemo(() => filteredPrivacyTasks.filter((task) => !hiddenTaskStatuses.has(task.status)), [filteredPrivacyTasks]);
+  const activeTasks = useMemo(() => allTasks.filter((task) => isActiveDownloadTask(task.status)), [allTasks]);
+  const completedTasks = useMemo(() => allTasks.filter((task) => task.status === 'completed'), [allTasks]);
+  const failedTasks = useMemo(() => allTasks.filter((task) => task.status === 'failed'), [allTasks]);
   const taskSearchResults = useMemo(() => headerPanel === 'search' && !isDownloadInput(searchInput)
     ? filteredPrivacyTasks.filter((task) => searchTaskMatches(task, searchInput))
     : [], [filteredPrivacyTasks, headerPanel, searchInput]);
-  const unsortedVisibleTasks = downloadTab === 'active' ? activeTasks
-    : downloadTab === 'completed' ? completedTasks
-      : recycledTasks;
+  const unsortedVisibleTasks = downloadTab === 'all' ? allTasks
+    : downloadTab === 'active' ? activeTasks
+      : downloadTab === 'completed' ? completedTasks
+        : failedTasks;
   const visibleTasks = useMemo(() => {
     const sorted = taskSorts[downloadTab] === 'manual'
       ? applyStoredTaskOrder(unsortedVisibleTasks, taskOrders[downloadTab])
       : sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]);
-    return downloadTab === 'active' ? prioritizeNewActiveTasks(sorted, newActiveTaskIds) : sorted;
+    return downloadTab === 'all' || downloadTab === 'active' ? prioritizeNewActiveTasks(sorted, newActiveTaskIds) : sorted;
   }, [downloadTab, newActiveTaskIds, taskOrders, taskSorts, unsortedVisibleTasks]);
   const detailsTask = useMemo(() => filteredPrivacyTasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, filteredPrivacyTasks]);
   const downloadingTasks = filteredPrivacyTasks.filter((task) => task.status === 'downloading');
@@ -495,7 +504,7 @@ export function App() {
   function addNewDownloadTask(task: QueueTask) {
     recordTaskEvent(task);
     setTasks((current) => upsertTask(current, task));
-    if (!inactiveStatuses.has(task.status)) {
+    if (isActiveDownloadTask(task.status)) {
       // New user-created tasks take precedence over a previously chosen
       // ordering. This only affects the active list and keeps newest tasks
       // first without changing the user's saved sort preference.
@@ -765,7 +774,7 @@ export function App() {
         if (disposed) return;
         const activeIds = new Set(activeSnapshot.map((task) => task.id));
         const hasMissingActiveTask = tasksRef.current.some((task) => (
-          !inactiveStatuses.has(task.status) && !activeIds.has(task.id)
+          isActiveDownloadTask(task.status) && !activeIds.has(task.id)
         ));
         if (hasMissingActiveTask) await refreshTaskSnapshot(() => disposed, 'terminal');
       } finally {
@@ -985,9 +994,9 @@ export function App() {
     listen<string>('launcher-parse', (event) => {
       void parse(event.payload).catch((error) => setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) }));
     }).then((stop) => { if (disposed) stop(); else unlisten.push(stop); }).catch(() => undefined);
-    listen('launcher-open-active-downloads', () => {
+    listen('launcher-open-all-tasks', () => {
       setView('downloads');
-      setDownloadTab('active');
+      setDownloadTab('all');
       setHeaderPanel(null);
     }).then((stop) => { if (disposed) stop(); else unlisten.push(stop); }).catch(() => undefined);
     return () => { disposed = true; unlisten.forEach((stop) => stop()); };
@@ -1124,7 +1133,7 @@ export function App() {
     const task = findQueueTask(tasks, id);
     if (!task) return;
     if (command === 'details') { setSelectedTaskId(id); setDetailsTaskId(id); return; }
-    if (command === 'remove_record') { setPendingPurgeTaskIds([id]); return; }
+    if (command === 'delete') { setPendingPurgeTaskIds([id]); return; }
     const optimisticStart = command === 'resume' || command === 'retry';
     if (optimisticStart) {
       if (pendingStartTaskIds.current.has(id)) return;
@@ -1151,14 +1160,6 @@ export function App() {
           await refreshTaskSnapshot(() => false, 'terminal');
         }
         setNotice({ kind: 'success', message: authorization.instructions });
-        return;
-      }
-      if (command === 'move_to_recycle') {
-        const recycled = await moveTaskToRecycle(id);
-        if (recycled) {
-          recordTaskEvent(recycled);
-          setTasks((current) => upsertTask(current, recycled));
-        }
         return;
       }
       if (command === 'move_to_private' || command === 'move_to_normal') {
@@ -1236,7 +1237,7 @@ export function App() {
         setNotice({ kind: 'success', message: `已复制 ${links.length} 个下载链接` });
         return;
       }
-      if (command === 'delete' && targets.every((task) => task.status === 'recycled' || task.status === 'cancelled')) {
+      if (command === 'delete') {
         setPendingPurgeTaskIds(targets.map((task) => task.id));
         return;
       }
@@ -1256,10 +1257,7 @@ export function App() {
           if (task.status === 'failed' && !pendingStartTaskIds.current.has(task.id)) return [{ task, optimisticStart: true, run: () => runTaskAction(task.id, 'retry').then((result) => result.queueTask ?? result.task) }];
           return [];
         }
-        if (task.status === 'completed' || task.status === 'failed') {
-          return [{ task, run: () => moveTaskToRecycle(task.id) }];
-        }
-        return [{ task, run: () => runTaskAction(task.id, 'cancel').then((result) => result.queueTask ?? result.task) }];
+        return [];
       });
       operations.filter((operation) => operation.optimisticStart).forEach(({ task }) => queueTaskOptimistically(task));
       const results = await Promise.allSettled(operations.map(({ run }) => run()));
@@ -1344,9 +1342,8 @@ export function App() {
       setSelectedTaskIds((current) => current.filter((id) => !removed.has(id)));
       setDetailsTaskId((current) => current && removed.has(current) ? null : current);
     };
-    const successMessage = deleteFiles ? '任务和下载文件已彻底删除' : '任务已从回收站彻底删除，下载文件已保留';
+    const successMessage = deleteFiles ? '任务和下载文件已删除' : '任务已删除，下载文件已保留';
     purgeInProgressRef.current = true;
-    setPurgeInProgress(true);
     for (const id of ids) purgingTaskIds.current.add(id);
     protectRemovedTasksFromOlderSnapshots(ids);
     setPendingPurgeTaskIds(null);
@@ -1373,7 +1370,7 @@ export function App() {
       }
     };
 
-    const purge = purgeRecycledTasks(ids, deleteFiles);
+    const purge = deleteTasks(ids, deleteFiles);
     removeVisibleTasks();
     void (async () => {
       try {
@@ -1385,7 +1382,6 @@ export function App() {
           purgingTaskIds.current.delete(id);
         }
         purgeInProgressRef.current = false;
-        setPurgeInProgress(false);
         setNotice({ kind: 'success', message: successMessage });
       } catch (error) {
         if (timer !== undefined) window.clearTimeout(timer);
@@ -1393,16 +1389,9 @@ export function App() {
         await refreshTaskSnapshot(() => false, 'terminal', false);
         for (const id of ids) purgingTaskIds.current.delete(id);
         purgeInProgressRef.current = false;
-        setPurgeInProgress(false);
         setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
       }
     })();
-  }
-
-  function requestRecycleClear() {
-    if (!purgeInProgressRef.current && recycledTasks.length) {
-      setPendingPurgeTaskIds(recycledTasks.map((task) => task.id));
-    }
   }
 
   function submitHeaderInput() {
@@ -1625,11 +1614,11 @@ export function App() {
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
             <div className="download-tab-list workspace-tab-list" role="tablist" aria-label="下载任务">
+              <button role="tab" aria-selected={downloadTab === 'all'} onClick={() => selectDownloadTab('all')}>全部 <b>{allTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
               <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
-              <button role="tab" aria-selected={downloadTab === 'recycle'} onClick={() => selectDownloadTab('recycle')}>回收站 <b>{recycledTasks.length}</b></button>
+              <button role="tab" aria-selected={downloadTab === 'failed'} onClick={() => selectDownloadTab('failed')}>失败 <b>{failedTasks.length}</b></button>
             </div>
-            {downloadTab === 'recycle' && recycledTasks.length > 0 && <button className="bulk-pause" disabled={purgeInProgress} onClick={requestRecycleClear}>清空</button>}
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
             <div className="task-privacy-actions">
               {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}><PrivacyLockIcon unlocked={privacyVisibility.unlocked} /></button>}

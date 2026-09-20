@@ -4,7 +4,7 @@ import { AboutPanel } from './AboutPanel';
 it('shows project acknowledgements and the ten declaration terms after usage instructions', () => {
   render(<AboutPanel icon="/icon.png" />);
   const help = screen.getByRole('region', { name: '使用说明' });
-  const thanks = screen.getByRole('region', { name: '感谢' });
+  const thanks = screen.getByRole('region', { name: '致谢' });
   const declaration = screen.getByRole('region', { name: '声明' });
   expect(help.compareDocumentPosition(thanks) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(thanks.compareDocumentPosition(declaration) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

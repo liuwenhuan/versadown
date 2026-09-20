@@ -523,6 +523,7 @@ pub fn run() {
             commands::play_task_videos,
             commands::recycle_task,
             commands::purge_recycled_tasks,
+            commands::delete_tasks,
             commands::select_files,
             commands::cancel_download_file,
             commands::get_download_engine_state,

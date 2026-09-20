@@ -76,6 +76,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  window.localStorage.removeItem('remove-task-delete-files');
   state.cloudInvoke.mockReset().mockImplementation((command: string) => Promise.reject(new Error(`Unexpected command: ${command}`)));
   state.windowSnapshot.mockReset();
   state.windowSnapshot.mockResolvedValue({ active: false, nativeDrag: false });
@@ -390,7 +391,7 @@ it('review shares overlapping task reauthorization requests', async () => {
   const begin = deferred<any>();
   state.reauthorizeFailedCloudTask.mockReturnValue(begin.promise);
   render(<App />);
-  fireEvent.click(screen.getByRole('tab', { name: /下载中/ }));
+  fireEvent.click(screen.getByRole('tab', { name: /失败/ }));
   const button = await screen.findByRole('button', { name: '重新授权 重复授权.mp4' });
   fireEvent.click(button);
   fireEvent.click(button);
@@ -407,7 +408,7 @@ it('shows a native authorization failure and allows the Baidu authorization butt
   state.reauthorizeFailedCloudTask.mockRejectedValue({ code: 'storage', message: '授权窗口打开失败，请重试' });
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
   await user.click(await screen.findByRole('button', { name: '重新授权 book.pdf' }));
   expect(await screen.findByRole('status')).toHaveTextContent('授权窗口打开失败，请重试');
   await user.click(screen.getByRole('button', { name: '重新授权 book.pdf' }));
@@ -420,7 +421,7 @@ it('shows the duplicate decision when retry returns a queue projection', async (
   state.taskAction.mockResolvedValue({ queueTask: failed, duplicate: { task: failed, state: 'overwrite_required' } });
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
   await user.click(await screen.findByRole('button', { name: '重新下载 book.pdf' }));
   expect(await screen.findByRole('dialog', { name: '检测到重复下载' })).toBeVisible();
 });
@@ -435,13 +436,15 @@ it('optimistically queues a refresh and restores its failed state when the actio
   state.taskAction.mockReturnValueOnce(action.promise);
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
 
   await user.click(await screen.findByRole('button', { name: '重新下载 retry-pending.zip' }));
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
   expect(screen.getByRole('button', { name: 'retry-pending.zip 排队中' })).toBeEnabled();
   expect(screen.getByText('正在提交下载任务…')).toBeVisible();
 
   await act(async () => { action.reject(new Error('下载引擎暂时不可用')); });
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
   expect(await screen.findByRole('button', { name: '重新下载 retry-pending.zip' })).toBeVisible();
   expect(screen.getByRole('status')).toHaveTextContent('下载引擎暂时不可用');
 });
@@ -458,7 +461,7 @@ it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorizat
     };
     let authorizationCompleted = false;
     state.list.mockImplementation((scope?: string) => {
-      if (scope === 'active') return Promise.resolve(authorizationCompleted ? [resumedTask] : [failedTask]);
+      if (scope === 'active') return Promise.resolve(authorizationCompleted ? [resumedTask] : []);
       if (scope === 'terminal') return Promise.resolve(authorizationCompleted ? [] : [failedTask]);
       return Promise.resolve(authorizationCompleted ? [resumedTask] : [failedTask]);
     });
@@ -471,8 +474,8 @@ it.each(['event', 'watchdog'])('shows a reauthorized Baidu task after authorizat
     });
 
     render(<App />);
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    fireEvent.click(screen.getByRole('tab', { name: /下载中/ }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(screen.getByRole('tab', { name: /失败/ }));
     fireEvent.click(screen.getByRole('button', { name: '重新授权 需要验证的文件.mp4' }));
     await act(async () => { await Promise.resolve(); });
 
@@ -509,7 +512,7 @@ it('refreshes a task after automatic password renewal without polling a closed a
   });
   const user = userEvent.setup();
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
   await user.click(await screen.findByRole('button', { name: '重新授权 自动恢复.mp4' }));
   await screen.findByText('登录已自动恢复，正在继续下载');
   await user.click(screen.getByRole('tab', { name: /下载中/ }));
@@ -564,13 +567,12 @@ it('uses the supplied dark SVG icon and vector icons in the primary navigation',
   }
 });
 
-it('places recycle clear immediately after the tabs without page-wide start or pause links', async () => {
+it('removes recycle controls without adding page-wide start or pause links', async () => {
   const active = { id: 'active-task', name: 'active.zip', kind: 'file', status: 'downloading' as const, progress: 25 };
   const recycled = { id: 'recycled-task', name: 'removed.zip', kind: 'file', status: 'recycled' as const, progress: 100 };
   state.list.mockImplementation((scope?: string) => Promise.resolve(
     scope === 'active' ? [active] : scope === 'terminal' ? [recycled] : [active, recycled]
   ));
-  const user = userEvent.setup();
   render(<App />);
 
   const speed = await screen.findByLabelText('当前总下载速度');
@@ -578,11 +580,8 @@ it('places recycle clear immediately after the tabs without page-wide start or p
   expect(screen.queryByRole('button', { name: /全部开始|全部暂停/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '清空' })).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole('tab', { name: /回收站/ }));
-
-  const recycleAction = screen.getByRole('button', { name: '清空' });
-  expect(screen.getByRole('tablist', { name: '下载任务' }).nextElementSibling).toBe(recycleAction);
-  expect(recycleAction.compareDocumentPosition(speed) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(screen.queryByRole('tab', { name: /回收站/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('tablist', { name: '下载任务' }).nextElementSibling).toBe(speed);
   expect(screen.queryByRole('button', { name: /全部暂停/ })).not.toBeInTheDocument();
 });
 
@@ -626,6 +625,7 @@ it('sorts only the active task tab from the menu beside total speed', async () =
   const user = userEvent.setup();
   render(<App />);
 
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
   const queue = await screen.findByRole('region', { name: '下载队列' });
   const visibleNames = () => Array.from(queue.querySelectorAll<HTMLElement>('.task-copy b')).map((item) => item.textContent);
   await waitFor(() => expect(visibleNames()).toEqual(['zeta.zip', 'alpha.zip']));
@@ -842,8 +842,8 @@ it('shows every visible task in all and keeps failed tasks out of downloading', 
   const allTab = await screen.findByRole('tab', { name: /全部/ });
   expect(allTab).toHaveAttribute('aria-selected', 'true');
   expect(screen.getByText('正在下载.zip')).toBeVisible();
-  expect(screen.getByText('已经完成.zip')).toBeVisible();
-  expect(screen.getByText('下载失败.zip')).toBeVisible();
+  expect(await screen.findByText('已经完成.zip')).toBeVisible();
+  expect(await screen.findByText('下载失败.zip')).toBeVisible();
   expect(screen.queryByText('旧回收记录.zip')).not.toBeInTheDocument();
   expect(screen.queryByRole('tab', { name: /回收站/ })).not.toBeInTheDocument();
 
@@ -951,18 +951,23 @@ it('deletes every selected active task from the multi-selection menu', async () 
   const first: QueueTask = { ...oldTask, id: 'delete-1', name: 'first-delete.zip' };
   const second: QueueTask = { ...oldTask, id: 'delete-2', name: 'second-delete.zip' };
   state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [first, second] : []));
-  state.taskAction.mockImplementation((id: string) => Promise.resolve({ task: { ...(id === first.id ? first : second), status: 'cancelled' } }));
+  state.deleteTasks.mockResolvedValue(undefined);
+  const user = userEvent.setup();
   render(<App />);
 
   fireEvent.click(await screen.findByText('first-delete.zip'));
   fireEvent.click(screen.getByText('second-delete.zip'), { ctrlKey: true });
   fireEvent.contextMenu(screen.getByText('first-delete.zip'));
-  fireEvent.click(screen.getByRole('menuitem', { name: '删除' }));
+  await user.click(screen.getByRole('menuitem', { name: '删除' }));
+  const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
+  const deleteFiles = within(dialog).getByRole('checkbox', { name: '同时删除下载文件' });
+  if ((deleteFiles as HTMLInputElement).checked) await user.click(deleteFiles);
+  await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
 
-  await waitFor(() => {
-    expect(state.taskAction).toHaveBeenCalledWith('delete-1', 'cancel');
-    expect(state.taskAction).toHaveBeenCalledWith('delete-2', 'cancel');
-  });
+  await waitFor(() => expect(state.deleteTasks).toHaveBeenCalledTimes(1));
+  expect(new Set(state.deleteTasks.mock.calls[0]?.[0])).toEqual(new Set(['delete-1', 'delete-2']));
+  expect(state.deleteTasks.mock.calls[0]?.[1]).toBe(false);
+  expect(state.taskAction).not.toHaveBeenCalled();
 });
 
 it('pauses every selected running task from the multi-selection menu', async () => {
@@ -983,112 +988,27 @@ it('pauses every selected running task from the multi-selection menu', async () 
   });
 });
 
-it('moves every selected completed task to the recycle bin', async () => {
+it('permanently deletes every selected completed task from the multi-selection menu', async () => {
   const first: QueueTask = { ...oldTask, id: 'done-delete-1', name: 'first-done.zip', status: 'completed', progress: 100 };
   const second: QueueTask = { ...oldTask, id: 'done-delete-2', name: 'second-done.zip', status: 'completed', progress: 100 };
   state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? [first, second] : []));
-  state.moveToRecycle.mockImplementation((id: string) => Promise.resolve({ ...(id === first.id ? first : second), status: 'recycled' }));
+  state.deleteTasks.mockResolvedValue(undefined);
+  const user = userEvent.setup();
   render(<App />);
 
   fireEvent.click(await screen.findByRole('tab', { name: /已完成/ }));
   fireEvent.click(await screen.findByText('first-done.zip'));
   fireEvent.click(screen.getByText('second-done.zip'), { ctrlKey: true });
   fireEvent.contextMenu(screen.getByText('first-done.zip'));
-  fireEvent.click(screen.getByRole('menuitem', { name: '删除' }));
-
-  await waitFor(() => {
-    expect(state.moveToRecycle).toHaveBeenCalledWith('done-delete-1');
-    expect(state.moveToRecycle).toHaveBeenCalledWith('done-delete-2');
-  });
-});
-
-it('opens one permanent-delete confirmation for all selected recycled tasks', async () => {
-  const first: QueueTask = { ...oldTask, id: 'purge-1', name: 'first-old.zip', status: 'recycled', progress: 100 };
-  const second: QueueTask = { ...oldTask, id: 'purge-2', name: 'second-old.zip', status: 'cancelled', progress: 100 };
-  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? [first, second] : []));
-  state.purgeTasks.mockResolvedValue(undefined);
-  render(<App />);
-
-  fireEvent.click(await screen.findByRole('tab', { name: /回收站/ }));
-  fireEvent.click(await screen.findByText('first-old.zip'));
-  fireEvent.click(screen.getByText('second-old.zip'), { ctrlKey: true });
-  fireEvent.contextMenu(screen.getByText('first-old.zip'));
-  fireEvent.click(screen.getByRole('menuitem', { name: '删除' }));
-
-  expect(screen.getByRole('dialog', { name: '彻底删除任务' })).toHaveTextContent('2 个任务');
-  fireEvent.click(screen.getByRole('button', { name: '彻底删除' }));
-  await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledWith(expect.arrayContaining(['purge-1', 'purge-2']), false));
-});
-
-it('submits a large recycle cleanup once and starts draining the visible list before it finishes', async () => {
-  const user = userEvent.setup();
-  const completion = deferred<void>();
-  const recycled = Array.from({ length: 1_000 }, (_, index): QueueTask => ({
-    ...oldTask,
-    id: `background-purge-${index}`,
-    name: `background-purge-${index}.zip`,
-    status: 'recycled',
-    progress: 100,
-  }));
-  let terminalTasks = recycled;
-  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? terminalTasks : []));
-  state.purgeTasks.mockImplementation((ids: string[]) => {
-    return completion.promise.then(() => {
-      terminalTasks = terminalTasks.filter((task) => !ids.includes(task.id));
-    });
-  });
-  render(<App />);
-
-  await user.click(await screen.findByRole('tab', { name: /回收站/ }));
-  await user.click(screen.getByRole('button', { name: '清空' }));
+  await user.click(screen.getByRole('menuitem', { name: '删除' }));
   const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
-  expect(dialog).toHaveTextContent('1000 个任务');
-
+  const deleteFiles = within(dialog).getByRole('checkbox', { name: '同时删除下载文件' });
+  if ((deleteFiles as HTMLInputElement).checked) await user.click(deleteFiles);
   await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
 
-  await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledOnce());
-  const submittedIds = state.purgeTasks.mock.calls[0][0] as string[];
-  expect(submittedIds).toHaveLength(1_000);
-  expect(state.purgeTasks.mock.calls[0][1]).toBe(false);
-  expect(screen.queryByRole('dialog', { name: '彻底删除任务' })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: '清空' })).toBeDisabled();
-  await act(async () => { await new Promise<void>((resolve) => window.setTimeout(resolve, 40)); });
-  expect(screen.getByRole('status')).toHaveTextContent('正在后台删除');
-  expect(screen.queryByText(recycled.at(-1)!.name)).not.toBeInTheDocument();
-  expect(screen.getByText(recycled[0].name)).toBeVisible();
-  expect(state.purgeTasks).toHaveBeenCalledOnce();
-
-  await act(async () => { completion.resolve(undefined); });
-  await waitFor(() => expect(screen.queryByText(recycled[0].name)).not.toBeInTheDocument());
-}, 12_000);
-
-it('does not restore a permanently purged task from a late task event', async () => {
-  const user = userEvent.setup();
-  const completion = deferred<void>();
-  const recycled: QueueTask = {
-    ...oldTask,
-    id: 'late-purge-event',
-    name: 'late-purge-event.zip',
-    status: 'recycled',
-    progress: 100,
-  };
-  let terminalTasks = [recycled];
-  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'terminal' ? terminalTasks : []));
-  state.purgeTasks.mockImplementation(() => completion.promise.then(() => {
-    terminalTasks = [];
-  }));
-  render(<App />);
-
-  await user.click(await screen.findByRole('tab', { name: /回收站/ }));
-  await user.click(screen.getByRole('button', { name: '清空' }));
-  await user.click(within(screen.getByRole('dialog', { name: '彻底删除任务' })).getByRole('button', { name: '彻底删除' }));
-  await waitFor(() => expect(state.purgeTasks).toHaveBeenCalledOnce());
-
-  await act(async () => { completion.resolve(undefined); });
-  await waitFor(() => expect(screen.queryByText(recycled.name)).not.toBeInTheDocument());
-  act(() => { state.onTask?.(recycled); });
-
-  expect(screen.queryByText(recycled.name)).not.toBeInTheDocument();
+  await waitFor(() => expect(state.deleteTasks).toHaveBeenCalledTimes(1));
+  expect(new Set(state.deleteTasks.mock.calls[0]?.[0])).toEqual(new Set(['done-delete-1', 'done-delete-2']));
+  expect(state.deleteTasks.mock.calls[0]?.[1]).toBe(false);
 });
 
 it('clears cleanup retry only after the typed task action result reports success', async () => {
@@ -1675,11 +1595,11 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
 it('switches the manager to all tasks when the launcher is double-clicked', async () => {
   const user = userEvent.setup();
   render(<App />);
-  await waitFor(() => expect(state.listeners.get('launcher-open-active-downloads')).toBeDefined());
+  await waitFor(() => expect(state.listeners.get('launcher-open-all-tasks')).toBeDefined());
 
   await user.click(screen.getByRole('tab', { name: /已完成/ }));
   expect(screen.getByRole('tab', { name: /已完成/ })).toHaveAttribute('aria-selected', 'true');
-  act(() => { state.listeners.get('launcher-open-active-downloads')?.({ payload: undefined }); });
+  act(() => { state.listeners.get('launcher-open-all-tasks')?.({ payload: undefined }); });
 
   expect(screen.getByRole('tab', { name: /全部/ })).toHaveAttribute('aria-selected', 'true');
 });
@@ -1883,7 +1803,7 @@ it('replaces a virtual failed directory leaf from its retry root without adding 
     queueTask: retriedRoot,
   });
   render(<App />);
-  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
 
   await user.click(await screen.findByRole('button', { name: '展开 Season 1' }));
   expect(screen.getByText('链接生成失败')).toBeVisible();
