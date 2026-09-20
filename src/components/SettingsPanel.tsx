@@ -60,6 +60,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [cloudUploadLimit, setCloudUploadLimit] = useState(initial.cloudUploadLimit ?? 0);
   const [rateLimitInputs, setRateLimitInputs] = useState(() => createRateLimitInputs({ ...defaultAria2Settings, ...initial.aria2 }, initial.cloudUploadLimit ?? 0));
   const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
+  const [downloadStatusNotifications, setDownloadStatusNotifications] = useState(initial.downloadStatusNotifications ?? true);
   const [privacyDownloadEnabled, setPrivacyDownloadEnabled] = useState(initial.privacyDownloadEnabled ?? false);
   const [privacyPasswordConfigured, setPrivacyPasswordConfigured] = useState(initial.privacyPasswordConfigured ?? false);
   const [privacyCurrentPassword, setPrivacyCurrentPassword] = useState('');
@@ -78,10 +79,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { const nextAria2 = { ...defaultAria2Settings, ...initial.aria2 }; const nextCloudUploadLimit = initial.cloudUploadLimit ?? 0; setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(nextAria2); setCloudUploadLimit(nextCloudUploadLimit); setRateLimitInputs(createRateLimitInputs(nextAria2, nextCloudUploadLimit)); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
+  useEffect(() => { const nextAria2 = { ...defaultAria2Settings, ...initial.aria2 }; const nextCloudUploadLimit = initial.cloudUploadLimit ?? 0; setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(nextAria2); setCloudUploadLimit(nextCloudUploadLimit); setRateLimitInputs(createRateLimitInputs(nextAria2, nextCloudUploadLimit)); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setDownloadStatusNotifications(initial.downloadStatusNotifications ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
 
   function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
-    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, ...(cloudUploadLimit || initial.cloudUploadLimit !== undefined ? { cloudUploadLimit } : {}), deleteTransferredShareFilesAfterDownload, ...overrides };
+    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, ...(cloudUploadLimit || initial.cloudUploadLimit !== undefined ? { cloudUploadLimit } : {}), deleteTransferredShareFilesAfterDownload, ...(initial.downloadStatusNotifications !== undefined ? { downloadStatusNotifications } : {}), ...overrides };
   }
 
   function saveWithoutStatus(settings: AppSettings) {
@@ -186,6 +187,11 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   function updateTransferredShareCleanup(enabled: boolean) {
     setDeleteTransferredShareFilesAfterDownload(enabled);
     saveWithoutStatus(currentSettings({ deleteTransferredShareFilesAfterDownload: enabled }));
+  }
+
+  function updateDownloadStatusNotifications(enabled: boolean) {
+    setDownloadStatusNotifications(enabled);
+    saveWithoutStatus(currentSettings({ downloadStatusNotifications: enabled }));
   }
 
   async function updatePrivacyDownload(enabled: boolean) {
@@ -338,6 +344,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         </form>
         <label className="setting-row"><span><b>悬浮球显示</b></span><select aria-label="悬浮球显示" value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">总是显示</option><option value="downloading">仅下载时显示</option><option value="hidden">关闭显示</option></select></label>
         <label className="setting-row"><span><b>下载完成后自动删除转存文件</b></span><input aria-label="下载完成后自动删除转存文件" type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
+        <label className="setting-row"><span><b>下载状态变动通知</b></span><input aria-label="下载状态变动通知" type="checkbox" checked={downloadStatusNotifications} onChange={(event) => updateDownloadStatusNotifications(event.target.checked)} /></label>
       </>}
       {activeTab === 'network' && <>
       <form className="proxy-settings" onSubmit={saveProxy}>

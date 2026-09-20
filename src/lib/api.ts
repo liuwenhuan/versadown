@@ -223,6 +223,10 @@ export async function purgeRecycledTasks(taskIds: string[], deleteFiles: boolean
   if (isTauriRuntime()) await invoke('purge_recycled_tasks', { taskIds, deleteFiles });
 }
 
+export async function deleteTasks(taskIds: string[], deleteFiles: boolean): Promise<void> {
+  if (isTauriRuntime()) await invoke('delete_tasks', { taskIds, deleteFiles });
+}
+
 export async function selectDownloadFiles(taskId: string, indices: number[]): Promise<QueueTask | undefined> {
   return isTauriRuntime() ? invoke<QueueTask>('select_files', { taskId, indices }) : undefined;
 }
@@ -259,7 +263,8 @@ export const defaultSettings: AppSettings = {
   deleteTransferredShareFilesAfterDownload: true,
   privacyDownloadEnabled: false,
   privacyPasswordConfigured: false,
-  cloudUploadLimit: 0
+  cloudUploadLimit: 0,
+  downloadStatusNotifications: true
 };
 
 export async function getSettings(): Promise<AppSettings> {

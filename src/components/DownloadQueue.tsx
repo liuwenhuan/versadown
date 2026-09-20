@@ -282,7 +282,7 @@ function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry
                       : <><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></>}</svg>;
 }
 
-type TaskMenuCommand = TaskCommand | 'delete';
+type TaskMenuCommand = TaskCommand;
 
 interface ContextMenuState { tasks: readonly QueueTask[]; x: number; y: number }
 
@@ -307,8 +307,8 @@ function isPrivateTask(task: QueueTask): boolean {
   return task.is_private === true || task.isPrivate === true;
 }
 
-function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> {
-  const commands: Array<{ command: TaskCommand; label: string; danger?: boolean; separated?: boolean }> = [];
+function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> {
+  const commands: Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
   if (task.status === 'paused') commands.push(task.reauthorization_required
     ? { command: 'reauthorize', label: '重新授权' }
@@ -323,9 +323,7 @@ function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ comm
   if (privacyEnabled) commands.push(isPrivateTask(task)
     ? { command: 'move_to_normal', label: '移入正常下载', separated: commands.length > 0 }
     : { command: 'move_to_private', label: '移入隐私下载', separated: commands.length > 0 });
-  if (['draft', 'parsing', 'awaiting_user', 'queued', 'downloading', 'processing', 'paused'].includes(task.status)) commands.push({ command: 'cancel', label: '取消任务', danger: true, separated: true });
-  if (task.status === 'recycled' || task.status === 'cancelled') commands.push({ command: 'remove_record', label: '彻底删除…', danger: true, separated: true });
-  if (['completed', 'failed'].includes(task.status)) commands.push({ command: 'move_to_recycle', label: '移入回收站', danger: true, separated: true });
+  commands.push({ command: 'delete', label: '删除任务', danger: true, separated: true });
   return commands;
 }
 
@@ -354,8 +352,6 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
     details: <><circle cx="12" cy="12" r="8" /><path d="M12 11v5M12 8h.01" /></>,
     move_to_private: <><path d="M6 11V7.5A2.5 2.5 0 0 1 8.5 5h7A2.5 2.5 0 0 1 18 7.5V11" /><rect x="4" y="11" width="16" height="9" rx="1.5" /><path d="m9 15 3 3 3-3M12 12v6" /></>,
     move_to_normal: <><path d="M6 11V7.5A2.5 2.5 0 0 1 8.5 5h7A2.5 2.5 0 0 1 18 7.5V11" /><rect x="4" y="11" width="16" height="9" rx="1.5" /><path d="m15 16-3-3-3 3M12 19v-6" /></>,
-    move_to_recycle: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="M18.5 4.5 20 6" /></>,
-    remove_record: <><path d="M5 7h14M9 7V4h6v3M8 10v7M12 10v7M16 10v7M6.5 7l.8 13h9.4l.8-13" /><path d="m7.5 7.5 9 9M16.5 7.5l-9 9" /></>,
     delete: deletePath,
   };
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[command]}</svg>;
@@ -575,7 +571,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
       onBatchCommand?.(targets.map((task) => task.id), command as BatchTaskCommand);
       return;
     }
-    if (targets[0] && command !== 'delete') onCommand(targets[0].id, command);
+    if (targets[0]) onCommand(targets[0].id, command);
   }
   function selectionModifiers(event: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) {
     const held = heldSelectionModifiers.current;

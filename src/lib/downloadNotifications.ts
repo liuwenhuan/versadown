@@ -1,0 +1,52 @@
+import type { QueueTask, TaskStatus } from './types';
+
+let permissionPromise: Promise<boolean> | undefined;
+
+export interface DownloadNotification {
+  title: '下载完成' | '下载失败';
+  body: string;
+}
+
+function isPrivateTask(task: QueueTask): boolean {
+  return task.isPrivate ?? task.is_private ?? false;
+}
+
+function isTerminalNotificationStatus(status: TaskStatus): status is 'completed' | 'failed' {
+  return status === 'completed' || status === 'failed';
+}
+
+export function notificationForTask(task: QueueTask): DownloadNotification | null {
+  if (!isTerminalNotificationStatus(task.status) || isPrivateTask(task) || task.source?.startsWith('cloud-directory-item://')) {
+    return null;
+  }
+  const name = task.name.trim() || '下载任务';
+  if (task.status === 'completed') return { title: '下载完成', body: name };
+  const error = task.error?.trim();
+  return { title: '下载失败', body: error ? `${name}：${error}` : name };
+}
+
+export function shouldNotifyTask(task: QueueTask, previousStatus: TaskStatus | undefined): boolean {
+  return notificationForTask(task) !== null && previousStatus !== task.status;
+}
+
+async function hasNotificationPermission(): Promise<boolean> {
+  if (!permissionPromise) {
+    permissionPromise = import('@tauri-apps/plugin-notification').then(async ({ isPermissionGranted, requestPermission }) => {
+      if (await isPermissionGranted()) return true;
+      const permission = await requestPermission();
+      return permission === 'granted';
+    }).catch(() => false);
+  }
+  return permissionPromise;
+}
+
+export async function sendDownloadNotification(task: QueueTask): Promise<void> {
+  const notification = notificationForTask(task);
+  if (!notification || !(await hasNotificationPermission())) return;
+  try {
+    const { sendNotification } = await import('@tauri-apps/plugin-notification');
+    await sendNotification(notification);
+  } catch {
+    // A disabled OS notification service must not affect the download engine.
+  }
+}

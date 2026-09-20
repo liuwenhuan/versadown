@@ -162,6 +162,19 @@ it('offers an OpenAI-compatible AI analysis configuration in advanced settings',
   expect(screen.queryByRole('button', { name: '保存 AI 配置' })).not.toBeInTheDocument();
 });
 
+it('saves the download status notification preference from common settings', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  render(<SettingsPanel initial={{ ...initial, downloadStatusNotifications: true }} onChange={onChange} />);
+
+  const notificationToggle = screen.getByRole('checkbox', { name: '下载状态变动通知' });
+  expect(notificationToggle).toBeChecked();
+  await user.click(notificationToggle);
+
+  expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ downloadStatusNotifications: false }));
+  expect(notificationToggle).not.toBeChecked();
+});
+
 it('refreshes models when its selector is opened and saves the complete AI configuration on selection', async () => {
   const user = userEvent.setup();
   const loadAiModels = vi.fn().mockResolvedValue(['gpt-4.1-mini', 'gpt-5-mini']);

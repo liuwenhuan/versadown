@@ -228,6 +228,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .on_menu_event(|app, event| {
             // Keep the Windows/macOS/Linux native menu pump immediately
             // available even if an action needs to touch a window or runtime

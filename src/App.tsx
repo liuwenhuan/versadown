@@ -18,6 +18,7 @@ import { EngineStatusToast } from './components/EngineStatusBanner';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, moveTaskToRecycle, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, purgeRecycledTasks, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { reconcileTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
+import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import darkMintIcon from './assets/launcher/dark_mint.svg';
@@ -386,6 +387,8 @@ export function App() {
   const privacyUnlockPassword = useRef<HTMLInputElement>(null);
   const previousPrivacyUnlocked = useRef(false);
   const tasksRef = useRef<QueueTask[]>(tasks);
+  const settingsRef = useRef<AppSettings>(settings);
+  const terminalNotificationStatuses = useRef(new Map<string, QueueTask['status']>());
   // Keep a locally requested start visible until its RPC action settles.  A
   // polling snapshot can otherwise put the old paused/failed state back on
   // screen while aria2 is still handling the request.
@@ -400,6 +403,7 @@ export function App() {
   const duplicateActionInFlight = useRef(false);
   const duplicateCloseInFlight = useRef(false);
   tasksRef.current = tasks;
+  settingsRef.current = settings;
   const duplicate = resolvingDuplicateId ? null : duplicateQueue[0] ?? null;
 
   const windowInteraction = useRef<ReturnType<typeof createWindowInteraction> | null>(null);
@@ -631,6 +635,15 @@ export function App() {
     subscribeToDownloadEvents({
       onTask: (task) => {
         if (disposed || purgingTaskIds.current.has(task.id) || permanentlyPurgedTaskIds.current.has(task.id)) return;
+        const previousStatus = terminalNotificationStatuses.current.get(task.id);
+        if (task.status === 'completed' || task.status === 'failed') {
+          if (settingsRef.current.downloadStatusNotifications !== false && shouldNotifyTask(task, previousStatus)) {
+            void sendDownloadNotification(task);
+          }
+          terminalNotificationStatuses.current.set(task.id, task.status);
+        } else {
+          terminalNotificationStatuses.current.delete(task.id);
+        }
         recordTaskEvent(task);
         setTasks((current) => upsertTask(current, task));
         setConfirmation((current) => {

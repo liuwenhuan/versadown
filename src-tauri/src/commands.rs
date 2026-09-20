@@ -4336,6 +4336,10 @@ mod tests {
                 ..completed
             })
             .unwrap();
+        let failed = store
+            .create(NewTask::direct("https://example.test/failed.zip"))
+            .unwrap();
+        store.fail(failed.id, "fixture").unwrap();
         let active_tasks =
             list_queue_tasks_in_background(Arc::clone(&store), None, Some("active".into()), true)
                 .await
@@ -4346,8 +4350,9 @@ mod tests {
             list_queue_tasks_in_background(Arc::clone(&store), None, Some("terminal".into()), true)
                 .await
                 .unwrap();
-        assert_eq!(terminal.len(), 1);
-        assert_eq!(terminal[0].status, TaskStatus::Completed);
+        assert_eq!(terminal.len(), 2);
+        assert!(terminal.iter().any(|task| task.status == TaskStatus::Completed));
+        assert!(terminal.iter().any(|task| task.status == TaskStatus::Failed));
     }
 
     #[tokio::test]

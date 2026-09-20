@@ -144,6 +144,8 @@ pub struct AppSettings {
     pub cloud_upload_limit: u64,
     #[serde(default = "default_delete_transferred_share_files_after_download")]
     pub delete_transferred_share_files_after_download: bool,
+    #[serde(default = "default_download_status_notifications")]
+    pub download_status_notifications: bool,
     #[serde(default)]
     pub privacy_download_enabled: bool,
     #[serde(default)]
@@ -151,6 +153,10 @@ pub struct AppSettings {
 }
 
 const fn default_delete_transferred_share_files_after_download() -> bool {
+    true
+}
+
+const fn default_download_status_notifications() -> bool {
     true
 }
 
@@ -165,6 +171,7 @@ impl Default for AppSettings {
             magnet_metadata: MagnetMetadataSettings::default(),
             cloud_upload_limit: 0,
             delete_transferred_share_files_after_download: true,
+            download_status_notifications: true,
             privacy_download_enabled: false,
             privacy_password_configured: false,
         }

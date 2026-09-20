@@ -99,13 +99,14 @@ it('opens the launcher context menu on right click without a new-task dialog', (
   expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument();
 });
 
-it('uses the dark mint graphic in dark theme', () => {
+it('uses the themed inline SVG graphic in dark theme', () => {
   theme.resolved = 'dark';
   render(<FloatingLauncher />);
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
-  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('src', expect.stringContaining('dark_mint.svg'));
+  expect(trigger.querySelector('svg.launcher-mark')).toBeInTheDocument();
+  expect(trigger.querySelector('.launcher-top-start')).toBeInTheDocument();
 });
 
 it('switches the launcher graphic when the theme changes', () => {
@@ -121,11 +122,12 @@ it('switches the launcher graphic when the theme changes', () => {
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
 });
 
-it('renders the supplied mint SVG artwork for the light launcher', () => {
+it('renders the themed inline SVG artwork for the light launcher', () => {
   theme.resolved = 'light';
   render(<FloatingLauncher />);
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
-  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('src', expect.stringContaining('mint_white.svg'));
-  expect(trigger.querySelector('svg.launcher-mark')).not.toBeInTheDocument();
+  expect(trigger.querySelector('svg.launcher-mark')).toBeInTheDocument();
+  expect(trigger.querySelector('img.launcher-mark')).not.toBeInTheDocument();
+  expect(trigger.querySelector('.launcher-logo-left')).toBeInTheDocument();
 });

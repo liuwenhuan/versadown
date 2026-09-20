@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
   confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
-  moveToRecycle: vi.fn(), purgeTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(),
+  moveToRecycle: vi.fn(), purgeTasks: vi.fn(), deleteTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
   getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
@@ -31,7 +31,7 @@ vi.mock('./lib/api', () => ({
   defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } },
   getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
   updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
-  moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, setTaskPrivacy: state.setTaskPrivacy, resolveDuplicateDownload: state.resolveDuplicate
+  moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, deleteTasks: state.deleteTasks, setTaskPrivacy: state.setTaskPrivacy, resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/downloadEvents')>();
@@ -95,6 +95,7 @@ beforeEach(() => {
   state.taskAction.mockReset();
   state.moveToRecycle.mockReset();
   state.purgeTasks.mockReset();
+  state.deleteTasks.mockReset();
   state.setTaskPrivacy.mockReset();
   state.clipboardWrite.mockReset();
   state.updateAiSettings.mockReset();
@@ -827,19 +828,68 @@ it('opens one batch window and parses every torrent dropped on the global input'
   expect(dialog).toHaveTextContent('second.torrent');
 });
 
-it('selects only the current tab tasks with Ctrl+A across all three task tabs', async () => {
+it('shows every visible task in all and keeps failed tasks out of downloading', async () => {
+  const downloading: QueueTask = { ...oldTask, id: 'all-downloading', name: '正在下载.zip', status: 'downloading' };
+  const completed: QueueTask = { ...oldTask, id: 'all-completed', name: '已经完成.zip', status: 'completed', progress: 100 };
+  const failed: QueueTask = { ...oldTask, id: 'all-failed', name: '下载失败.zip', status: 'failed', progress: 40 };
+  const recycled: QueueTask = { ...oldTask, id: 'all-recycled', name: '旧回收记录.zip', status: 'recycled', progress: 100 };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'active' ? [downloading] : scope === 'terminal' ? [completed, failed, recycled] : [downloading, completed, failed, recycled],
+  ));
+  const user = userEvent.setup();
+  render(<App />);
+
+  const allTab = await screen.findByRole('tab', { name: /全部/ });
+  expect(allTab).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByText('正在下载.zip')).toBeVisible();
+  expect(screen.getByText('已经完成.zip')).toBeVisible();
+  expect(screen.getByText('下载失败.zip')).toBeVisible();
+  expect(screen.queryByText('旧回收记录.zip')).not.toBeInTheDocument();
+  expect(screen.queryByRole('tab', { name: /回收站/ })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  expect(screen.getByText('正在下载.zip')).toBeVisible();
+  expect(screen.queryByText('已经完成.zip')).not.toBeInTheDocument();
+  expect(screen.queryByText('下载失败.zip')).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('tab', { name: /已完成/ }));
+  expect(screen.getByText('已经完成.zip')).toBeVisible();
+
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  expect(screen.getByText('下载失败.zip')).toBeVisible();
+});
+
+it('uses permanent deletion for an active task instead of only cancelling it', async () => {
+  const task: QueueTask = { ...oldTask, id: 'delete-active', name: 'active-delete.zip' };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [task] : []));
+  state.deleteTasks.mockResolvedValue(undefined);
+  const user = userEvent.setup();
+  render(<App />);
+
+  fireEvent.contextMenu(await screen.findByText('active-delete.zip'));
+  await user.click(screen.getByRole('menuitem', { name: '删除任务' }));
+  const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
+  const deleteFiles = within(dialog).getByRole('checkbox', { name: '同时删除下载文件' });
+  if ((deleteFiles as HTMLInputElement).checked) await user.click(deleteFiles);
+  await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
+
+  await waitFor(() => expect(state.deleteTasks).toHaveBeenCalledWith(['delete-active'], false));
+  expect(state.taskAction).not.toHaveBeenCalled();
+});
+
+it('selects only the current tab tasks with Ctrl+A across all four task tabs', async () => {
   const groups = [
-    { tab: /下载中/, statuses: ['downloading', 'failed'] }, { tab: /已完成/, statuses: ['completed'] },
-    { tab: /回收站/, statuses: ['recycled'] },
+    { tab: /全部/, statuses: ['downloading', 'failed', 'completed'] }, { tab: /下载中/, statuses: ['downloading'] },
+    { tab: /已完成/, statuses: ['completed'] }, { tab: /失败/, statuses: ['failed'] },
   ] as const;
   const tasks = ['downloading', 'failed', 'completed', 'recycled'].flatMap((status) => [1, 2].map(index => ({
     ...oldTask, id: `${status}-${index}`, name: `${status}-${index}.zip`, status,
   })));
   state.list.mockImplementation((scope?: string) => Promise.resolve(
     scope === 'active'
-      ? tasks.filter((task) => task.status === 'downloading' || task.status === 'failed')
+      ? tasks.filter((task) => task.status === 'downloading')
       : scope === 'terminal'
-        ? tasks.filter((task) => task.status === 'completed' || task.status === 'recycled')
+        ? tasks.filter((task) => task.status === 'completed' || task.status === 'failed' || task.status === 'recycled')
         : tasks
   ));
   const user = userEvent.setup();
@@ -1622,7 +1672,7 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
   await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
 });
 
-it('switches the manager to the active-downloads tab when the launcher is double-clicked', async () => {
+it('switches the manager to all tasks when the launcher is double-clicked', async () => {
   const user = userEvent.setup();
   render(<App />);
   await waitFor(() => expect(state.listeners.get('launcher-open-active-downloads')).toBeDefined());
@@ -1631,7 +1681,7 @@ it('switches the manager to the active-downloads tab when the launcher is double
   expect(screen.getByRole('tab', { name: /已完成/ })).toHaveAttribute('aria-selected', 'true');
   act(() => { state.listeners.get('launcher-open-active-downloads')?.({ payload: undefined }); });
 
-  expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByRole('tab', { name: /全部/ })).toHaveAttribute('aria-selected', 'true');
 });
 
 it('expands primary navigation when the launcher opens a non-download workspace', async () => {
