@@ -16,6 +16,10 @@ use crate::{
     UriSubmissionOptions,
 };
 
+#[cfg(all(test, windows))]
+#[path = "xunlei_native_live_tests.rs"]
+mod live_tests;
+
 /// An in-memory-only marker used to hand a drive response's opaque credential
 /// to this backend. `ResolvedCloudDownload::into_uri_submission_options`
 /// removes it before an aria2 request is constructed.
@@ -297,15 +301,6 @@ impl XunleiNativeBackend {
                 .unwrap_or("Mozilla/5.0");
             let cid = marker_header(resolved, CID_MARKER_HEADER).unwrap_or("");
             let gcid = marker_header(resolved, GCID_MARKER_HEADER).unwrap_or("");
-            // `prepare_expected_with_retry_intent` deliberately clears the
-            // durable GID before resolving a fresh cloud URL. Keep the old
-            // SDK identity from the retry intent so the stopped task cannot
-            // block its own checkpoint from being reopened.
-            let prior_native_id = store
-                .find(task_id)
-                .ok()
-                .and_then(|task| prior_native_task_id(&task, options));
-
             let (native_id, client_version) = {
                 let mut api = self
                     .api
@@ -320,6 +315,10 @@ impl XunleiNativeBackend {
                 let Some(api) = api.as_mut() else {
                     return Ok(None);
                 };
+                // SDK IDs belong to this process, not the persisted task DB.
+                // Release only the live owner of this output, including before
+                // an overwrite. A restored GID may now identify another task.
+                api.release_output(&output_path)?;
                 // Native checkpoint files are meaningful only after the
                 // official backend has actually been selected. Without the
                 // installed SDK, return `None` above and let aria2 apply its
@@ -331,11 +330,6 @@ impl XunleiNativeBackend {
                 )?;
                 api.set_identity(user_id, peer_id)?;
                 let size = resolved.size_hint().unwrap_or(0);
-                if let Some(old_id) = prior_native_id {
-                    if api.stop(old_id).is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                    }
-                }
                 let native_id = api.create_p2sp_task(
                     &resolved.url,
                     &output_path,
@@ -378,7 +372,13 @@ impl XunleiNativeBackend {
                 )
                 .map_err(|_| NativeSubmitError::Failed("无法保存迅雷原生任务".into()))?;
             emit_task(app, store, &task);
-            self.spawn_progress_monitor(app.clone(), Arc::clone(store), task_id, output_path);
+            self.spawn_progress_monitor(
+                app.clone(),
+                Arc::clone(store),
+                task_id,
+                native_id,
+                output_path,
+            );
             self.spawn_vip_activation(
                 app.clone(),
                 Arc::clone(store),
@@ -456,9 +456,8 @@ impl XunleiNativeBackend {
                 return;
             }
             task.status_message = match result {
-                Ok(()) if task.completed_length > 0 || task.download_speed > 0 => {
-                    Some("正在使用迅雷svip加速".into())
-                }
+                // Token acceptance is authorization, not proof of traffic.
+                // Only the monitor may confirm current accelerated transfer.
                 Ok(()) => None,
                 Err(NativeSubmitError::Incompatible) => Some(PLUGIN_UPDATE_MESSAGE.into()),
                 Err(NativeSubmitError::Failed(message)) => {
@@ -560,7 +559,13 @@ impl XunleiNativeBackend {
                     .and_then(|files| files.into_iter().next())
                     .map(|file| PathBuf::from(file.path))
                 {
-                    self.spawn_progress_monitor(app.clone(), Arc::clone(store), updated.id, path);
+                    self.spawn_progress_monitor(
+                        app.clone(),
+                        Arc::clone(store),
+                        updated.id,
+                        native_id,
+                        path,
+                    );
                 }
             }
             Ok(updated)
@@ -572,19 +577,17 @@ impl XunleiNativeBackend {
         app: AppHandle,
         store: Arc<TaskStore>,
         id: Uuid,
+        expected_native_id: u32,
         output_path: PathBuf,
     ) {
         let backend = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            let mut previous = store
-                .find(id)
-                .map(|task| task.completed_length)
-                .unwrap_or(0);
+            let mut meter = NativeTransferMeter::new(std::time::Instant::now());
             let mut progress_failures = 0u8;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let Ok(mut task) = store.find(id) else { return };
-                if !is_native_gid(task.aria_gid.as_deref())
+                if native_id(&task) != Some(expected_native_id)
                     || task.status != TaskStatus::Downloading
                 {
                     return;
@@ -628,36 +631,67 @@ impl XunleiNativeBackend {
                     .then_some(native_total)
                     .or(task.total_length);
                 task.total_length = total;
-                let delta = completed.saturating_sub(previous);
-                previous = completed;
+                let now = std::time::Instant::now();
+                let has_equity = {
+                    #[cfg(windows)]
+                    {
+                        backend
+                            .equity_tokens
+                            .lock()
+                            .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        false
+                    }
+                };
+                let (speed, accelerating) = meter.sample(native_progress, has_equity, now);
                 task.completed_length = completed;
-                task.download_speed = native_progress.speed.max(delta);
-                #[cfg(windows)]
-                if completed > 0
-                    && task.status_message.as_deref() != Some("正在使用迅雷svip加速")
-                    && backend
-                        .equity_tokens
-                        .lock()
-                        .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
-                {
+                task.download_speed = speed;
+                task.connections = native_progress.connections;
+                if accelerating {
                     task.status_message = Some("正在使用迅雷svip加速".into());
+                } else if matches!(task.status_message.as_deref(), Some("正在使用迅雷svip加速"))
+                    || (has_equity && task.status_message.as_deref() == Some("正在启用迅雷加速"))
+                {
+                    task.status_message = None;
                 }
                 task.progress = total
                     .filter(|total| *total > 0)
                     .map(|total| ((completed.saturating_mul(100) / total).min(100)) as u8)
                     .unwrap_or(0);
-                if native_status == 4 || total.is_some_and(|total| completed >= total) {
+                if native_status == NATIVE_COMPLETE
+                    && output_path.is_file()
+                    && total.is_some_and(|total| total > 0 && completed == total)
+                {
                     task.status = TaskStatus::Completed;
                     task.progress = 100;
                     task.download_speed = 0;
                     task.error = None;
                     task.status_message = None;
                     let _ = backend.stop_completed_task(&task);
-                } else if native_status == 1 {
+                } else if native_status == NATIVE_ERROR {
                     task.status = TaskStatus::Failed;
                     task.download_speed = 0;
                     task.error = Some(native_failure_message(native_error_code));
                     task.status_message = None;
+                } else if native_status == NATIVE_STOPPED {
+                    task.status = TaskStatus::Paused;
+                    task.download_speed = 0;
+                    task.status_message = Some("迅雷原生任务已停止，请继续下载".into());
+                } else if now.duration_since(meter.last_data_at).as_secs() >= 120 {
+                    task.status = TaskStatus::Failed;
+                    task.download_speed = 0;
+                    task.status_message = None;
+                    task.error = Some("迅雷原生任务长时间未返回数据，请重试".into());
+                    let _ = backend.stop_completed_task(&task);
+                }
+                // A pause/resubmit can finish while QueryTaskInfo is in flight.
+                if !store.find(id).is_ok_and(|current| {
+                    current.status == TaskStatus::Downloading
+                        && native_id(&current) == Some(expected_native_id)
+                }) {
+                    return;
                 }
                 let Ok(updated) = store.apply_transfer_snapshot_with_files(
                     task.clone(),
@@ -672,7 +706,10 @@ impl XunleiNativeBackend {
                     return;
                 };
                 emit_task(&app, &store, &updated);
-                if matches!(updated.status, TaskStatus::Completed | TaskStatus::Failed) {
+                if matches!(
+                    updated.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Paused
+                ) {
                     release_cloud_slot(&app, &store, &updated);
                     return;
                 }
@@ -762,14 +799,6 @@ fn native_task_id_from_gid(gid: Option<&str>) -> Option<u32> {
     gid?.strip_prefix(NATIVE_GID_PREFIX)?.parse().ok()
 }
 
-fn prior_native_task_id(task: &DownloadTask, options: &UriSubmissionOptions) -> Option<u32> {
-    options
-        .continue_download
-        .then(|| native_task_id_from_gid(options.native_resume_gid.as_deref()))
-        .flatten()
-        .or_else(|| native_id(task))
-}
-
 fn emit_task(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
     let state = app.state::<crate::commands::AppState>();
     if crate::commands::should_emit_task_update(&state, task.is_private) {
@@ -817,7 +846,9 @@ struct WindowsApi {
     _module: usize,
     client_version: String,
     trace_ids: BTreeMap<u32, String>,
+    task_paths: BTreeMap<PathBuf, u32>,
     create_p2sp_task: XlCreateP2spTask,
+    redirect_original_resource: XlRedirectOriginalResource,
     delete_task: XlTaskAction,
     query_task_info: XlQueryTaskInfo,
     set_app_guid: XlSetString,
@@ -863,13 +894,90 @@ type XlTaskString = unsafe extern "system" fn(u32, *const std::ffi::c_char) -> i
 #[cfg(windows)]
 type XlTaskStringKind = unsafe extern "system" fn(u32, i32, *const std::ffi::c_char) -> i32;
 
-#[derive(Clone, Copy, Debug)]
+#[cfg(windows)]
+type XlRedirectOriginalResource = unsafe extern "system" fn(u32, *const u16, u32) -> i32;
+
+const NATIVE_DOWNLOADING: i32 = 3;
+const NATIVE_STOPPED: i32 = 5;
+const NATIVE_COMPLETE: i32 = 7;
+const NATIVE_ERROR: i32 = 8;
+
+#[derive(Clone, Copy, Debug, Default)]
 struct NativeProgress {
     completed: u64,
     total: u64,
     status: i32,
     error_code: i32,
-    speed: u64,
+    connections: u32,
+    received: u64,
+    peer_received: u64,
+}
+
+impl NativeProgress {
+    fn from_bytes(info: &[u8; 924]) -> Self {
+        // Verified against XL_QueryTaskInfo in the installed 25.1.13 SDK and
+        // a throttled range server. Offset 44 is a connection count, NOT B/s.
+        let peer_received = read_u64(info, 60).saturating_add(read_u64(info, 68));
+        Self {
+            status: read_i32(info, 4),
+            error_code: read_i32(info, 8),
+            total: read_u64(info, 12),
+            completed: read_u64(info, 20),
+            connections: read_u32(info, 48),
+            received: read_u64(info, 52).saturating_add(peer_received),
+            peer_received,
+        }
+    }
+}
+
+struct NativeTransferMeter {
+    sampled_at: std::time::Instant,
+    received: u64,
+    peer_received: u64,
+    last_data_at: std::time::Instant,
+    accelerated_at: Option<std::time::Instant>,
+}
+
+impl NativeTransferMeter {
+    fn new(now: std::time::Instant) -> Self {
+        Self {
+            sampled_at: now,
+            received: 0,
+            peer_received: 0,
+            last_data_at: now,
+            accelerated_at: None,
+        }
+    }
+
+    fn sample(
+        &mut self,
+        progress: NativeProgress,
+        has_equity: bool,
+        now: std::time::Instant,
+    ) -> (u64, bool) {
+        let bytes = progress.received.saturating_sub(self.received);
+        let elapsed = now.duration_since(self.sampled_at).as_secs_f64();
+        let speed = if elapsed > 0.0 && progress.status == NATIVE_DOWNLOADING {
+            (bytes as f64 / elapsed) as u64
+        } else {
+            0
+        };
+        if bytes > 0 {
+            self.last_data_at = now;
+        }
+        if has_equity && progress.peer_received > self.peer_received && speed > 0 {
+            self.accelerated_at = Some(now);
+        }
+        self.received = progress.received;
+        self.peer_received = progress.peer_received;
+        self.sampled_at = now;
+        let accelerating = has_equity
+            && progress.status == NATIVE_DOWNLOADING
+            && self
+                .accelerated_at
+                .is_some_and(|at| now.duration_since(at).as_secs() < 5);
+        (speed, accelerating)
+    }
 }
 
 const NATIVE_PROGRESS_FAILURE_LIMIT: u8 = 3;
@@ -1104,7 +1212,11 @@ impl WindowsApi {
             _module: module.0 as usize,
             client_version: plugin.client_version,
             trace_ids: BTreeMap::new(),
+            task_paths: BTreeMap::new(),
             create_p2sp_task: unsafe { symbol(module, b"XL_CreateP2spTask\0")? },
+            redirect_original_resource: unsafe {
+                symbol(module, b"XL_RedirectOriginalResource\0")?
+            },
             delete_task: unsafe { symbol(module, b"XL_DeleteTask\0")? },
             query_task_info: unsafe { symbol(module, b"XL_QueryTaskInfo\0")? },
             set_app_guid: unsafe { symbol(module, b"XL_SetAppGuid\0")? },
@@ -1127,7 +1239,7 @@ impl WindowsApi {
     fn create_p2sp_task(
         &mut self,
         url: &str,
-        _full_path: &std::path::Path,
+        full_path: &std::path::Path,
         display_name: &str,
         save_path: &std::path::Path,
         ref_url: &str,
@@ -1136,8 +1248,23 @@ impl WindowsApi {
         cid: &str,
         gcid: &str,
     ) -> Result<u32, NativeSubmitError> {
-        let _ = (file_size, cid, gcid);
-        let url = wide_string(url);
+        self.release_output(full_path)?;
+        let _ = (file_size, cid);
+        // The SDK hashes the creation URL into its checkpoint identity. Signed
+        // cloud URLs change on every resolution and otherwise produce error 201
+        // when reopening the same file. This URL is only an SDK resource key;
+        // redirect to the current real URL below BEFORE the task can be started.
+        let creation_url = if gcid.is_empty() {
+            url.to_owned()
+        } else {
+            format!(
+                "https://pan.xunlei.com/?gcid={}",
+                url::form_urlencoded::byte_serialize(gcid.to_ascii_lowercase().as_bytes())
+                    .collect::<String>()
+            )
+        };
+        let creation_url = wide_string(&creation_url);
+        let current_url = wide_string(url);
         let referer = wide_string(ref_url);
         let cookie = wide_string("");
         let save_path = wide_os(save_path.as_os_str());
@@ -1145,7 +1272,7 @@ impl WindowsApi {
         let mut task_id = 0u32;
         let result = unsafe {
             (self.create_p2sp_task)(
-                url.as_ptr(),
+                creation_url.as_ptr(),
                 referer.as_ptr(),
                 cookie.as_ptr(),
                 save_path.as_ptr(),
@@ -1157,6 +1284,21 @@ impl WindowsApi {
             return Err(NativeSubmitError::Failed(format!(
                 "迅雷原生任务创建失败（错误码 {result}）"
             )));
+        }
+        // Proxy ABI includes the UTF-16 length (without NUL); the direct SDK
+        // DLL's same-named export has a different, two-argument ABI.
+        if let Err(error) = native_call(
+            unsafe {
+                (self.redirect_original_resource)(
+                    task_id,
+                    current_url.as_ptr(),
+                    (current_url.len() - 1) as u32,
+                )
+            },
+            "迅雷原生任务下载地址更新失败",
+        ) {
+            let _ = unsafe { (self.delete_task)(task_id) };
+            return Err(error);
         }
         let user_agent = c_string(user_agent)?;
         native_call(
@@ -1174,7 +1316,37 @@ impl WindowsApi {
             "迅雷原生任务加速标识设置失败",
         )?;
         self.trace_ids.insert(task_id, trace_id);
+        self.task_paths.insert(full_path.to_owned(), task_id);
         Ok(task_id)
+    }
+
+    fn release_output(&mut self, output: &std::path::Path) -> Result<(), NativeSubmitError> {
+        let Some(id) = self.task_paths.get(output).copied() else {
+            return Ok(());
+        };
+        native_call(unsafe { (self.stop_task)(id) }, "迅雷原生任务暂停失败")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let progress = self.progress(id)?;
+            if matches!(
+                progress.status,
+                NATIVE_STOPPED | NATIVE_COMPLETE | NATIVE_ERROR
+            ) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(NativeSubmitError::Failed(
+                    "迅雷原生任务尚未停止，请稍后重试".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Stop is asynchronous and does not release the SDK's open checkpoint.
+        // DeleteTask releases the handle, but preserves .xltd/.xltd.cfg on disk.
+        native_call(unsafe { (self.delete_task)(id) }, "迅雷原生断点释放失败")?;
+        self.trace_ids.remove(&id);
+        self.task_paths.remove(output);
+        Ok(())
     }
 
     fn enable_vip(&mut self, id: u32, token: &str) -> Result<(), NativeSubmitError> {
@@ -1236,6 +1408,7 @@ impl WindowsApi {
         let _ = unsafe { (self.stop_task)(id) };
         let result = unsafe { (self.delete_task)(id) };
         self.trace_ids.remove(&id);
+        self.task_paths.retain(|_, task_id| *task_id != id);
         native_stale_task_action_call(result, "迅雷原生任务取消失败")
     }
 
@@ -1246,13 +1419,7 @@ impl WindowsApi {
             unsafe { (self.query_task_info)(id, info.as_mut_ptr()) },
             "迅雷原生任务进度暂不可用",
         )?;
-        Ok(NativeProgress {
-            status: read_i32(&info, 4),
-            error_code: read_i32(&info, 8),
-            total: read_u64(&info, 12),
-            completed: read_u64(&info, 20),
-            speed: read_u32(&info, 44) as u64,
-        })
+        Ok(NativeProgress::from_bytes(&info))
     }
 }
 
@@ -1455,18 +1622,57 @@ mod tests {
     }
 
     #[test]
-    fn native_progress_layout_matches_the_current_proxy_abi() {
+    fn native_progress_uses_received_bytes_not_the_sdk_connection_counter() {
+        // Captured from a stopped 16 MiB real SDK download; retained bytes are
+        // a checkpoint, and the historical connection count remains 1.
         let mut info = [0u8; 924];
-        info[4..8].copy_from_slice(&3i32.to_le_bytes());
-        info[8..12].copy_from_slice(&(-7i32).to_le_bytes());
-        info[12..20].copy_from_slice(&122_600_000u64.to_le_bytes());
-        info[20..28].copy_from_slice(&2_500_000u64.to_le_bytes());
-        info[44..48].copy_from_slice(&461_400u32.to_le_bytes());
-        assert_eq!(read_i32(&info, 4), 3);
-        assert_eq!(read_i32(&info, 8), -7);
-        assert_eq!(read_u64(&info, 12), 122_600_000);
-        assert_eq!(read_u64(&info, 20), 2_500_000);
-        assert_eq!(read_u32(&info, 44), 461_400);
+        info[4..8].copy_from_slice(&5i32.to_le_bytes());
+        info[12..20].copy_from_slice(&16_777_216u64.to_le_bytes());
+        info[20..28].copy_from_slice(&1_638_400u64.to_le_bytes());
+        info[44..48].copy_from_slice(&1u32.to_le_bytes());
+        let progress = NativeProgress::from_bytes(&info);
+        assert_eq!(progress.completed, 1_638_400);
+        assert_eq!(progress.received, 0);
+        let now = std::time::Instant::now();
+        let mut meter = NativeTransferMeter::new(now);
+        assert_eq!(
+            meter.sample(progress, true, now + std::time::Duration::from_secs(1)),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn svip_requires_current_non_origin_traffic_and_expires_when_stalled() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let mut meter = NativeTransferMeter::new(now);
+        let mut progress = NativeProgress {
+            status: 3,
+            completed: 20_000_000,
+            received: 600_000,
+            ..Default::default()
+        };
+        // Restored bytes never inflate speed; origin-only traffic is not SVIP.
+        assert_eq!(
+            meter.sample(progress, true, now + Duration::from_secs(2)),
+            (300_000, false)
+        );
+        progress.received += 800_000;
+        progress.peer_received = 800_000;
+        assert_eq!(
+            meter.sample(progress, true, now + Duration::from_secs(4)),
+            (400_000, true)
+        );
+        assert_eq!(
+            meter.sample(progress, true, now + Duration::from_secs(10)),
+            (0, false)
+        );
+        progress.peer_received += 100;
+        progress.received += 100;
+        assert_eq!(
+            meter.sample(progress, false, now + Duration::from_secs(11)),
+            (100, false)
+        );
     }
 
     #[test]
@@ -1602,23 +1808,6 @@ mod tests {
         assert!(!checkpoint_config.exists());
     }
 
-    #[test]
-    fn native_resume_keeps_the_previous_sdk_task_id_after_the_task_is_queued() {
-        let store = TaskStore::open_in_memory().unwrap();
-        let mut task = store
-            .create(crate::NewTask::direct("cloud://xunlei/file-id"))
-            .unwrap();
-        task.status = TaskStatus::Queued;
-        task.aria_gid = None;
-        let options = UriSubmissionOptions {
-            continue_download: true,
-            native_resume_gid: Some("xunlei-native:42".into()),
-            ..Default::default()
-        };
-
-        assert_eq!(prior_native_task_id(&task, &options), Some(42));
-    }
-
     #[cfg(windows)]
     #[test]
     #[ignore = "requires an installed Thunder client"]
@@ -1647,10 +1836,7 @@ mod tests {
         );
         let app_data = std::env::var_os("ALLDOWNLOADER_XUNLEI_SESSION_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("APPDATA").unwrap())
-                    .join("com.alldownloader.desktop")
-            });
+            .expect("use an explicitly isolated session directory for the live test");
         let session_root = app_data.join("cloud-sessions");
         let load_session = || {
             if let Ok(json) = std::env::var("ALLDOWNLOADER_XUNLEI_SESSION_JSON") {
@@ -1668,63 +1854,57 @@ mod tests {
             }
         };
         let http = crate::cloud::ReqwestTransport::new().unwrap();
-        let mut client = crate::cloud::xunlei::XunleiClient::new(load_session(), &http);
-        let root_directory = match client.directory("0") {
-            Ok(directory) => directory,
-            Err(crate::cloud::QuarkError::AuthorizationExpired)
-            | Err(crate::cloud::QuarkError::NotAuthorized)
-            | Err(crate::cloud::QuarkError::WebAuthorizationRequired) => {
-                let credentials =
-                    crate::cloud::DpapiCredentialStore::new(session_root.clone()).unwrap();
-                let credential = crate::cloud::load_password_credential(
-                    &credentials,
-                    crate::cloud::CloudProvider::Xunlei,
-                )
-                .unwrap()
-                .expect("expired live session should have a saved Xunlei password");
-                crate::cloud::commands::recover_provider_password_session(
-                    crate::cloud::CloudProvider::Xunlei,
-                    &credentials,
-                    &http,
-                    &credential,
-                )
-                .expect("saved Xunlei password should silently recover the live session");
-                client = crate::cloud::xunlei::XunleiClient::new(load_session(), &http);
-                client
-                    .directory("0")
-                    .expect("recovered Xunlei account root should be readable")
-            }
-            Err(error) => panic!("current Xunlei account root should be readable: {error:?}"),
-        };
+        let client = crate::cloud::xunlei::XunleiClient::new(load_session(), &http);
+        // This test has no WebView. Prepare its isolated session through the
+        // app's complete recovery flow, including the persistent web profile.
+        let root_directory = client.directory("0").expect(
+            "prepare a current session with the app recovery flow before this SDK-only test",
+        );
         let refreshed_credentials =
             crate::cloud::DpapiCredentialStore::new(session_root.clone()).unwrap();
         refreshed_credentials
             .save("xunlei", &serde_json::to_vec(&client.session()).unwrap())
             .expect("the refreshed live session should be persisted for the download probe");
-        let file = root_directory
-            .items
-            .iter()
-            .filter(|file| matches!(file.kind, crate::cloud::CloudFileKind::File))
-            .find(|file| file.name == "midysj.zip")
-            .or_else(|| {
-                root_directory
-                    .items
-                    .iter()
-                    .filter(|file| {
-                        matches!(file.kind, crate::cloud::CloudFileKind::File)
-                            && file.size.unwrap_or(0) >= 1024 * 1024
-                    })
-                    .max_by_key(|file| file.size.unwrap_or(0))
-            })
-            .expect("current Xunlei account should contain a downloadable test file");
+        let file_id = std::env::var("ALLDOWNLOADER_XUNLEI_FILE_ID").unwrap_or_else(|_| {
+            root_directory
+                .items
+                .iter()
+                .find(|file| {
+                    file.name == "midysj.zip"
+                        && matches!(file.kind, crate::cloud::CloudFileKind::File)
+                })
+                .expect("provide the scoped midysj.zip file ID when it is inside a folder")
+                .id
+                .clone()
+        });
         let download = client
-            .download_with_acceleration(&file.id)
+            .download_with_acceleration(&file_id)
             .expect("Xunlei should return a fresh cloud download contract");
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join(".tools")
-            .join(format!("xunlei-native-live-{}", uuid::Uuid::new_v4()));
+        assert_eq!(
+            download.name, "midysj.zip",
+            "only the scoped test file may be downloaded"
+        );
+        let root = std::env::var_os("ALLDOWNLOADER_XUNLEI_DOWNLOAD_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join(".tools")
+                    .join(format!("xunlei-native-live-{}", uuid::Uuid::new_v4()))
+            });
+        let restore = std::env::var("ALLDOWNLOADER_XUNLEI_RESTORE").as_deref() == Ok("1");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_hash = format!("{:x}", md5::compute(download.url.as_bytes()));
+        if restore {
+            let previous_hash = std::fs::read_to_string(root.join("source-url-hash")).unwrap();
+            eprintln!(
+                "cloud restore URL unchanged: {}",
+                previous_hash == source_hash
+            );
+        } else {
+            std::fs::write(root.join("source-url-hash"), source_hash).unwrap();
+        }
         let output_directory = root.join("downloads");
         std::fs::create_dir_all(&output_directory).unwrap();
         let plugin_config_path = root.join("plugins").join("xunlei-native.json");
@@ -1786,16 +1966,75 @@ mod tests {
         api.enable_vip(task_id, &token)
             .expect("SVIP rule should be accepted");
 
+        if restore {
+            let saved: u64 = std::fs::read_to_string(root.join("verified-checkpoint-bytes"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let started = std::time::Instant::now();
+            let mut checkpoint_checked = false;
+            let mut peer_data = false;
+            let mut last_report = 0;
+            loop {
+                let progress = api.progress(task_id).unwrap();
+                assert_ne!(
+                    progress.status, NATIVE_ERROR,
+                    "restored cloud task failed: {progress:?}"
+                );
+                if progress.total > 0 && !checkpoint_checked {
+                    assert!(
+                        progress.completed >= saved,
+                        "process restart discarded cloud checkpoint"
+                    );
+                    checkpoint_checked = true;
+                }
+                peer_data |= progress.peer_received > 0;
+                let elapsed = started.elapsed().as_secs();
+                if elapsed >= last_report + 10 {
+                    eprintln!(
+                        "cloud restore: completed={}, received={}, peer_received={}, elapsed={}s",
+                        progress.completed, progress.received, progress.peer_received, elapsed
+                    );
+                    last_report = elapsed;
+                }
+                if progress.status == NATIVE_COMPLETE {
+                    assert_eq!(progress.completed, download.size.unwrap());
+                    assert_eq!(
+                        std::fs::metadata(&output_path).unwrap().len(),
+                        progress.completed
+                    );
+                    assert!(
+                        peer_data,
+                        "restored cloud task had no new accelerated resource bytes"
+                    );
+                    eprintln!(
+                        "cloud restore complete: bytes={}, new_received={}, peer_received={}",
+                        progress.completed, progress.received, progress.peer_received
+                    );
+                    api.delete(task_id).unwrap();
+                    return;
+                }
+                assert!(
+                    elapsed < 900,
+                    "restored cloud download timed out: {progress:?}"
+                );
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let paused_at = loop {
             let progress = api
                 .progress(task_id)
                 .expect("native progress should be readable");
-            assert_ne!(progress.status, 1, "native task failed: {progress:?}");
+            assert_ne!(
+                progress.status, NATIVE_ERROR,
+                "native task failed: {progress:?}"
+            );
             if progress.completed >= 512 * 1024 {
                 eprintln!(
-                    "native live progress before pause: {}/{}, status={}, speed={}",
-                    progress.completed, progress.total, progress.status, progress.speed
+                    "native live progress before pause: {}/{}, status={}, received={}",
+                    progress.completed, progress.total, progress.status, progress.received
                 );
                 api.stop(task_id).expect("native task should pause");
                 break progress.completed;
@@ -1806,7 +2045,18 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_secs(1));
         };
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let stopped = loop {
+            let progress = api.progress(task_id).unwrap();
+            if progress.status == NATIVE_STOPPED {
+                break progress;
+            }
+            assert!(
+                std::time::Instant::now() < stop_deadline,
+                "pause was not acknowledged"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
         let resumed_task_id = api
             .create_p2sp_task(
                 &download.url,
@@ -1840,36 +2090,47 @@ mod tests {
         api.enable_vip(resumed_task_id, &resumed_token)
             .expect("SVIP rule should be restored after resume");
         let resume_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut saw_restored_checkpoint = false;
         let resumed_at = loop {
             let progress = api
                 .progress(resumed_task_id)
                 .expect("resumed progress should be readable");
             assert_ne!(
-                progress.status, 1,
+                progress.status, NATIVE_ERROR,
                 "resumed native task failed: {progress:?}"
             );
-            if progress.completed >= paused_at + 512 * 1024 {
+            if progress.total > 0 && !saw_restored_checkpoint {
+                assert!(
+                    progress.completed >= stopped.completed,
+                    "resumed task discarded existing ranges"
+                );
+                saw_restored_checkpoint = true;
+            }
+            if progress.completed >= paused_at + 512 * 1024 && progress.peer_received > 0 {
                 eprintln!(
-                    "native live progress after resume: {}/{}, status={}, speed={}",
-                    progress.completed, progress.total, progress.status, progress.speed
+                    "native live progress after resume: {}/{}, status={}, received={}",
+                    progress.completed, progress.total, progress.status, progress.received
                 );
                 break progress.completed;
             }
             assert!(
                 std::time::Instant::now() < resume_deadline,
-                "native resume made no progress"
+                "native resume produced no current accelerated peer data"
             );
             std::thread::sleep(std::time::Duration::from_secs(1));
         };
         assert!(resumed_at > paused_at);
-        api.stop(resumed_task_id).unwrap();
-
-        let data_path = std::fs::read_dir(&output_directory)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| path.is_file())
-            .expect("native task should create a data file");
+        api.release_output(&output_path).unwrap();
+        std::fs::write(
+            root.join("verified-checkpoint-bytes"),
+            resumed_at.to_string(),
+        )
+        .unwrap();
+        let data_path = if output_path.is_file() {
+            output_path.clone()
+        } else {
+            native_checkpoint_path(&output_path, ".xltd")
+        };
         let mut prefix = vec![0_u8; 64 * 1024];
         let mut file = std::fs::File::open(data_path).unwrap();
         file.read_exact(&mut prefix).unwrap();
@@ -1878,7 +2139,7 @@ mod tests {
             "downloaded prefix must contain real data"
         );
         eprintln!(
-            "native SVIP token, real download data and resume verified in {}",
+            "native token accepted; restored checkpoint and new peer data verified (partial download only) in {}",
             root.display()
         );
     }

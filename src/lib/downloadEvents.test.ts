@@ -34,7 +34,7 @@ describe('upsertTask', () => {
     expect(upsertTask([current], snapshot)).toEqual([{ ...snapshot, files }]);
   });
 
-  it('keeps a confirmed Xunlei SVIP label across incomplete live snapshots', () => {
+  it('clears Xunlei SVIP when the backend no longer confirms current acceleration', () => {
     const current = task({
       source: 'cloud://xunlei/file-1', kind: 'cloud', aria_gid: 'xunlei-native:42',
       statusMessage: '正在使用迅雷svip加速',
@@ -44,10 +44,7 @@ describe('upsertTask', () => {
       progress: 11, statusMessage: undefined,
     });
 
-    expect(upsertTask([current], incomplete)).toEqual([{
-      ...incomplete,
-      statusMessage: '正在使用迅雷svip加速',
-    }]);
+    expect(upsertTask([current], incomplete)).toEqual([incomplete]);
     expect(upsertTask([current], { ...incomplete, status: 'paused' })[0].statusMessage)
       .toBeUndefined();
     expect(upsertTask([current], {
