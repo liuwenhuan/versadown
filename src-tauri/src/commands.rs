@@ -2936,6 +2936,47 @@ fn remove_task_payload_files(store: &TaskStore, task_id: Uuid) -> Result<(), Str
     Ok(())
 }
 
+fn recorded_xunlei_checkpoint_paths(
+    store: &TaskStore,
+    task: &DownloadTask,
+) -> Result<Vec<PathBuf>, String> {
+    if !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref()) {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for file in store.files(task.id).map_err(|error| error.to_string())? {
+        if file.path.trim().is_empty() {
+            continue;
+        }
+        let output = PathBuf::from(file.path);
+        if !output.is_absolute() {
+            return Err(format!(
+                "拒绝删除非绝对路径的迅雷断点文件：{}",
+                output.display()
+            ));
+        }
+        for suffix in [".xltd", ".xltd.cfg"] {
+            let mut checkpoint = output.as_os_str().to_os_string();
+            checkpoint.push(suffix);
+            let checkpoint = PathBuf::from(checkpoint);
+            match fs::symlink_metadata(&checkpoint) {
+                Ok(metadata)
+                    if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {}
+                Ok(_) => return Err(format!("拒绝删除非文件下载项：{}", checkpoint.display())),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "无法读取下载文件 {}：{error}",
+                        checkpoint.display()
+                    ))
+                }
+            }
+            paths.push(checkpoint);
+        }
+    }
+    Ok(paths)
+}
+
 // Engine snapshots can be missing after an interrupted submission/recovery.
 // Use durable membership only when there is no authoritative engine filename;
 // never guess from the display name or recursively remove a shared directory.
@@ -3390,6 +3431,13 @@ fn purge_recycled_task_records(
         }
         tasks.push(task);
     }
+    let native_checkpoints = tasks
+        .iter()
+        .map(|task| recorded_xunlei_checkpoint_paths(store, task))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     if delete_files {
         let directories = directory_payload_directories(store, &tasks)?;
         remove_directory_payload_fallbacks(store, &tasks)?;
@@ -3399,6 +3447,9 @@ fn purge_recycled_task_records(
         for directory in directories {
             remove_empty_download_directory(&directory)?;
         }
+    }
+    for path in native_checkpoints {
+        remove_recorded_download_file(&path)?;
     }
     let linked_cloud_tasks = tasks
         .iter()
@@ -5510,6 +5561,43 @@ mod tests {
             .is_empty());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn permanent_purge_always_removes_xunlei_checkpoints_but_respects_payload_choice() {
+        for delete_files in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let plans = crate::cloud::share::CloudSharePlanStore::new(
+                DpapiCredentialStore::new(directory.path().join("credentials")).unwrap(),
+            );
+            let store = TaskStore::open_in_memory().unwrap();
+            let output = directory.path().join("file.zip");
+            let checkpoint = PathBuf::from(format!("{}.xltd", output.display()));
+            let checkpoint_config = PathBuf::from(format!("{}.xltd.cfg", output.display()));
+            fs::write(&output, b"payload").unwrap();
+            fs::write(&checkpoint, b"checkpoint").unwrap();
+            fs::write(&checkpoint_config, b"config").unwrap();
+
+            let mut task = store
+                .create(NewTask::direct("cloud://xunlei/file-id"))
+                .unwrap();
+            task.aria_gid = Some("xunlei-native:7".into());
+            task = store.apply_transfer_snapshot(task).unwrap();
+            store
+                .upsert_files(
+                    task.id,
+                    &[(0, output.to_string_lossy().into_owned(), 7, 7, true)],
+                )
+                .unwrap();
+            let task = store.fail(task.id, "fixture").unwrap();
+            let task = store.transition(task.id, TaskStatus::Recycled).unwrap();
+
+            purge_recycled_task_records(&store, &plans, &[task.id], delete_files).unwrap();
+
+            assert_eq!(output.exists(), !delete_files);
+            assert!(!checkpoint.exists());
+            assert!(!checkpoint_config.exists());
+        }
+    }
     #[cfg(windows)]
     #[test]
     fn permanent_purge_keeps_a_task_when_its_cloud_share_plan_is_missing() {

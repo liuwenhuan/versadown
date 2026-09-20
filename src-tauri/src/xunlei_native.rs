@@ -4,11 +4,6 @@
 //! an extra Node host.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-
-#[cfg(windows)]
-use hmac::{Hmac, Mac};
-#[cfg(windows)]
-use sha2::Sha256;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
@@ -44,7 +39,7 @@ pub struct XunleiNativeBackend {
     #[cfg(windows)]
     api: std::sync::Mutex<Option<WindowsApi>>,
     #[cfg(windows)]
-    equity_tokens: std::sync::Mutex<BTreeMap<u32, String>>,
+    vip_tokens: std::sync::Mutex<BTreeMap<u32, String>>,
     #[cfg(windows)]
     plugin_config_path: Option<PathBuf>,
 }
@@ -55,7 +50,7 @@ impl Default for XunleiNativeBackend {
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
             #[cfg(windows)]
-            equity_tokens: std::sync::Mutex::new(BTreeMap::new()),
+            vip_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(windows)]
             plugin_config_path: None,
         }
@@ -68,7 +63,7 @@ impl XunleiNativeBackend {
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
             #[cfg(windows)]
-            equity_tokens: std::sync::Mutex::new(BTreeMap::new()),
+            vip_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(windows)]
             plugin_config_path: Some(plugin_config_path),
         }
@@ -80,132 +75,6 @@ impl XunleiNativeBackend {
     pub(crate) fn initialize_plugin_config(&self) {
         #[cfg(windows)]
         let _ = configured_or_installed_plugin_config(self.plugin_config_path.as_deref());
-    }
-}
-
-#[cfg(windows)]
-struct NativeEquityRequest<'a> {
-    access_token: &'a str,
-    user_id: &'a str,
-    peer_id: &'a str,
-    client_version: &'a str,
-    trace_id: &'a str,
-    resource_url: &'a str,
-}
-
-#[cfg(windows)]
-fn request_equity_rule(
-    request: NativeEquityRequest<'_>,
-) -> Result<(String, String), NativeSubmitError> {
-    use crate::cloud::{CloudHttpRequest, CloudHttpTransport, ReqwestTransport};
-
-    const CLIENT_ID: &str = "XW-G4v1H72tgfJym";
-    let rt = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| NativeSubmitError::Incompatible)?
-        .as_secs()
-        .to_string();
-    let nonce = Uuid::new_v4().to_string();
-    let resource_value: String =
-        url::form_urlencoded::byte_serialize(request.resource_url.as_bytes()).collect();
-    let security_seed = format!(
-        "{CLIENT_ID}{}{}{}",
-        request.client_version, request.user_id, rt
-    );
-    let security_key = format!("{:X}", md5::compute(security_seed.as_bytes()))[..16].to_owned();
-    let signature_text = format!(
-        "nonce={nonce}&resource_type=url&resource_value={resource_value}&rt={rt}&scene=download&trial_cost=0&trial_id="
-    );
-    let mut signer = Hmac::<Sha256>::new_from_slice(security_key.as_bytes())
-        .map_err(|_| NativeSubmitError::Incompatible)?;
-    signer.update(signature_text.as_bytes());
-    let signature: String = signer
-        .finalize()
-        .into_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let query = format!(
-        "trace_id={}&resource_type=url&resource_value={resource_value}&scene=download&trial_id=&trial_cost=0&rt={rt}&nonce={nonce}&sign={signature}&user_id={}",
-        url::form_urlencoded::byte_serialize(request.trace_id.as_bytes()).collect::<String>(),
-        url::form_urlencoded::byte_serialize(request.user_id.as_bytes()).collect::<String>()
-    );
-    let headers = BTreeMap::from([
-        ("Content-Type".into(), "application/json".into()),
-        ("X-Guid".into(), request.peer_id.into()),
-        ("X-Peer-Id".into(), request.peer_id.into()),
-        ("X-Client-Id".into(), CLIENT_ID.into()),
-        ("X-Client-Version".into(), request.client_version.into()),
-        (
-            "X-Client-Version-Code".into(),
-            request.client_version.into(),
-        ),
-        ("X-Signature".into(), signature),
-        ("X-Signature-Time".into(), rt),
-        ("X-Signature-Nonce".into(), nonce),
-        (
-            "Authorization".into(),
-            format!("Bearer {}", request.access_token),
-        ),
-    ]);
-    let response = ReqwestTransport::new()
-        .and_then(|http| {
-            http.send(CloudHttpRequest {
-                method: "GET",
-                url: format!("https://api-gateway-pan.xunlei.com/speed-center/v2/rule?{query}"),
-                headers,
-                body: None,
-            })
-        })
-        .map_err(|_| NativeSubmitError::Failed("迅雷会员加速通道网络请求失败".into()))?;
-    if !(200..300).contains(&response.status) {
-        return Err(equity_rule_request_failure(response.status));
-    }
-    let envelope: serde_json::Value =
-        serde_json::from_str(&response.body).map_err(|_| NativeSubmitError::Incompatible)?;
-    let response_code = envelope
-        .get("error_code")
-        .or_else(|| envelope.get("code"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-        });
-    if response_code != Some(0) {
-        let code = envelope
-            .get("error_code")
-            .or_else(|| envelope.get("code"))
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(-1);
-        let message = envelope
-            .get("error")
-            .or_else(|| envelope.get("error_description"))
-            .or_else(|| envelope.get("message"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown");
-        return Err(NativeSubmitError::Failed(format!(
-            "迅雷会员加速权限不可用（代码 {code}: {message}）"
-        )));
-    }
-    Ok((
-        envelope
-            .get("data")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(NativeSubmitError::Incompatible)?
-            .to_owned(),
-        security_key,
-    ))
-}
-
-#[cfg(windows)]
-fn equity_rule_request_failure(status: u16) -> NativeSubmitError {
-    // These status codes mean the endpoint or request shape is no longer
-    // accepted. They are not membership denials or transient server faults,
-    // so continuing to advertise native SVIP support would be misleading.
-    if matches!(status, 400 | 404 | 405 | 410 | 415 | 426 | 501) {
-        NativeSubmitError::Incompatible
-    } else {
-        NativeSubmitError::Failed("迅雷会员加速通道请求失败".into())
     }
 }
 
@@ -225,9 +94,8 @@ impl NativeSubmitError {
 }
 
 impl XunleiNativeBackend {
-    /// Returns `Ok(None)` only when Thunder is not installed or this resolved
-    /// file has no acceleration credential. Both cases deliberately preserve
-    /// the existing aria2 behavior.
+    /// Returns `Ok(None)` when Thunder is not installed or the resolved item
+    /// does not carry the account identity required by the native SDK.
     pub fn submit(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -236,28 +104,17 @@ impl XunleiNativeBackend {
         resolved: &ResolvedCloudDownload,
         options: &UriSubmissionOptions,
     ) -> Result<Option<DownloadTask>, NativeSubmitError> {
-        let Some(access_token) = marker_header(resolved, ACCESS_TOKEN_MARKER_HEADER) else {
-            return Ok(None);
-        };
         let Some(user_id) = marker_header(resolved, USER_ID_MARKER_HEADER) else {
             return Ok(None);
         };
         let Some(peer_id) = marker_header(resolved, PEER_ID_MARKER_HEADER) else {
             return Ok(None);
         };
+        let vip_token = native_vip_token(resolved).map(str::to_owned);
 
         #[cfg(not(windows))]
         {
-            let _ = (
-                app,
-                store,
-                task_id,
-                resolved,
-                options,
-                access_token,
-                user_id,
-                peer_id,
-            );
+            let _ = (app, store, task_id, resolved, options, user_id, peer_id);
             return Ok(None);
         }
 
@@ -302,7 +159,7 @@ impl XunleiNativeBackend {
                 .unwrap_or("Mozilla/5.0");
             let cid = marker_header(resolved, CID_MARKER_HEADER).unwrap_or("");
             let gcid = marker_header(resolved, GCID_MARKER_HEADER).unwrap_or("");
-            let (native_id, client_version) = {
+            let native_id = {
                 let mut api = self
                     .api
                     .lock()
@@ -342,8 +199,17 @@ impl XunleiNativeBackend {
                     cid,
                     gcid,
                 )?;
-                api.start(native_id)?;
-                (native_id, api.client_version.clone())
+                let start_result = (|| {
+                    if let Some(token) = vip_token.as_deref() {
+                        api.enable_vip_with_file_token(native_id, token)?;
+                    }
+                    api.start(native_id)
+                })();
+                if let Err(error) = start_result {
+                    let _ = api.delete(native_id);
+                    return Err(error);
+                }
+                native_id
             };
 
             let mut task = store
@@ -356,12 +222,26 @@ impl XunleiNativeBackend {
                 self.spawn_task_cleanup(native_id);
                 return Ok(Some(task));
             }
+            if let Some(token) = vip_token {
+                self.vip_tokens
+                    .lock()
+                    .map_err(|_| NativeSubmitError::Incompatible)?
+                    .insert(native_id, token);
+            }
             task.name.clone_from(&output_name);
             task.aria_gid = Some(format!("{NATIVE_GID_PREFIX}{native_id}"));
             task.followed_by_gid = None;
             task.status = TaskStatus::Downloading;
             task.error = None;
-            task.status_message = Some("正在启用迅雷加速".into());
+            task.status_message = if self
+                .vip_tokens
+                .lock()
+                .is_ok_and(|tokens| tokens.contains_key(&native_id))
+            {
+                Some("正在启用迅雷加速".into())
+            } else {
+                Some("迅雷SVIP加速凭据不可用，正在使用普通通道".into())
+            };
             task.failure_code = None;
             task.aria_error_code = None;
             task.total_length = resolved.size_hint();
@@ -387,95 +267,8 @@ impl XunleiNativeBackend {
                 native_id,
                 output_path,
             );
-            self.spawn_vip_activation(
-                app.clone(),
-                Arc::clone(store),
-                task_id,
-                native_id,
-                access_token.to_owned(),
-                user_id.to_owned(),
-                peer_id.to_owned(),
-                client_version,
-                resolved.url.clone(),
-            );
             Ok(Some(task))
         }
-    }
-
-    #[cfg(windows)]
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_vip_activation(
-        self: &Arc<Self>,
-        app: AppHandle,
-        store: Arc<TaskStore>,
-        task_id: Uuid,
-        task_native_id: u32,
-        access_token: String,
-        user_id: String,
-        peer_id: String,
-        client_version: String,
-        resource_url: String,
-    ) {
-        let backend = Arc::clone(self);
-        tauri::async_runtime::spawn_blocking(move || {
-            let result = (|| -> Result<(), NativeSubmitError> {
-                let trace_id = {
-                    let mut api = backend
-                        .api
-                        .lock()
-                        .map_err(|_| NativeSubmitError::Incompatible)?;
-                    api.as_mut()
-                        .ok_or(NativeSubmitError::Incompatible)?
-                        .wait_for_trace_id(task_native_id)?
-                };
-                let (encrypted, security_key) = request_equity_rule(NativeEquityRequest {
-                    access_token: &access_token,
-                    user_id: &user_id,
-                    peer_id: &peer_id,
-                    client_version: &client_version,
-                    trace_id: &trace_id,
-                    resource_url: &resource_url,
-                })?;
-                if !store.find(task_id).is_ok_and(|task| {
-                    task.status == TaskStatus::Downloading
-                        && native_id(&task) == Some(task_native_id)
-                }) {
-                    return Err(NativeSubmitError::Failed("迅雷原生任务已暂停".into()));
-                }
-                let mut api = backend
-                    .api
-                    .lock()
-                    .map_err(|_| NativeSubmitError::Incompatible)?;
-                let api = api.as_mut().ok_or(NativeSubmitError::Incompatible)?;
-                let token = api.decrypt_equity_rule(&encrypted, &security_key)?;
-                api.enable_vip(task_native_id, &token)?;
-                backend
-                    .equity_tokens
-                    .lock()
-                    .map_err(|_| NativeSubmitError::Incompatible)?
-                    .insert(task_native_id, token);
-                Ok(())
-            })();
-
-            let Ok(mut task) = store.find(task_id) else {
-                return;
-            };
-            if native_id(&task) != Some(task_native_id) || task.status != TaskStatus::Downloading {
-                return;
-            }
-            task.status_message = match result {
-                // Token acceptance is authorization, not proof of traffic.
-                // Only the monitor may confirm current accelerated transfer.
-                Ok(()) => None,
-                Err(NativeSubmitError::Incompatible) => Some(PLUGIN_UPDATE_MESSAGE.into()),
-                Err(NativeSubmitError::Failed(message)) => {
-                    Some(format!("迅雷加速启用失败，正在使用普通通道：{message}"))
-                }
-            };
-            if let Ok(task) = store.apply_transfer_snapshot(task) {
-                emit_task(&app, &store, &task);
-            }
-        });
     }
 
     pub fn control(
@@ -508,17 +301,16 @@ impl XunleiNativeBackend {
                 match action {
                     DownloadAction::Pause => api.stop(native_id),
                     DownloadAction::Resume => (|| -> Result<(), NativeSubmitError> {
-                        api.start(native_id)?;
                         if let Some(token) = self
-                            .equity_tokens
+                            .vip_tokens
                             .lock()
                             .map_err(|_| NativeSubmitError::Incompatible)?
                             .get(&native_id)
                             .cloned()
                         {
-                            api.enable_vip(native_id, &token)?;
+                            api.enable_vip_with_file_token(native_id, &token)?;
                         }
-                        Ok(())
+                        api.start(native_id)
                     })(),
                     DownloadAction::Cancel => api.delete(native_id),
                 }
@@ -526,7 +318,7 @@ impl XunleiNativeBackend {
             }
 
             if action == DownloadAction::Cancel {
-                if let Ok(mut tokens) = self.equity_tokens.lock() {
+                if let Ok(mut tokens) = self.vip_tokens.lock() {
                     tokens.remove(&native_id);
                 }
             }
@@ -540,7 +332,7 @@ impl XunleiNativeBackend {
                 DownloadAction::Resume => {
                     updated.status = TaskStatus::Downloading;
                     updated.status_message = self
-                        .equity_tokens
+                        .vip_tokens
                         .lock()
                         .is_ok_and(|tokens| tokens.contains_key(&native_id))
                         .then(|| "正在启用迅雷加速".into());
@@ -660,11 +452,11 @@ impl XunleiNativeBackend {
                     .or(task.total_length);
                 task.total_length = total;
                 let now = std::time::Instant::now();
-                let has_equity = {
+                let has_vip_token = {
                     #[cfg(windows)]
                     {
                         backend
-                            .equity_tokens
+                            .vip_tokens
                             .lock()
                             .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
                     }
@@ -673,14 +465,14 @@ impl XunleiNativeBackend {
                         false
                     }
                 };
-                let (speed, accelerating) = meter.sample(native_progress, has_equity, now);
+                let (speed, accelerating) = meter.sample(native_progress, has_vip_token, now);
                 task.completed_length = completed;
                 task.download_speed = speed;
                 task.connections = native_progress.connections;
                 if accelerating {
                     task.status_message = Some("正在使用迅雷svip加速".into());
                 } else if matches!(task.status_message.as_deref(), Some("正在使用迅雷svip加速"))
-                    || (has_equity && task.status_message.as_deref() == Some("正在启用迅雷加速"))
+                    || (has_vip_token && task.status_message.as_deref() == Some("正在启用迅雷加速"))
                 {
                     task.status_message = None;
                 }
@@ -819,6 +611,10 @@ fn marker_header<'a>(resolved: &'a ResolvedCloudDownload, marker: &str) -> Optio
         .map(|(_, value)| value.as_str())
 }
 
+fn native_vip_token(resolved: &ResolvedCloudDownload) -> Option<&str> {
+    marker_header(resolved, ACCELERATION_TOKEN_MARKER_HEADER).filter(|token| !token.is_empty())
+}
+
 fn native_id(task: &DownloadTask) -> Option<u32> {
     native_task_id_from_gid(task.aria_gid.as_deref())
 }
@@ -872,8 +668,6 @@ struct WindowsApi {
     // The native module owns worker threads for the lifetime of the process.
     // Keep the module loaded instead of calling FreeLibrary while they may run.
     _module: usize,
-    client_version: String,
-    trace_ids: BTreeMap<u32, String>,
     task_paths: BTreeMap<PathBuf, u32>,
     create_p2sp_task: XlCreateP2spTask,
     redirect_original_resource: XlRedirectOriginalResource,
@@ -882,7 +676,7 @@ struct WindowsApi {
     set_app_guid: XlSetString,
     set_global_ext_info: XlSetGlobalExtInfo,
     set_origin_connect_count: XlTaskInteger,
-    set_task_equity_token: XlTaskStringKind,
+    enable_dcdn_with_vip_cert: XlTaskStringKind,
     set_task_trace_id: XlTaskStringKind,
     set_task_user_agent: XlTaskString,
     set_token_mode: XlSetInteger,
@@ -980,7 +774,7 @@ impl NativeTransferMeter {
     fn sample(
         &mut self,
         progress: NativeProgress,
-        has_equity: bool,
+        has_vip_token: bool,
         now: std::time::Instant,
     ) -> (u64, bool) {
         let bytes = progress.received.saturating_sub(self.received);
@@ -993,13 +787,13 @@ impl NativeTransferMeter {
         if bytes > 0 {
             self.last_data_at = now;
         }
-        if has_equity && progress.peer_received > self.peer_received && speed > 0 {
+        if has_vip_token && progress.peer_received > self.peer_received && speed > 0 {
             self.accelerated_at = Some(now);
         }
         self.received = progress.received;
         self.peer_received = progress.peer_received;
         self.sampled_at = now;
-        let accelerating = has_equity
+        let accelerating = has_vip_token
             && progress.status == NATIVE_DOWNLOADING
             && self
                 .accelerated_at
@@ -1077,116 +871,6 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 }
 
 #[cfg(windows)]
-fn decrypt_equity_payload(
-    encrypted: &str,
-    security_key: &str,
-) -> Result<String, NativeSubmitError> {
-    use base64::Engine as _;
-    use windows::{
-        core::PCWSTR,
-        Win32::Security::Cryptography::{
-            BCryptCloseAlgorithmProvider, BCryptDecrypt, BCryptDestroyKey,
-            BCryptGenerateSymmetricKey, BCryptOpenAlgorithmProvider, BCryptSetProperty,
-            BCRYPT_AES_ALGORITHM, BCRYPT_ALG_HANDLE, BCRYPT_BLOCK_PADDING, BCRYPT_CHAINING_MODE,
-            BCRYPT_HANDLE, BCRYPT_KEY_HANDLE,
-        },
-    };
-    use zeroize::Zeroize;
-
-    let mut ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(encrypted)
-        .map_err(|_| NativeSubmitError::Incompatible)?;
-    let mut key_bytes = security_key.as_bytes().to_vec();
-    if key_bytes.len() != 16 {
-        ciphertext.zeroize();
-        key_bytes.zeroize();
-        return Err(NativeSubmitError::Incompatible);
-    }
-
-    let mut algorithm = BCRYPT_ALG_HANDLE::default();
-    let open_status = unsafe {
-        BCryptOpenAlgorithmProvider(
-            &mut algorithm,
-            BCRYPT_AES_ALGORITHM,
-            PCWSTR::null(),
-            Default::default(),
-        )
-    };
-    if open_status.0 < 0 {
-        ciphertext.zeroize();
-        key_bytes.zeroize();
-        return Err(NativeSubmitError::Incompatible);
-    }
-
-    let mode_units: Vec<u16> = "ChainingModeCBC".encode_utf16().chain([0]).collect();
-    let mode_bytes = unsafe {
-        std::slice::from_raw_parts(mode_units.as_ptr().cast::<u8>(), mode_units.len() * 2)
-    };
-    let set_status = unsafe {
-        BCryptSetProperty(
-            BCRYPT_HANDLE(algorithm.0),
-            BCRYPT_CHAINING_MODE,
-            mode_bytes,
-            0,
-        )
-    };
-    let mut key = BCRYPT_KEY_HANDLE::default();
-    let key_status = if set_status.0 >= 0 {
-        unsafe { BCryptGenerateSymmetricKey(algorithm, &mut key, None, &key_bytes, 0) }
-    } else {
-        set_status
-    };
-    let result = if key_status.0 >= 0 {
-        let mut iv = key_bytes.clone();
-        let mut plaintext = vec![0u8; ciphertext.len()];
-        let mut plaintext_len = 0u32;
-        let status = unsafe {
-            BCryptDecrypt(
-                key,
-                Some(&ciphertext),
-                None,
-                Some(&mut iv),
-                Some(&mut plaintext),
-                &mut plaintext_len,
-                BCRYPT_BLOCK_PADDING,
-            )
-        };
-        iv.zeroize();
-        if status.0 >= 0 {
-            plaintext.truncate(plaintext_len as usize);
-            let payload: Result<serde_json::Value, _> = serde_json::from_slice(&plaintext);
-            plaintext.zeroize();
-            payload
-                .ok()
-                .and_then(|payload| {
-                    payload
-                        .pointer("/rule/0/id")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|token| !token.is_empty())
-                        .map(str::to_owned)
-                })
-                .ok_or(NativeSubmitError::Incompatible)
-        } else {
-            plaintext.zeroize();
-            Err(NativeSubmitError::Incompatible)
-        }
-    } else {
-        Err(NativeSubmitError::Incompatible)
-    };
-    if !key.0.is_null() {
-        unsafe {
-            let _ = BCryptDestroyKey(key);
-        }
-    }
-    unsafe {
-        let _ = BCryptCloseAlgorithmProvider(algorithm, 0);
-    }
-    ciphertext.zeroize();
-    key_bytes.zeroize();
-    result
-}
-
-#[cfg(windows)]
 impl WindowsApi {
     fn load(
         plugin_config_path: Option<&std::path::Path>,
@@ -1239,8 +923,6 @@ impl WindowsApi {
 
         let mut api = Self {
             _module: module.0 as usize,
-            client_version: plugin.client_version,
-            trace_ids: BTreeMap::new(),
             task_paths: BTreeMap::new(),
             create_p2sp_task: unsafe { symbol(module, b"XL_CreateP2spTask\0")? },
             redirect_original_resource: unsafe {
@@ -1251,7 +933,7 @@ impl WindowsApi {
             set_app_guid: unsafe { symbol(module, b"XL_SetAppGuid\0")? },
             set_global_ext_info: unsafe { symbol(module, b"XL_SetGlobalExtInfo\0")? },
             set_origin_connect_count: unsafe { symbol(module, b"XL_SetOriginConnectCount\0")? },
-            set_task_equity_token: unsafe { symbol(module, b"XL_SetTaskEquityToken\0")? },
+            enable_dcdn_with_vip_cert: unsafe { symbol(module, b"XL_EnableDcdnWithVipCert\0")? },
             set_task_trace_id: unsafe { symbol(module, b"XL_SetTaskTraceID\0")? },
             set_task_user_agent: unsafe { symbol(module, b"XL_SetTaskUserAgent\0")? },
             set_token_mode: unsafe { symbol(module, b"XL_SetTokenMode\0")? },
@@ -1344,7 +1026,6 @@ impl WindowsApi {
             unsafe { (self.set_task_trace_id)(task_id, 0, trace.as_ptr()) },
             "迅雷原生任务加速标识设置失败",
         )?;
-        self.trace_ids.insert(task_id, trace_id);
         self.task_paths.insert(full_path.to_owned(), task_id);
         Ok(task_id)
     }
@@ -1373,15 +1054,18 @@ impl WindowsApi {
         // Stop is asynchronous and does not release the SDK's open checkpoint.
         // DeleteTask releases the handle, but preserves .xltd/.xltd.cfg on disk.
         native_call(unsafe { (self.delete_task)(id) }, "迅雷原生断点释放失败")?;
-        self.trace_ids.remove(&id);
         self.task_paths.remove(output);
         Ok(())
     }
 
-    fn enable_vip(&mut self, id: u32, token: &str) -> Result<(), NativeSubmitError> {
+    fn enable_vip_with_file_token(
+        &mut self,
+        id: u32,
+        token: &str,
+    ) -> Result<(), NativeSubmitError> {
         let token = c_string(token)?;
         native_call(
-            unsafe { (self.set_task_equity_token)(id, -1, token.as_ptr()) },
+            unsafe { (self.enable_dcdn_with_vip_cert)(id, -1, token.as_ptr()) },
             "迅雷会员加速令牌注入失败",
         )
     }
@@ -1410,19 +1094,6 @@ impl WindowsApi {
             "迅雷会员令牌模式设置失败",
         )
     }
-    fn decrypt_equity_rule(
-        &mut self,
-        encrypted: &str,
-        security_key: &str,
-    ) -> Result<String, NativeSubmitError> {
-        decrypt_equity_payload(encrypted, security_key)
-    }
-    fn wait_for_trace_id(&mut self, id: u32) -> Result<String, NativeSubmitError> {
-        self.trace_ids
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| NativeSubmitError::Failed("迅雷原生任务未生成加速标识".into()))
-    }
     fn start(&mut self, id: u32) -> Result<(), NativeSubmitError> {
         native_call(unsafe { (self.start_task)(id) }, "迅雷原生任务启动失败")
     }
@@ -1436,7 +1107,6 @@ impl WindowsApi {
         // for a stale ID restored from an earlier application process.
         let _ = unsafe { (self.stop_task)(id) };
         let result = unsafe { (self.delete_task)(id) };
-        self.trace_ids.remove(&id);
         self.task_paths.retain(|_, task_id| *task_id != id);
         native_stale_task_action_call(result, "迅雷原生任务取消失败")
     }
@@ -1762,35 +1432,10 @@ mod tests {
             .collect()
     }
 
-    #[cfg(windows)]
-    fn request_equity_token(
-        api: &mut WindowsApi,
-        request: NativeEquityRequest<'_>,
-    ) -> Result<String, NativeSubmitError> {
-        let (encrypted, security_key) = request_equity_rule(request)?;
-        api.decrypt_equity_rule(&encrypted, &security_key)
-    }
     #[test]
     fn native_gid_is_not_an_aria_gid() {
         assert!(is_native_gid(Some("xunlei-native:42")));
         assert!(!is_native_gid(Some("0123456789abcdef")));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn rejected_equity_endpoint_shape_requires_a_plugin_update() {
-        assert!(matches!(
-            equity_rule_request_failure(404),
-            NativeSubmitError::Incompatible
-        ));
-        assert!(matches!(
-            equity_rule_request_failure(415),
-            NativeSubmitError::Incompatible
-        ));
-        assert_eq!(
-            equity_rule_request_failure(503).user_message(),
-            "迅雷会员加速通道请求失败"
-        );
     }
 
     #[test]
@@ -1810,6 +1455,23 @@ mod tests {
         };
         let options = resolved.into_uri_submission_options();
         assert!(options.headers.is_empty());
+    }
+
+    #[test]
+    fn native_vip_uses_the_file_acceleration_token() {
+        let resolved = ResolvedCloudDownload {
+            url: "https://cdn.example/file".into(),
+            name: "file.zip".into(),
+            headers: vec![
+                (ACCESS_TOKEN_MARKER_HEADER.into(), "account-token".into()),
+                (
+                    ACCELERATION_TOKEN_MARKER_HEADER.into(),
+                    "file-acceleration-token".into(),
+                ),
+            ],
+        };
+
+        assert_eq!(native_vip_token(&resolved), Some("file-acceleration-token"));
     }
 
     #[test]
@@ -2221,11 +1883,13 @@ mod tests {
                 .id
                 .clone()
         });
+        let expected_name =
+            std::env::var("ALLDOWNLOADER_XUNLEI_FILE_NAME").unwrap_or_else(|_| "midysj.zip".into());
         let download = client
             .download_with_acceleration(&file_id)
             .expect("Xunlei should return a fresh cloud download contract");
         assert_eq!(
-            download.name, "midysj.zip",
+            download.name, expected_name,
             "only the scoped test file may be downloaded"
         );
         let root = std::env::var_os("ALLDOWNLOADER_XUNLEI_DOWNLOAD_ROOT")
@@ -2268,7 +1932,7 @@ mod tests {
                 .expect("Thunder should be installed");
         api.set_identity(&session.user_id, peer_id)
             .expect("native proxy should accept the current Xunlei identity");
-        let output_name = "midysj-native-live.zip";
+        let output_name = "xunlei-native-live.bin";
         let output_path = output_directory.join(output_name);
         eprintln!(
             "native live contract: size={}, cid_len={}, gcid_len={}",
@@ -2290,25 +1954,13 @@ mod tests {
             )
             .expect("official P2SP task should be created");
         eprintln!("native live task id: {task_id}");
+        let token = download
+            .acceleration_token
+            .as_deref()
+            .expect("Xunlei should return the file acceleration token");
+        api.enable_vip_with_file_token(task_id, token)
+            .expect("the file SVIP token should be accepted");
         api.start(task_id).expect("native task should start");
-        let trace_id = api
-            .wait_for_trace_id(task_id)
-            .expect("native task should expose its acceleration trace id");
-        let client_version = api.client_version.clone();
-        let token = request_equity_token(
-            &mut api,
-            NativeEquityRequest {
-                access_token: &session.access_token,
-                user_id: &session.user_id,
-                peer_id,
-                client_version: &client_version,
-                trace_id: &trace_id,
-                resource_url: &download.url,
-            },
-        )
-        .expect("current SVIP account should receive an acceleration rule");
-        api.enable_vip(task_id, &token)
-            .expect("SVIP rule should be accepted");
 
         if restore {
             let saved: u64 = std::fs::read_to_string(root.join("verified-checkpoint-bytes"))
@@ -2414,25 +2066,10 @@ mod tests {
                 download.gcid.as_deref().unwrap_or(""),
             )
             .expect("native task should reopen the existing breakpoint data");
+        api.enable_vip_with_file_token(resumed_task_id, token)
+            .expect("the file SVIP token should be restored before resume");
         api.start(resumed_task_id)
             .expect("recreated native task should resume");
-        let resumed_trace_id = api
-            .wait_for_trace_id(resumed_task_id)
-            .expect("resumed native task should expose an acceleration trace id");
-        let resumed_token = request_equity_token(
-            &mut api,
-            NativeEquityRequest {
-                access_token: &session.access_token,
-                user_id: &session.user_id,
-                peer_id,
-                client_version: &client_version,
-                trace_id: &resumed_trace_id,
-                resource_url: &download.url,
-            },
-        )
-        .expect("resumed SVIP task should receive a fresh acceleration rule");
-        api.enable_vip(resumed_task_id, &resumed_token)
-            .expect("SVIP rule should be restored after resume");
         let resume_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
         let mut saw_restored_checkpoint = false;
         let resumed_at = loop {

@@ -30,6 +30,26 @@ mod tests {
         test_support::{entry, Http},
         *,
     };
+
+    #[test]
+    fn native_identity_markers_are_shared_by_drive_and_share_downloads() {
+        let credentials = credentials();
+        let session: XunleiSession =
+            serde_json::from_slice(&credentials.load("xunlei").unwrap().unwrap()).unwrap();
+
+        let markers = xunlei_native_identity_markers(&session);
+
+        assert!(markers.iter().any(|(name, value)| {
+            name == crate::xunlei_native::ACCESS_TOKEN_MARKER_HEADER && value == "current-access"
+        }));
+        assert!(markers.iter().any(|(name, value)| {
+            name == crate::xunlei_native::USER_ID_MARKER_HEADER && !value.is_empty()
+        }));
+        assert!(markers.iter().any(|(name, value)| {
+            name == crate::xunlei_native::PEER_ID_MARKER_HEADER && !value.is_empty()
+        }));
+    }
+
     #[test]
     fn xunlei_share_http_challenge_without_json_preserves_authorization_error() {
         struct StatusHttp(u16);
@@ -935,6 +955,7 @@ impl XunleiShareAdapter<'_> {
         self.credentials.save("xunlei", &refreshed)?;
         let download = result?;
         let mut headers = xunlei_cdn_headers(&client.session().profile.user_agent);
+        headers.extend(xunlei_native_identity_markers(&client.session()));
         if let Some(token) = download.acceleration_token {
             headers.push((
                 crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER.into(),
@@ -1114,6 +1135,29 @@ fn xunlei_acceleration_token(file: &Value) -> Result<Option<String>, QuarkError>
         .map(str::to_owned)
         .map(Some)
         .ok_or(QuarkError::InvalidResponse)
+}
+
+pub(crate) fn xunlei_native_identity_markers(session: &XunleiSession) -> Vec<(String, String)> {
+    let peer_id = if session.web_context.peer_id.is_empty() {
+        if session.web_context.device_id.is_empty() {
+            session.profile.device_id.clone()
+        } else {
+            session.web_context.device_id.clone()
+        }
+    } else {
+        session.web_context.peer_id.clone()
+    };
+    vec![
+        (
+            crate::xunlei_native::ACCESS_TOKEN_MARKER_HEADER.into(),
+            session.access_token.clone(),
+        ),
+        (
+            crate::xunlei_native::USER_ID_MARKER_HEADER.into(),
+            session.user_id.clone(),
+        ),
+        (crate::xunlei_native::PEER_ID_MARKER_HEADER.into(), peer_id),
+    ]
 }
 
 impl ShareInspect for XunleiShareAdapter<'_> {

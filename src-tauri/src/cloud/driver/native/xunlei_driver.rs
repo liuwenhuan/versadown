@@ -4,6 +4,34 @@ pub(super) struct XunleiDriver<'a> {
     pub(super) http: HttpRef<'a>,
 }
 impl ProviderBackend for XunleiDriver<'_> {}
+
+fn append_native_download_markers(
+    headers: &mut Vec<(String, String)>,
+    download: &xunlei::XunleiDownload,
+) {
+    if let Some(token) = &download.acceleration_token {
+        headers.push((
+            crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER.into(),
+            token.clone(),
+        ));
+    }
+    if let Some(size) = download.size {
+        headers.push((
+            crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER.into(),
+            size.to_string(),
+        ));
+    }
+    if let Some(cid) = &download.cid {
+        headers.push((crate::xunlei_native::CID_MARKER_HEADER.into(), cid.clone()));
+    }
+    if let Some(gcid) = &download.gcid {
+        headers.push((
+            crate::xunlei_native::GCID_MARKER_HEADER.into(),
+            gcid.clone(),
+        ));
+    }
+}
+
 impl DriveOps for XunleiDriver<'_> {
     fn account(&mut self) -> Result<CloudAccount, CloudError> {
         let provider = CloudProvider::Xunlei;
@@ -127,36 +155,8 @@ impl DownloadOps for XunleiDriver<'_> {
             if session.profile.is_modern_web() {
                 headers.push(("Referer".into(), "https://pan.xunlei.com/".into()));
             }
-            let peer_id = if session.web_context.peer_id.is_empty() {
-                if session.web_context.device_id.is_empty() {
-                    session.profile.device_id.clone()
-                } else {
-                    session.web_context.device_id.clone()
-                }
-            } else {
-                session.web_context.peer_id.clone()
-            };
-            headers.push((
-                crate::xunlei_native::ACCESS_TOKEN_MARKER_HEADER.into(),
-                session.access_token.clone(),
-            ));
-            headers.push((
-                crate::xunlei_native::USER_ID_MARKER_HEADER.into(),
-                session.user_id.clone(),
-            ));
-            headers.push((crate::xunlei_native::PEER_ID_MARKER_HEADER.into(), peer_id));
-            if let Some(size) = download.size {
-                headers.push((
-                    crate::xunlei_native::CONTENT_LENGTH_MARKER_HEADER.into(),
-                    size.to_string(),
-                ));
-            }
-            if let Some(cid) = download.cid {
-                headers.push((crate::xunlei_native::CID_MARKER_HEADER.into(), cid));
-            }
-            if let Some(gcid) = download.gcid {
-                headers.push((crate::xunlei_native::GCID_MARKER_HEADER.into(), gcid));
-            }
+            headers.extend(xunlei::xunlei_native_identity_markers(&session));
+            append_native_download_markers(&mut headers, &download);
             Ok(ResolvedCloudDownload {
                 url: download.url,
                 name: download.name,
@@ -232,5 +232,30 @@ impl UploadOps for XunleiDriver<'_> {
         s.with_upload_session(CloudProvider::Xunlei, &h, |store| {
             with_xunlei_client(store, &h, |client| client.upload_file(&parent_id, &path))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_markers_preserve_the_file_acceleration_token() {
+        let download = xunlei::XunleiDownload {
+            url: "https://cdn.example/file".into(),
+            name: "file.zip".into(),
+            acceleration_token: Some("file-acceleration-token".into()),
+            cid: Some("cid".into()),
+            gcid: Some("gcid".into()),
+            size: Some(42),
+        };
+        let mut headers = Vec::new();
+
+        append_native_download_markers(&mut headers, &download);
+
+        assert!(headers.iter().any(|(name, value)| {
+            name == crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER
+                && value == "file-acceleration-token"
+        }));
     }
 }
