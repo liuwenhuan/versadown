@@ -465,17 +465,11 @@ impl XunleiNativeBackend {
                         false
                     }
                 };
-                let (speed, accelerating) = meter.sample(native_progress, has_vip_token, now);
+                let (speed, svip_confirmed) = meter.sample(native_progress, has_vip_token, now);
                 task.completed_length = completed;
                 task.download_speed = speed;
                 task.connections = native_progress.connections;
-                if accelerating {
-                    task.status_message = Some("正在使用迅雷svip加速".into());
-                } else if matches!(task.status_message.as_deref(), Some("正在使用迅雷svip加速"))
-                    || (has_vip_token && task.status_message.as_deref() == Some("正在启用迅雷加速"))
-                {
-                    task.status_message = None;
-                }
+                update_svip_status_message(&mut task.status_message, has_vip_token, svip_confirmed);
                 task.progress = total
                     .filter(|total| *total > 0)
                     .map(|total| ((completed.saturating_mul(100) / total).min(100)) as u8)
@@ -757,7 +751,8 @@ struct NativeTransferMeter {
     received: u64,
     peer_received: u64,
     last_data_at: std::time::Instant,
-    accelerated_at: Option<std::time::Instant>,
+    has_baseline: bool,
+    svip_confirmed: bool,
 }
 
 impl NativeTransferMeter {
@@ -767,7 +762,8 @@ impl NativeTransferMeter {
             received: 0,
             peer_received: 0,
             last_data_at: now,
-            accelerated_at: None,
+            has_baseline: false,
+            svip_confirmed: false,
         }
     }
 
@@ -777,6 +773,13 @@ impl NativeTransferMeter {
         has_vip_token: bool,
         now: std::time::Instant,
     ) -> (u64, bool) {
+        if !self.has_baseline {
+            self.received = progress.received;
+            self.peer_received = progress.peer_received;
+            self.sampled_at = now;
+            self.has_baseline = true;
+            return (0, false);
+        }
         let bytes = progress.received.saturating_sub(self.received);
         let elapsed = now.duration_since(self.sampled_at).as_secs_f64();
         let speed = if elapsed > 0.0 && progress.status == NATIVE_DOWNLOADING {
@@ -787,18 +790,37 @@ impl NativeTransferMeter {
         if bytes > 0 {
             self.last_data_at = now;
         }
-        if has_vip_token && progress.peer_received > self.peer_received && speed > 0 {
-            self.accelerated_at = Some(now);
+        if has_vip_token && progress.peer_received > self.peer_received && bytes > 0 {
+            self.svip_confirmed = true;
+        } else if !has_vip_token {
+            self.svip_confirmed = false;
         }
         self.received = progress.received;
         self.peer_received = progress.peer_received;
         self.sampled_at = now;
-        let accelerating = has_vip_token
-            && progress.status == NATIVE_DOWNLOADING
-            && self
-                .accelerated_at
-                .is_some_and(|at| now.duration_since(at).as_secs() < 5);
-        (speed, accelerating)
+        (speed, self.svip_confirmed)
+    }
+}
+
+fn update_svip_status_message(
+    message: &mut Option<String>,
+    has_vip_token: bool,
+    svip_confirmed: bool,
+) {
+    if has_vip_token {
+        *message = Some(
+            if svip_confirmed {
+                "正在使用迅雷svip加速"
+            } else {
+                "正在启用迅雷加速"
+            }
+            .into(),
+        );
+    } else if matches!(
+        message.as_deref(),
+        Some("正在启用迅雷加速" | "正在使用迅雷svip加速")
+    ) {
+        *message = None;
     }
 }
 
@@ -1495,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn svip_requires_current_non_origin_traffic_and_expires_when_stalled() {
+    fn svip_confirmation_survives_transient_native_status_for_the_same_task() {
         use std::time::{Duration, Instant};
         let now = Instant::now();
         let mut meter = NativeTransferMeter::new(now);
@@ -1505,10 +1527,11 @@ mod tests {
             received: 600_000,
             ..Default::default()
         };
-        // Restored bytes never inflate speed; origin-only traffic is not SVIP.
+        // The first sample establishes a baseline. Historical bytes from a
+        // restored task must not become current speed or SVIP evidence.
         assert_eq!(
             meter.sample(progress, true, now + Duration::from_secs(2)),
-            (300_000, false)
+            (0, false)
         );
         progress.received += 800_000;
         progress.peer_received = 800_000;
@@ -1516,16 +1539,94 @@ mod tests {
             meter.sample(progress, true, now + Duration::from_secs(4)),
             (400_000, true)
         );
+
+        // The SDK can briefly report a connecting/scheduling state while the
+        // same native task remains active. That instantaneous state must not
+        // revoke an already observed SVIP transfer.
+        progress.status = 1;
+        assert_eq!(
+            meter.sample(progress, true, now + Duration::from_secs(5)),
+            (0, true)
+        );
+
+        progress.status = NATIVE_DOWNLOADING;
         assert_eq!(
             meter.sample(progress, true, now + Duration::from_secs(10)),
+            (0, true)
+        );
+    }
+
+    #[test]
+    fn svip_confirmation_does_not_cross_native_monitor_lifetimes() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let progress = NativeProgress {
+            status: NATIVE_DOWNLOADING,
+            received: 512_000,
+            peer_received: 512_000,
+            ..Default::default()
+        };
+
+        let mut first_task = NativeTransferMeter::new(now);
+        assert_eq!(
+            first_task.sample(progress, true, now + Duration::from_secs(1)),
             (0, false)
         );
-        progress.peer_received += 100;
-        progress.received += 100;
         assert_eq!(
-            meter.sample(progress, false, now + Duration::from_secs(11)),
-            (100, false)
+            first_task.sample(
+                NativeProgress {
+                    status: NATIVE_DOWNLOADING,
+                    received: 640_000,
+                    peer_received: 640_000,
+                    ..Default::default()
+                },
+                true,
+                now + Duration::from_secs(2),
+            ),
+            (128_000, true)
         );
+
+        let mut resumed_task = NativeTransferMeter::new(now + Duration::from_secs(2));
+        assert_eq!(
+            resumed_task.sample(
+                NativeProgress {
+                    status: NATIVE_DOWNLOADING,
+                    received: 512_000,
+                    peer_received: 512_000,
+                    ..Default::default()
+                },
+                true,
+                now + Duration::from_secs(3),
+            ),
+            (0, false)
+        );
+        assert_eq!(
+            resumed_task.sample(
+                NativeProgress {
+                    status: NATIVE_DOWNLOADING,
+                    received: 768_000,
+                    peer_received: 768_000,
+                    ..Default::default()
+                },
+                true,
+                now + Duration::from_secs(4),
+            ),
+            (256_000, true)
+        );
+    }
+
+    #[test]
+    fn svip_status_message_follows_the_current_native_task_lifecycle() {
+        let mut message = Some("正在启用迅雷加速".to_string());
+
+        update_svip_status_message(&mut message, true, false);
+        assert_eq!(message.as_deref(), Some("正在启用迅雷加速"));
+
+        update_svip_status_message(&mut message, true, true);
+        assert_eq!(message.as_deref(), Some("正在使用迅雷svip加速"));
+
+        update_svip_status_message(&mut message, false, false);
+        assert!(message.is_none());
     }
 
     #[test]
