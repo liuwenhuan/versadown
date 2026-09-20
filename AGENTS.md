@@ -24,9 +24,10 @@
 | 下载核心、网盘连接器、跨前后端契约或共享基础设施 | 相关前后端定向测试 | 全量测试；除非下列条件满足 |
 
 - 默认使用增量和模块化构建：日常可运行验证使用 `pnpm run build:windows:quick`；正式二进制使用 `pnpm run build:windows:release`；安装包使用 `pnpm run build:windows:installer`。不要以验证、提交或合并为由反复执行完整 Release 构建。
+- **二进制构建模式硬性开关**：用户只说“生成二进制”“编译二进制”或“生成 `.exe`”时，必须执行快速构建（`scripts/build-windows.ps1 -Mode Quick` 或等效的 quick 命令）。只有用户在**当前请求**明确写出“发布版”“Release 版本”“Release 构建”或“安装包”时，才允许执行完整 Release 构建。严禁调用未带 `-Mode Quick` 的 `scripts/build-windows.ps1`，因为该脚本默认是 Release 模式。
 - 全量前端或 Rust 测试仅在以下任一情况运行：用户明确要求全量测试/完整回归/发布前全量验收；改动横跨多个独立子系统且定向验证无法覆盖；或定向测试暴露共享基础设施风险。
 - 前端 Vitest 必须排除历史工作树：`--exclude '.worktrees/**'`。
-- 只有用户在**当前请求**明确要求“生成二进制”“编译二进制”“生成 `.exe`”或同等发布指令时，才可运行 `scripts/build-windows.ps1`、`cargo build --release`、`tauri build` 或其他原生发布构建。发布构建是构建验证，不替代定向测试。
+- 只有用户在**当前请求**明确要求“生成二进制”“编译二进制”“生成 `.exe`”或同等发布指令时，才可运行原生二进制构建；除非同时满足上一条的明确 Release 授权，否则只能运行快速构建，禁止 `cargo build --release`、`tauri build`、`scripts/build-windows.ps1`（不带 `-Mode Quick`）及任何其他完整 Release 编译。二进制构建不替代定向测试。
 - 汇报时只列出实际运行的命令与结果；扩大验证范围前，先说明具体风险和原因。
 
 ## 命令与工具链
