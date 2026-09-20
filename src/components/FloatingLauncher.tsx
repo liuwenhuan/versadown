@@ -1,4 +1,6 @@
 import { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent, useRef, useState, useSyncExternalStore } from 'react';
+import darkMintIcon from '../assets/launcher/dark_mint.svg';
+import mintWhiteIcon from '../assets/launcher/mint_white.svg';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 import type { ScanDownloadResult } from '../lib/types';
 
@@ -38,14 +40,7 @@ function isTorrentFile(file: File): boolean {
 }
 
 function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
-  const shell = variant === 'dark' ? '#2e3239' : '#8bc2b3';
-  const chevron = variant === 'dark' ? '#c4e3d1' : '#ffffff';
-  return (
-    <svg className="launcher-mark" viewBox="0 0 128 128" aria-hidden="true" focusable="false">
-      <path className="launcher-mark-shell" d="M64 10 112 37.5v53L64 118 16 90.5v-53Z" fill={shell} stroke="none" />
-      <path className="launcher-mark-chevron" d="M38 49.5 64 64.5l26-15v9L64 73.5l-26-15Zm0 19L64 83.5l26-15v9L64 92.5l-26-15Z" fill={chevron} stroke="none" />
-    </svg>
-  );
+  return <img className="launcher-mark" src={variant === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" draggable={false} />;
 }
 
 export function FloatingLauncher({ onScan, onActivateTaskList, onDroppedInput, onStageDroppedTorrent, onDragStart, onDragMove, onDragEnd, onPrimaryClick, onContextMenu }: FloatingLauncherProps) {

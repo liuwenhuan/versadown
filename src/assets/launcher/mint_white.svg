@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="gTop" x1="30%" y1="0%" x2="70%" y2="100%">
+      <stop offset="0%" stop-color="#C4DED4"/><stop offset="100%" stop-color="#ACC6BE"/>
+    </linearGradient>
+    <linearGradient id="gLeft" x1="0%" y1="10%" x2="100%" y2="90%">
+      <stop offset="0%" stop-color="#ACC6BE"/><stop offset="100%" stop-color="#E6F2EC"/>
+    </linearGradient>
+    <linearGradient id="gRight" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#E6F2EC"/><stop offset="100%" stop-color="#9EC4B8"/>
+    </linearGradient>
+    <linearGradient id="gRim" x1="30%" y1="0%" x2="70%" y2="100%">
+      <stop offset="0%" stop-color="#D6EAE2"/><stop offset="100%" stop-color="#ACC6BE"/>
+    </linearGradient>
+    <clipPath id="hexClip"><path d="M 480.155,158.776 Q 512.000,140.390 543.845,158.776 L 801.978,307.809 Q 833.823,326.195 833.823,362.967 L 833.823,661.033 Q 833.823,697.805 801.978,716.191 L 543.845,865.224 Q 512.000,883.610 480.155,865.224 L 222.022,716.191 Q 190.177,697.805 190.177,661.033 L 190.177,362.967 Q 190.177,326.195 222.022,307.809 Z"/></clipPath>
+    <clipPath id="faceL"><path d="M 175.012,317.440 L 175.012,706.560 L 512.000,901.120 L 512.000,512.000 Z"/></clipPath>
+    <clipPath id="faceR"><path d="M 848.988,317.440 L 848.988,706.560 L 512.000,901.120 L 512.000,512.000 Z"/></clipPath>
+  </defs>
+  <path d="M 476.616,143.309 Q 512.000,122.880 547.384,143.309 L 813.604,297.011 Q 848.988,317.440 848.988,358.298 L 848.988,665.702 Q 848.988,706.560 813.604,726.989 L 547.384,880.691 Q 512.000,901.120 476.616,880.691 L 210.396,726.989 Q 175.012,706.560 175.012,665.702 L 175.012,358.298 Q 175.012,317.440 210.396,297.011 Z" fill="url(#gRim)"/>
+  <g clip-path="url(#hexClip)">
+    <path d="M 175.012,317.440 L 512.000,122.880 L 848.988,317.440 L 512.000,512.000 Z" fill="url(#gTop)"/>
+    <path d="M 175.012,317.440 L 175.012,706.560 L 512.000,901.120 L 512.000,512.000 Z" fill="url(#gLeft)"/>
+    <path d="M 848.988,317.440 L 848.988,706.560 L 512.000,901.120 L 512.000,512.000 Z" fill="url(#gRight)"/>
+    <g clip-path="url(#faceL)">
+      <path d="M 333.396,492.544 L 512.000,595.661 L 690.604,492.544 L 690.604,408.883 L 512.000,512.000 L 333.396,408.883 Z" fill="#FFFFFF"/>
+      <path d="M 333.396,644.301 L 512.000,747.418 L 690.604,644.301 L 690.604,560.640 L 512.000,663.757 L 333.396,560.640 Z" fill="#FFFFFF"/>
+    </g>
+    <g clip-path="url(#faceR)">
+      <path d="M 333.396,492.544 L 512.000,595.661 L 690.604,492.544 L 690.604,408.883 L 512.000,512.000 L 333.396,408.883 Z" fill="#F4FAF6"/>
+      <path d="M 333.396,644.301 L 512.000,747.418 L 690.604,644.301 L 690.604,560.640 L 512.000,663.757 L 333.396,560.640 Z" fill="#F4FAF6"/>
+    </g>
+  </g>
+</svg>

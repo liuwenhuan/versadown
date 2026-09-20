@@ -539,7 +539,7 @@ it('opens a unified task window and parses a typed download link immediately', a
   expect(state.parse).toHaveBeenCalledWith('magnet:?xt=urn:btih:abc', undefined, true);
 });
 
-it('uses the dark launcher graphic and vector icons in the primary navigation', async () => {
+it('uses the supplied dark SVG icon and vector icons in the primary navigation', async () => {
   const previousTheme = getThemeMode();
   setThemeMode('deep-ocean');
   const app = render(<App />);
@@ -548,7 +548,7 @@ it('uses the dark launcher graphic and vector icons in the primary navigation', 
     await screen.findByRole('heading', { name: '万能下载' });
     const brandMark = document.querySelector('.brand-mark');
     expect(brandMark).toHaveAttribute('data-icon-variant', 'dark');
-    expect(brandMark?.querySelector('img')).toHaveAttribute('src', expect.stringContaining('dark_mint'));
+    expect(brandMark?.querySelector('img')).toHaveAttribute('src', expect.stringContaining('dark_mint.svg'));
 
     const navigation = screen.getByRole('navigation', { name: '主导航' });
     for (const button of within(navigation).getAllByRole('button')) {
