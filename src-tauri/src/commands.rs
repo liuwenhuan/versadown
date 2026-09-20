@@ -1596,6 +1596,11 @@ fn aggregate_cloud_directory_folder(
             .all(|item| item.status == TaskStatus::Completed);
     let status = if group.status == TaskStatus::Recycled || all_linked_recycled {
         TaskStatus::Recycled
+    } else if group.status == TaskStatus::Cancelled {
+        // Cancellation is durable user intent. Native/provider cleanup may
+        // still be finishing in the background, but an active child must not
+        // make the cancelled directory appear queued or downloading again.
+        TaskStatus::Cancelled
     } else if group.status == TaskStatus::Paused && !all_completed {
         TaskStatus::Paused
     } else if has_active {
@@ -1625,8 +1630,6 @@ fn aggregate_cloud_directory_folder(
             .find(|status| leaves.iter().any(|item| item.status == *status))
             .unwrap_or(TaskStatus::Queued)
         }
-    } else if group.status == TaskStatus::Cancelled {
-        TaskStatus::Cancelled
     } else if all_completed {
         TaskStatus::Completed
     } else if has_failure {
@@ -4424,6 +4427,46 @@ mod tests {
             project_cloud_directory_groups(&store, store.list().unwrap(), Some("terminal"))
                 .unwrap();
         assert!(terminal_scope.is_empty());
+    }
+
+    #[test]
+    fn cancelled_cloud_directory_group_is_not_projected_as_queued_by_an_active_child() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Xunlei,
+                    "cloud://xunlei/directory",
+                    "迅雷目录",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "cloud://xunlei/file",
+                    &["迅雷目录"],
+                    "file.zip",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap()[0].clone();
+        let task = store
+            .create(NewTask::direct("cloud://xunlei/file"))
+            .unwrap();
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Queued,
+                total_length: Some(100),
+                ..task.clone()
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+            .unwrap();
+        store.cancel_cloud_directory_group(group.id).unwrap();
+
+        let root = cloud_directory_group_queue_task(&store, group.id).unwrap();
+
+        assert_eq!(root.status, TaskStatus::Cancelled);
     }
 
     #[test]

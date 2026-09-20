@@ -236,6 +236,11 @@ fn sdk_resume_worker() {
             "fresh process restored {saved} bytes and completed with SDK state {}",
             complete.status
         );
+        let delete_started = Instant::now();
         api.delete(id).unwrap();
+        assert!(
+            delete_started.elapsed() < Duration::from_secs(10),
+            "native task deletion must not wait behind SDK server startup"
+        );
     }
 }

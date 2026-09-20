@@ -295,7 +295,19 @@ impl CloudDownloadDispatch {
         id: Uuid,
         action: DownloadAction,
     ) -> Result<Option<DownloadTask>, QuarkError> {
-        let _guard = self.submission_lock(id).await;
+        // A native submission may already be inside a foreign SDK call. Let
+        // cancellation invalidate that worker immediately; Xunlei's submit
+        // path rechecks the durable state before publishing its result.
+        let skip_submission_wait = action == DownloadAction::Cancel
+            && store.find(id).is_ok_and(|task| {
+                task.source.starts_with("cloud://xunlei/")
+                    || task.source.starts_with("cloud-share://xunlei/")
+            });
+        let _guard = if skip_submission_wait {
+            None
+        } else {
+            Some(self.submission_lock(id).await)
+        };
         let mut task = store.find(id).map_err(|_| QuarkError::Storage)?;
         let refreshing_cloud_url = cloud_task_requires_provider_dispatch(&task)
             && task.failure_code.as_deref() == Some(CLOUD_URL_REFRESHING);
@@ -557,6 +569,29 @@ mod tests {
             options.native_resume_gid.as_deref(),
             Some("xunlei-native:42")
         );
+    }
+
+    #[tokio::test]
+    async fn queued_xunlei_cancel_does_not_wait_for_a_blocked_native_submission() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+        dispatch.prepare_expected(&store, &task).await.unwrap();
+        let _blocked_submission = dispatch.submission_lock(task.id).await;
+
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            dispatch.control_unsubmitted(&store, task.id, DownloadAction::Cancel),
+        )
+        .await
+        .expect("Xunlei cancellation must be persisted before native submission returns")
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Cancelled);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 //! Windows-only bridge to the native task API shipped with an installed
-//! Thunder client. It loads the official proxy DLL, whose isolated SDK server
-//! owns P2SP tasks; neither `Thunder.exe` nor an extra Node host is started.
+//! Thunder client. It loads a private runtime copy of the official proxy DLL;
+//! P2SP tasks use the official SDK service without starting `Thunder.exe` or
+//! an extra Node host.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
@@ -348,6 +349,13 @@ impl XunleiNativeBackend {
             let mut task = store
                 .find(task_id)
                 .map_err(|_| NativeSubmitError::Failed("下载任务已不存在".into()))?;
+            if task.status != TaskStatus::Queued {
+                // Cancellation can deliberately bypass a blocked native
+                // submission. Never publish this late SDK result over the
+                // user's durable terminal state.
+                self.spawn_task_cleanup(native_id);
+                return Ok(Some(task));
+            }
             task.name.clone_from(&output_name);
             task.aria_gid = Some(format!("{NATIVE_GID_PREFIX}{native_id}"));
             task.followed_by_gid = None;
@@ -570,6 +578,26 @@ impl XunleiNativeBackend {
             }
             Ok(updated)
         }
+    }
+
+    #[cfg(windows)]
+    fn spawn_task_cleanup(self: &Arc<Self>, native_id: u32) {
+        let backend = Arc::clone(self);
+        tauri::async_runtime::spawn_blocking(move || {
+            let Ok(mut api) = backend.api.lock() else {
+                return;
+            };
+            // A persisted SDK id from an earlier application process is not
+            // safe to delete: the new process may have reused that numeric id
+            // for another task. Only clean tasks owned by this SDK instance.
+            if let Some(api) = api.as_mut() {
+                if api.task_paths.values().any(|id| *id == native_id) {
+                    if let Err(error) = api.delete(native_id) {
+                        eprintln!("迅雷原生任务后台清理失败：{}", error.user_message());
+                    }
+                }
+            }
+        });
     }
 
     fn spawn_progress_monitor(
@@ -1175,6 +1203,7 @@ impl WindowsApi {
         let Some(plugin) = configured_or_installed_plugin_config(plugin_config_path) else {
             return Ok(None);
         };
+        let plugin = isolated_plugin_config(plugin_config_path, plugin)?;
         let wide_path = wide_os(plugin.sdk_path.as_os_str());
         let module = unsafe {
             LoadLibraryExW(
@@ -1567,9 +1596,171 @@ fn sdk_path_from_install_location(install_location: &std::path::Path) -> Option<
     is_download_sdk(&path).then_some(path)
 }
 
+#[cfg(windows)]
+const OFFICIAL_SDK_SERVER_NAME: &str = "DownloadSDKServer.exe";
+#[cfg(windows)]
+const ISOLATED_SDK_SERVER_NAME: &str = "AllDownSDKServer.exe";
+
+#[cfg(windows)]
+fn patch_proxy_server_name(image: &mut [u8]) -> Result<(), NativeSubmitError> {
+    // The official proxy kills every process named DownloadSDKServer.exe and
+    // then polls for up to five minutes before starting its broker. Thunder
+    // supervises that same process, so both clients otherwise fight forever.
+    // Patch only the private runtime copy; the installed official files remain
+    // byte-for-byte untouched. An unknown proxy layout is a plugin update,
+    // never a best-effort binary rewrite.
+    let official = OFFICIAL_SDK_SERVER_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let private = ISOLATED_SDK_SERVER_NAME
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    if private.len() > official.len() {
+        return Err(NativeSubmitError::Incompatible);
+    }
+    let matches = image
+        .windows(official.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == official).then_some(offset))
+        .collect::<Vec<_>>();
+    let [offset] = matches.as_slice() else {
+        return Err(NativeSubmitError::Incompatible);
+    };
+    image[*offset..*offset + official.len()].fill(0);
+    image[*offset..*offset + private.len()].copy_from_slice(&private);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn materialize_isolated_sdk_runtime(
+    source_directory: &std::path::Path,
+    runtime_directory: &std::path::Path,
+) -> Result<(), NativeSubmitError> {
+    std::fs::create_dir_all(runtime_directory)
+        .map_err(|_| NativeSubmitError::Failed("无法准备迅雷原生下载组件".into()))?;
+    let entries = std::fs::read_dir(source_directory)
+        .map_err(|_| NativeSubmitError::Failed("无法读取迅雷原生下载组件".into()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|_| NativeSubmitError::Failed("无法读取迅雷原生下载组件".into()))?;
+        let source = entry.path();
+        let file_name = entry.file_name();
+        let destination = runtime_directory.join(&file_name);
+        if source.is_dir() {
+            materialize_isolated_sdk_runtime(&source, &destination)?;
+            continue;
+        }
+        if !source.is_file() {
+            continue;
+        }
+        let name = file_name.to_string_lossy();
+        if name.eq_ignore_ascii_case("DownloadSDKProxy.dll") {
+            let mut image = std::fs::read(&source)
+                .map_err(|_| NativeSubmitError::Failed("无法读取迅雷原生下载组件".into()))?;
+            patch_proxy_server_name(&mut image)?;
+            std::fs::write(&destination, image)
+                .map_err(|_| NativeSubmitError::Failed("无法准备迅雷原生下载组件".into()))?;
+        } else {
+            let destination = if name.eq_ignore_ascii_case(OFFICIAL_SDK_SERVER_NAME) {
+                runtime_directory.join(ISOLATED_SDK_SERVER_NAME)
+            } else {
+                destination
+            };
+            std::fs::copy(&source, destination)
+                .map_err(|_| NativeSubmitError::Failed("无法准备迅雷原生下载组件".into()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn isolated_plugin_config(
+    plugin_config_path: Option<&std::path::Path>,
+    installed: XunleiPluginConfig,
+) -> Result<XunleiPluginConfig, NativeSubmitError> {
+    // Keep the persisted path pointed at the installed SDK so official client
+    // updates are still discoverable. Only the module loaded by this process
+    // comes from the fingerprinted, non-conflicting runtime copy.
+    let source_directory = installed
+        .sdk_path
+        .parent()
+        .ok_or(NativeSubmitError::Incompatible)?;
+    let proxy_image = std::fs::read(&installed.sdk_path)
+        .map_err(|_| NativeSubmitError::Failed("无法读取迅雷原生下载组件".into()))?;
+    let server_image = std::fs::read(source_directory.join(OFFICIAL_SDK_SERVER_NAME))
+        .map_err(|_| NativeSubmitError::Failed("无法读取迅雷原生下载组件".into()))?;
+    let mut identity = Vec::with_capacity(proxy_image.len() + server_image.len());
+    identity.extend_from_slice(&proxy_image);
+    identity.extend_from_slice(&server_image);
+    let fingerprint = format!("{:x}", md5::compute(identity));
+    let base_directory = plugin_config_path
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::env::temp_dir().join("alldownloader-plugins"));
+    let runtime_root = base_directory.join("xunlei-native-runtime");
+    let runtime_directory =
+        runtime_root.join(format!("{}-{}", installed.client_version, fingerprint));
+    let runtime_proxy = runtime_directory.join("DownloadSDKProxy.dll");
+    let ready = runtime_directory.join(".ready");
+    if !(ready.is_file()
+        && runtime_proxy.is_file()
+        && runtime_directory.join(ISOLATED_SDK_SERVER_NAME).is_file()
+        && runtime_directory.join("DownloadSDK.dll").is_file())
+    {
+        std::fs::create_dir_all(&runtime_root)
+            .map_err(|_| NativeSubmitError::Failed("无法准备迅雷原生下载组件".into()))?;
+        let staging = runtime_root.join(format!(
+            ".staging-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        materialize_isolated_sdk_runtime(source_directory, &staging)?;
+        std::fs::write(staging.join(".ready"), fingerprint.as_bytes())
+            .map_err(|_| NativeSubmitError::Failed("无法准备迅雷原生下载组件".into()))?;
+        match std::fs::rename(&staging, &runtime_directory) {
+            Ok(()) => {}
+            Err(_) if ready.is_file() => {
+                let _ = std::fs::remove_dir_all(staging);
+            }
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(staging);
+                return Err(NativeSubmitError::Failed("无法准备迅雷原生下载组件".into()));
+            }
+        }
+    }
+    Ok(XunleiPluginConfig {
+        sdk_path: runtime_proxy,
+        client_version: installed.client_version,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn process_ids(image_name: &str) -> Vec<u32> {
+        let process_name = image_name.trim_end_matches(".exe");
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Get-Process -Name '{}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id",
+                    process_name.replace('\'', "''")
+                ),
+            ])
+            .output()
+            .expect("PowerShell should inspect SDK server processes");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|pid| pid.trim().parse::<u32>().ok())
+            .collect()
+    }
 
     #[cfg(windows)]
     fn request_equity_token(
@@ -1693,6 +1884,102 @@ mod tests {
         assert_eq!(task.download_speed, 0);
         assert!(task.error.is_none());
         assert!(task.status_message.is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn isolated_proxy_uses_a_private_server_process_name() {
+        let official = "DownloadSDKServer.exe"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut image = [
+            b"prefix".as_slice(),
+            official.as_slice(),
+            b"suffix".as_slice(),
+        ]
+        .concat();
+
+        patch_proxy_server_name(&mut image).unwrap();
+
+        let private = "AllDownSDKServer.exe"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert!(image.windows(private.len()).any(|window| window == private));
+        assert!(!image
+            .windows(official.len())
+            .any(|window| window == official));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn isolated_sdk_runtime_renames_only_its_server_and_keeps_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let runtime = root.path().join("runtime");
+        std::fs::create_dir_all(source.join("xar")).unwrap();
+        let official = OFFICIAL_SDK_SERVER_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        std::fs::write(
+            source.join("DownloadSDKProxy.dll"),
+            [b"proxy".as_slice(), official.as_slice()].concat(),
+        )
+        .unwrap();
+        std::fs::write(source.join(OFFICIAL_SDK_SERVER_NAME), b"server").unwrap();
+        std::fs::write(source.join("DownloadSDK.dll"), b"engine").unwrap();
+        std::fs::write(source.join("xar").join("resource.bin"), b"resource").unwrap();
+
+        materialize_isolated_sdk_runtime(&source, &runtime).unwrap();
+
+        assert!(runtime.join("DownloadSDKProxy.dll").is_file());
+        assert!(runtime.join(ISOLATED_SDK_SERVER_NAME).is_file());
+        assert!(!runtime.join(OFFICIAL_SDK_SERVER_NAME).exists());
+        assert_eq!(
+            std::fs::read(runtime.join("xar").join("resource.bin")).unwrap(),
+            b"resource"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_config_keeps_the_installed_source_but_loads_an_isolated_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("official");
+        std::fs::create_dir_all(&source).unwrap();
+        let official = OFFICIAL_SDK_SERVER_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let source_proxy = source.join("DownloadSDKProxy.dll");
+        std::fs::write(
+            &source_proxy,
+            [b"proxy".as_slice(), official.as_slice()].concat(),
+        )
+        .unwrap();
+        std::fs::write(source.join(OFFICIAL_SDK_SERVER_NAME), b"server").unwrap();
+        std::fs::write(source.join("DownloadSDK.dll"), b"engine").unwrap();
+        let persisted_path = root.path().join("plugins").join("xunlei-native.json");
+        let installed = XunleiPluginConfig {
+            sdk_path: source_proxy.clone(),
+            client_version: "25.1.13.1634".into(),
+        };
+
+        let runtime = isolated_plugin_config(Some(&persisted_path), installed).unwrap();
+
+        assert_ne!(runtime.sdk_path, source_proxy);
+        assert!(runtime.sdk_path.is_file());
+        assert!(runtime
+            .sdk_path
+            .with_file_name(ISOLATED_SDK_SERVER_NAME)
+            .is_file());
+        assert_eq!(runtime.client_version, "25.1.13.1634");
     }
 
     #[tokio::test]
@@ -1820,6 +2107,63 @@ mod tests {
         let config = read_plugin_config(&plugin_config_path)
             .expect("the discovered SDK path should be persisted for later calls");
         assert!(is_download_sdk(&config.sdk_path));
+        drop(api);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an installed official Thunder SDK"]
+    fn installed_sdk_reuses_thunder_server_without_restarting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin_config_path = root.path().join("plugins").join("xunlei-native.json");
+        let server_pids_before = process_ids(OFFICIAL_SDK_SERVER_NAME);
+        assert!(
+            !server_pids_before.is_empty(),
+            "this coexistence probe requires Thunder's SDK server to be running"
+        );
+        let started = std::time::Instant::now();
+
+        let api = WindowsApi::load(Some(&plugin_config_path), None)
+            .expect("isolated proxy should remain compatible")
+            .expect("Thunder should be installed");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "isolated SDK initialization must not enter the official proxy's five-minute server wait"
+        );
+        assert!(
+            server_pids_before
+                .iter()
+                .any(|pid| process_ids(OFFICIAL_SDK_SERVER_NAME).contains(pid)),
+            "AllDownloader must reuse the running official SDK server without terminating it"
+        );
+        drop(api);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the official Thunder SDK with its shared server stopped"]
+    fn installed_sdk_starts_private_server_without_thunder_server() {
+        assert!(
+            process_ids(OFFICIAL_SDK_SERVER_NAME).is_empty(),
+            "stop the shared Thunder SDK server before running this cold-start probe"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let plugin_config_path = root.path().join("plugins").join("xunlei-native.json");
+        let started = std::time::Instant::now();
+
+        let api = WindowsApi::load(Some(&plugin_config_path), None)
+            .expect("private proxy should remain compatible")
+            .expect("Thunder should be installed");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "private SDK initialization must not enter the five-minute server wait"
+        );
+        assert!(
+            !process_ids(ISOLATED_SDK_SERVER_NAME).is_empty(),
+            "the private runtime must start its renamed official SDK server"
+        );
         drop(api);
     }
 
