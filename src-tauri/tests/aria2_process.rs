@@ -90,6 +90,25 @@ fn launch_arguments_apply_user_configured_rpc_and_transfer_limits() {
 }
 
 #[test]
+fn default_loopback_rpc_does_not_enable_a_password() {
+    let config = Aria2LaunchConfig {
+        binary: PathBuf::from("aria2c.exe"),
+        data_dir: PathBuf::from("fixture/data"),
+        download_dir: PathBuf::from("fixture/downloads"),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+        aria2: Aria2Settings::default(),
+    };
+    let secret = RpcSecret::from_token("").unwrap();
+
+    assert!(config.aria2.validate().is_ok());
+    assert_eq!(secret.authorization_param(), None);
+    let args = build_aria2_args(&config, &secret);
+    assert!(args.contains(&"--rpc-listen-all=false".into()));
+    assert!(!args.iter().any(|arg| arg.starts_with("--rpc-secret=")));
+}
+
+#[test]
 fn launch_arguments_enable_detailed_sidecar_logging_only_when_requested() {
     let mut config = config(std::path::Path::new("fixture"));
     config.aria2.debug_logging = true;
@@ -132,6 +151,26 @@ async fn bundled_sidecar_is_authenticated_saves_session_and_exits() {
     let session = std::fs::read_to_string(root.path().join("data/aria2-next.tasks")).unwrap();
     assert!(!session.contains("rpc-secret"));
     assert!(!session.contains("token:"));
+}
+
+#[tokio::test]
+async fn bundled_sidecar_accepts_unauthenticated_loopback_calls_by_default() {
+    let root = tempfile::tempdir().unwrap();
+    let mut launch = config(root.path());
+    launch.aria2.rpc_token.clear();
+    let (mut child, client) = Aria2Process::start(launch).await.unwrap();
+    let unauthenticated = Aria2RpcClient::new(
+        client.endpoint().as_str(),
+        RpcSecret::from_token("").unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        unauthenticated.get_version().await.unwrap().version,
+        "2.8.0"
+    );
+    assert_eq!(client.shutdown().await.unwrap(), "OK");
+    assert!(child.wait_for_exit(Duration::from_secs(5)).await.unwrap());
 }
 
 #[tokio::test]

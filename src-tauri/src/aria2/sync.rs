@@ -109,7 +109,12 @@ impl TransferSynchronizer {
         let Ok(Ok((mut socket, _))) = connection else {
             return;
         };
-        let request = serde_json::json!({"jsonrpc":"2.0","id":"sync-auth","method":"aria2.getVersion","params":[client.authorization_param()]});
+        let parameters = client
+            .authorization_param()
+            .map(serde_json::Value::String)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let request = serde_json::json!({"jsonrpc":"2.0","id":"sync-auth","method":"aria2.getVersion","params":parameters});
         if socket
             .send(Message::Text(request.to_string().into()))
             .await
@@ -141,10 +146,12 @@ impl TransferSynchronizer {
             }
             if let Ok(text) = message.to_text() {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                    if let Some(gid) = notification_gid(&value) {
-                        if matches!(self.service.store().find_by_gid(gid), Ok(Some(_))) {
-                            self.wake.notify_one();
-                        }
+                    if notification_gid(&value).is_some() {
+                        // An accepted RPC submission can be unknown to this
+                        // process. Wake reconciliation for documented aria2
+                        // lifecycle notifications so `onDownloadStart` imports
+                        // it without waiting for the idle polling interval.
+                        self.wake.notify_one();
                     }
                 }
             }

@@ -3,16 +3,18 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Clone)]
-pub struct RpcSecret(String);
+pub struct RpcSecret(Option<String>);
 
 impl RpcSecret {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+        Self(Some(
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+        ))
     }
     pub fn from_token(token: impl AsRef<str>) -> Result<Self, Aria2Error> {
         let token = token.as_ref();
-        if token.is_empty()
-            || token
+        if !token.is_empty()
+            && token
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace())
         {
@@ -21,21 +23,27 @@ impl RpcSecret {
                 value: "[REDACTED]".into(),
             });
         }
-        Ok(Self(token.into()))
+        Ok(Self((!token.is_empty()).then(|| token.into())))
     }
-    pub fn authorization_param(&self) -> String {
-        format!("token:{}", self.hex())
+    pub fn authorization_param(&self) -> Option<String> {
+        self.0.as_ref().map(|token| format!("token:{token}"))
     }
-    pub(super) fn hex(&self) -> String {
-        self.0.clone()
+    pub(super) fn token(&self) -> Option<&str> {
+        self.0.as_deref()
     }
     pub(super) fn redact(&self, text: &str) -> String {
-        text.replace(&self.hex(), "[REDACTED]")
+        self.token()
+            .map(|token| text.replace(token, "[REDACTED]"))
+            .unwrap_or_else(|| text.into())
     }
 }
 impl fmt::Debug for RpcSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("RpcSecret([REDACTED])")
+        if self.0.is_some() {
+            f.write_str("RpcSecret([REDACTED])")
+        } else {
+            f.write_str("RpcSecret(None)")
+        }
     }
 }
 
@@ -83,6 +91,15 @@ pub struct Aria2File {
     pub length: String,
     pub completed_length: String,
     pub selected: String,
+    #[serde(default)]
+    pub uris: Vec<Aria2Uri>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Aria2Uri {
+    pub uri: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

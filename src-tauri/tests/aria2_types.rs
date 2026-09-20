@@ -108,7 +108,7 @@ fn secret_debug_is_redacted() {
     let secret = RpcSecret::from_bytes([0xab; 32]);
     assert_eq!(
         secret.authorization_param(),
-        format!("token:{}", "ab".repeat(32))
+        Some(format!("token:{}", "ab".repeat(32)))
     );
     assert_eq!(format!("{secret:?}"), "RpcSecret([REDACTED])");
 }

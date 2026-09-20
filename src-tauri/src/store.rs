@@ -43,12 +43,6 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct IncompatiblePayloadPurgeReport {
-    pub removed_files: usize,
-    pub skipped_outside_files: usize,
-}
-
 pub struct TaskStore {
     connection: Mutex<Connection>,
     leaf_gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
@@ -1159,47 +1153,6 @@ impl TaskStore {
         self.fail_with_code(id, None, message)
     }
 
-    pub(crate) fn purge_incompatible_payload_paths(
-        &self,
-        paths: &[String],
-        download_root: &Path,
-    ) -> Result<IncompatiblePayloadPurgeReport, StoreError> {
-        let root = std::fs::canonicalize(download_root)?;
-        // A refreshed cloud URL can lose its old GID before the process exits.
-        // Engine ownership is not file ownership: retain payloads/control files
-        // still referenced by durable tasks, even when that GID is unowned.
-        let protected = {
-            let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-            let mut statement = connection.prepare("SELECT path FROM task_files")?;
-            let paths = statement
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            paths
-                .into_iter()
-                .flat_map(|path| [path.clone(), format!("{path}.aria2")])
-                .filter_map(|path| std::fs::canonicalize(path).ok())
-                .collect::<HashSet<_>>()
-        };
-        let mut report = IncompatiblePayloadPurgeReport::default();
-        for value in paths {
-            let path = std::path::PathBuf::from(value);
-            for candidate in [
-                path.clone(),
-                std::path::PathBuf::from(format!("{value}.aria2")),
-            ] {
-                if std::fs::canonicalize(&candidate).is_ok_and(|path| protected.contains(&path)) {
-                    continue;
-                }
-                match remove_managed_payload_file(&root, &candidate)? {
-                    ManagedFileRemoval::Removed => report.removed_files += 1,
-                    ManagedFileRemoval::OutsideRoot => report.skipped_outside_files += 1,
-                    ManagedFileRemoval::Missing => {}
-                }
-            }
-        }
-        Ok(report)
-    }
-
     /// Stores a durable, machine-readable failure kind alongside the safe
     /// text displayed to the user. A missing code deliberately clears an old
     /// cloud-auth classification left by an earlier attempt.
@@ -1693,44 +1646,6 @@ impl TaskStore {
     }
 }
 
-enum ManagedFileRemoval {
-    Removed,
-    OutsideRoot,
-    Missing,
-}
-
-fn remove_managed_payload_file(
-    download_root: &Path,
-    candidate: &Path,
-) -> Result<ManagedFileRemoval, StoreError> {
-    if !candidate.is_absolute() {
-        return Ok(ManagedFileRemoval::OutsideRoot);
-    }
-    let metadata = match std::fs::symlink_metadata(candidate) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ManagedFileRemoval::Missing)
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let resolved = std::fs::canonicalize(candidate)?;
-    if !resolved.starts_with(download_root) {
-        return Ok(ManagedFileRemoval::OutsideRoot);
-    }
-    if !(metadata.is_file() || metadata.file_type().is_symlink()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to remove non-file payload {}",
-                candidate.display()
-            ),
-        )
-        .into());
-    }
-    std::fs::remove_file(candidate)?;
-    Ok(ManagedFileRemoval::Removed)
-}
-
 const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note, p2p_sharing, status_message FROM tasks";
 const CLOUD_DIRECTORY_GROUP_SELECT: &str = "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note FROM cloud_directory_groups";
 
@@ -2172,40 +2087,6 @@ mod tests {
             )
             .unwrap();
         assert!(table_exists);
-    }
-
-    #[test]
-    fn startup_orphan_cleanup_preserves_payloads_owned_by_detached_tasks() {
-        let root = tempfile::tempdir().unwrap();
-        let store = TaskStore::open_in_memory().unwrap();
-        let task = store
-            .create(NewTask::direct("cloud://pikpak/partial"))
-            .unwrap();
-        let payload = root.path().join("partial.bin");
-        let control = root.path().join("partial.bin.aria2");
-        let orphan = root.path().join("orphan.bin");
-        std::fs::write(&payload, b"partial bytes").unwrap();
-        std::fs::write(&control, b"checkpoint").unwrap();
-        std::fs::write(&orphan, b"unowned").unwrap();
-        store
-            .upsert_files(
-                task.id,
-                &[(0, payload.to_string_lossy().into_owned(), 100, 13, true)],
-            )
-            .unwrap();
-        let report = store
-            .purge_incompatible_payload_paths(
-                &[
-                    payload.to_string_lossy().into_owned(),
-                    orphan.to_string_lossy().into_owned(),
-                ],
-                root.path(),
-            )
-            .unwrap();
-        assert_eq!(report.removed_files, 1);
-        assert_eq!(std::fs::read(payload).unwrap(), b"partial bytes");
-        assert_eq!(std::fs::read(control).unwrap(), b"checkpoint");
-        assert!(!orphan.exists());
     }
 
     #[test]

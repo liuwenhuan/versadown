@@ -34,7 +34,6 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
         "--rpc-allow-origin-all=false".into(),
         "--disable-ipv6=true".into(),
         format!("--rpc-listen-port={}", config.aria2.rpc_port),
-        format!("--rpc-secret={}", secret.hex()),
         "--continue=true".into(),
         format!("--state-dir={}", state_dir.display()),
         format!("--input-file={}", session.display()),
@@ -74,6 +73,9 @@ pub fn build_aria2_args(config: &Aria2LaunchConfig, secret: &RpcSecret) -> Vec<S
         "--summary-interval=0".into(),
         "--console-log-level=error".into(),
     ];
+    if let Some(token) = secret.token() {
+        args.push(format!("--rpc-secret={token}"));
+    }
     if config.aria2.debug_logging {
         args.push(format!(
             "--log={}",

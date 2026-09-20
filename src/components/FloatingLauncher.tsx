@@ -12,6 +12,7 @@ interface FloatingLauncherProps {
   onDragStart?(pointer: LauncherPointerPosition, grabOffset?: LauncherPointerPosition): void;
   onDragMove?(pointer: LauncherPointerPosition): void;
   onDragEnd?(pointer: LauncherPointerPosition): void;
+  onPrimaryClick?(): void;
   onContextMenu?(): void;
 }
 
@@ -47,7 +48,7 @@ function LauncherMark({ variant }: { variant: 'light' | 'dark' }) {
   );
 }
 
-export function FloatingLauncher({ onScan, onActivateTaskList, onDroppedInput, onStageDroppedTorrent, onDragStart, onDragMove, onDragEnd, onContextMenu }: FloatingLauncherProps) {
+export function FloatingLauncher({ onScan, onActivateTaskList, onDroppedInput, onStageDroppedTorrent, onDragStart, onDragMove, onDragEnd, onPrimaryClick, onContextMenu }: FloatingLauncherProps) {
   const dragOrigin = useRef<{ x: number; y: number } | null>(null);
   const dragGrabOffset = useRef<LauncherPointerPosition>();
   const dragPointerId = useRef<number | null>(null);
@@ -128,7 +129,9 @@ export function FloatingLauncher({ onScan, onActivateTaskList, onDroppedInput, o
     dragOrigin.current = null;
     if (suppressClick.current) {
       suppressClick.current = false;
+      return;
     }
+    onPrimaryClick?.();
   }
 
   function activateTaskList() {

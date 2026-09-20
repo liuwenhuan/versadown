@@ -62,23 +62,18 @@ impl Default for Aria2Settings {
 impl Aria2Settings {
     pub fn ensure_rpc_token(&mut self) {
         self.rpc_token = self.rpc_token.trim().to_string();
-        if self.rpc_token.is_empty() {
-            self.rpc_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        }
     }
 
     pub fn validate(&self) -> Result<(), String> {
         if !(1024..=65535).contains(&self.rpc_port) {
             return Err("aria2 RPC 端口必须在 1024 到 65535 之间".into());
         }
-        if self.rpc_token.is_empty()
-            || self.rpc_token.len() > 256
-            || self
-                .rpc_token
-                .chars()
-                .any(|character| character.is_control() || character.is_whitespace())
+        if self.rpc_token.len() > 256
+            || self.rpc_token.chars().any(|character| {
+                !self.rpc_token.is_empty() && (character.is_control() || character.is_whitespace())
+            })
         {
-            return Err("aria2 RPC Token 不能为空，且不能包含空白或控制字符".into());
+            return Err("aria2 RPC Token 最长 256 个字符，且不能包含空白或控制字符".into());
         }
         if !(1..=64).contains(&self.max_concurrent_downloads) {
             return Err("最大并发任务数必须在 1 到 64 之间".into());

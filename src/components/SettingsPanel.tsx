@@ -44,6 +44,12 @@ function createRateLimitInputs(aria2: Aria2Settings, cloudUploadLimit: number) {
   };
 }
 
+function PasswordVisibilityIcon({ visible }: { visible: boolean }) {
+  return visible
+    ? <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 4.3A10.8 10.8 0 0 1 12 4c5 0 8.3 4.1 9 8-.3 1.5-1.1 3-2.4 4.2M6.1 6.1C4.4 7.6 3.4 9.8 3 12c.7 3.9 4 8 9 8 1.2 0 2.3-.2 3.3-.7" /></svg>
+    : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-8 9-8 9 8 9 8-3.2 8-9 8-9-8-9-8Z" /><circle cx="12" cy="12" r="3" /></svg>;
+}
+
 export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, onNotice, configurePrivacyDownload }: SettingsPanelProps) {
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
@@ -61,6 +67,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [privacyPasswordConfirmation, setPrivacyPasswordConfirmation] = useState('');
   const [privacyStatus, setPrivacyStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aria2Status, setAria2Status] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [showRpcToken, setShowRpcToken] = useState(false);
   const [rateLimitStatus, setRateLimitStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
@@ -359,7 +366,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         <div className="setting-row"><span><b>aria2 下载引擎</b></span></div>
         <fieldset>
           <label><span>RPC 端口</span><input aria-label="aria2 RPC 端口" required type="number" min="1024" max="65535" value={aria2.rpcPort} onChange={(event) => updateAria2('rpcPort', Number(event.target.value))} /></label>
-          <label className="aria2-token"><span>RPC Token</span><input aria-label="aria2 RPC Token" required type="password" autoComplete="new-password" value={aria2.rpcToken} onChange={(event) => updateAria2('rpcToken', event.target.value)} /></label>
+          <label className="aria2-token"><span>RPC Token（可选）</span><div className="secret-input"><input aria-label="aria2 RPC Token" type={showRpcToken ? 'text' : 'password'} autoComplete="new-password" value={aria2.rpcToken} onChange={(event) => updateAria2('rpcToken', event.target.value)} /><button type="button" aria-label={showRpcToken ? '隐藏 RPC Token' : '显示 RPC Token'} title={showRpcToken ? '隐藏 RPC Token' : '显示 RPC Token'} onClick={() => setShowRpcToken((visible) => !visible)}><PasswordVisibilityIcon visible={showRpcToken} /></button></div></label>
           <label><span>最大并发任务数</span><input aria-label="最大并发任务数" required type="number" min="1" max="64" value={aria2.maxConcurrentDownloads} onChange={(event) => updateAria2('maxConcurrentDownloads', Number(event.target.value))} /></label>
           <label><span>单任务并发连接数</span><input aria-label="单任务并发连接数" required type="number" min="1" max="16" value={aria2.maxConnectionsPerServer} onChange={(event) => updateAria2('maxConnectionsPerServer', Number(event.target.value))} /></label>
           <label className="aria2-seed-ratio"><span>BT 分享率</span><input aria-label="BT 分享率" required type="number" min="0.1" max="1000" step="0.1" value={aria2.btSeedRatio} onChange={(event) => updateAria2('btSeedRatio', Number(event.target.value))} /></label>

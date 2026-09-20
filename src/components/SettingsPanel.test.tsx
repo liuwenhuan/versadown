@@ -378,6 +378,19 @@ it('saves aria2 RPC and engine settings from the network settings', async () => 
   });
 });
 
+it('toggles visibility for the optional aria2 RPC Token', async () => {
+  const user = userEvent.setup();
+  render(<SettingsPanel initial={{ ...initial, aria2: { ...initial.aria2, rpcToken: 'local-token' } }} onChange={vi.fn()} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  const token = screen.getByLabelText('aria2 RPC Token');
+  expect(token).toHaveAttribute('type', 'password');
+  await user.click(screen.getByRole('button', { name: '显示 RPC Token' }));
+  expect(token).toHaveAttribute('type', 'text');
+  await user.click(screen.getByRole('button', { name: '隐藏 RPC Token' }));
+  expect(token).toHaveAttribute('type', 'password');
+});
+
 it('saves aria2 debug logging immediately from advanced settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();

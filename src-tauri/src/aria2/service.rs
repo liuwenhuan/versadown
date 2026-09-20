@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,8 +11,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    validate_download_input, validate_task_source, DownloadTask, InputValidationError, StoreError,
-    TaskStatus, TaskStore,
+    validate_download_input, validate_task_source, DownloadTask, InputValidationError, NewTask,
+    StoreError, TaskStatus, TaskStore,
 };
 
 use super::sync::{EventSink, NoEvents};
@@ -295,6 +295,11 @@ pub struct DownloadService {
     global: std::sync::Mutex<Option<Aria2GlobalStat>>,
     resume_versions: std::sync::Mutex<BTreeMap<String, u64>>,
     observed_peers: std::sync::Mutex<HashMap<Uuid, HashSet<String>>>,
+    // Live RPC submissions own an extra engine slot only for this service
+    // instance. It intentionally is not persisted: a restart restores the
+    // ordinary configured concurrency policy.
+    external_rpc_slot_base: Option<u16>,
+    external_rpc_slots: std::sync::Mutex<BTreeSet<Uuid>>,
     pub(super) operation: tokio::sync::Mutex<()>,
 }
 
@@ -310,6 +315,8 @@ impl DownloadService {
             global: Default::default(),
             resume_versions: Default::default(),
             observed_peers: Default::default(),
+            external_rpc_slot_base: None,
+            external_rpc_slots: Default::default(),
             operation: Default::default(),
         }
     }
@@ -326,6 +333,11 @@ impl DownloadService {
 
     pub fn with_events(mut self, events: Arc<dyn EventSink>) -> Self {
         self.events = events;
+        self
+    }
+
+    pub fn with_external_rpc_slots(mut self, base_concurrency: u16) -> Self {
+        self.external_rpc_slot_base = Some(base_concurrency);
         self
     }
 
@@ -1134,7 +1146,9 @@ impl DownloadService {
                 if self.api().remove(&gid).await.is_err() {
                     self.api().force_remove(&gid).await?;
                 }
-                return self.persist_removed(task);
+                let removed = self.persist_removed(task)?;
+                self.release_external_rpc_slot_if_terminal(&removed).await?;
+                return Ok(removed);
             }
         }
         self.reconcile_task_unlocked(task_id).await
@@ -1461,6 +1475,7 @@ impl DownloadService {
 
     pub async fn reconcile_now(&self) -> Result<(), DownloadServiceError> {
         let _guard = self.operation.lock().await;
+        self.import_external_rpc_tasks_unlocked().await?;
         let tasks: Vec<_> = self
             .store
             .list()?
@@ -1504,7 +1519,9 @@ impl DownloadService {
                                             .await
                                         {
                                             Ok(updated) => {
-                                                self.sync_discovered_nodes(updated).await
+                                                self.sync_discovered_nodes(updated.clone()).await?;
+                                                self.release_external_rpc_slot_if_terminal(&updated)
+                                                    .await
                                             }
                                             Err(error) => Err(error),
                                         }
@@ -1542,6 +1559,161 @@ impl DownloadService {
         if let Some(error) = first_error {
             return Err(error);
         }
+        Ok(())
+    }
+
+    /// Imports jobs submitted through aria2's RPC endpoint by another client.
+    /// They have already been accepted by aria2, so they deliberately skip the
+    /// application's interactive file-selection/confirmation flow.
+    async fn import_external_rpc_tasks_unlocked(&self) -> Result<(), DownloadServiceError> {
+        let api = self.api();
+        let mut statuses = api.tell_active().await?;
+        let mut offset = 0;
+        loop {
+            let page = api.tell_waiting(offset, 1000).await?;
+            let count = page.len();
+            statuses.extend(page);
+            if count < 1000 {
+                break;
+            }
+            offset += 1000;
+        }
+
+        for status in statuses {
+            if self.store.find_by_gid(&status.gid)?.is_some() {
+                continue;
+            }
+            let waiting = status.status == "waiting";
+            let task = self.import_external_rpc_status_unlocked(status).await?;
+            if waiting && self.external_rpc_slot_base.is_some() {
+                // Positioning is a best-effort refinement. The subsequent
+                // slot expansion still guarantees capacity if a compatible
+                // RPC implementation declines to reorder its queue.
+                let _ = self
+                    .api()
+                    .change_position(
+                        task.aria_gid
+                            .as_deref()
+                            .ok_or(DownloadServiceError::MissingGid(task.id))?,
+                        0,
+                        "POS_SET",
+                    )
+                    .await;
+            }
+            self.reserve_external_rpc_slot(task.id).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn import_external_rpc_status_unlocked(
+        &self,
+        status: Aria2Status,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        if status.gid.trim().is_empty() {
+            return Err(Aria2Error::MalformedResponse.into());
+        }
+        if let Some(task) = self.store.find_by_gid(&status.gid)? {
+            return Ok(task);
+        }
+
+        let source = status
+            .files
+            .iter()
+            .flat_map(|file| file.uris.iter())
+            .map(|uri| uri.uri.trim())
+            .find(|uri| !uri.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("aria2:{}", status.gid));
+        let mut task = NewTask::direct(source.clone());
+        task.kind = if source.starts_with("magnet:") {
+            "magnet".into()
+        } else if source.starts_with("ed2k:") {
+            "ed2k".into()
+        } else if status.bittorrent.is_some() {
+            "torrent".into()
+        } else {
+            "file".into()
+        };
+        if let Some(name) = super::recovery::recovery_name(&status) {
+            task.name = name;
+        }
+
+        let task = self.store.create(task)?;
+        let task = self.store.bind_gid(task.id, &status.gid)?;
+        self.store.confirm_selection(task.id)?;
+        self.apply_status(task, status, true).await
+    }
+
+    async fn reserve_external_rpc_slot(&self, task_id: Uuid) -> Result<(), DownloadServiceError> {
+        let Some(base) = self.external_rpc_slot_base else {
+            return Ok(());
+        };
+        let limit = {
+            let mut slots = self
+                .external_rpc_slots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !slots.insert(task_id) {
+                return Ok(());
+            }
+            base.saturating_add(u16::try_from(slots.len()).unwrap_or(u16::MAX))
+        };
+        if let Err(error) = self.set_external_rpc_concurrency_limit(limit).await {
+            self.external_rpc_slots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&task_id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn release_external_rpc_slot_if_terminal(
+        &self,
+        task: &DownloadTask,
+    ) -> Result<(), DownloadServiceError> {
+        if !matches!(
+            task.status,
+            TaskStatus::Completed
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::Recycled
+        ) {
+            return Ok(());
+        }
+        let Some(base) = self.external_rpc_slot_base else {
+            return Ok(());
+        };
+        let limit = {
+            let mut slots = self
+                .external_rpc_slots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !slots.remove(&task.id) {
+                return Ok(());
+            }
+            base.saturating_add(u16::try_from(slots.len()).unwrap_or(u16::MAX))
+        };
+        if let Err(error) = self.set_external_rpc_concurrency_limit(limit).await {
+            self.external_rpc_slots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(task.id);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn set_external_rpc_concurrency_limit(
+        &self,
+        limit: u16,
+    ) -> Result<(), DownloadServiceError> {
+        self.api()
+            .change_global_option(Aria2Options::from([(
+                "max-concurrent-downloads".into(),
+                limit.to_string(),
+            )]))
+            .await?;
         Ok(())
     }
 

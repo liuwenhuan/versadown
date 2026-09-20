@@ -756,7 +756,7 @@ it('refills saved credentials after manual logout and logs in only when clicked'
   await user.click(screen.getByRole('button', { name: '确认退出登录' }));
   await waitFor(() => expect(screen.getByLabelText('账号')).toHaveValue('saved-user'));
   expect(screen.getByLabelText('密码')).toHaveValue('');
-  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '***');
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '******');
   expect(client.loginCloudWithPassword).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: '登录' }));
   expect(client.loginCloudWithPassword).toHaveBeenCalledWith('tianyi', { username: 'saved-user', useSavedPassword: true });
@@ -780,7 +780,7 @@ it('refills the newly saved account after successful replacement and a second lo
   await user.click(await screen.findByRole('button', { name: '退出登录' }));
   await user.click(screen.getByRole('button', { name: '确认退出登录' }));
   await waitFor(() => expect(screen.getByLabelText('账号')).toHaveValue('bob'));
-  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '***');
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '******');
   expect(screen.getByLabelText('密码')).toHaveValue('');
 });
 
@@ -796,12 +796,12 @@ it('restores encrypted login input into masked fields and keeps it after a faile
   const passwordInput = screen.getByLabelText('密码');
   expect(passwordInput).toHaveAttribute('type', 'password');
   expect(passwordInput).toHaveValue('');
-  expect(passwordInput).toHaveAttribute('placeholder', '***');
+  expect(passwordInput).toHaveAttribute('placeholder', '******');
   await user.click(screen.getByRole('button', { name: '登录' }));
   await screen.findByText('登录失败');
   expect(screen.getByLabelText('账号')).toHaveValue('saved-user');
   expect(client.loginCloudWithPassword).toHaveBeenCalledWith('tianyi', { username: 'saved-user', useSavedPassword: true });
-  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '***');
+  expect(screen.getByLabelText('密码')).toHaveAttribute('placeholder', '******');
 });
 
 it('preserves a password edited while an earlier login is pending and submits the newer value next', async () => {

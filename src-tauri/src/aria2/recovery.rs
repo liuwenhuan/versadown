@@ -73,8 +73,12 @@ pub struct ShutdownReport {
 #[derive(Default, Debug, Serialize)]
 pub struct RecoveryReport {
     pub reconciled: usize,
-    /// Kept in the serialized contract; native recovery never imports jobs.
+    /// External aria2 jobs discovered while restoring the engine.
     pub imported: usize,
+    /// Newly imported active/waiting jobs that must resume after aria2 starts
+    /// the saved session in its safe paused mode. This is runtime-only state.
+    #[serde(skip)]
+    pub resumable_task_ids: Vec<uuid::Uuid>,
     /// Completion is now reported by aria2-next rather than inferred locally.
     pub completed: usize,
     /// Resume is owned by aria2-next and is never synthesized by the app.
@@ -88,7 +92,7 @@ pub struct RecoveryReport {
 impl DownloadService {
     pub async fn recover_native(
         &self,
-        download_root: &Path,
+        _download_root: &Path,
     ) -> Result<RecoveryReport, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         let api = self.api();
@@ -123,16 +127,17 @@ impl DownloadService {
 
         for status in statuses {
             let Some(task) = store.find_by_gid(&status.gid)? else {
-                self.remove_unowned_native_task(api.as_ref(), &status)
-                    .await?;
-                report.removed_engine_tasks += 1;
-                let paths = status
-                    .files
-                    .iter()
-                    .map(|file| file.path.clone())
-                    .collect::<Vec<_>>();
-                let cleanup = store.purge_incompatible_payload_paths(&paths, download_root)?;
-                report.removed_files += cleanup.removed_files;
+                // An application restart loses the in-memory knowledge of
+                // work that another RPC client submitted while this app was
+                // closed. Active and waiting jobs become ordinary local tasks;
+                // they intentionally receive no live-session extra slot.
+                // Historical stopped results are left to aria2's own result
+                // retention and are not turned into new UI history entries.
+                if matches!(status.status.as_str(), "active" | "waiting" | "paused") {
+                    let imported = self.import_external_rpc_status_unlocked(status).await?;
+                    report.imported += 1;
+                    report.resumable_task_ids.push(imported.id);
+                }
                 continue;
             };
 
@@ -219,18 +224,5 @@ impl DownloadService {
             }
         }
         Ok(statuses)
-    }
-
-    async fn remove_unowned_native_task(
-        &self,
-        api: &dyn Aria2Api,
-        status: &Aria2Status,
-    ) -> Result<(), DownloadServiceError> {
-        if matches!(status.status.as_str(), "complete" | "error" | "removed") {
-            api.remove_download_result(&status.gid).await?;
-        } else if api.remove(&status.gid).await.is_err() {
-            api.force_remove(&status.gid).await?;
-        }
-        Ok(())
     }
 }

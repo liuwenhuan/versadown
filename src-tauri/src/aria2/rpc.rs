@@ -222,6 +222,14 @@ pub trait Aria2Api: Send + Sync {
     async fn change_global_option(&self, _options: Aria2Options) -> Result<String, Aria2Error> {
         Err(Aria2Error::Transport)
     }
+    async fn change_position(
+        &self,
+        _gid: &str,
+        _position: i64,
+        _how: &str,
+    ) -> Result<i64, Aria2Error> {
+        Err(Aria2Error::Transport)
+    }
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error>;
     async fn change_uri(
         &self,
@@ -296,7 +304,7 @@ impl Aria2RpcClient {
             .expect("HTTP URL accepts WS scheme");
         endpoint
     }
-    pub fn authorization_param(&self) -> String {
+    pub fn authorization_param(&self) -> Option<String> {
         self.secret.authorization_param()
     }
 
@@ -356,7 +364,9 @@ impl Aria2RpcClient {
         method: &str,
         mut params: Vec<Value>,
     ) -> Result<T, Aria2Error> {
-        params.insert(0, json!(self.secret.authorization_param()));
+        if let Some(authorization) = self.secret.authorization_param() {
+            params.insert(0, json!(authorization));
+        }
         self.request(method, params).await
     }
     pub async fn get_version(&self) -> Result<Aria2Version, Aria2Error> {
@@ -398,7 +408,16 @@ fn rpc_gid(method: &str, params: &[Value]) -> Option<String> {
     ) {
         return None;
     }
-    params.get(1).and_then(Value::as_str).map(str::to_owned)
+    let gid_index = params
+        .first()
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.starts_with("token:"))
+        .then_some(1)
+        .unwrap_or(0);
+    params
+        .get(gid_index)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 #[async_trait]
@@ -478,6 +497,18 @@ impl Aria2Api for Aria2RpcClient {
         self.call("aria2.changeGlobalOption", vec![json!(options)])
             .await
     }
+    async fn change_position(
+        &self,
+        gid: &str,
+        position: i64,
+        how: &str,
+    ) -> Result<i64, Aria2Error> {
+        self.call(
+            "aria2.changePosition",
+            vec![json!(gid), json!(position), json!(how)],
+        )
+        .await
+    }
     async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error> {
         self.call("aria2.changeOption", vec![json!(gid), json!(options)])
             .await
@@ -521,8 +552,9 @@ impl Aria2Api for Aria2RpcClient {
             if !call.method.starts_with("aria2.") {
                 return Err(Aria2Error::MalformedResponse);
             }
-            call.params
-                .insert(0, json!(self.secret.authorization_param()));
+            if let Some(authorization) = self.secret.authorization_param() {
+                call.params.insert(0, json!(authorization));
+            }
             authenticated.push(json!({"methodName":call.method, "params":call.params}));
         }
         // system.multicall itself takes only the call array, and each protected nested method needs its own token.

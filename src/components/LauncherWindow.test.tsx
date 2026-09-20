@@ -166,6 +166,18 @@ it('keeps the hexagon compact on one click, activates tasks on double click, and
   expect(trigger.querySelector('.launcher-mark')).toBe(mark);
 });
 
+it.each(['left', 'right'] as const)('closes the launcher context menu after a %s click on the floating trigger', async (button) => {
+  render(<LauncherWindow />);
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+
+  fireEvent.contextMenu(trigger);
+  await screen.findByRole('menu', { name: '悬浮球菜单' });
+  if (button === 'left') fireEvent.click(trigger);
+  else fireEvent.contextMenu(trigger);
+
+  await waitFor(() => expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument());
+});
+
 it('never resizes, clips, hides, or shows the native window for context-menu transitions', async () => {
   render(<LauncherWindow />);
   await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenCalledOnce());
@@ -198,7 +210,7 @@ it('does not open a new-task dialog when left and right clicks alternate rapidly
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   fireEvent.click(trigger); fireEvent.contextMenu(trigger); fireEvent.click(trigger);
   expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument();
-  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
+  await waitFor(() => expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument());
 });
 
 it.each(['Escape', 'blur', 'drag'] as const)('restores icon-only input for %s', async (reason) => {

@@ -30,6 +30,26 @@ pub fn global() -> Value {
     json!({"downloadSpeed":"10","uploadSpeed":"0","numActive":"1","numWaiting":"0","numStopped":"0","numStoppedTotal":"0"})
 }
 
+fn external_status(gid: &str, state: &str, completed: u64) -> Value {
+    json!({
+        "gid": gid,
+        "status": state,
+        "totalLength": "100",
+        "completedLength": completed.to_string(),
+        "downloadSpeed": "10",
+        "uploadSpeed": "0",
+        "connections": "1",
+        "files": [{
+            "index": "1",
+            "path": "C:/Downloads/external.iso",
+            "length": "100",
+            "completedLength": completed.to_string(),
+            "selected": "true",
+            "uris": [{"uri": "https://external.example.test/external.iso", "status": "used"}]
+        }]
+    })
+}
+
 struct Events {
     store: Arc<TaskStore>,
     values: Mutex<Vec<u8>>,
@@ -54,6 +74,8 @@ async fn changed_snapshots_persist_before_events_and_unchanged_emit_once() {
     let progress = Arc::new(Mutex::new(25));
     let wire_progress = progress.clone();
     let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => json!([]),
+        "aria2.tellWaiting" => json!([]),
         "system.multicall" => json!([[status("gid-1", "active", *wire_progress.lock().unwrap())]]),
         "aria2.getGlobalStat" => global(),
         other => panic!("unexpected method {other}"),
@@ -76,6 +98,195 @@ async fn changed_snapshots_persist_before_events_and_unchanged_emit_once() {
     service.reconcile_now().await.unwrap();
     assert_eq!(*events.values.lock().unwrap(), [25, 50]);
     assert_eq!(*events.globals.lock().unwrap(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn reconcile_imports_an_unowned_active_rpc_task_without_confirmation() {
+    let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => json!([external_status("external-gid", "active", 25)]),
+        "aria2.tellWaiting" => json!([]),
+        "system.multicall" => json!([[external_status("external-gid", "active", 25)]]),
+        "aria2.getGlobalStat" => global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let events = Arc::new(Events {
+        store: store.clone(),
+        values: Mutex::new(vec![]),
+        globals: Mutex::new(0),
+    });
+    let service = DownloadService::new(Arc::new(client), store.clone()).with_events(events.clone());
+
+    service.reconcile_now().await.unwrap();
+
+    let tasks = store.list().unwrap();
+    assert_eq!(tasks.len(), 1);
+    let task = &tasks[0];
+    assert_eq!(task.aria_gid.as_deref(), Some("external-gid"));
+    assert_eq!(task.source, "https://external.example.test/external.iso");
+    assert_eq!(task.name, "external.iso");
+    assert_eq!(task.status, alldownloader_lib::TaskStatus::Downloading);
+    assert!(store.selection_confirmed(task.id).unwrap());
+    assert_eq!(store.files(task.id).unwrap().len(), 1);
+    assert_eq!(*events.values.lock().unwrap(), [25]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn live_external_rpc_task_gets_a_temporary_concurrency_slot() {
+    let global_options = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let observed_options = Arc::clone(&global_options);
+    let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => json!([external_status("external-gid", "active", 25)]),
+        "aria2.tellWaiting" => json!([]),
+        "system.multicall" => json!([[external_status("external-gid", "active", 25)]]),
+        "aria2.changeGlobalOption" => {
+            observed_options
+                .lock()
+                .unwrap()
+                .push(request["params"][1].clone());
+            json!("OK")
+        }
+        "aria2.getGlobalStat" => global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let service = DownloadService::new(Arc::new(client), store).with_external_rpc_slots(4);
+
+    service.reconcile_now().await.unwrap();
+
+    assert_eq!(
+        *global_options.lock().unwrap(),
+        [json!({"max-concurrent-downloads": "5"})]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn waiting_external_rpc_task_is_prioritized_before_its_slot_is_added() {
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed_calls = Arc::clone(&calls);
+    let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => json!([]),
+        "aria2.tellWaiting" => json!([external_status("external-gid", "waiting", 0)]),
+        "system.multicall" => json!([[external_status("external-gid", "waiting", 0)]]),
+        "aria2.changePosition" => {
+            observed_calls.lock().unwrap().push("position".into());
+            assert_eq!(request["params"][1], "external-gid");
+            assert_eq!(request["params"][2], 0);
+            assert_eq!(request["params"][3], "POS_SET");
+            json!(0)
+        }
+        "aria2.changeGlobalOption" => {
+            observed_calls.lock().unwrap().push("slot".into());
+            json!("OK")
+        }
+        "aria2.getGlobalStat" => global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let service = DownloadService::new(Arc::new(client), store).with_external_rpc_slots(4);
+
+    service.reconcile_now().await.unwrap();
+
+    assert_eq!(*calls.lock().unwrap(), ["position", "slot"]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn completed_external_rpc_task_returns_its_temporary_concurrency_slot() {
+    let state = Arc::new(Mutex::new("active"));
+    let wire_state = Arc::clone(&state);
+    let global_options = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let observed_options = Arc::clone(&global_options);
+    let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => {
+            let state = *wire_state.lock().unwrap();
+            if state == "active" {
+                json!([external_status("external-gid", state, 25)])
+            } else {
+                json!([])
+            }
+        }
+        "aria2.tellWaiting" => json!([]),
+        "system.multicall" => {
+            let state = *wire_state.lock().unwrap();
+            json!([[external_status(
+                "external-gid",
+                state,
+                if state == "complete" { 100 } else { 25 },
+            )]])
+        }
+        "aria2.changeGlobalOption" => {
+            observed_options
+                .lock()
+                .unwrap()
+                .push(request["params"][1].clone());
+            json!("OK")
+        }
+        "aria2.getGlobalStat" => global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let service = DownloadService::new(Arc::new(client), store).with_external_rpc_slots(4);
+
+    service.reconcile_now().await.unwrap();
+    *state.lock().unwrap() = "complete";
+    service.reconcile_now().await.unwrap();
+
+    assert_eq!(
+        *global_options.lock().unwrap(),
+        [
+            json!({"max-concurrent-downloads": "5"}),
+            json!({"max-concurrent-downloads": "4"}),
+        ]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancelling_external_rpc_task_returns_its_temporary_concurrency_slot() {
+    let global_options = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let observed_options = Arc::clone(&global_options);
+    let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" => json!([external_status("external-gid", "active", 25)]),
+        "aria2.tellWaiting" => json!([]),
+        "system.multicall" => json!([[external_status("external-gid", "active", 25)]]),
+        "aria2.remove" => json!("external-gid"),
+        "aria2.changeGlobalOption" => {
+            observed_options
+                .lock()
+                .unwrap()
+                .push(request["params"][1].clone());
+            json!("OK")
+        }
+        "aria2.getGlobalStat" => global(),
+        other => panic!("unexpected method {other}"),
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let service =
+        DownloadService::new(Arc::new(client), Arc::clone(&store)).with_external_rpc_slots(4);
+
+    service.reconcile_now().await.unwrap();
+    let task = store.find_by_gid("external-gid").unwrap().unwrap();
+    service
+        .control(task.id, alldownloader_lib::DownloadAction::Cancel)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *global_options.lock().unwrap(),
+        [
+            json!({"max-concurrent-downloads": "5"}),
+            json!({"max-concurrent-downloads": "4"}),
+        ]
+    );
     server.abort();
 }
 
@@ -286,6 +497,7 @@ async fn pause_interrupt_reaches_engine_while_snapshot_rpc_is_still_blocked() {
                     return axum::Json(json!({"jsonrpc":"2.0", "id":request["id"], "error":{"code":1,"message":"cannot be paused now"}}));
                 }
                 let result = match request["method"].as_str().unwrap() {
+                    "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
                     "system.multicall" => { polling.notify_one(); release.notified().await; json!([[status("gid", "active", 20)]]) },
                     "aria2.forcePause" => { paused.notify_one(); json!("gid") },
                     "aria2.pause" => json!("gid"),
@@ -338,6 +550,7 @@ async fn pause_interrupt_reaches_engine_while_snapshot_rpc_is_still_blocked() {
 #[tokio::test]
 async fn paused_task_keeps_persisted_progress_when_aria2_restores_without_lengths() {
     let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => {
             json!([[json!({
                 "gid": "gid-1",
@@ -388,6 +601,7 @@ async fn paused_task_keeps_persisted_progress_when_aria2_restores_without_length
 #[tokio::test]
 async fn paused_task_keeps_persisted_progress_when_restore_has_placeholder_files() {
     let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => {
             json!([[json!({
                 "gid": "gid-1",
@@ -474,6 +688,7 @@ async fn synchronizer_polls_active_at_half_second_and_idle_at_two_seconds() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let wire = calls.clone();
     let (client, server) = server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => {
             wire.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             json!([[status("gid", "paused", 0)]])
@@ -549,16 +764,26 @@ fn notifications_accept_only_documented_events_with_gid() {
 }
 
 #[tokio::test]
-async fn authenticated_websocket_reconnect_wakes_polling_before_idle_interval() {
+async fn websocket_download_start_imports_an_unknown_rpc_task_before_idle_polling() {
     use alldownloader_lib::aria2::sync::TransferSynchronizer;
     use futures_util::{SinkExt, StreamExt};
     use std::time::Duration;
     let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = requests.clone();
+    let external_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_external_available = Arc::clone(&external_available);
     let (client, http_server) = server(move |r| match r["method"].as_str().unwrap() {
+        "aria2.tellActive" => {
+            if wire_external_available.load(std::sync::atomic::Ordering::SeqCst) {
+                json!([external_status("external-gid", "active", 25)])
+            } else {
+                json!([])
+            }
+        }
+        "aria2.tellWaiting" => json!([]),
         "system.multicall" => {
             count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            json!([[status("gid", "paused", 0)]])
+            json!([[external_status("external-gid", "active", 25)]])
         }
         "aria2.getGlobalStat" => global(),
         other => panic!("{other}"),
@@ -571,6 +796,7 @@ async fn authenticated_websocket_reconnect_wakes_polling_before_idle_interval() 
     )
     .unwrap();
     let (connected, mut connection) = tokio::sync::mpsc::channel(2);
+    let notification_available = Arc::clone(&external_available);
     let socket_server = tokio::spawn(async move {
         for attempt in 0..2 {
             let (socket, _) = listener.accept().await.unwrap();
@@ -580,7 +806,9 @@ async fn authenticated_websocket_reconnect_wakes_polling_before_idle_interval() 
             assert_eq!(auth["method"], "aria2.getVersion");
             assert_eq!(
                 auth["params"][0],
-                RpcSecret::from_bytes([1; 32]).authorization_param()
+                RpcSecret::from_bytes([1; 32])
+                    .authorization_param()
+                    .unwrap()
             );
             socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"jsonrpc":"2.0","id":auth["id"],"result":{"version":"1.37.0","enabledFeatures":[]}}).to_string().into())).await.unwrap();
             connected.send(()).await.unwrap();
@@ -589,17 +817,17 @@ async fn authenticated_websocket_reconnect_wakes_polling_before_idle_interval() 
                 continue;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
-            socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"jsonrpc":"2.0","method":"aria2.onDownloadPause","params":[{"gid":"gid"}]}).to_string().into())).await.unwrap();
+            notification_available.store(true, std::sync::atomic::Ordering::SeqCst);
+            socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"jsonrpc":"2.0","method":"aria2.onDownloadStart","params":[{"gid":"external-gid"}]}).to_string().into())).await.unwrap();
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
-    let task = store
-        .create(NewTask::direct("http://127.0.0.1/file"))
-        .unwrap();
-    store.bind_gid(task.id, "gid").unwrap();
-    let sync = TransferSynchronizer::new(Arc::new(DownloadService::new(Arc::new(client), store)))
-        .with_websocket(ws_client);
+    let sync = TransferSynchronizer::new(Arc::new(DownloadService::new(
+        Arc::new(client),
+        Arc::clone(&store),
+    )))
+    .with_websocket(ws_client);
     let (cancel, receiver) = tokio::sync::watch::channel(false);
     let worker = tokio::spawn(sync.run(receiver));
     tokio::time::timeout(Duration::from_secs(1), connection.recv())
@@ -611,12 +839,13 @@ async fn authenticated_websocket_reconnect_wakes_polling_before_idle_interval() 
         .unwrap()
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
-        while requests.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+        while store.find_by_gid("external-gid").unwrap().is_none() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("notification did not wake idle reconciler");
+    .expect("download-start notification did not wake idle reconciler");
+    assert!(requests.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     cancel.send(true).unwrap();
     tokio::time::timeout(Duration::from_millis(100), worker)
         .await
@@ -676,6 +905,7 @@ async fn cancel_acknowledgement_persists_event_and_missing_gid_does_not_break_la
     let cancelled_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let wire = cancelled_queries.clone();
     let (client, server) = server(move |r| match r["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "aria2.remove" => json!("removed-gid"),
         "system.multicall" => serde_json::Value::Array(
             r["params"][0]

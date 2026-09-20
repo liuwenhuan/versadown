@@ -181,6 +181,10 @@ export function LauncherWindow() {
   }, []);
 
   function openContextMenu() {
+    if (requestedMode.current === 'context-menu') {
+      requestMode('compact');
+      return;
+    }
     requestMode('context-menu');
     void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
     // Records menu usage only; this command never changes native visibility.
@@ -189,6 +193,10 @@ export function LauncherWindow() {
 
   function closeContextMenu() {
     requestMode('compact');
+  }
+
+  function closeContextMenuFromLauncher() {
+    if (requestedMode.current === 'context-menu') requestMode('compact');
   }
 
   function queueLauncherDragMove(pointer: LauncherPointerPosition) {
@@ -299,6 +307,7 @@ export function LauncherWindow() {
         onDragStart={(pointer, grabOffset) => { dragStartQueue.current = beginLauncherDrag(pointer, grabOffset); }}
         onDragMove={moveLauncherDrag}
         onDragEnd={finishLauncherDrag}
+        onPrimaryClick={closeContextMenuFromLauncher}
         onContextMenu={openContextMenu}
       />
       {mode === 'context-menu' && <LauncherContextMenu onElement={captureMenu} downloadSpeed={formatSpeed(downloadSpeed)} managerVisible={managerVisible} visibility={launcherVisibility} onClose={closeContextMenu} onAction={runContextAction} onVisibilityChange={updateLauncherVisibility} />}

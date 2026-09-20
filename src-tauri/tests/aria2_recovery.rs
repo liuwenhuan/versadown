@@ -155,7 +155,7 @@ async fn reconcile_repairs_a_recovery_placeholder_from_the_reported_file_name() 
 }
 
 #[tokio::test]
-async fn native_recovery_removes_unowned_engine_job_and_confined_payload() {
+async fn native_recovery_imports_unowned_active_engine_job_without_deleting_payload() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("orphan.bin");
     std::fs::write(&output, b"partial").unwrap();
@@ -172,22 +172,26 @@ async fn native_recovery_removes_unowned_engine_job_and_confined_payload() {
                 json!([status])
             }
             "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
-            "aria2.remove" => json!("orphan"),
             other => panic!("{other}"),
         })
         .await;
 
-    let report = DownloadService::new(
-        Arc::new(client),
-        Arc::new(TaskStore::open_in_memory().unwrap()),
-    )
-    .recover_native(root.path())
-    .await
-    .unwrap();
-    assert_eq!(report.removed_engine_tasks, 1);
-    assert_eq!(report.removed_files, 2);
-    assert!(!output.exists());
-    assert!(!std::path::PathBuf::from(format!("{}.aria2", output.display())).exists());
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let report = DownloadService::new(Arc::new(client), Arc::clone(&store))
+        .with_external_rpc_slots(4)
+        .recover_native(root.path())
+        .await
+        .unwrap();
+    assert_eq!(report.imported, 1);
+    assert_eq!(report.removed_engine_tasks, 0);
+    assert_eq!(report.removed_files, 0);
+    let imported = store.list().unwrap();
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].aria_gid.as_deref(), Some("orphan"));
+    assert_eq!(imported[0].status, TaskStatus::Downloading);
+    assert!(store.selection_confirmed(imported[0].id).unwrap());
+    assert!(output.exists());
+    assert!(std::path::PathBuf::from(format!("{}.aria2", output.display())).exists());
     server.abort();
 }
 

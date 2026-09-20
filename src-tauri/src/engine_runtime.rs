@@ -371,7 +371,7 @@ impl EngineRuntime {
     async fn retry_locked(&self, slot: &mut EngineSlot) -> EngineAvailability {
         if let Some(service) = slot.service.clone() {
             if service.engine_running().await.ok().flatten() == Some(true) {
-                let resume_after_recovery = self.recovery_resume_candidates();
+                let mut resume_after_recovery = self.recovery_resume_candidates();
                 let download_root = self
                     .launch_config
                     .read()
@@ -384,7 +384,8 @@ impl EngineRuntime {
                     return self.set_state(EngineAvailability::unavailable("应用正在退出"));
                 }
                 return match recovered {
-                    Ok(_) => {
+                    Ok(recovered) => {
+                        resume_after_recovery.extend(recovered.resumable_task_ids);
                         self.resume_recovered_non_cloud_tasks(&service, &resume_after_recovery)
                             .await;
                         let client = slot.client.clone();
@@ -412,7 +413,8 @@ impl EngineRuntime {
             .unwrap_or_else(|error| error.into_inner())
             .clone();
         let download_root = launch_config.download_dir.clone();
-        let resume_after_recovery = self.recovery_resume_candidates();
+        let mut resume_after_recovery = self.recovery_resume_candidates();
+        let external_rpc_slot_base = launch_config.aria2.max_concurrent_downloads;
         let (process, client) = match Aria2Process::start(launch_config).await {
             Ok(engine) => engine,
             Err(error) => {
@@ -430,7 +432,8 @@ impl EngineRuntime {
                 Arc::clone(&self.store),
                 process,
             )
-            .with_events(Arc::clone(&self.download_events)),
+            .with_events(Arc::clone(&self.download_events))
+            .with_external_rpc_slots(external_rpc_slot_base),
         );
         slot.service = Some(Arc::clone(&service));
         self.register_active_service(Arc::clone(&service));
@@ -441,7 +444,8 @@ impl EngineRuntime {
             return self.set_state(EngineAvailability::unavailable("应用正在退出"));
         }
         match recovered {
-            Ok(_) => {
+            Ok(recovered) => {
+                resume_after_recovery.extend(recovered.resumable_task_ids);
                 self.resume_recovered_non_cloud_tasks(&service, &resume_after_recovery)
                     .await;
                 Self::start_synchronizer_if_needed(slot, service, Some(client));
