@@ -9,6 +9,8 @@
     "test": "vitest",
     "test:run": "vitest run",
     "test:launcher": "node scripts/smoke-launcher.cjs",
+    "test:live:baidu-session": "node scripts/verify-baidu-session-live.cjs",
+    "test:live:xunlei-auth": "node scripts/verify-xunlei-auth-live.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "build:windows:quick": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Quick",

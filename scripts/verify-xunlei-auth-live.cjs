@@ -4,6 +4,19 @@ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),net=
 const {spawn}=require('node:child_process');
 const {evaluate,targets}=require('./xunlei-live-probe.cjs');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function availablePort(){
+  return await new Promise((resolve,reject)=>{
+    const server=net.createServer();
+    server.once('error',reject);
+    server.listen(0,'127.0.0.1',()=>{
+      const port=server.address().port;
+      server.close(error=>error?reject(error):resolve(port));
+    });
+  });
+}
+function removeIsolatedData(data){
+  fs.rmSync(data,{recursive:true,force:true,maxRetries:240,retryDelay:250});
+}
 async function invoke(page,command,args={}){
   return evaluate(page,`(async()=>{try{return {ok:true,result:await window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)},${JSON.stringify(args)})};}catch(e){return {ok:false,code:e?.code,message:e?.message};}})()`,210000);
 }
@@ -11,33 +24,41 @@ async function main(){
   const password=process.env.ALLDOWNLOADER_XUNLEI_PASSWORD_LIVE==='1';
   const primary=path.join(process.env.APPDATA,'com.alldownloader.desktop');
   const data=fs.mkdtempSync(path.join(os.tmpdir(),'alldownloader-xunlei-auth-live-'));
-  const reuse=process.env.ALLDOWNLOADER_XUNLEI_REUSE_TEST_DATA;
-  if(reuse&&(!path.resolve(reuse).startsWith(path.resolve(os.tmpdir())+path.sep)||!path.basename(reuse).startsWith('alldownloader-xunlei-auth-live-')))throw Error('invalid_test_profile');
-  const filter=file=>!['LOCK','SingletonLock','SingletonCookie','SingletonSocket'].includes(path.basename(file));
-  if(!password){
-    const source=reuse?path.join(reuse,'webview2'):path.join(primary,'web-auth','xunlei');
-    fs.cpSync(source,path.join(data,'webview2'),{recursive:true,filter});
-  }else{
-    fs.mkdirSync(path.join(data,'cloud-sessions'),{recursive:true});
-    for(const name of ['cloud-password-xunlei.bin','cloud-password-draft-xunlei.bin']){
-      const source=path.join(primary,'cloud-sessions',name);
-      if(fs.existsSync(source))fs.copyFileSync(source,path.join(data,'cloud-sessions',name));
-    }
-  }
-  const port=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p));});});
-  if(process.env.ALLDOWNLOADER_XUNLEI_DOWNLOAD_LIVE==='1'){
-    const enginePort=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p));});});
-    const original=JSON.parse(fs.readFileSync(path.join(primary,'settings.json'),'utf8'));
-    fs.writeFileSync(path.join(data,'settings.json'),JSON.stringify({downloadDirectory:path.join(data,'downloads'),proxy:original.proxy,aria2:{...original.aria2,rpcPort:enginePort,rpcToken:require('node:crypto').randomBytes(32).toString('hex')}}));
-  }
-  const binary=path.resolve(process.env.ALLDOWNLOADER_TEST_BINARY||'artifacts/alldownloader.exe');
-  const child=spawn(binary,[],{cwd:path.dirname(binary),windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,
-    ALLDOWNLOADER_BACKGROUND_UI_TEST:'1',ALLDOWNLOADER_TEST_DATA_DIR:data,ALLDOWNLOADER_TEST_DOWNLOAD_DIR:path.join(data,'downloads'),
-    WEBVIEW2_USER_DATA_FOLDER:path.join(data,'webview2'),WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${port} --disable-background-timer-throttling`}});
-  let manager,diagnostic='';
-  for(const stream of [child.stdout,child.stderr])stream?.on('data',chunk=>{diagnostic=(diagnostic+String(chunk)).slice(-4096);});
+  const retain=process.env.ALLDOWNLOADER_XUNLEI_KEEP_TEST_DATA==='1';
+  let child,manager,spawnError,diagnostic='';
   try{
+    const reuse=process.env.ALLDOWNLOADER_XUNLEI_REUSE_TEST_DATA;
+    if(reuse&&(!path.resolve(reuse).startsWith(path.resolve(os.tmpdir())+path.sep)||!path.basename(reuse).startsWith('alldownloader-xunlei-auth-live-')))throw Error('invalid_test_profile');
+    const filter=file=>!['LOCK','SingletonLock','SingletonCookie','SingletonSocket'].includes(path.basename(file));
+    if(!password){
+      const source=reuse?path.join(reuse,'webview2'):path.join(primary,'web-auth','xunlei');
+      fs.cpSync(source,path.join(data,'webview2'),{recursive:true,filter});
+    }else{
+      fs.mkdirSync(path.join(data,'cloud-sessions'),{recursive:true});
+      for(const name of ['cloud-password-xunlei.bin','cloud-password-draft-xunlei.bin']){
+        const source=path.join(primary,'cloud-sessions',name);
+        if(fs.existsSync(source))fs.copyFileSync(source,path.join(data,'cloud-sessions',name));
+      }
+    }
+    const port=await availablePort();
+    if(process.env.ALLDOWNLOADER_XUNLEI_DOWNLOAD_LIVE==='1'){
+      const enginePort=await availablePort();
+      const original=JSON.parse(fs.readFileSync(path.join(primary,'settings.json'),'utf8'));
+      fs.writeFileSync(path.join(data,'settings.json'),JSON.stringify({downloadDirectory:path.join(data,'downloads'),proxy:original.proxy,aria2:{...original.aria2,rpcPort:enginePort,rpcToken:require('node:crypto').randomBytes(32).toString('hex')}}));
+    }
+    const quickBinary=path.resolve(__dirname,'..','artifacts','quick','alldownloader.exe');
+    const releaseBinary=path.resolve(__dirname,'..','artifacts','alldownloader.exe');
+    const binary=process.env.ALLDOWNLOADER_TEST_BINARY
+      ? path.resolve(process.env.ALLDOWNLOADER_TEST_BINARY)
+      : (fs.existsSync(quickBinary)?quickBinary:releaseBinary);
+    if(!fs.existsSync(binary))throw Error(`test_binary_missing:${binary}`);
+    child=spawn(binary,[],{cwd:path.dirname(binary),windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,
+      ALLDOWNLOADER_BACKGROUND_UI_TEST:'1',ALLDOWNLOADER_TEST_DATA_DIR:data,ALLDOWNLOADER_TEST_DOWNLOAD_DIR:path.join(data,'downloads'),
+      WEBVIEW2_USER_DATA_FOLDER:path.join(data,'webview2'),WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${port} --disable-background-timer-throttling`}});
+    child.once('error',error=>{spawnError=error;});
+    for(const stream of [child.stdout,child.stderr])stream?.on('data',chunk=>{diagnostic=(diagnostic+String(chunk)).slice(-4096);});
     for(let n=0;n<120&&!manager;n++){
+      if(spawnError)throw spawnError;
       for(const page of (await targets(port).catch(()=>[])).filter(t=>t.type==='page'&&/tauri.localhost/.test(t.url))){
         if(await evaluate(page,"Array.from(document.querySelectorAll('button')).some(b=>b.textContent.includes('我的网盘'))").catch(()=>false)){manager=page;break;}
       }
@@ -103,12 +124,25 @@ async function main(){
     if(process.env.ALLDOWNLOADER_XUNLEI_DOWNLOAD_LIVE==='1'){
       await require('./verify-xunlei-download-live.cjs').run(command=>invoke(manager,command.name,command.args),root.result,data,account.result);
     }
-    console.log(JSON.stringify({method:password?'password':'web',rootReadable:true,accountRestorable:true,capacityReadable:true,capacityVisible,authorizationWindowClosed:closed,workspaceMenu:menu,isolatedData:data}));
+    const summary={method:password?'password':'web',rootReadable:true,accountRestorable:true,capacityReadable:true,capacityVisible,authorizationWindowClosed:closed,workspaceMenu:menu};
+    if(retain)summary.isolatedData=data;
+    console.log(JSON.stringify(summary));
   }finally{
-    if(manager)await invoke(manager,'activate_launcher_menu_for_test',{action:'launcher.quit'}).catch(()=>{});
-    for(let n=0;n<40&&child.exitCode===null;n++)await delay(200);
-    if(child.exitCode===null)child.kill();
-    console.log(JSON.stringify({testData:data}));
+    if(manager&&child)await invoke(manager,'activate_launcher_menu_for_test',{action:'launcher.quit'}).catch(()=>{});
+    if(child&&!spawnError){
+      for(let n=0;n<40&&child.exitCode===null;n++)await delay(200);
+    }
+    if(child&&child.exitCode===null)child.kill();
+    if(retain){
+      console.log(JSON.stringify({testData:data,retained:true}));
+    }else{
+      try{
+        removeIsolatedData(data);
+      }catch(error){
+        console.error(`cleanup_failed:${error.code||error.message}:testData=${data}`);
+        process.exitCode=1;
+      }
+    }
   }
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});
