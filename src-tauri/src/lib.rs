@@ -25,6 +25,7 @@ mod privacy;
 mod processing;
 mod store;
 mod update;
+mod window_icon;
 #[cfg(windows)]
 mod window_interaction;
 mod window_lifecycle;
@@ -252,6 +253,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            app.manage(window_icon::TaskbarIconState::default());
             let lifecycle = std::sync::Arc::new(ApplicationLifecycle::new());
             app.manage(std::sync::Arc::clone(&lifecycle));
             let background_ui_test = std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST").ok();
@@ -505,6 +507,7 @@ pub fn run() {
             launcher_drag::drag_launcher_window,
             launcher_input::set_launcher_input_regions,
             launcher_input::launcher_input_hit_test_for_test,
+            window_icon::set_main_window_icon,
             check_for_app_update,
             local_upload_picker::local_upload_entries,
             main_window_interaction_state,

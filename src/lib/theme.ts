@@ -99,6 +99,11 @@ export function getResolvedTheme(): ResolvedTheme {
   return resolvedTheme();
 }
 
+/** The concrete palette currently applied to every window. */
+export function getResolvedThemeId(): ThemeId {
+  return resolvedThemeId();
+}
+
 export function setThemeMode(mode: ThemeMode): void {
   currentMode = mode;
   try {

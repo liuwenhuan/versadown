@@ -1,6 +1,7 @@
 import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
+import type { ThemeId } from './theme';
 
 function fileNameFrom(value: string) {
   if (/^ed2k:\/\/\|file\|/i.test(value)) {
@@ -47,6 +48,11 @@ export function parseLocally(input: string): ParseDownloadResult {
 
 export function isTauriRuntime() {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+export async function syncMainWindowIcon(theme: ThemeId): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke('set_main_window_icon', { theme });
 }
 
 type NativeTaskOutcome = QueueTask & { duplicate?: DuplicateDownloadState; queueTask?: QueueTask };

@@ -22,6 +22,7 @@ it('keeps a single left click compact and does not render a new-task dialog', ()
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   expect(trigger).toHaveAttribute('data-size', '64');
+  expect(trigger.querySelector('svg.launcher-mark')).toHaveAttribute('viewBox', '175 123 674 778');
   fireEvent.click(trigger);
 
   expect(onActivateTaskList).not.toHaveBeenCalled();

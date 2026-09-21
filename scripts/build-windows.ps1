@@ -137,6 +137,11 @@ function Get-QuickRustSignature {
         $relativePath = $path.Substring($ProjectRoot.Length).TrimStart([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar))
         '{0}:{1}' -f $relativePath, (Get-FileSha256 -Path $path)
     }
+    # The GUI executable embeds the Vite output through Tauri's custom
+    # protocol. Reusing a Rust target after only frontend files changed would
+    # publish an executable with stale UI assets, so the quick target must
+    # depend on the same source signature as the frontend cache.
+    $signatureLines += 'frontend:{0}' -f (Get-FrontendSignature -ProjectRoot $ProjectRoot)
     $signatureBytes = [System.Text.Encoding]::UTF8.GetBytes(($signatureLines -join "`n"))
     $signatureHasher = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -228,7 +233,12 @@ function Ensure-FrontendBuild {
     $previousSignature = if (Test-Path -LiteralPath $signatureFile) { (Get-Content -LiteralPath $signatureFile -Raw).Trim() } else { '' }
     $distDir = Join-Path $ProjectRoot 'dist'
 
-    if ($Force -or $currentSignature -ne $previousSignature -or -not (Test-Path -LiteralPath $distDir)) {
+    $needsFrontendBuild = $Force -or -not (Test-Path -LiteralPath $distDir)
+    if (-not $needsFrontendBuild) {
+        $needsFrontendBuild = [string]::CompareOrdinal([string]$currentSignature, [string]$previousSignature) -ne 0
+    }
+
+    if ($needsFrontendBuild) {
         if ($Force) {
             Write-Host 'Release build: rebuilding production frontend.'
         } else {

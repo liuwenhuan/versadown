@@ -176,7 +176,7 @@ export function completedAt(completedAt: number | undefined): string | undefined
   const date = new Date(completedAt < 1_000_000_000_000 ? completedAt * 1000 : completedAt);
   if (Number.isNaN(date.getTime())) return undefined;
   const pad = (value: number) => String(value).padStart(2, '0');
-  return `完成于 ${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function childFileSize(task: QueueTask): string {
@@ -253,10 +253,9 @@ function isRecoveringCloudAuthorization(task: QueueTask): boolean {
 function taskPeerMetric(task: QueueTask): string | undefined {
   if (task.status !== 'downloading') return undefined;
   const connections = task.connections ?? 0;
-  if (task.kind === 'magnet' || task.kind === 'torrent') {
-    return '下载源 ' + connections + '/' + (task.discovered_nodes ?? 0);
-  }
-  return task.kind === 'ed2k' ? '已连接 ' + connections : undefined;
+  return task.kind === 'magnet' || task.kind === 'torrent' || task.kind === 'ed2k'
+    ? `(${connections}/${task.discovered_nodes ?? 0})`
+    : undefined;
 }
 
 function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
@@ -733,8 +732,9 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
           && (!isCompleted || (task.kind === 'folder' && hasPersistentChildren) || isBtFileTree);
         const taskName = displayTaskName(task);
         const isPaused = task.status === 'paused';
+        const isDownloading = task.status === 'downloading';
         const speed = !isPaused ? task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed) : undefined;
-        const eta = !isPaused ? task.eta ?? (task.eta_seconds !== undefined ? formatEta(task.eta_seconds) : undefined) : undefined;
+        const eta = isDownloading ? task.eta ?? (task.eta_seconds !== undefined ? formatEta(task.eta_seconds) : undefined) : undefined;
         const hasSpeed = !isPaused && (task.speed !== undefined || task.speedBytes !== undefined || task.download_speed !== undefined);
         const transferSize = task.total_length !== undefined || task.completed_length !== undefined ? transferProgress(task) : task.size;
         const subtitle = taskSubtitle(task);
@@ -758,9 +758,9 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
             <div className="task-name">
               <span className="expand-slot">{hasChildren && <button className="expand-button" aria-label={`${isExpanded ? '收起' : '展开'} ${taskName}`} onClick={(event) => { event.stopPropagation(); setExpanded((current) => ({ ...current, [task.id]: !isExpanded })); }}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}</span>
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
-              <span className="task-copy"><b title={taskName}>{taskName}</b>{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}</span>
+              <span className="task-copy"><b title={taskName}>{taskName}</b></span>
             </div>
-            {isCompleted ? <div className="completed-summary">{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>P2P 分享中</span>}</div> : <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={task.progress}><i style={{ width: `${task.progress}%` }} /></div><div className="transfer-metrics">{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error && !waitingForCloudAuthorization ? ' task-error' : ''}`} title={subtitle}>{subtitle}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">{recoveringCloudAuthorization ? '登录恢复中' : '已暂停'}</span> : <>{eta && <span className="transfer-eta">剩余 {eta}</span>}{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></div></div>}
+            <div className="task-progress">{eta && <span className="task-progress-eta">剩余 {eta}</span>}<div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={isCompleted ? 100 : task.progress}><i style={{ width: `${isCompleted ? 100 : task.progress}%` }} /></div><div className="transfer-metrics">{isCompleted ? <>{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>P2P 分享中</span>}<span className="transfer-live"><span className="transfer-paused transfer-completed">已完成</span></span></> : <>{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error && !waitingForCloudAuthorization ? ' task-error' : ''}`} title={subtitle}>{subtitle}{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">{recoveringCloudAuthorization ? '登录恢复中' : '已暂停'}</span> : <>{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></>}</div></div>
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {isCompleted && <button className="completed-quick-action" aria-label={completedHasPlayableMedia ? `播放 ${taskName}` : completedFileType ? `${associatedFileLabels[completedFileType]} ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasPlayableMedia ? '播放视频或音频' : completedFileType ? '使用系统默认应用打开' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasPlayableMedia ? 'play_videos' : completedFileType ? 'open_file' : 'open_directory'); }}><ActionIcon action={completedHasPlayableMedia ? 'play' : completedFileType ?? 'folder'} /></button>}

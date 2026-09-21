@@ -73,7 +73,7 @@ it('does not hijack Ctrl+A while editing or when a dialog is open', () => {
   expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(0);
 });
 
-it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
+it('shows downloading peer counts after the peer-to-peer task type', () => {
   render(<DownloadQueue tasks={[
     { id: 'magnet', name: 'movie.mkv', kind: 'magnet', status: 'downloading', progress: 25, connections: 3, discovered_nodes: 8 },
     { id: 'torrent', name: 'bundle', kind: 'torrent', status: 'downloading', progress: 25, connections: 1, discovered_nodes: 4 },
@@ -82,11 +82,15 @@ it('shows live peer metrics only for downloading peer-to-peer tasks', () => {
     { id: 'file', name: 'file.iso', kind: 'file', status: 'downloading', progress: 25, connections: 99 },
   ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
 
-  expect(screen.getByText('下载源 3/8')).toBeVisible();
-  expect(screen.getByText('下载源 1/4')).toBeVisible();
-  expect(screen.getByText('已连接 2')).toBeVisible();
-  expect(screen.queryByText('下载源 6/9')).not.toBeInTheDocument();
-  expect(screen.queryByText('已连接 99')).not.toBeInTheDocument();
+  const magnetPeers = screen.getByText('(3/8)');
+  const torrentPeers = screen.getByText('(1/4)');
+  const ed2kPeers = screen.getByText('(2/0)');
+  expect(magnetPeers.closest('.task-subtitle')).toHaveTextContent('磁力任务(3/8)');
+  expect(torrentPeers.closest('.task-subtitle')).toHaveTextContent('BT 种子(1/4)');
+  expect(ed2kPeers.closest('.task-subtitle')).toHaveTextContent('ED2K 下载(2/0)');
+  expect(magnetPeers.closest('.task-copy')).toBeNull();
+  expect(screen.queryByText('(6/9)')).not.toBeInTheDocument();
+  expect(screen.queryByText('(99/0)')).not.toBeInTheDocument();
 });
 
 it('uses one queued control with the regular task menu until aria2 promotes the task', async () => {
@@ -123,7 +127,7 @@ it('shows a sharing marker only for completed peer-to-peer tasks that are still 
   ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
 
   expect(screen.getByText('P2P 分享中')).toBeVisible();
-  expect(screen.getAllByText(/完成于 2026-09-11 11:02/)).toHaveLength(2);
+  expect(screen.getAllByText(/2026-09-11 11:02/)).toHaveLength(2);
   expect(screen.getAllByText('P2P 分享中')).toHaveLength(1);
 });
 
@@ -305,7 +309,7 @@ it('shows an active cloud directory with the standard transfer metrics', () => {
   expect(screen.queryByText('目录任务 · 1 个文件')).not.toBeInTheDocument();
 });
 
-it('keeps the remaining-time and speed values in dedicated stable layout slots', () => {
+it('places remaining time above the progress bar and keeps speed below it', () => {
   render(<DownloadQueue
     tasks={[{
       id: 'stable-live-metrics', name: 'large-file.bin', kind: 'file', status: 'downloading', progress: 34,
@@ -317,7 +321,9 @@ it('keeps the remaining-time and speed values in dedicated stable layout slots',
     onCommand={() => {}}
   />);
 
-  expect(screen.getByText('剩余 49 秒')).toHaveClass('transfer-eta');
+  const eta = screen.getByText('剩余 49 秒');
+  expect(eta).toHaveClass('task-progress-eta');
+  expect(eta.parentElement?.firstElementChild).toBe(eta);
   expect(screen.getByText('6.6 MB/s')).toHaveClass('transfer-speed');
 });
 
@@ -489,7 +495,7 @@ it('shows each completed file time instead of progress in a completed cloud dire
   await user.click(screen.getByRole('button', { name: '展开 已完成归档' }));
 
   const fileRow = container.querySelector('.child-row')!;
-  expect(fileRow).toHaveTextContent('完成于 2026-09-11 11:02');
+  expect(fileRow).toHaveTextContent('2026-09-11 11:02');
   expect(fileRow).toHaveTextContent('1 MB');
   expect(fileRow.querySelector('.child-progress')).toBeNull();
   expect(fileRow.querySelector('.child-progress-value')).toBeNull();
@@ -523,7 +529,7 @@ it('keeps completed nested directories on their existing progress display', asyn
   expect(directoryRow.querySelector('.child-completion-time')).toBeNull();
 
   await user.click(screen.getByRole('button', { name: '展开 第二季' }));
-  expect(screen.getByText('完成于 2026-09-11 11:02')).toBeVisible();
+  expect(screen.getByText('2026-09-11 11:02')).toBeVisible();
 });
 
 it('uses file operations instead of transfer status for expanded multi-file tasks and removes local path noise', async () => {
@@ -865,10 +871,10 @@ it('renders a completed video task compactly and plays its video files', async (
     onCommand={onCommand}
   />);
 
-  expect(screen.getByText('完成于 2026-09-10 08:00')).toBeVisible();
+  expect(screen.getByText('2026-09-10 08:00')).toBeVisible();
   expect(screen.getByText('1.0 GB')).toBeVisible();
-  expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
-  expect(screen.queryByText('已完成')).not.toBeInTheDocument();
+  expect(screen.getByRole('progressbar', { name: '纪录片合集 下载进度' })).toHaveAttribute('aria-valuenow', '100');
+  expect(screen.getByText('已完成')).toBeVisible();
 
   await user.click(screen.getByRole('button', { name: '播放 纪录片合集' }));
   expect(onCommand).toHaveBeenCalledWith('completed-video', 'play_videos');

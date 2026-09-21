@@ -15,7 +15,7 @@ import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusToast } from './components/EngineStatusBanner';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { reconcileTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
@@ -23,7 +23,7 @@ import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, Duplicate
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import darkMintIcon from './assets/launcher/dark_mint.svg';
 import mintWhiteIcon from './assets/launcher/mint_white.svg';
-import { getResolvedTheme, subscribeTheme } from './lib/theme';
+import { getResolvedTheme, getResolvedThemeId, subscribeTheme } from './lib/theme';
 import type { CloudAuthorization, ProviderDescriptor } from './lib/cloudTypes';
 import { installWindowResizePerformanceMode } from './lib/windowResizePerformance';
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
@@ -356,6 +356,12 @@ export function App() {
   useEffect(() => () => { taskAuthorizationActive.current = false; taskAuthorizationGeneration.current += 1; }, []);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const resolvedTheme = useSyncExternalStore(subscribeTheme, getResolvedTheme, getResolvedTheme);
+  const resolvedThemeId = useSyncExternalStore(subscribeTheme, getResolvedThemeId, getResolvedThemeId);
+  useEffect(() => {
+    // Tauri's regular set_icon call only controls Windows' small title-bar
+    // icon.  Keep the native taskbar icon in step with the concrete palette.
+    void syncMainWindowIcon(resolvedThemeId).catch(() => undefined);
+  }, [resolvedThemeId]);
   const privacyVisibleTasks = useMemo(() => tasks.filter((task) => privacyVisibility.unlocked || !isPrivateTask(task)), [privacyVisibility.unlocked, tasks]);
   const filteredPrivacyTasks = useMemo(() => privacyVisibleTasks.filter((task) => {
     if (privacyTaskFilter === 'all') return true;

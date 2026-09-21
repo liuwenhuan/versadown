@@ -38,7 +38,10 @@ function isTorrentFile(file: File): boolean {
 }
 
 function LauncherMark() {
-  return <svg className="launcher-mark" viewBox="0 0 1024 1024" aria-hidden="true">
+  // The original 1024px export includes a large transparent margin.  Keep
+  // the hit target at 64px, but crop that export here so the visible launcher
+  // glyph itself is a true 64px-tall icon.
+  return <svg className="launcher-mark" viewBox="175 123 674 778" aria-hidden="true">
     <defs>
       <linearGradient id="launcher-g-top" x1="30%" y1="0%" x2="70%" y2="100%">
         <stop className="launcher-top-start" offset="0%" stopColor="#C4DED4" />

@@ -16,7 +16,7 @@ pub const QUIT: &str = "launcher.quit";
 pub const TRAY_LAUNCHER_ALWAYS: &str = "tray.launcher.always";
 pub const TRAY_LAUNCHER_DOWNLOADING: &str = "tray.launcher.downloading";
 pub const TRAY_LAUNCHER_HIDDEN: &str = "tray.launcher.hidden";
-const TRAY_ID: &str = "manager-tray";
+pub(crate) const TRAY_ID: &str = "manager-tray";
 const EXIT_TRAY_REMOVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 const EXIT_ARIA2_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(7);
 
@@ -165,12 +165,11 @@ pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
         ],
     )
     .map_err(|error| error.to_string())?;
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| "应用图标不可用".to_string())?;
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon)
+        // The packaged icon includes intentional export padding for window
+        // and installer use.  A system-tray slot is much smaller, so use the
+        // tight raster shared with the taskbar instead.
+        .icon(crate::window_icon::icon_image("mint"))
         .tooltip("万能下载")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -242,6 +241,14 @@ mod tests {
         assert!(source.contains(
             "tauri::async_runtime::spawn(async move {\n                    reveal_manager"
         ));
+    }
+
+    #[test]
+    fn tray_uses_the_tight_runtime_icon_instead_of_the_padded_bundle_icon() {
+        let source = include_str!("launcher.rs");
+        assert!(source.contains(".icon(crate::window_icon::icon_image(\"mint\"))"));
+        let implementation = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!implementation.contains("default_window_icon()"));
     }
 }
 
