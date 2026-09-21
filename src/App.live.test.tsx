@@ -1103,6 +1103,25 @@ it('uses a non-link query to find local active, completed, and failed tasks', as
   expect(screen.getByTitle('已完成文档.pdf')).toBeVisible();
 });
 
+it('clears a task search from the search input and closes its attached results panel', async () => {
+  const user = userEvent.setup();
+  const task = { id: 'search-document', name: '搜索文档.zip', kind: 'file' as const, status: 'downloading' as const, progress: 40 };
+  state.list.mockResolvedValue([task]);
+  render(<App />);
+
+  const input = screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' });
+  await user.type(input, '搜索{Enter}');
+  await screen.findByRole('region', { name: '搜索结果' });
+
+  const search = input.closest('.global-search')!;
+  expect(search).toHaveClass('has-search-results');
+  const clear = within(search).getByRole('button', { name: '清除搜索' });
+  await user.click(clear);
+
+  expect(input).toHaveValue('');
+  expect(screen.queryByRole('region', { name: '搜索结果' })).not.toBeInTheDocument();
+});
+
 it('opens the unified batch window immediately when pasted content spans multiple lines', async () => {
   render(<App />);
   const content = 'https://example.test/first.zip\nhttps://example.test/second.zip';

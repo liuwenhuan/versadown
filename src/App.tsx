@@ -1544,7 +1544,7 @@ export function App() {
           <button type="button" className="sidebar-toggle" data-window-no-drag aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
         </div>
         <div className="header-input-shell" data-window-no-drag>
-          <label ref={searchDropTarget} className="global-search">
+          <label ref={searchDropTarget} className={`global-search${headerPanel === 'search' ? ' has-search-results' : ''}`}>
             <span aria-hidden="true">⌕</span>
             <textarea
               style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
@@ -1575,8 +1575,13 @@ export function App() {
                 }
               }}
             />
+            {headerPanel === 'search' && <button type="button" className="global-search-clear" aria-label="清除搜索" onClick={(event) => {
+              event.preventDefault();
+              setSearchInput('');
+              setHeaderPanel(null);
+            }}>×</button>}
           </label>
-          {(headerPanel || headerConfirmation) && <div className="header-input-panel" data-window-no-drag>
+          {(headerPanel || headerConfirmation) && <div className={`header-input-panel${headerPanel === 'search' ? ' header-search-panel' : ''}`} data-window-no-drag>
             {headerConfirmation ? <ParseConfirmDialog placement="header" result={headerConfirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={(selectedIds, destinationDirectory, privateDownload) => void confirm(selectedIds, destinationDirectory, privateDownload, 'header')} onSelectionChange={(selectedIds) => setHeaderConfirmation((current) => current ? {
               ...current,
               resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
@@ -1588,7 +1593,7 @@ export function App() {
                 return result;
               }} onClose={() => { setHeaderPanel(null); setSearchInput(''); }} />
                 : <section className="header-search-results" role="region" aria-label="搜索结果">
-                  <header><strong>搜索结果</strong><span>{taskSearchResults.length} 个任务</span><button type="button" aria-label="关闭搜索结果" onClick={() => setHeaderPanel(null)}>×</button></header>
+                  <header><strong>搜索结果</strong><span>{taskSearchResults.length} 个任务</span></header>
                   {taskSearchResults.length ? <div>{taskSearchResults.map((task) => <button type="button" key={task.id} className="header-search-result" aria-label={`打开任务 ${displayTaskName(task)}`} onClick={() => selectSearchResult(task)}>
                     <span className={`header-search-status ${task.status === 'failed' ? 'failed' : taskTabForSearchResult(task)}`}>{taskStatusLabel(task)}</span>
                     <strong title={displayTaskName(task)}>{displayTaskName(task)}</strong>
