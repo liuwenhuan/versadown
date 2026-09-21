@@ -236,7 +236,7 @@ it('asks for and confirms a new password when privacy has no existing password',
   await user.click(screen.getByRole('button', { name: '保存密码' }));
 
   expect(configurePrivacyDownload).toHaveBeenCalledWith(true, undefined, 'private-pass');
-  expect(await screen.findByRole('status')).toHaveTextContent('隐私下载已开启');
+  expect(screen.queryByRole('status')).not.toBeInTheDocument();
 });
 
 it('requires the old password before replacing an existing privacy password', async () => {
@@ -251,6 +251,19 @@ it('requires the old password before replacing an existing privacy password', as
 
   expect(screen.queryByLabelText('确认新密码')).not.toBeInTheDocument();
   expect(configurePrivacyDownload).toHaveBeenCalledWith(true, 'old-pass', 'new-pass');
+});
+
+it('keeps privacy password controls disabled after debug logging refreshes a configured password', async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<SettingsPanel initial={{ ...initial, privacyDownloadEnabled: false, privacyPasswordConfigured: false }} onChange={() => {}} />);
+
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await user.click(screen.getByRole('checkbox', { name: '打开日志调试' }));
+  rerender(<SettingsPanel initial={{ ...initial, aria2: { ...initial.aria2, debugLogging: true }, privacyDownloadEnabled: false, privacyPasswordConfigured: true }} onChange={() => {}} />);
+
+  expect(screen.getByLabelText('输入旧密码')).toBeDisabled();
+  expect(screen.getByLabelText('设置新密码')).toBeDisabled();
+  expect(screen.getByRole('button', { name: '保存密码' })).toBeDisabled();
 });
 
 it('uses compact aligned controls and consistent cards across settings tabs', async () => {

@@ -204,7 +204,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         ?? currentSettings({ privacyDownloadEnabled: enabled, privacyPasswordConfigured: true });
       setPrivacyDownloadEnabled(saved.privacyDownloadEnabled ?? enabled);
       setPrivacyPasswordConfigured(saved.privacyPasswordConfigured ?? true);
-      setPrivacyStatus({ kind: 'success', message: enabled ? '隐私下载已开启' : '隐私下载已关闭' });
+      setPrivacyStatus(null);
     } catch (error) {
       setPrivacyDownloadEnabled(previous);
       setPrivacyStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
@@ -236,7 +236,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
       setPrivacyCurrentPassword('');
       setPrivacyNewPassword('');
       setPrivacyPasswordConfirmation('');
-      setPrivacyStatus({ kind: 'success', message: privacyDownloadEnabled ? '隐私下载已开启' : '隐私下载已关闭' });
+      setPrivacyStatus(null);
     } catch (error) {
       setPrivacyStatus({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
     }
@@ -389,7 +389,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         </section>
         <form className="privacy-download-settings proxy-settings" onSubmit={(event) => void savePrivacyDownload(event)}>
           <label className="setting-row"><span><b>开启隐私下载</b><small>私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。</small></span><input aria-label="开启隐私下载" type="checkbox" checked={privacyDownloadEnabled} onChange={(event) => void updatePrivacyDownload(event.target.checked)} /></label>
-          <fieldset className="privacy-password-fields" disabled={!privacyDownloadEnabled && !privacyPasswordConfigured}>
+          <fieldset className="privacy-password-fields" disabled={!privacyDownloadEnabled}>
             {privacyPasswordConfigured && <label><span>输入旧密码</span><input aria-label="输入旧密码" type="password" autoComplete="current-password" value={privacyCurrentPassword} onChange={(event) => setPrivacyCurrentPassword(event.target.value)} /></label>}
             <label><span>设置新密码</span><input aria-label="设置新密码" type="password" autoComplete="new-password" placeholder={privacyPasswordConfigured ? '留空则保留现有密码' : '设置隐私模式密码'} value={privacyNewPassword} onChange={(event) => setPrivacyNewPassword(event.target.value)} /></label>
             {!privacyPasswordConfigured && <label><span>确认新密码</span><input aria-label="确认新密码" type="password" autoComplete="new-password" value={privacyPasswordConfirmation} onChange={(event) => setPrivacyPasswordConfirmation(event.target.value)} /></label>}

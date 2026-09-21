@@ -1380,6 +1380,7 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
     await user.dblClick(screen.getByText('子目录'));
     const parentRow = await screen.findByRole('treeitem', { name: '返回上一级目录' });
     expect(parentRow).toHaveTextContent('返回上级目录');
+    expect(within(parentRow).getByRole('checkbox', { name: '选择 返回上级目录' })).toBeDisabled();
     await user.click(parentRow);
     await waitFor(() => expect(listCloudDirectory).toHaveBeenLastCalledWith(provider, cloudRootDirectoryId[provider]));
   }
@@ -1400,6 +1401,7 @@ it.each(['回收站', '我的分享'] as const)(
     await user.dblClick(await screen.findByText(virtualFolder, { exact: true }));
     const parentRow = await screen.findByRole('treeitem', { name: '返回上一级目录' });
     expect(parentRow).toHaveTextContent('返回上级目录');
+    expect(within(parentRow).getByRole('checkbox', { name: '选择 返回上级目录' })).toBeDisabled();
     await user.click(parentRow);
 
     await waitFor(() => expect(listCloudDirectory).toHaveBeenLastCalledWith(provider, cloudRootDirectoryId[provider]));
@@ -1855,7 +1857,7 @@ it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
   render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
 
   const recycleBin = await screen.findByText('回收站');
-  expect(screen.queryByRole('checkbox', { name: '选择 回收站' })).not.toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: '选择 回收站' })).toBeDisabled();
   await user.click(recycleBin);
   expect(screen.queryByRole('toolbar', { name: /已选择/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '下载' })).not.toBeInTheDocument();
@@ -1877,8 +1879,8 @@ it('keeps root virtual folders out of selection while retaining their navigation
 
   const recycleBin = await screen.findByText('回收站');
   const myShares = screen.getByText('我的分享');
-  expect(screen.queryByRole('checkbox', { name: '选择 回收站' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('checkbox', { name: '选择 我的分享' })).not.toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: '选择 回收站' })).toBeDisabled();
+  expect(screen.getByRole('checkbox', { name: '选择 我的分享' })).toBeDisabled();
 
   await user.click(recycleBin);
   await user.click(myShares);
