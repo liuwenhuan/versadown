@@ -1091,7 +1091,7 @@ it('uses a non-link query to find local active, completed, and failed tasks', as
   state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [active] : scope === 'terminal' ? [completed, failed] : [active, completed, failed]));
   render(<App />);
 
-  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), '文档{Enter}');
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), '文档');
 
   const results = await screen.findByRole('region', { name: '搜索结果' });
   expect(within(results).getByRole('button', { name: /正在下载的文档\.zip/ })).toBeVisible();
@@ -1120,6 +1120,49 @@ it('clears a task search from the search input and closes its attached results p
 
   expect(input).toHaveValue('');
   expect(screen.queryByRole('region', { name: '搜索结果' })).not.toBeInTheDocument();
+});
+
+it('closes live search results with Escape without clearing the query', async () => {
+  const user = userEvent.setup();
+  const task = { id: 'escape-document', name: '保留关键词文档.zip', kind: 'file' as const, status: 'downloading' as const, progress: 40 };
+  state.list.mockResolvedValue([task]);
+  render(<App />);
+
+  const input = screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' });
+  await user.type(input, '关键词');
+  await screen.findByRole('region', { name: '搜索结果' });
+  await user.keyboard('{Escape}');
+
+  expect(input).toHaveValue('关键词');
+  expect(screen.queryByRole('region', { name: '搜索结果' })).not.toBeInTheDocument();
+});
+
+it('moves through live search results with arrow keys and opens the selected task with Enter', async () => {
+  const user = userEvent.setup();
+  const active = { id: 'keyboard-active', name: '键盘下载中.zip', kind: 'file' as const, status: 'downloading' as const, progress: 40 };
+  const completed = { id: 'keyboard-completed', name: '键盘已完成.zip', kind: 'file' as const, status: 'completed' as const, progress: 100 };
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [active] : scope === 'terminal' ? [completed] : [active, completed]));
+  render(<App />);
+
+  const input = screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' });
+  await user.type(input, '键盘');
+  const results = await screen.findByRole('region', { name: '搜索结果' });
+  const activeResult = within(results).getByRole('button', { name: /键盘下载中\.zip/ });
+  const completedResult = within(results).getByRole('button', { name: /键盘已完成\.zip/ });
+  const [firstResult, secondResult] = within(results).getAllByRole('button');
+  const selectedTask = secondResult === activeResult ? active : completed;
+
+  expect(input).toHaveFocus();
+  await user.keyboard('{ArrowDown}');
+  expect(firstResult).toHaveClass('is-keyboard-selected');
+  await user.keyboard('{ArrowDown}');
+  expect(secondResult).toHaveClass('is-keyboard-selected');
+  await user.keyboard('{ArrowUp}');
+  expect(firstResult).toHaveClass('is-keyboard-selected');
+  await user.keyboard('{ArrowDown}{Enter}');
+
+  expect(screen.getByRole('tab', { name: selectedTask.status === 'completed' ? /已完成/ : /下载中/ })).toHaveAttribute('aria-selected', 'true');
+  expect(screen.getByTitle(selectedTask.name)).toBeVisible();
 });
 
 it('opens the unified batch window immediately when pasted content spans multiple lines', async () => {

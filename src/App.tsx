@@ -334,6 +334,7 @@ export function App() {
   const taskOrders = taskOrderPreferences.orders;
   const [searchInput, setSearchInput] = useState('');
   const [headerPanel, setHeaderPanel] = useState<HeaderPanelMode>(null);
+  const [selectedSearchResultIndex, setSelectedSearchResultIndex] = useState<number | null>(null);
   const [headerConfirmation, setHeaderConfirmation] = useState<ParseResult | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null);
@@ -1557,7 +1558,9 @@ export function App() {
               onChange={(event) => {
                 const next = event.target.value;
                 setSearchInput(next);
-                if (!next.trim()) setHeaderPanel(null);
+                setSelectedSearchResultIndex(null);
+                const query = next.trim();
+                setHeaderPanel(query && !hasMultipleLines(next) && !isDownloadInput(query) ? 'search' : null);
               }}
               onPaste={(event) => {
                 const pasted = event.clipboardData.getData('text');
@@ -1565,10 +1568,33 @@ export function App() {
                 event.preventDefault();
                 setSearchInput('');
                 setHeaderPanel(null);
+                setSelectedSearchResultIndex(null);
                 setNewDownloadInput(pasted);
                 setNewDownloadOpen(true);
               }}
               onKeyDown={(event) => {
+                if (event.key === 'Escape' && headerPanel === 'search') {
+                  event.preventDefault();
+                  setHeaderPanel(null);
+                  setSelectedSearchResultIndex(null);
+                  return;
+                }
+                if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && headerPanel === 'search' && taskSearchResults.length) {
+                  event.preventDefault();
+                  const moveDown = event.key === 'ArrowDown';
+                  setSelectedSearchResultIndex((current) => moveDown
+                    ? Math.min((current ?? -1) + 1, taskSearchResults.length - 1)
+                    : Math.max((current ?? taskSearchResults.length) - 1, 0));
+                  return;
+                }
+                if (event.key === 'Enter' && !event.shiftKey && headerPanel === 'search' && selectedSearchResultIndex !== null) {
+                  const selectedTask = taskSearchResults[selectedSearchResultIndex];
+                  if (selectedTask) {
+                    event.preventDefault();
+                    selectSearchResult(selectedTask);
+                    return;
+                  }
+                }
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();
                   submitHeaderInput();
@@ -1579,6 +1605,7 @@ export function App() {
               event.preventDefault();
               setSearchInput('');
               setHeaderPanel(null);
+              setSelectedSearchResultIndex(null);
             }}>×</button>}
           </label>
           {(headerPanel || headerConfirmation) && <div className={`header-input-panel${headerPanel === 'search' ? ' header-search-panel' : ''}`} data-window-no-drag>
@@ -1594,7 +1621,7 @@ export function App() {
               }} onClose={() => { setHeaderPanel(null); setSearchInput(''); }} />
                 : <section className="header-search-results" role="region" aria-label="搜索结果">
                   <header><strong>搜索结果</strong><span>{taskSearchResults.length} 个任务</span></header>
-                  {taskSearchResults.length ? <div>{taskSearchResults.map((task) => <button type="button" key={task.id} className="header-search-result" aria-label={`打开任务 ${displayTaskName(task)}`} onClick={() => selectSearchResult(task)}>
+                  {taskSearchResults.length ? <div>{taskSearchResults.map((task, index) => <button type="button" key={task.id} className={`header-search-result${selectedSearchResultIndex === index ? ' is-keyboard-selected' : ''}`} aria-label={`打开任务 ${displayTaskName(task)}`} onClick={() => selectSearchResult(task)}>
                     <span className={`header-search-status ${task.status === 'failed' ? 'failed' : taskTabForSearchResult(task)}`}>{taskStatusLabel(task)}</span>
                     <strong title={displayTaskName(task)}>{displayTaskName(task)}</strong>
                   </button>)}</div> : <p>没有匹配的下载任务</p>}
