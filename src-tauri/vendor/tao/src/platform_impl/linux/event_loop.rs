@@ -450,15 +450,17 @@ impl<T: 'static> EventLoop<T> {
             }
           }
           WindowRequest::CursorIgnoreEvents(ignore) => {
-            if ignore {
-              let empty_region = Region::create_rectangle(&RectangleInt::new(0, 0, 1, 1));
-              window
-                .window()
-                .unwrap()
-                .input_shape_combine_region(&empty_region, 0, 0);
-            } else {
-              window.input_shape_combine_region(None)
-            };
+            let gdk_window = window.window();
+            if cursor_ignore_events_are_ready(&gdk_window) {
+              if ignore {
+                let empty_region = Region::create_rectangle(&RectangleInt::new(0, 0, 1, 1));
+                gdk_window
+                  .expect("realized GDK window was checked above")
+                  .input_shape_combine_region(&empty_region, 0, 0);
+              } else {
+                window.input_shape_combine_region(None);
+              }
+            }
           }
           WindowRequest::ProgressBarState(_) => unreachable!(),
           WindowRequest::BadgeCount(_, _) => unreachable!(),
@@ -1213,6 +1215,10 @@ impl<T: 'static> EventLoopProxy<T> {
   }
 }
 
+fn cursor_ignore_events_are_ready(window: &Option<gdk::Window>) -> bool {
+  window.is_some()
+}
+
 fn assert_is_main_thread(suggested_method: &str) {
   assert!(
     is_main_thread(),
@@ -1308,5 +1314,15 @@ impl ResizeDirection {
       ResizeDirection::SouthWest => WindowEdge::SouthWest,
       ResizeDirection::West => WindowEdge::West,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::cursor_ignore_events_are_ready;
+
+  #[test]
+  fn cursor_ignore_request_before_gtk_window_realization_is_deferred() {
+    assert!(!cursor_ignore_events_are_ready(&None));
   }
 }
