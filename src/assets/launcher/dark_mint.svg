@@ -2,16 +2,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
     <linearGradient id="gTop" x1="30%" y1="0%" x2="70%" y2="100%">
-      <stop offset="0%" stop-color="#70767E"/><stop offset="100%" stop-color="#5C626A"/>
+      <stop offset="0%" stop-color="#767C84"/><stop offset="100%" stop-color="#62686E"/>
     </linearGradient>
     <linearGradient id="gLeft" x1="0%" y1="10%" x2="100%" y2="90%">
-      <stop offset="0%" stop-color="#5C626A"/><stop offset="100%" stop-color="#9CA4AC"/>
+      <stop offset="0%" stop-color="#62686E"/><stop offset="100%" stop-color="#9CA4AC"/>
     </linearGradient>
     <linearGradient id="gRight" x1="100%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#9CA4AC"/><stop offset="100%" stop-color="#50565E"/>
+      <stop offset="0%" stop-color="#9CA4AC"/><stop offset="100%" stop-color="#525860"/>
     </linearGradient>
     <linearGradient id="gRim" x1="30%" y1="0%" x2="70%" y2="100%">
-      <stop offset="0%" stop-color="#848C96"/><stop offset="100%" stop-color="#5C626A"/>
+      <stop offset="0%" stop-color="#848C96"/><stop offset="100%" stop-color="#62686E"/>
     </linearGradient>
     <clipPath id="hexClip"><path d="M 480.155,158.776 Q 512.000,140.390 543.845,158.776 L 801.978,307.809 Q 833.823,326.195 833.823,362.967 L 833.823,661.033 Q 833.823,697.805 801.978,716.191 L 543.845,865.224 Q 512.000,883.610 480.155,865.224 L 222.022,716.191 Q 190.177,697.805 190.177,661.033 L 190.177,362.967 Q 190.177,326.195 222.022,307.809 Z"/></clipPath>
     <clipPath id="faceL"><path d="M 175.012,317.440 L 175.012,706.560 L 512.000,901.120 L 512.000,512.000 Z"/></clipPath>
@@ -27,8 +27,8 @@
       <path d="M 333.396,644.301 L 512.000,747.418 L 690.604,644.301 L 690.604,560.640 L 512.000,663.757 L 333.396,560.640 Z" fill="#E8F4EC"/>
     </g>
     <g clip-path="url(#faceR)">
-      <path d="M 333.396,492.544 L 512.000,595.661 L 690.604,492.544 L 690.604,408.883 L 512.000,512.000 L 333.396,408.883 Z" fill="#D2E4DA"/>
-      <path d="M 333.396,644.301 L 512.000,747.418 L 690.604,644.301 L 690.604,560.640 L 512.000,663.757 L 333.396,560.640 Z" fill="#D2E4DA"/>
+      <path d="M 333.396,492.544 L 512.000,595.661 L 690.604,492.544 L 690.604,408.883 L 512.000,512.000 L 333.396,408.883 Z" fill="#D4E6DA"/>
+      <path d="M 333.396,644.301 L 512.000,747.418 L 690.604,644.301 L 690.604,560.640 L 512.000,663.757 L 333.396,560.640 Z" fill="#D4E6DA"/>
     </g>
   </g>
 </svg>

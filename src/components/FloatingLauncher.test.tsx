@@ -132,3 +132,13 @@ it('renders the themed inline SVG artwork for the light launcher', () => {
   expect(trigger.querySelector('img.launcher-mark')).not.toBeInTheDocument();
   expect(trigger.querySelector('.launcher-logo-left')).toBeInTheDocument();
 });
+
+it('uses the latest left-lit mint gradient on the floating launcher', () => {
+  theme.resolved = 'light';
+  render(<FloatingLauncher />);
+
+  const trigger = screen.getByRole('button', { name: '打开下载输入' });
+  expect(trigger.querySelector('.launcher-top-start')).toHaveAttribute('stop-color', '#C4E0D4');
+  expect(trigger.querySelector('.launcher-rim-start')).toHaveAttribute('stop-color', '#DCECE4');
+  expect(trigger.querySelector('.launcher-right-end')).toHaveAttribute('stop-color', '#A8CABE');
+});

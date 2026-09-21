@@ -2,16 +2,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
     <linearGradient id="gTop" x1="30%" y1="0%" x2="70%" y2="100%">
-      <stop offset="0%" stop-color="#C4DED4"/><stop offset="100%" stop-color="#ACC6BE"/>
+      <stop offset="0%" stop-color="#C4E0D4"/><stop offset="100%" stop-color="#B6D8CA"/>
     </linearGradient>
     <linearGradient id="gLeft" x1="0%" y1="10%" x2="100%" y2="90%">
-      <stop offset="0%" stop-color="#ACC6BE"/><stop offset="100%" stop-color="#E6F2EC"/>
+      <stop offset="0%" stop-color="#B6D8CA"/><stop offset="100%" stop-color="#E0EEE6"/>
     </linearGradient>
     <linearGradient id="gRight" x1="100%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#E6F2EC"/><stop offset="100%" stop-color="#9EC4B8"/>
+      <stop offset="0%" stop-color="#E0EEE6"/><stop offset="100%" stop-color="#A8CABE"/>
     </linearGradient>
     <linearGradient id="gRim" x1="30%" y1="0%" x2="70%" y2="100%">
-      <stop offset="0%" stop-color="#D6EAE2"/><stop offset="100%" stop-color="#ACC6BE"/>
+      <stop offset="0%" stop-color="#DCECE4"/><stop offset="100%" stop-color="#B6D8CA"/>
     </linearGradient>
     <clipPath id="hexClip"><path d="M 480.155,158.776 Q 512.000,140.390 543.845,158.776 L 801.978,307.809 Q 833.823,326.195 833.823,362.967 L 833.823,661.033 Q 833.823,697.805 801.978,716.191 L 543.845,865.224 Q 512.000,883.610 480.155,865.224 L 222.022,716.191 Q 190.177,697.805 190.177,661.033 L 190.177,362.967 Q 190.177,326.195 222.022,307.809 Z"/></clipPath>
     <clipPath id="faceL"><path d="M 175.012,317.440 L 175.012,706.560 L 512.000,901.120 L 512.000,512.000 Z"/></clipPath>

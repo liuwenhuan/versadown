@@ -78,8 +78,11 @@ function Get-FrontendSignature {
         $frontendInputs += Get-ChildItem -LiteralPath $publicDir -File -Recurse
     }
 
-    $signatureLines = foreach ($file in $frontendInputs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object { $_.FullName }) {
+    $signatureLines = foreach ($file in $frontendInputs | Sort-Object { $_.FullName }) {
         $path = if ($file -is [System.IO.FileInfo]) { $file.FullName } else { [string]$file }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
         $relativePath = $path.Substring($ProjectRoot.Length).TrimStart([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar))
         '{0}:{1}' -f $relativePath, (Get-FileSha256 -Path $path)
     }
@@ -132,8 +135,11 @@ function Get-QuickRustSignature {
         }
     }
 
-    $signatureLines = foreach ($file in $rustInputs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Sort-Object { $_.FullName }) {
+    $signatureLines = foreach ($file in $rustInputs | Sort-Object { $_.FullName }) {
         $path = if ($file -is [System.IO.FileInfo]) { $file.FullName } else { [string]$file }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
         $relativePath = $path.Substring($ProjectRoot.Length).TrimStart([char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar))
         '{0}:{1}' -f $relativePath, (Get-FileSha256 -Path $path)
     }
@@ -172,14 +178,7 @@ function Reset-QuickRustBuildIfInputsChanged {
         return $signature
     }
 
-    Write-Host 'Rust inputs changed: invalidating cached alldownloader artifacts.'
-    $manifest = Join-Path $ProjectRoot 'src-tauri\Cargo.toml'
-    # Keep cargo's clean output visible, but do not let it become part of the
-    # function result: callers persist that result as the source signature.
-    & $CargoCommand clean --manifest-path $manifest --target-dir $TargetRoot --profile quick -p alldownloader | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "Quick Rust cache invalidation failed with exit code $LASTEXITCODE."
-    }
+    Write-Host 'Rust inputs changed; retaining the incremental quick build cache.'
     return $signature
 }
 
@@ -214,6 +213,7 @@ function Invoke-FrontendBuild {
     }
     $signature = Get-FrontendSignature -ProjectRoot $ProjectRoot
     Save-FrontendSignature -ProjectRoot $ProjectRoot -Signature $signature
+    return $signature
 }
 
 function Ensure-FrontendBuild {
@@ -244,10 +244,12 @@ function Ensure-FrontendBuild {
         } else {
             Write-Host 'Frontend inputs changed: rebuilding production frontend.'
         }
-        Invoke-FrontendBuild -PnpmCommand $PnpmCommand -ProjectRoot $ProjectRoot
+        $null = Invoke-FrontendBuild -PnpmCommand $PnpmCommand -ProjectRoot $ProjectRoot
     } else {
         Write-Host 'Frontend unchanged; reusing dist for quick build.'
     }
+
+    return $currentSignature
 }
 
 function Invoke-MsvcBuild {
@@ -269,23 +271,44 @@ function Invoke-MsvcBuild {
         [ValidateSet('quick', 'release')]
         [string]$Profile,
 
+        [Parameter(Mandatory)]
+        [string]$FrontendSignature,
+
         [switch]$Installer
     )
 
     $incremental = if ($Profile -eq 'quick') { '1' } else { '0' }
     if ($Installer) {
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && call "{3}" exec tauri build --runner "{4}"' -f $VcvVars, $TargetRoot, $incremental, $PnpmCommand, $CargoCommand
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && call "{4}" exec tauri build --runner "{5}"' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $PnpmCommand, $CargoCommand
     } elseif ($Profile -eq 'quick') {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && "{3}" build --manifest-path "{4}" --profile quick --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $CargoCommand, $manifest
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --profile quick --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
     } else {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && "{3}" build --manifest-path "{4}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $CargoCommand, $manifest
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
     }
 
-    & cmd.exe /d /s /c $command
-    if ($LASTEXITCODE -ne 0) {
-        throw "Windows $Profile build failed with exit code $LASTEXITCODE."
+    $process = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/s', '/c', $command) -NoNewWindow -PassThru -Wait
+    if ($process.ExitCode -ne 0) {
+        throw "Windows $Profile build failed with exit code $($process.ExitCode)."
+    }
+}
+
+function Assert-PublishedBinaryAvailable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$PublishedBinary,
+
+        [object[]]$Processes = @(Get-Process -Name 'alldownloader' -ErrorAction SilentlyContinue)
+    )
+
+    $destination = [System.IO.Path]::GetFullPath($PublishedBinary)
+    foreach ($existingProcess in $Processes) {
+        $processPath = try { [System.IO.Path]::GetFullPath([string]$existingProcess.Path) } catch { continue }
+        if ([string]::Equals($processPath, $destination, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "The published executable is running (PID $($existingProcess.Id)): $destination. Close it before starting the build."
+        }
     }
 }
 
@@ -319,8 +342,13 @@ function Publish-BuildOutput {
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PublishedBinary) | Out-Null
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PublishedSidecar) | Out-Null
+    $builtBinaryHash = Get-FileSha256 -Path $BuiltBinary
     Copy-Item -LiteralPath $BuiltBinary -Destination $PublishedBinary -Force
     Copy-Item -LiteralPath $SidecarSource -Destination $PublishedSidecar -Force
+    $publishedBinaryHash = Get-FileSha256 -Path $PublishedBinary
+    if ($publishedBinaryHash -ne $builtBinaryHash) {
+        throw "Published executable hash did not match the build output: $PublishedBinary"
+    }
     if (Test-Path -LiteralPath $RetiredXunleiHelper -PathType Leaf) {
         Remove-Item -LiteralPath $RetiredXunleiHelper -Force
     }
@@ -328,7 +356,7 @@ function Publish-BuildOutput {
         Remove-Item -LiteralPath $LegacyPublishedSidecar -Force
     }
 
-    Write-Host "Published ($Mode): $PublishedBinary"
+    Write-Host "Published ($Mode): $PublishedBinary (SHA-256: $publishedBinaryHash)"
     Write-Host "Published ($Mode): $PublishedSidecar"
 }
 
@@ -358,18 +386,20 @@ if (-not (Test-Path -LiteralPath $vcvars)) {
 }
 
 Set-Location $projectRoot
+Assert-PublishedBinaryAvailable -PublishedBinary $publishedBinary
 $quickRustSignature = $null
 if ($Installer) {
     # Tauri owns beforeBuildCommand for a package build, so it performs the
     # frontend production build exactly once.
-    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $cargoCommand -PnpmCommand $pnpmCommand -TargetRoot $targetRoot -Profile $profile -Installer
-    Save-FrontendSignature -ProjectRoot $projectRoot -Signature (Get-FrontendSignature -ProjectRoot $projectRoot)
+    $frontendSignature = Get-FrontendSignature -ProjectRoot $projectRoot
+    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $cargoCommand -PnpmCommand $pnpmCommand -TargetRoot $targetRoot -Profile $profile -FrontendSignature $frontendSignature -Installer
+    Save-FrontendSignature -ProjectRoot $projectRoot -Signature $frontendSignature
 } else {
-    Ensure-FrontendBuild -PnpmCommand $pnpmCommand -ProjectRoot $projectRoot -Force:($Mode -eq 'Release')
+    $frontendSignature = Ensure-FrontendBuild -PnpmCommand $pnpmCommand -ProjectRoot $projectRoot -Force:($Mode -eq 'Release')
     if ($Mode -eq 'Quick') {
         $quickRustSignature = Reset-QuickRustBuildIfInputsChanged -CargoCommand $cargoCommand -ProjectRoot $projectRoot -TargetRoot $targetRoot
     }
-    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $cargoCommand -PnpmCommand $pnpmCommand -TargetRoot $targetRoot -Profile $profile
+    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $cargoCommand -PnpmCommand $pnpmCommand -TargetRoot $targetRoot -Profile $profile -FrontendSignature $frontendSignature
     if ($null -ne $quickRustSignature) {
         # Persist the post-build state rather than the pre-build snapshot. This
         # prevents a stale signature from making a later quick build reuse an

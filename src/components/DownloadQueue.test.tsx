@@ -309,7 +309,7 @@ it('shows an active cloud directory with the standard transfer metrics', () => {
   expect(screen.queryByText('目录任务 · 1 个文件')).not.toBeInTheDocument();
 });
 
-it('places remaining time above the progress bar and keeps speed below it', () => {
+it('places remaining time at the right edge of the task title row', () => {
   render(<DownloadQueue
     tasks={[{
       id: 'stable-live-metrics', name: 'large-file.bin', kind: 'file', status: 'downloading', progress: 34,
@@ -322,8 +322,10 @@ it('places remaining time above the progress bar and keeps speed below it', () =
   />);
 
   const eta = screen.getByText('剩余 49 秒');
-  expect(eta).toHaveClass('task-progress-eta');
-  expect(eta.parentElement?.firstElementChild).toBe(eta);
+  expect(eta).toHaveClass('task-title-eta');
+  expect(eta.closest('.task-copy')).not.toBeNull();
+  expect(eta.closest('.task-progress')).toBeNull();
+  expect(eta.parentElement?.lastElementChild).toBe(eta);
   expect(screen.getByText('6.6 MB/s')).toHaveClass('transfer-speed');
 });
 

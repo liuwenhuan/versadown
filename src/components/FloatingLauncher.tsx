@@ -44,20 +44,20 @@ function LauncherMark() {
   return <svg className="launcher-mark" viewBox="175 123 674 778" aria-hidden="true">
     <defs>
       <linearGradient id="launcher-g-top" x1="30%" y1="0%" x2="70%" y2="100%">
-        <stop className="launcher-top-start" offset="0%" stopColor="#C4DED4" />
-        <stop className="launcher-top-end" offset="100%" stopColor="#ACC6BE" />
+        <stop className="launcher-top-start" offset="0%" stopColor="#C4E0D4" />
+        <stop className="launcher-top-end" offset="100%" stopColor="#B6D8CA" />
       </linearGradient>
       <linearGradient id="launcher-g-left" x1="0%" y1="10%" x2="100%" y2="90%">
-        <stop className="launcher-left-start" offset="0%" stopColor="#ACC6BE" />
-        <stop className="launcher-left-end" offset="100%" stopColor="#E6F2EC" />
+        <stop className="launcher-left-start" offset="0%" stopColor="#B6D8CA" />
+        <stop className="launcher-left-end" offset="100%" stopColor="#E0EEE6" />
       </linearGradient>
       <linearGradient id="launcher-g-right" x1="100%" y1="0%" x2="0%" y2="100%">
-        <stop className="launcher-right-start" offset="0%" stopColor="#E6F2EC" />
-        <stop className="launcher-right-end" offset="100%" stopColor="#9EC4B8" />
+        <stop className="launcher-right-start" offset="0%" stopColor="#E0EEE6" />
+        <stop className="launcher-right-end" offset="100%" stopColor="#A8CABE" />
       </linearGradient>
       <linearGradient id="launcher-g-rim" x1="30%" y1="0%" x2="70%" y2="100%">
-        <stop className="launcher-rim-start" offset="0%" stopColor="#D6EAE2" />
-        <stop className="launcher-rim-end" offset="100%" stopColor="#ACC6BE" />
+        <stop className="launcher-rim-start" offset="0%" stopColor="#DCECE4" />
+        <stop className="launcher-rim-end" offset="100%" stopColor="#B6D8CA" />
       </linearGradient>
       <clipPath id="launcher-hex-clip"><path d="M 480.155,158.776 Q 512.000,140.390 543.845,158.776 L 801.978,307.809 Q 833.823,326.195 833.823,362.967 L 833.823,661.033 Q 833.823,697.805 801.978,716.191 L 543.845,865.224 Q 512.000,883.610 480.155,865.224 L 222.022,716.191 Q 190.177,697.805 190.177,661.033 L 190.177,362.967 Q 190.177,326.195 222.022,307.809 Z" /></clipPath>
       <clipPath id="launcher-face-left"><path d="M 175.012,317.440 L 175.012,706.560 L 512.000,901.120 L 512.000,512.000 Z" /></clipPath>
