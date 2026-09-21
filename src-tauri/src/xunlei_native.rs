@@ -1139,7 +1139,16 @@ impl WindowsApi {
     }
 }
 
-#[cfg(windows)]
+#[cfg(test)]
+mod cross_platform_compile_tests {
+    use super::native_failure_message;
+
+    #[test]
+    fn native_failure_message_is_available_without_windows_bindings() {
+        assert_eq!(native_failure_message(0), "迅雷原生任务失败，请重试");
+    }
+}
+
 fn native_failure_message(error_code: i32) -> String {
     if error_code == 0 {
         "迅雷原生任务失败，请重试".into()

@@ -16,5 +16,5 @@
     ],
     "security": { "csp": null }
   },
-  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico", "icons/icon.icns", "icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png"], "resources": ["binaries/aria2-next-x86_64-pc-windows-msvc.exe"], "windows": { "wix": { "language": ["zh-CN"] } } }
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.ico", "icons/icon.icns", "icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png"], "resources": ["binaries/aria2-next-x86_64-pc-windows-msvc.exe", "binaries/aria2-next-x86_64-unknown-linux-gnu"], "windows": { "wix": { "language": ["zh-CN"] } } }
 }

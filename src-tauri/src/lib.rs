@@ -10,6 +10,7 @@ mod commands;
 mod connectors;
 mod downloader;
 mod duplicates;
+pub mod engine_binary;
 mod engine_runtime;
 mod ftp;
 mod launcher;
@@ -36,10 +37,7 @@ pub use commands::list_queue_tasks_for_scope;
 pub use connectors::{
     CloudConnector, CloudDirectory, CloudItem, ConnectorError, MockConnector, Provider,
 };
-pub use downloader::{
-    aria2_binary_name, confirm_download, prepare_download, DownloadError, ParseOutcome,
-    ParseResource,
-};
+pub use downloader::{confirm_download, prepare_download, DownloadError, ParseOutcome, ParseResource};
 pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
@@ -269,19 +267,14 @@ pub fn run() {
             // calls cannot race a later `manage` call.
             app.manage(std::sync::Arc::clone(&cloud));
             cloud.start_authorization_maintenance();
-            let manifest_sidecar = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("binaries")
-                .join(aria2_binary_name());
-            let bundled_sidecar = app
-                .path()
-                .resource_dir()?
-                .join("binaries")
-                .join(aria2_binary_name());
-            let sidecar = if bundled_sidecar.exists() {
-                bundled_sidecar
-            } else {
-                manifest_sidecar
-            };
+            let sidecar = engine_binary::EngineBinary::for_current_target()
+                .and_then(|binary| {
+                    binary.resolve(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                        &app.path().resource_dir().map_err(|_| engine_binary::EngineBinaryError::Missing(std::path::PathBuf::from("resource directory")))?,
+                    )
+                })
+                .map_err(std::io::Error::other)?;
             let default_destination = if background_ui_test.as_deref() == Some("1") {
                 std::env::var_os("ALLDOWNLOADER_TEST_DOWNLOAD_DIR")
                     .map(std::path::PathBuf::from)
