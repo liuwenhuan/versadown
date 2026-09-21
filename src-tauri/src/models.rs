@@ -295,7 +295,7 @@ pub struct DownloadTask {
     pub error: Option<String>,
     /// Non-terminal progress information such as authorization recovery or
     /// provider-native acceleration. This must never drive retry decisions.
-    #[serde(default)]
+    #[serde(default, rename = "statusMessage")]
     pub status_message: Option<String>,
     /// Stable, user-safe classification for a terminal cloud failure. This is
     /// intentionally separate from aria2's numeric error code so the UI can

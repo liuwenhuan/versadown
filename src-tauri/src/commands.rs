@@ -3909,6 +3909,21 @@ mod tests {
     }
 
     #[test]
+    fn direct_task_update_uses_the_queue_status_message_contract() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        task.status_message = Some("正在使用迅雷svip加速".into());
+
+        let payload = task_update_payload(&store, None, task).unwrap();
+        let json = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(json["statusMessage"], "正在使用迅雷svip加速");
+        assert!(json.get("status_message").is_none());
+    }
+
+    #[test]
     fn queue_projection_keeps_post_processing_notes_on_native_and_cloud_roots() {
         let store = TaskStore::open_in_memory().unwrap();
         let native = store
