@@ -1905,7 +1905,24 @@ it('queues a selected cloud folder as one directory parent task', async () => {
   await waitFor(() => expect(downloadCloudDirectory).toHaveBeenCalledWith('quark', 'folder-1', '归档'));
   expect(client.downloadCloudFile).not.toHaveBeenCalled();
   expect(onDownloadTask).toHaveBeenCalledTimes(1);
-  expect(onDownloadTask).toHaveBeenCalledWith(root);
+  expect(onDownloadTask).toHaveBeenCalledWith({ task: queuedTask, queueTask: root });
+});
+
+it('forwards a completed directory duplicate without discarding its duplicate outcome', async () => {
+  const user = userEvent.setup();
+  const onDownloadTask = vi.fn();
+  const existing = { id: 'existing-folder', name: '归档', kind: 'folder' as const, status: 'completed' as const, progress: 100 };
+  const root = { ...existing, children: [{ id: 'existing-file', name: '文件.bin', kind: 'cloud' as const, status: 'completed' as const, progress: 100 }] };
+  const duplicate = { duplicate: { task: existing, state: 'completed_files_present' as const }, queueTask: root };
+  const downloadCloudDirectory = vi.fn().mockResolvedValue({ task: duplicate, queuedCount: 0, failures: [] });
+  const client = createCloudFake({ downloadCloudDirectory });
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} onDownloadTask={onDownloadTask} />);
+
+  await screen.findByText('归档');
+  await user.click(screen.getByRole('checkbox', { name: '选择 归档' }));
+  await user.click(screen.getByRole('button', { name: '下载' }));
+
+  await waitFor(() => expect(onDownloadTask).toHaveBeenCalledWith(duplicate));
 });
 
 it('requires an ordinary-download confirmation before queuing a cloud file when privacy downloads are enabled', async () => {

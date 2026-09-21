@@ -120,9 +120,9 @@ it('updates the extraction code of an existing share without recreating it', asy
   expect(native.invoke).toHaveBeenLastCalledWith('cloud_update_share_pass_code', { provider: 'pikpak', shareId: 'share-existing', passCode: 'a1B2' });
 });
 
-it('maps one directory parent task with its authoritative group root while preserving the queued count and redacted failures', async () => {
+it('preserves a duplicate directory outcome with its authoritative group root', async () => {
   native.invoke.mockResolvedValueOnce({
-    task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0, queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'queued', progress: 0, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }] } },
+    task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'completed', progress: 100, duplicate: 'completed_files_present', queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'completed', progress: 100, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'completed', progress: 100 }] } },
     queuedCount: 1,
     failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
   });
@@ -134,7 +134,7 @@ it('maps one directory parent task with its authoritative group root while prese
     provider: 'quark', directoryId: 'folder-1', directoryName: '归档'
   });
   expect(outcome).toEqual({
-    task: { task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }, queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'queued', progress: 0, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'queued', progress: 0 }] } },
+    task: { duplicate: { task: { id: 'directory-1', name: '归档', kind: 'cloud', status: 'completed', progress: 100 }, state: 'completed_files_present' }, queueTask: { id: 'group-1', name: '归档', kind: 'folder', status: 'completed', progress: 100, children: [{ id: 'directory-1', name: '归档', kind: 'cloud', status: 'completed', progress: 100 }] } },
     queuedCount: 1,
     failures: [{ relativePath: '归档/私密文件.txt', code: 'network_error', message: '网络或下载引擎错误' }]
   });

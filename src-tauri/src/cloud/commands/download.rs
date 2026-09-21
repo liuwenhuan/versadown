@@ -1108,6 +1108,91 @@ pub(crate) fn cloud_directory_group_task_outcome(
     })
 }
 
+/// Finds a prior personal-cloud directory download that owns the same remote
+/// directory and local root. Directory leaves intentionally bypass source
+/// de-duplication because their nested target paths are distinct; the durable
+/// group is therefore the duplicate identity at this boundary.
+pub(crate) fn existing_cloud_directory_duplicate(
+    store: &TaskStore,
+    provider: CloudProvider,
+    account: &str,
+    directory_id: &str,
+    output_directory: &Path,
+) -> Result<Option<TaskActionOutcome>, QuarkError> {
+    let mut completed = None;
+    for group in store
+        .cloud_directory_groups()
+        .map_err(|_| QuarkError::Storage)?
+        .into_iter()
+        .rev()
+    {
+        if group.provider != provider
+            || group.remote_directory_id != directory_id
+            || group.status == TaskStatus::Recycled
+            || !group
+                .output_directory
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&output_directory.to_string_lossy())
+            || store
+                .cloud_download_account(group.id)
+                .map_err(|_| QuarkError::Storage)?
+                .as_deref()
+                != Some(account)
+        {
+            continue;
+        }
+        let root = cloud_directory_group_queue_task(store, group.id)
+            .map_err(QuarkError::Transport)?;
+        match root.status {
+            TaskStatus::Draft
+            | TaskStatus::Parsing
+            | TaskStatus::AwaitingUser
+            | TaskStatus::Queued
+            | TaskStatus::Downloading
+            | TaskStatus::Processing
+            | TaskStatus::Paused => {
+                let mut outcome = cloud_directory_group_task_outcome(store, &group)?;
+                outcome.duplicate = Some(crate::DuplicateDownloadState::ExistingActive);
+                return Ok(Some(outcome));
+            }
+            TaskStatus::Completed if cloud_directory_group_files_present(store, group.id)? => {
+                let mut outcome = cloud_directory_group_task_outcome(store, &group)?;
+                outcome.duplicate = Some(crate::DuplicateDownloadState::CompletedFilesPresent);
+                completed.get_or_insert(outcome);
+            }
+            TaskStatus::Completed
+            | TaskStatus::Failed
+            | TaskStatus::Cancelled
+            | TaskStatus::Recycled => {}
+        }
+    }
+    Ok(completed)
+}
+
+fn cloud_directory_group_files_present(
+    store: &TaskStore,
+    group_id: uuid::Uuid,
+) -> Result<bool, QuarkError> {
+    let items = store
+        .cloud_directory_group_items(group_id)
+        .map_err(|_| QuarkError::Storage)?;
+    if items.is_empty() {
+        return Ok(false);
+    }
+    for item in items {
+        let Some(task_id) = item.task_id else {
+            return Ok(false);
+        };
+        let task = store.find(task_id).map_err(|_| QuarkError::Storage)?;
+        if duplicate_state(store, &task).map_err(|_| QuarkError::Storage)?
+            != crate::DuplicateDownloadState::CompletedFilesPresent
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Executes a previously validated plan through a narrow, injectable leaf
 /// submission boundary. This is shared by the Tauri command and deterministic
 /// connector tests, so persistence/linking semantics cannot drift from the
@@ -1329,6 +1414,28 @@ pub async fn cloud_download_directory(
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     let private_download = private_download.unwrap_or(false);
     ensure_private_download_enabled(&state, private_download).map_err(QuarkError::InvalidInput)?;
+    if let Some(outcome) = existing_cloud_directory_duplicate(
+        &state.store,
+        provider,
+        &account_id,
+        &directory_id,
+        configured
+            .directory
+            .as_deref()
+            .ok_or_else(|| QuarkError::InvalidInput("未配置下载目录".into()))?,
+    )? {
+        let group = state
+            .store
+            .cloud_directory_group(outcome.payload.task.id)
+            .map_err(|_| QuarkError::Storage)?
+            .ok_or(QuarkError::Storage)?;
+        ensure_private_group_access(&state, &group).map_err(QuarkError::InvalidInput)?;
+        return Ok(CloudDirectoryDownloadOutcome {
+            task: outcome,
+            queued_count: 0,
+            failures: Vec::new(),
+        });
+    }
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
     let root_event_app = app.clone();
@@ -1696,6 +1803,128 @@ mod tests {
                 item_id: uuid::Uuid::new_v4(),
             }
         )));
+    }
+
+    fn completed_directory_group(
+        store: &TaskStore,
+        output: &std::path::Path,
+        provider: CloudProvider,
+        directory_id: &str,
+        account: &str,
+    ) -> CloudDirectoryGroup {
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(provider, directory_id, "Archive", output),
+                &[NewCloudDirectoryGroupItem::new(
+                    "file-id",
+                    &["Archive"],
+                    "complete.bin",
+                    Some(3),
+                )],
+            )
+            .unwrap();
+        store
+            .bind_cloud_download_account(group.id, provider, account)
+            .unwrap();
+        let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
+        let task = store
+            .claim_cloud_directory_leaf_task(
+                group.id,
+                item.id,
+                provider,
+                account,
+                NewTask {
+                    source: format!("cloud://{}/file-id", provider.key()),
+                    name: "complete.bin".into(),
+                    kind: "cloud".into(),
+                    is_private: false,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let payload = output.join("Archive").join("complete.bin");
+        std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        std::fs::write(&payload, b"yes").unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 3, 3, true)],
+            )
+            .unwrap();
+        store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                progress: 100,
+                total_length: Some(3),
+                completed_length: 3,
+                ..task
+            })
+            .unwrap();
+        group
+    }
+
+    #[test]
+    fn completed_directory_reuses_its_existing_group_for_the_same_account_and_destination() {
+        let output = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = completed_directory_group(
+            &store,
+            output.path(),
+            CloudProvider::Xunlei,
+            "folder-id",
+            "alice",
+        );
+
+        let duplicate = existing_cloud_directory_duplicate(
+            &store,
+            CloudProvider::Xunlei,
+            "alice",
+            "folder-id",
+            output.path(),
+        )
+        .unwrap()
+        .expect("completed directory must be reused");
+
+        assert_eq!(
+            duplicate.duplicate,
+            Some(crate::DuplicateDownloadState::CompletedFilesPresent)
+        );
+        assert_eq!(duplicate.payload.task.id, group.id);
+        assert_eq!(duplicate.payload.task.status, TaskStatus::Completed);
+        assert_eq!(duplicate.queue_task.unwrap().id, group.id.to_string());
+    }
+
+    #[test]
+    fn completed_directory_does_not_match_a_different_account_or_destination() {
+        let output = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        completed_directory_group(
+            &store,
+            output.path(),
+            CloudProvider::Xunlei,
+            "folder-id",
+            "alice",
+        );
+
+        assert!(existing_cloud_directory_duplicate(
+            &store,
+            CloudProvider::Xunlei,
+            "bob",
+            "folder-id",
+            output.path(),
+        )
+        .unwrap()
+        .is_none());
+        assert!(existing_cloud_directory_duplicate(
+            &store,
+            CloudProvider::Xunlei,
+            "alice",
+            "folder-id",
+            elsewhere.path(),
+        )
+        .unwrap()
+        .is_none());
     }
 }
 

@@ -1245,7 +1245,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           const outcome = privateDownload === undefined
             ? await client.downloadCloudDirectory(provider, item.id, item.name)
             : await client.downloadCloudDirectory(provider, item.id, item.name, privateDownload);
-          onDownloadTask?.(outcome.task.queueTask ?? outcome.task);
+          onDownloadTask?.(outcome.task);
           directoryFailures.push(...outcome.failures);
           queuedDirectoryFiles += outcome.queuedCount;
           return;
