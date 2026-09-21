@@ -1,6 +1,6 @@
-# AllDownloader · Windows Beta
+# AllDownloader · Desktop Beta
 
-本地优先的 Windows 下载客户端。它把标准下载链接、磁力/种子、迅雷链接、网盘分享链接和复杂文本放入统一任务流程，并使用小型悬浮输入窗与下载管理器显示进度。
+本地优先的桌面下载客户端。它把标准下载链接、磁力/种子、迅雷链接、网盘分享链接和复杂文本放入统一任务流程，并使用小型悬浮输入窗与下载管理器显示进度。
 
 ## 当前可运行能力
 
@@ -20,6 +20,20 @@
 - 任何服务商拒绝嵌入式授权时应转为系统浏览器或服务商允许流程；不得抓取 OAuth token。
 
 ## 开发环境
+
+### Linux x86_64 调试二进制
+
+安装 Node 24+、Rust stable、GTK/WebKitGTK 开发依赖后，执行以下命令生成嵌入静态前端资源的本机调试二进制。不要直接执行不含 `custom-protocol` 功能的 `cargo build` 产物，它会尝试连接 Vite 开发服务器的 `localhost:1420`。
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build:linux:quick
+./src-tauri/target/debug/alldownloader
+```
+
+产物包含 Linux x86_64 的 aria2-next 2.8.0 sidecar。该命令生成调试二进制，不生成 Release 包或安装包。
+
+### Windows
 
 Windows 10/11、WebView2 runtime、Node 24+、Rust stable MSVC、Visual Studio C++ Build Tools。项目构建时会使用 Tauri 的 Windows WiX 打包链。
 
