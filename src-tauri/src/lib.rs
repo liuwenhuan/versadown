@@ -108,27 +108,9 @@ impl TauriDownloadEvents {
                     async move {
                         let _ = tauri::async_runtime::spawn_blocking(move || {
                             for root in roots {
-                                if let Ok(payload) =
-                                    commands::cloud_directory_group_queue_task(&store, root)
-                                {
-                                    // Recheck privacy after the delayed projection:
-                                    // the user may have locked the session meanwhile.
-                                    let visible = app
-                                        .try_state::<commands::AppState>()
-                                        .map(|state| {
-                                            commands::should_emit_task_update(
-                                                &state,
-                                                payload.is_private,
-                                            )
-                                        })
-                                        .unwrap_or(!payload.is_private);
-                                    if visible {
-                                        let _ = app.emit(
-                                            "download-task-updated",
-                                            commands::TaskUpdatePayload::Queue(payload),
-                                        );
-                                    }
-                                }
+                                let _ = commands::emit_task_update_for_directory_root(
+                                    &app, &store, root,
+                                );
                             }
                         })
                         .await;
@@ -176,17 +158,13 @@ impl EventSink for TauriDownloadEvents {
         }
         if let Some(group) = group {
             self.schedule_directory_refresh(group.id);
-        } else if let Ok(payload) =
-            commands::task_update_payload(&self.store, Some(&self.cloud.share_plans), task.clone())
-        {
-            let visible = self
-                .app
-                .try_state::<commands::AppState>()
-                .map(|state| commands::should_emit_task_update(&state, task.is_private))
-                .unwrap_or(!task.is_private);
-            if visible {
-                let _ = self.app.emit("download-task-updated", payload);
-            }
+        } else {
+            let _ = commands::emit_task_update_for_task(
+                &self.app,
+                &self.store,
+                Some(&self.cloud.share_plans),
+                task.clone(),
+            );
         }
         commands::schedule_cloud_download_refresh(self.app.clone(), task);
         cloud::commands::schedule_cloud_share_cleanup(self.app.clone(), task);
@@ -435,15 +413,13 @@ pub fn run() {
                 let _availability = runtime.initialize().await;
                 runtime.start_monitor(std::time::Duration::from_secs(2));
                 let emit_updates = |tasks: Vec<DownloadTask>| {
-                    let state = startup_app.state::<commands::AppState>();
                     for task in tasks {
-                        if commands::should_emit_task_update(&state, task.is_private) {
-                            if let Ok(payload) =
-                                commands::task_update_payload(&startup_store, None, task)
-                            {
-                                let _ = startup_app.emit("download-task-updated", payload);
-                            }
-                        }
+                        let _ = commands::emit_task_update_for_task(
+                            &startup_app,
+                            &startup_store,
+                            None,
+                            task,
+                        );
                     }
                 };
                 for provider in startup_cloud_providers {

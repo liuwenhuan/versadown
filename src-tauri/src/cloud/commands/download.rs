@@ -759,13 +759,7 @@ fn check_dispatch_owner(
 }
 
 pub(crate) fn emit_cloud_dispatch_update(app: &AppHandle, state: &AppState, task: &DownloadTask) {
-    use tauri::Emitter;
-    if should_emit_task_update(state, task.is_private) {
-        if let Ok(payload) = crate::commands::task_update_payload(&state.store, None, task.clone())
-        {
-            let _ = app.emit("download-task-updated", payload);
-        }
-    }
+    let _ = crate::commands::emit_task_update_for_task(app, &state.store, None, task.clone());
 }
 
 pub fn apply_cloud_download_policy(
@@ -1335,10 +1329,6 @@ pub async fn cloud_download_directory(
         crate::commands::download_submission_options(&state).map_err(QuarkError::Transport)?;
     let private_download = private_download.unwrap_or(false);
     ensure_private_download_enabled(&state, private_download).map_err(QuarkError::InvalidInput)?;
-    let emit_root = !private_download
-        || crate::commands::privacy_task_visibility(&state)
-            .map(|visibility| visibility.unlocked)
-            .unwrap_or(false);
     let store = Arc::clone(&state.store);
     let submit_app = app.clone();
     let root_event_app = app.clone();
@@ -1351,15 +1341,15 @@ pub async fn cloud_download_directory(
         configured,
         private_download,
         move |root| {
-            use tauri::Emitter;
             // Binding precedes every leaf submission; failures are checked again by submit_cloud_file.
             let id = uuid::Uuid::parse_str(&root.id).map_err(|_| QuarkError::Storage)?;
             owner_store
                 .bind_cloud_download_account(id, provider, &account_id)
                 .map_err(|_| QuarkError::Storage)?;
-            if emit_root {
-                let _ = root_event_app.emit("download-task-updated", root);
-            }
+            crate::commands::emit_task_update(
+                &root_event_app,
+                crate::commands::TaskUpdatePayload::Queue(root),
+            );
             Ok(())
         },
         move |provider, file_id, options, context| {

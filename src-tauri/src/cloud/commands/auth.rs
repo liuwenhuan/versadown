@@ -668,8 +668,6 @@ pub async fn resume_reauthorized_provider_tasks(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<(), QuarkError> {
-    use tauri::Emitter;
-
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
@@ -769,26 +767,21 @@ pub async fn resume_reauthorized_provider_tasks(
         match resumed {
             Ok(task) => {
                 if let Ok(outcome) = task_action_outcome(&state.store, task, None) {
-                    if should_emit_task_update(&state, outcome.payload.task.is_private) {
-                        if let Some(queue_task) = outcome.queue_task {
-                            let _ = app.emit("download-task-updated", queue_task);
-                        } else {
-                            let _ = app.emit("download-task-updated", outcome.payload);
-                        }
-                    }
+                    let payload = outcome
+                        .queue_task
+                        .map(crate::commands::TaskUpdatePayload::Queue)
+                        .unwrap_or(crate::commands::TaskUpdatePayload::Task(outcome.payload));
+                    crate::commands::emit_task_update(&app, payload);
                 }
             }
             Err(_) => {
                 if let Ok(task) = state.store.find(id) {
-                    if should_emit_task_update(&state, task.is_private) {
-                        if let Ok(payload) = crate::commands::task_update_payload(
-                            &state.store,
-                            Some(&cloud.share_plans),
-                            task,
-                        ) {
-                            let _ = app.emit("download-task-updated", payload);
-                        }
-                    }
+                    let _ = crate::commands::emit_task_update_for_task(
+                        &app,
+                        &state.store,
+                        Some(&cloud.share_plans),
+                        task,
+                    );
                 }
             }
         }
@@ -834,13 +827,11 @@ pub async fn resume_reauthorized_provider_tasks(
         }
         if let Ok(outcome) = retry_cloud_directory_group_item(app.clone(), group_id, item_id).await
         {
-            if should_emit_task_update(&state, outcome.payload.task.is_private) {
-                if let Some(queue_task) = outcome.queue_task {
-                    let _ = app.emit("download-task-updated", queue_task);
-                } else {
-                    let _ = app.emit("download-task-updated", outcome.payload);
-                }
-            }
+            let payload = outcome
+                .queue_task
+                .map(crate::commands::TaskUpdatePayload::Queue)
+                .unwrap_or(crate::commands::TaskUpdatePayload::Task(outcome.payload));
+            crate::commands::emit_task_update(&app, payload);
         }
     }
     Ok(())

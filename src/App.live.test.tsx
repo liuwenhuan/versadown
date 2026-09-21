@@ -2,13 +2,13 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { beforeEach, expect, it, vi } from 'vitest';
-import type { QueueTask } from './lib/types';
+import type { QueueTask, QueueTaskInput } from './lib/types';
 import { getThemeMode, setThemeMode } from './lib/theme';
 import { cloudCatalog } from './test/cloudCatalog';
 import { scanDownloadInputs } from './lib/api';
 
 const state = vi.hoisted(() => ({
-  list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTask) => void),
+  list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTaskInput) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
   confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
+  syncMainWindowIcon: vi.fn().mockResolvedValue(undefined),
   scanDownloadInputs: vi.fn().mockResolvedValue([]),
   confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, discardPreparedDownload: state.discardPrepared, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
@@ -738,7 +739,7 @@ it('does not expose private tasks or visibility options while privacy is locked'
   expect(within(queue).queryByTitle('private.zip')).not.toBeInTheDocument();
 });
 
-it('hides a task and its open details dialog immediately after moving it into private downloads while locked', async () => {
+it.each([{ is_private: true }, { isPrivate: true }])('clears the open details after a private move response %j while locked', async (privacyFields) => {
   const ordinaryTask: QueueTask = { ...oldTask, id: 'move-private-now', name: '马上隐藏.zip' };
   state.getSettings.mockResolvedValue({
     downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always',
@@ -749,7 +750,7 @@ it('hides a task and its open details dialog immediately after moving it into pr
   });
   state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: false });
   state.list.mockResolvedValue([ordinaryTask]);
-  state.setTaskPrivacy.mockResolvedValue({ ...ordinaryTask, is_private: true });
+  state.setTaskPrivacy.mockResolvedValue({ ...ordinaryTask, ...privacyFields });
   const user = userEvent.setup();
   render(<App />);
 
@@ -763,6 +764,9 @@ it('hides a task and its open details dialog immediately after moving it into pr
 
   await waitFor(() => expect(state.setTaskPrivacy).toHaveBeenCalledWith('move-private-now', true));
   await waitFor(() => expect(screen.queryByTitle('马上隐藏.zip')).not.toBeInTheDocument());
+  expect(screen.queryByRole('dialog', { name: '任务详情' })).not.toBeInTheDocument();
+  act(() => { state.onTask?.(ordinaryTask); });
+  expect(screen.getByTitle('马上隐藏.zip')).toBeVisible();
   expect(screen.queryByRole('dialog', { name: '任务详情' })).not.toBeInTheDocument();
 });
 
@@ -1749,6 +1753,45 @@ it('keeps a same-ID event update that arrives while a focus snapshot is pending'
   expect(within(screen.getByRole('region', { name: '下载队列' })).getAllByText('archive.iso')).toHaveLength(1);
 });
 
+it('keeps the later requested list snapshot when focus responses arrive out of order', async () => {
+  const older = deferred<QueueTask[]>();
+  const newer = deferred<QueueTask[]>();
+  let activeRequests = 0;
+  state.list.mockImplementation((scope?: string) => {
+    if (scope !== 'active') return Promise.resolve([]);
+    activeRequests += 1;
+    return activeRequests === 1 ? Promise.resolve([oldTask])
+      : activeRequests === 2 ? older.promise : newer.promise;
+  });
+  render(<App />);
+  await screen.findByText('archive.iso');
+  await waitFor(() => expect(state.onFocus).toBeDefined());
+  act(() => { state.onFocus?.({ payload: true }); });
+  await waitFor(() => expect(activeRequests).toBe(2));
+  act(() => { state.onFocus?.({ payload: true }); });
+  await waitFor(() => expect(activeRequests).toBe(3));
+  await act(async () => { newer.resolve([{ ...oldTask, progress: 65 }]); });
+  await act(async () => { older.resolve([{ ...oldTask, progress: 20 }]); });
+
+  expect(screen.getByRole('progressbar', { name: 'archive.iso 下载进度' })).toHaveAttribute('aria-valuenow', '65');
+});
+
+it('keeps an empty newer focus list when the older initial list later returns an unknown task', async () => {
+  const initial = deferred<QueueTask[]>();
+  let activeRequests = 0;
+  state.list.mockImplementation((scope?: string) => {
+    if (scope !== 'active') return Promise.resolve([]);
+    return ++activeRequests === 1 ? initial.promise : Promise.resolve([]);
+  });
+  render(<App />);
+  await waitFor(() => expect(state.onFocus).toBeDefined());
+  await act(async () => { state.onFocus?.({ payload: true }); });
+  await waitFor(() => expect(activeRequests).toBe(2));
+  await act(async () => { initial.resolve([oldTask]); });
+
+  expect(screen.queryByText('archive.iso')).not.toBeInTheDocument();
+});
+
 it('keeps a cloud directory member inside its authoritative root through member events and actions', async () => {
   const user = userEvent.setup();
   const root: QueueTask = {
@@ -1866,6 +1909,37 @@ it('polls a pending magnet confirmation when a metadata event is missed', async 
 
   await waitFor(() => expect(screen.getByText('episode.mkv')).toBeVisible(), { timeout: 1200 });
   expect(screen.queryByText('正在获取文件信息…')).not.toBeInTheDocument();
+});
+
+it.each(['event', 'list'] as const)('keeps newer %s progress when an older metadata poll returns', async (source) => {
+  const metadata = deferred<QueueTask[]>();
+  const magnet: QueueTask = { ...oldTask, id: 'magnet-race', kind: 'magnet', name: 'collection', files: [] };
+  let activeRequests = 0;
+  state.list.mockImplementation((scope?: string) => {
+    if (!scope) return metadata.promise;
+    if (scope === 'terminal') return Promise.resolve([]);
+    activeRequests += 1;
+    return Promise.resolve(activeRequests === 1 ? [magnet] : [{ ...magnet, progress: 70 }]);
+  });
+  state.parse.mockResolvedValueOnce({
+    confirmation: { taskId: magnet.id, requiresConfirmation: true, resources: [], processing: [], isBitTorrent: true }
+  });
+  render(<App />);
+  await screen.findByText('collection');
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  await act(async () => { state.listeners.get('launcher-parse')?.({ payload: 'magnet:?xt=urn:btih:race' }); });
+  if (source === 'event') {
+    act(() => { state.onTask?.({ ...magnet, progress: 70 }); });
+  } else {
+    act(() => { state.onFocus?.({ payload: true }); });
+    await waitFor(() => expect(activeRequests).toBe(2));
+  }
+  await act(async () => { metadata.resolve([{ ...magnet, progress: 20,
+    files: [{ index: 1, path: 'stale.mkv', length: 1024, completed_length: 0, selected: true }]
+  }]); });
+
+  expect(screen.getByRole('progressbar', { name: 'collection 下载进度' })).toHaveAttribute('aria-valuenow', '70');
+  expect(screen.queryByText('stale.mkv')).not.toBeInTheDocument();
 });
 
 it('discards a closed magnet confirmation instead of leaving a queue recovery action', async () => {

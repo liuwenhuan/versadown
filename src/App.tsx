@@ -17,9 +17,10 @@ import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusToast } from './components/EngineStatusBanner';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
-import { reconcileTaskSnapshot, subscribeToDownloadEvents, upsertTask } from './lib/downloadEvents';
+import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
+import { isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
-import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, TaskActionResult, TaskCommand } from './lib/types';
+import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import darkMintIcon from './assets/launcher/dark_mint.svg';
 import mintWhiteIcon from './assets/launcher/mint_white.svg';
@@ -111,10 +112,6 @@ function prioritizeNewActiveTasks(tasks: readonly QueueTask[], newTaskIds: reado
     }),
     ...tasks.filter((task) => !prioritizedIds.has(task.id)),
   ];
-}
-
-function isPrivateTask(task: QueueTask): boolean {
-  return task.isPrivate ?? task.is_private ?? false;
 }
 
 const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mode: TaskSortMode; label: string; ariaLabel: string }> }> = [
@@ -386,15 +383,14 @@ export function App() {
   }, [downloadTab, newActiveTaskIds, taskOrders, taskSorts, unsortedVisibleTasks]);
   const detailsTask = useMemo(() => filteredPrivacyTasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, filteredPrivacyTasks]);
   const downloadingTasks = filteredPrivacyTasks.filter((task) => task.status === 'downloading');
-  const currentSpeed = formatSpeed(downloadingTasks.reduce((total, task) => total + (task.speedBytes ?? task.download_speed ?? 0), 0));
+  const currentSpeed = formatSpeed(downloadingTasks.reduce((total, task) => total + (task.download_speed ?? 0), 0));
   const pendingPurgeTasks = (pendingPurgeTaskIds ?? []).flatMap((id) => {
     const task = privacyVisibleTasks.find((item) => item.id === id);
     return task ? [task] : [];
   });
   const [eventsReady, setEventsReady] = useState(false);
   const [engineState, setEngineState] = useState<DownloadEngineState>({ available: true, retrying: false });
-  const taskEventEpoch = useRef(0);
-  const taskEventVersions = useRef(new Map<string, number>());
+  const taskUpdates = useRef(createTaskUpdateMerger());
   const purgingTaskIds = useRef(new Set<string>());
   const permanentlyPurgedTaskIds = useRef(new Set<string>());
   const purgeInProgressRef = useRef(false);
@@ -497,19 +493,34 @@ export function App() {
     window.setTimeout(() => { duplicateCloseInFlight.current = false; }, 0);
   }
 
-  function recordTaskEvent(task: QueueTask) {
-    taskEventEpoch.current += 1;
-    taskEventVersions.current.set(task.id, taskEventEpoch.current);
+  function applyTaskUpdates(
+    incoming: readonly QueueTaskInput[],
+    request?: { version: number; scope?: TaskSnapshotScope; protectPurgeInProgress?: boolean },
+  ) {
+    const normalized = normalizeQueueTasks(incoming);
+    const protectedIds = new Set(permanentlyPurgedTaskIds.current);
+    if (request?.protectPurgeInProgress !== false) {
+      for (const id of purgingTaskIds.current) protectedIds.add(id);
+    }
+    if (request) {
+      for (const id of pendingStartTaskIds.current) protectedIds.add(id);
+    }
+    const next = taskUpdates.current.merge(tasksRef.current, normalized, {
+      requestVersion: request?.version, scope: request?.scope, protectedIds,
+    });
+    tasksRef.current = next;
+    setTasks(next);
+    return next;
   }
 
-  function applyTaskProjection(task: QueueTask) {
-    recordTaskEvent(task);
-    setTasks((current) => upsertTask(current, task));
+  function applyTaskProjection(task: QueueTaskInput) {
+    const normalized = normalizeQueueTask(task);
+    applyTaskUpdates([normalized]);
+    return normalized;
   }
 
   function addNewDownloadTask(task: QueueTask) {
-    recordTaskEvent(task);
-    setTasks((current) => upsertTask(current, task));
+    applyTaskProjection(task);
     if (isActiveDownloadTask(task.status)) {
       // New user-created tasks take precedence over a previously chosen
       // ordering. This only affects the active list and keeps newest tasks
@@ -524,7 +535,6 @@ export function App() {
       ...task,
       status: 'queued',
       speed: '等待开始',
-      speedBytes: 0,
       download_speed: 0,
       upload_speed: 0,
       eta: undefined,
@@ -544,10 +554,7 @@ export function App() {
   }
 
   function protectRemovedTasksFromOlderSnapshots(taskIds: readonly string[]) {
-    taskEventEpoch.current += 1;
-    for (const taskId of taskIds) {
-      taskEventVersions.current.set(taskId, taskEventEpoch.current);
-    }
+    taskUpdates.current.protectRemoved(taskIds);
   }
 
   function refreshTaskSnapshot(
@@ -555,21 +562,12 @@ export function App() {
     scope?: 'active' | 'terminal',
     protectPurgeInProgress = true,
   ) {
-    const requestStartEpoch = taskEventEpoch.current;
+    const requestVersion = taskUpdates.current.beginSnapshot();
     const snapshot = scope ? listPersistedTasks(scope) : listPersistedTasks();
     return snapshot.then((saved) => {
       if (disposed()) return [] as QueueTask[];
-      const protectedIds = new Set([...taskEventVersions.current]
-        .flatMap(([id, epoch]) => epoch > requestStartEpoch ? [id] : []));
-      for (const id of pendingStartTaskIds.current) protectedIds.add(id);
-      for (const id of permanentlyPurgedTaskIds.current) protectedIds.add(id);
-      if (protectPurgeInProgress) {
-        for (const id of purgingTaskIds.current) protectedIds.add(id);
-      }
-      setTasks((current) => scope
-        ? reconcileTaskSnapshot(current, saved, scope, protectedIds)
-        : saved);
-      return saved;
+      applyTaskUpdates(saved, { version: requestVersion, scope, protectPurgeInProgress });
+      return normalizeQueueTasks(saved);
     }).catch((error: unknown) => {
       if (!disposed()) setNotice({ kind: 'error', message: String(error) });
       return [] as QueueTask[];
@@ -648,7 +646,8 @@ export function App() {
     let unlisten: (() => void) | undefined;
     let terminalLoadTimer: number | undefined;
     subscribeToDownloadEvents({
-      onTask: (task) => {
+      onTask: (incoming) => {
+        const task = normalizeQueueTask(incoming);
         if (disposed || purgingTaskIds.current.has(task.id) || permanentlyPurgedTaskIds.current.has(task.id)) return;
         const previousStatus = terminalNotificationStatuses.current.get(task.id);
         if (task.status === 'completed' || task.status === 'failed') {
@@ -659,8 +658,7 @@ export function App() {
         } else {
           terminalNotificationStatuses.current.delete(task.id);
         }
-        recordTaskEvent(task);
-        setTasks((current) => upsertTask(current, task));
+        applyTaskUpdates([task]);
         setConfirmation((current) => {
           if (!current || current.taskId !== task.id || !task.files?.length) return current;
           return {
@@ -714,12 +712,14 @@ export function App() {
     if (!pendingMagnet || !isTauriRuntime()) return;
     let disposed = false;
     const refreshMetadata = () => {
+      const requestVersion = taskUpdates.current.beginSnapshot();
       void listPersistedTasks().then((saved) => {
         if (disposed) return;
-        const task = saved.find((item) => item.id === activeConfirmation.taskId);
+        const snapshot = normalizeQueueTasks(saved).find((item) => item.id === activeConfirmation.taskId);
+        if (!snapshot) return;
+        const accepted = applyTaskUpdates([snapshot], { version: requestVersion });
+        const task = accepted.find((item) => item.id === activeConfirmation.taskId);
         if (!task) return;
-        recordTaskEvent(task);
-        setTasks((current) => upsertTask(current, task));
         const files = task.files;
         if (!files?.length) return;
         setActiveConfirmation((current) => {
@@ -776,10 +776,11 @@ export function App() {
       if (refreshing) return;
       refreshing = true;
       try {
+        const previousTasks = tasksRef.current;
         const activeSnapshot = await refreshTaskSnapshot(() => disposed, 'active');
         if (disposed) return;
         const activeIds = new Set(activeSnapshot.map((task) => task.id));
-        const hasMissingActiveTask = tasksRef.current.some((task) => (
+        const hasMissingActiveTask = previousTasks.some((task) => (
           isActiveDownloadTask(task.status) && !activeIds.has(task.id)
         ));
         if (hasMissingActiveTask) await refreshTaskSnapshot(() => disposed, 'terminal');
@@ -1016,8 +1017,7 @@ export function App() {
       else showConfirmation(result.confirmation);
     }
     if (result.duplicate) {
-      recordTaskEvent(result.duplicate.task);
-      setTasks((current) => upsertTask(current, result.duplicate!.task));
+      applyTaskProjection(result.duplicate.task);
       setSelectedTaskId(result.duplicate.task.id);
       enqueueDuplicate(result.duplicate);
     }
@@ -1032,8 +1032,7 @@ export function App() {
     try {
       const updated = await resolveDuplicateDownload(taskId, action);
       if (updated) {
-        recordTaskEvent(updated);
-        setTasks((current) => upsertTask(current, updated));
+        applyTaskProjection(updated);
         setSelectedTaskId(updated.id);
       }
       setDuplicateQueue((current) => current[0]?.task.id === taskId ? current.slice(1) : current);
@@ -1171,9 +1170,8 @@ export function App() {
       if (command === 'move_to_private' || command === 'move_to_normal') {
         const updated = await setTaskPrivacy(id, command === 'move_to_private');
         if (updated) {
-          recordTaskEvent(updated);
-          setTasks((current) => upsertTask(current, updated));
-          if (command === 'move_to_private' && !privacyVisibility.unlocked && isPrivateTask(updated)) {
+          const projected = applyTaskProjection(updated);
+          if (command === 'move_to_private' && !privacyVisibility.unlocked && isPrivateTask(projected)) {
             setSelectedTaskIds((current) => current.filter((selectedId) => selectedId !== id));
             setDetailsTaskId((current) => current === id ? null : current);
           }
@@ -1281,8 +1279,8 @@ export function App() {
           return;
         }
         if (result.value) {
-          applyTaskProjection(result.value);
-          if (privacyTarget === true && !privacyVisibility.unlocked && isPrivateTask(result.value)) newlyHiddenIds.add(result.value.id);
+          const projected = applyTaskProjection(result.value);
+          if (privacyTarget === true && !privacyVisibility.unlocked && isPrivateTask(projected)) newlyHiddenIds.add(projected.id);
         } else if (operation.optimisticStart) {
           refreshNeeded = true;
         }
@@ -1318,8 +1316,7 @@ export function App() {
     try {
       const updated = await selectDownloadFiles(taskId, selectedIndices);
       if (updated) {
-        recordTaskEvent(updated);
-        setTasks((current) => upsertTask(current, updated));
+        applyTaskProjection(updated);
       }
       if (selected && task.status === 'paused') await taskCommand(taskId, 'resume');
     } catch (error) {
@@ -1331,8 +1328,7 @@ export function App() {
     try {
       const updated = await cancelDownloadFile(taskId, fileIndex);
       if (updated) {
-        recordTaskEvent(updated);
-        setTasks((current) => upsertTask(current, updated));
+        applyTaskProjection(updated);
       }
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
@@ -1344,7 +1340,8 @@ export function App() {
     if (!ids.length || purgeInProgressRef.current) return;
     const removeTasksFromQueue = (taskIds: readonly string[]) => {
       const removed = new Set(taskIds);
-      setTasks((current) => current.filter((task) => !removed.has(task.id)));
+      tasksRef.current = tasksRef.current.filter((task) => !removed.has(task.id));
+      setTasks(tasksRef.current);
       setSelectedTaskIds((current) => current.filter((id) => !removed.has(id)));
       setDetailsTaskId((current) => current && removed.has(current) ? null : current);
     };
@@ -1435,8 +1432,7 @@ export function App() {
     const outcome = value as TaskActionResult | undefined;
     if (outcome?.duplicate) {
       const task = outcome.queueTask ?? outcome.duplicate.task;
-      recordTaskEvent(task);
-      setTasks((current) => upsertTask(current, task));
+      applyTaskProjection(task);
       setSelectedTaskId(outcome.duplicate.task.id);
       enqueueDuplicate(outcome.duplicate);
       return;

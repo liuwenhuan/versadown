@@ -4,7 +4,7 @@
 //! an extra Node host.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use crate::{
@@ -618,12 +618,7 @@ fn native_task_id_from_gid(gid: Option<&str>) -> Option<u32> {
 }
 
 fn emit_task(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
-    let state = app.state::<crate::commands::AppState>();
-    if crate::commands::should_emit_task_update(&state, task.is_private) {
-        if let Ok(payload) = crate::commands::task_update_payload(store, None, task.clone()) {
-            let _ = app.emit("download-task-updated", payload);
-        }
-    }
+    let _ = crate::commands::emit_task_update_for_task(app, store, None, task.clone());
 }
 
 fn release_cloud_slot(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {

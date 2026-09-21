@@ -10,7 +10,6 @@ export interface QueueTask {
   status: TaskStatus;
   progress: number;
   speed?: string;
-  speedBytes?: number;
   download_speed?: number;
   upload_speed?: number;
   size?: string;
@@ -34,14 +33,23 @@ export interface QueueTask {
   created_at?: number;
   updated_at?: number;
   completed_at?: number;
-  completedAt?: number;
   p2p_sharing?: boolean;
   is_private?: boolean;
-  isPrivate?: boolean;
   post_processing_note?: string;
   files?: readonly DownloadFile[];
   file_index?: number;
   selected?: boolean;
+}
+
+/**
+ * Permissive input shape for the task event boundary. Normalized UI state
+ * always uses QueueTask and therefore exposes only the current wire names.
+ */
+export interface QueueTaskInput extends Omit<QueueTask, 'children'> {
+  children?: readonly QueueTaskInput[];
+  speedBytes?: number;
+  completedAt?: number;
+  isPrivate?: boolean;
 }
 
 export interface DownloadFile {

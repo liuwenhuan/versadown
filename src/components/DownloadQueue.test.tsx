@@ -860,7 +860,7 @@ it('renders a completed video task compactly and plays its video files', async (
   const onCommand = vi.fn();
   const completedTask = {
     id: 'completed-video', name: '纪录片合集', kind: 'torrent' as const, status: 'completed' as const, progress: 100,
-    completedAt: 1_788_998_400,
+    completed_at: 1_788_998_400,
     files: [
       { index: 1, path: 'D:/Downloads/documentary.mp4', length: 1_073_741_824, completed_length: 1_073_741_824, selected: true },
       { index: 2, path: 'D:/Downloads/notes.txt', length: 524_288, completed_length: 524_288, selected: true },

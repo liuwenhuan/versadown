@@ -1,14 +1,11 @@
 import type { QueueTask, TaskStatus } from './types';
+import { isPrivateTask } from './queueTask';
 
 let permissionPromise: Promise<boolean> | undefined;
 
 export interface DownloadNotification {
   title: '下载完成' | '下载失败';
   body: string;
-}
-
-function isPrivateTask(task: QueueTask): boolean {
-  return task.isPrivate ?? task.is_private ?? false;
 }
 
 function isTerminalNotificationStatus(status: TaskStatus): status is 'completed' | 'failed' {

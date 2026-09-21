@@ -201,9 +201,7 @@ pub fn set_task_private(
 
     // A newly-private projection is never broadcast into a locked session.
     // The caller still receives the result for its immediate local update.
-    if should_emit_task_update(&state, payload.is_private) {
-        let _ = app.emit("download-task-updated", payload.clone());
-    }
+    emit_task_update(&app, TaskUpdatePayload::Queue(payload.clone()));
     Ok(payload)
 }
 
@@ -889,10 +887,6 @@ pub async fn confirm_cloud_share_download(
         let group_source = selection.plan_source.clone();
         let submit_app = app.clone();
         let root_event_app = app.clone();
-        let emit_root = !private_download
-            || privacy_task_visibility(&state)
-                .map(|visibility| visibility.unlocked)
-                .unwrap_or(false);
         let outcome = crate::cloud::commands::submit_cloud_directory_plan_with_group_event(
             &store,
             provider,
@@ -908,10 +902,7 @@ pub async fn confirm_cloud_share_download(
                     .map_err(|_| crate::cloud::QuarkError::Storage)?;
                 root.post_processing_note = group.post_processing_note;
                 let _ = on_created.send(root.clone());
-                if emit_root {
-                    use tauri::Emitter;
-                    let _ = root_event_app.emit("download-task-updated", root);
-                }
+                emit_task_update(&root_event_app, TaskUpdatePayload::Queue(root));
                 Ok(())
             },
             move |_, source, options, context| {
@@ -1210,6 +1201,65 @@ pub fn cloud_directory_group_queue_task(
 pub(crate) enum TaskUpdatePayload {
     Queue(QueueTaskPayload),
     Task(DownloadTaskPayload),
+}
+
+impl TaskUpdatePayload {
+    fn is_private(&self) -> bool {
+        match self {
+            Self::Queue(payload) => payload.is_private,
+            Self::Task(payload) => payload.task.is_private,
+        }
+    }
+}
+
+/// Builds the event form of a durable cloud-directory root. Keeping this
+/// conversion here prevents root events from bypassing the common event DTO.
+pub(crate) fn task_update_payload_for_directory_root(
+    store: &TaskStore,
+    group_id: Uuid,
+) -> Result<TaskUpdatePayload, String> {
+    cloud_directory_group_queue_task(store, group_id).map(TaskUpdatePayload::Queue)
+}
+
+/// The sole `download-task-updated` event boundary. Every payload is wrapped
+/// in `TaskUpdatePayload`, so ordinary tasks and recursive directory roots
+/// retain their distinct projections while sharing privacy filtering and the
+/// JSON serialization contract.
+pub(crate) fn emit_task_update(app: &AppHandle, payload: TaskUpdatePayload) {
+    let visible = app
+        .try_state::<AppState>()
+        .map(|state| should_emit_task_update(&state, payload.is_private()))
+        .unwrap_or(!payload.is_private());
+    if visible {
+        let _ = app.emit("download-task-updated", payload);
+    }
+}
+
+/// Projects an updated durable task before passing it through the sole event
+/// boundary. Directory members automatically project their synthetic root.
+pub(crate) fn emit_task_update_for_task(
+    app: &AppHandle,
+    store: &TaskStore,
+    plans: Option<&crate::cloud::share::CloudSharePlanStore>,
+    task: DownloadTask,
+) -> Result<(), String> {
+    let payload = task_update_payload(store, plans, task)?;
+    emit_task_update(app, payload);
+    Ok(())
+}
+
+/// Reprojects a directory root before emitting it, so callers cannot publish
+/// a stale, flat, or leaf-shaped directory event.
+pub(crate) fn emit_task_update_for_directory_root(
+    app: &AppHandle,
+    store: &TaskStore,
+    group_id: Uuid,
+) -> Result<(), String> {
+    emit_task_update(
+        app,
+        task_update_payload_for_directory_root(store, group_id)?,
+    );
+    Ok(())
 }
 
 /// Selects the externally visible event representation for one task update.
@@ -1961,15 +2011,7 @@ async fn run_cloud_directory_group_action(
             .store
             .set_cloud_directory_paused(group.id, action == "pause")
             .map_err(|error| error.to_string())?;
-        use tauri::Emitter;
-        let root = cloud_directory_group_queue_task(&state.store, group.id)?;
-        if !group.is_private
-            || privacy_task_visibility(state)
-                .map(|v| v.unlocked)
-                .unwrap_or(false)
-        {
-            let _ = app.emit("download-task-updated", root);
-        }
+        emit_task_update_for_directory_root(&app, &state.store, group.id)?;
         let items = state
             .store
             .cloud_directory_group_items(group.id)
@@ -2082,15 +2124,7 @@ async fn run_cloud_directory_group_action(
                         crate::cloud::commands::retry_cloud_directory_group(app.clone(), group_id)
                             .await;
                 }
-                if let Ok(root) = cloud_directory_group_queue_task(&state.store, group_id) {
-                    if !root.is_private
-                        || privacy_task_visibility(&state)
-                            .map(|v| v.unlocked)
-                            .unwrap_or(false)
-                    {
-                        let _ = app.emit("download-task-updated", root);
-                    }
-                }
+                let _ = emit_task_update_for_directory_root(&app, &state.store, group_id);
             });
         }
         if action == "resume" && group.provider == CloudProvider::Quark {
@@ -3909,18 +3943,60 @@ mod tests {
     }
 
     #[test]
-    fn direct_task_update_uses_the_queue_status_message_contract() {
+    fn task_update_events_use_the_same_status_message_contract_for_files_and_directory_roots() {
         let store = TaskStore::open_in_memory().unwrap();
         let mut task = store
             .create(NewTask::direct("cloud://xunlei/file-id"))
             .unwrap();
         task.status_message = Some("正在使用迅雷svip加速".into());
 
-        let payload = task_update_payload(&store, None, task).unwrap();
-        let json = serde_json::to_value(payload).unwrap();
+        let file_event = task_update_payload(&store, None, task).unwrap();
+        let file_json = serde_json::to_value(file_event).unwrap();
 
-        assert_eq!(json["statusMessage"], "正在使用迅雷svip加速");
-        assert!(json.get("status_message").is_none());
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    CloudProvider::Quark,
+                    "remote-directory",
+                    "课程",
+                    "C:\\Downloads",
+                ),
+                &[NewCloudDirectoryGroupItem::new(
+                    "remote-file",
+                    &[] as &[&str],
+                    "讲义.pdf",
+                    Some(100),
+                )],
+            )
+            .unwrap();
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
+        let mut member = NewTask::direct("cloud://quark/remote-file");
+        member.name = "讲义.pdf".into();
+        let member = store.create(member).unwrap();
+        let member = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Downloading,
+                total_length: Some(100),
+                completed_length: 50,
+                progress: 50,
+                status_message: Some("正在获取网盘下载地址".into()),
+                ..member
+            })
+            .unwrap();
+        store
+            .link_cloud_directory_group_item_task(group.id, item.id, member.id)
+            .unwrap();
+
+        let directory_event = task_update_payload_for_directory_root(&store, group.id).unwrap();
+        let directory_json = serde_json::to_value(directory_event).unwrap();
+
+        assert_eq!(file_json["statusMessage"], "正在使用迅雷svip加速");
+        assert!(file_json.get("status_message").is_none());
+        assert_eq!(directory_json["statusMessage"], "正在获取网盘下载地址");
+        assert!(directory_json.get("status_message").is_none());
     }
 
     #[test]

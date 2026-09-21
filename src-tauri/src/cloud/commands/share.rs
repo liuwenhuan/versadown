@@ -566,7 +566,6 @@ pub(crate) async fn cleanup_cloud_share_task(
     id: uuid::Uuid,
     retry: bool,
 ) -> Result<DownloadTask, QuarkError> {
-    use tauri::Emitter;
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
     let task = state.store.find(id).map_err(|_| QuarkError::Storage)?;
     share::parse_stable_cloud_share_source(&task.source)?;
@@ -591,15 +590,12 @@ pub(crate) async fn cleanup_cloud_share_task(
                 .set_completed_cleanup_message(id, true)
                 .map_err(|_| QuarkError::Storage)?;
             let cloud = app.try_state::<Arc<CloudState>>();
-            if let Ok(payload) = crate::commands::task_update_payload(
+            let _ = crate::commands::emit_task_update_for_task(
+                &app,
                 &state.store,
                 cloud.as_ref().map(|cloud| &cloud.share_plans),
                 task.clone(),
-            ) {
-                if should_emit_task_update(&state, task.is_private) {
-                    let _ = app.emit("download-task-updated", payload);
-                }
-            }
+            );
             Ok(task)
         }
     }
@@ -610,7 +606,6 @@ pub(crate) async fn cleanup_cloud_share_task_inner(
     id: uuid::Uuid,
     retry: bool,
 ) -> Result<DownloadTask, QuarkError> {
-    use tauri::Emitter;
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
     let task = state.store.find(id).map_err(|_| QuarkError::Storage)?;
     if task.status != TaskStatus::Completed {
@@ -665,15 +660,12 @@ pub(crate) async fn cleanup_cloud_share_task_inner(
     )
     .await?;
     if let Some(updated) = updated {
-        if let Ok(payload) = crate::commands::task_update_payload(
+        let _ = crate::commands::emit_task_update_for_task(
+            &app,
             &state.store,
             Some(&cloud.share_plans),
             updated.clone(),
-        ) {
-            if should_emit_task_update(&state, updated.is_private) {
-                let _ = app.emit("download-task-updated", payload);
-            }
-        }
+        );
         Ok(updated)
     } else {
         state.store.find(id).map_err(|_| QuarkError::Storage)

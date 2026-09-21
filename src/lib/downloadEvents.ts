@@ -1,11 +1,61 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { DownloadGlobalStat, QueueTask } from './types';
+import type { DownloadGlobalStat, QueueTask, QueueTaskInput } from './types';
 
 export type TaskSnapshotScope = 'active' | 'terminal';
 
 // Failed tasks remain in the active download list so users can retry or
 // manage them without switching to a separate terminal scope.
 const terminalTaskStatuses = new Set<QueueTask['status']>(['completed', 'cancelled', 'recycled']);
+
+/** One logical timeline for live updates and list/metadata requests. A snapshot
+ * keeps its request version when it returns; receiving it is not a new event. */
+export function createTaskUpdateMerger() {
+  let version = 0;
+  const taskVersions = new Map<string, number>();
+  const scopeVersions = new Map<TaskSnapshotScope, number>();
+  return {
+    beginSnapshot: () => ++version,
+    protectRemoved(ids: readonly string[]) {
+      const removedVersion = ++version;
+      for (const id of ids) taskVersions.set(id, removedVersion);
+    },
+    merge(
+      current: readonly QueueTask[],
+      snapshots: readonly QueueTask[],
+      options: { requestVersion?: number; scope?: TaskSnapshotScope; protectedIds?: ReadonlySet<string> } = {},
+    ): QueueTask[] {
+      const incomingVersion = options.requestVersion ?? ++version;
+      if (options.scope) {
+        if ((scopeVersions.get(options.scope) ?? 0) > incomingVersion) return [...current];
+        scopeVersions.set(options.scope, incomingVersion);
+      }
+      const protectedIds = new Set(options.protectedIds);
+      for (const [id, appliedVersion] of taskVersions) {
+        if (appliedVersion > incomingVersion) protectedIds.add(id);
+      }
+      if (options.requestVersion !== undefined && !options.scope) {
+        // A single-task metadata response still belongs to a list scope. An
+        // accepted newer list owns absence there, including IDs not seen yet.
+        for (const task of snapshots) {
+          const scope = taskMatchesSnapshotScope(task, 'active') ? 'active' : 'terminal';
+          if ((scopeVersions.get(scope) ?? 0) > incomingVersion) protectedIds.add(task.id);
+        }
+      }
+      const merged = options.scope
+        ? reconcileTaskSnapshot(current, snapshots, options.scope, protectedIds)
+        : mergeTaskSnapshot(current, snapshots, protectedIds);
+      // Record concrete task updates globally. Absence belongs only to its
+      // scope watermark: leaving active does not mean deletion from terminal.
+      const record = (task: QueueTask) => {
+        if (protectedIds.has(task.id)) return;
+        taskVersions.set(task.id, incomingVersion);
+        task.children?.forEach(record);
+      };
+      snapshots.forEach(record);
+      return merged;
+    },
+  };
+}
 
 export function upsertTask(tasks: readonly QueueTask[], snapshot: QueueTask): QueueTask[] {
   // A directory snapshot owns its descendants. A list response may have observed
@@ -29,9 +79,9 @@ export function mergeTaskSnapshot(
   snapshots: readonly QueueTask[],
   protectedIds: ReadonlySet<string> = new Set()
 ): QueueTask[] {
-  const liveTasks = protectedIds.size ? indexTasks(current, protectedIds) : new Map<string, QueueTask>();
+  const currentTasks = protectedIds.size ? indexTasks(current) : new Map<string, QueueTask>();
   return snapshots.reduce<QueueTask[]>((merged, snapshot) => (
-    protectedIds.has(snapshot.id) ? merged : upsertTask(merged, preserveLiveTasks(snapshot, liveTasks))
+    protectedIds.has(snapshot.id) ? merged : upsertTask(merged, preserveLiveTasks(snapshot, currentTasks, protectedIds))
   ), [...current]);
 }
 
@@ -64,11 +114,11 @@ function containsProtectedTask(task: QueueTask, protectedIds: ReadonlySet<string
   return protectedIds.has(task.id) || Boolean(task.children?.some((child) => containsProtectedTask(child, protectedIds)));
 }
 
-function indexTasks(tasks: readonly QueueTask[], ids?: ReadonlySet<string>): Map<string, QueueTask> {
+function indexTasks(tasks: readonly QueueTask[]): Map<string, QueueTask> {
   const indexed = new Map<string, QueueTask>();
   const visit = (items: readonly QueueTask[]) => {
     for (const task of items) {
-      if (!ids || ids.has(task.id)) indexed.set(task.id, task);
+      indexed.set(task.id, task);
       if (task.children) visit(task.children);
     }
   };
@@ -76,12 +126,21 @@ function indexTasks(tasks: readonly QueueTask[], ids?: ReadonlySet<string>): Map
   return indexed;
 }
 
-function preserveLiveTasks(snapshot: QueueTask, liveTasks: ReadonlyMap<string, QueueTask>): QueueTask {
-  const live = liveTasks.get(snapshot.id);
-  if (live) return live;
-  if (!liveTasks.size || !snapshot.children?.length) return snapshot;
-  const children = snapshot.children.map((child) => preserveLiveTasks(child, liveTasks));
-  return children.some((child, index) => child !== snapshot.children![index]) ? { ...snapshot, children } : snapshot;
+function preserveLiveTasks(
+  snapshot: QueueTask,
+  currentTasks: ReadonlyMap<string, QueueTask>,
+  protectedIds: ReadonlySet<string>,
+): QueueTask {
+  const current = currentTasks.get(snapshot.id);
+  if (current && protectedIds.has(snapshot.id)) return current;
+  if (!currentTasks.size) return snapshot;
+  const children = (snapshot.children ?? []).map((child) => preserveLiveTasks(child, currentTasks, protectedIds));
+  const childIds = new Set(children.map((child) => child.id));
+  for (const child of current?.children ?? []) {
+    if (!childIds.has(child.id) && containsProtectedTask(child, protectedIds)) children.push(child);
+  }
+  return children.length !== (snapshot.children?.length ?? 0)
+    || children.some((child, index) => child !== snapshot.children![index]) ? { ...snapshot, children } : snapshot;
 }
 
 function replaceExistingTask(tasks: readonly QueueTask[], snapshot: QueueTask): QueueTask[] | readonly QueueTask[] {
@@ -140,12 +199,12 @@ export function transferProgress(task: QueueTask): string {
 }
 
 export async function subscribeToDownloadEvents(handlers: {
-  onTask: (task: QueueTask) => void;
+  onTask: (task: QueueTaskInput) => void;
   onGlobalStat: (stat: DownloadGlobalStat) => void;
 }): Promise<UnlistenFn> {
   let stopTask: UnlistenFn | undefined;
   try {
-    stopTask = await listen<QueueTask>('download-task-updated', (event) => handlers.onTask(event.payload));
+    stopTask = await listen<QueueTaskInput>('download-task-updated', (event) => handlers.onTask(event.payload));
     const stopGlobal = await listen<DownloadGlobalStat>('download-global-stat-updated', (event) => handlers.onGlobalStat(event.payload));
     return () => { stopTask?.(); stopGlobal(); };
   } catch (error) {

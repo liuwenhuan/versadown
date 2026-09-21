@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatEta, formatSpeed, upsertTask, mergeTaskSnapshot, reconcileTaskSnapshot } from './downloadEvents';
+import { createTaskUpdateMerger, formatBytes, formatEta, formatSpeed, upsertTask, mergeTaskSnapshot, reconcileTaskSnapshot } from './downloadEvents';
 import type { QueueTask } from './types';
 
 function task(overrides: Partial<QueueTask> = {}): QueueTask {
@@ -125,6 +125,83 @@ describe('reconcileTaskSnapshot', () => {
     const live = task({ id: 'live-task', status: 'awaiting_user' });
 
     expect(reconcileTaskSnapshot([live], [], 'active', new Set([live.id]))).toEqual([live]);
+  });
+});
+
+describe('task update versions', () => {
+  it('accepts a delayed terminal snapshot after a newer active list observes its transition out of active', () => {
+    const updates = createTaskUpdateMerger();
+    const current = updates.merge([], [task()]);
+    const terminalRequest = updates.beginSnapshot();
+    const activeRequest = updates.beginSnapshot();
+    const removedFromActive = updates.merge(current, [], { requestVersion: activeRequest, scope: 'active' });
+    const completed = task({ status: 'completed', progress: 100 });
+
+    expect(removedFromActive).toEqual([]);
+    expect(updates.merge(removedFromActive, [completed], { requestVersion: terminalRequest, scope: 'terminal' }))
+      .toEqual([completed]);
+  });
+
+  it('rejects unknown magnet metadata after a newer active list confirms absence', () => {
+    const updates = createTaskUpdateMerger();
+    const metadataRequest = updates.beginSnapshot();
+    const activeRequest = updates.beginSnapshot();
+    const empty = updates.merge([], [], { requestVersion: activeRequest, scope: 'active' });
+    const staleMetadata = task({ kind: 'magnet', status: 'awaiting_user' });
+
+    expect(updates.merge(empty, [staleMetadata], { requestVersion: metadataRequest })).toEqual([]);
+  });
+
+  it.each(['active', 'terminal'] as const)('rejects unknown tasks from an older %s list after accepting an empty list', (scope) => {
+    const updates = createTaskUpdateMerger();
+    const older = updates.beginSnapshot();
+    const newer = updates.beginSnapshot();
+    const empty = updates.merge([], [], { requestVersion: newer, scope });
+    const stale = task({ status: scope === 'terminal' ? 'completed' : 'downloading' });
+
+    expect(updates.merge(empty, [stale], { requestVersion: older, scope })).toEqual([]);
+  });
+
+  it('retains a newer member event when an older directory snapshot omits that member', () => {
+    const updates = createTaskUpdateMerger();
+    const child = task({ id: 'member', progress: 10 });
+    const root = task({ id: 'root', kind: 'folder', children: [child] });
+    const initial = updates.merge([], [root]);
+    const requestVersion = updates.beginSnapshot();
+    const liveChild = { ...child, progress: 90 };
+    const current = updates.merge(initial, [liveChild]);
+
+    expect(updates.merge(current, [{ ...root, children: [] }], { requestVersion, scope: 'active' }))
+      .toEqual([{ ...root, children: [liveChild] }]);
+  });
+
+  it('does not resurrect a task removed by a later requested list', () => {
+    const updates = createTaskUpdateMerger();
+    const current = updates.merge([], [task()]);
+    const older = updates.beginSnapshot();
+    const newer = updates.beginSnapshot();
+    const removed = updates.merge(current, [], { requestVersion: newer, scope: 'active' });
+
+    expect(updates.merge(removed, [task()], { requestVersion: older, scope: 'active' })).toEqual([]);
+  });
+
+  it('lets a later list replace metadata that returned after the list request began', () => {
+    const updates = createTaskUpdateMerger();
+    const metadataRequest = updates.beginSnapshot();
+    const listRequest = updates.beginSnapshot();
+    const metadata = updates.merge([], [task({ progress: 20 })], { requestVersion: metadataRequest });
+
+    expect(updates.merge(metadata, [task({ progress: 70 })], { requestVersion: listRequest, scope: 'active' })[0].progress).toBe(70);
+  });
+
+  it('protects descendants included in a newer directory event from an older member snapshot', () => {
+    const updates = createTaskUpdateMerger();
+    const requestVersion = updates.beginSnapshot();
+    const child = task({ id: 'member', progress: 90 });
+    const root = task({ id: 'root', kind: 'folder', children: [child] });
+    const current = updates.merge([], [root]);
+
+    expect(updates.merge(current, [{ ...child, progress: 10 }], { requestVersion })).toEqual([root]);
   });
 });
 

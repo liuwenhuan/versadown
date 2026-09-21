@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { DownloadFile, QueueTask, TaskCommand } from '../lib/types';
 import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
+import { isPrivateTask } from '../lib/queueTask';
 import { reorderTaskIds } from '../lib/taskOrder';
 
 interface DownloadQueueProps {
@@ -302,10 +303,6 @@ export function taskContextMenuPosition({ x, y, menuWidth, menuHeight, viewportW
   };
 }
 
-function isPrivateTask(task: QueueTask): boolean {
-  return task.is_private === true || task.isPrivate === true;
-}
-
 function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> {
   const commands: Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: '暂停下载' });
@@ -448,11 +445,11 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const error = node.status === 'completed' ? undefined : node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
     const transferSize = childFileSize(node);
     const childSpeed = node.status === 'downloading'
-      ? node.speed ?? (node.speedBytes !== undefined || node.download_speed !== undefined
-        ? formatSpeed(node.speedBytes ?? node.download_speed) : undefined)
+      ? node.speed ?? (node.download_speed !== undefined
+        ? formatSpeed(node.download_speed) : undefined)
       : undefined;
     const isFileLeaf = !hasChildren && !isFolder;
-    const completionTime = completedRoot && isFileLeaf && node.status === 'completed' ? completedAt(node.completed_at ?? node.completedAt) : undefined;
+    const completionTime = completedRoot && isFileLeaf && node.status === 'completed' ? completedAt(node.completed_at) : undefined;
     const showsCompletionSummary = completedRoot && isFileLeaf && node.status === 'completed';
     return <div className="queue-tree-node" key={node.id}>
       <article className={`child-row queue-tree-row${hasChildren ? ' has-children' : ''}`} style={{ paddingLeft: `${21 + depth * 22}px` }}>
@@ -733,9 +730,9 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
         const taskName = displayTaskName(task);
         const isPaused = task.status === 'paused';
         const isDownloading = task.status === 'downloading';
-        const speed = !isPaused ? task.speed ?? formatSpeed(task.speedBytes ?? task.download_speed) : undefined;
+        const speed = !isPaused ? task.speed ?? formatSpeed(task.download_speed) : undefined;
         const eta = isDownloading ? task.eta ?? (task.eta_seconds !== undefined ? formatEta(task.eta_seconds) : undefined) : undefined;
-        const hasSpeed = !isPaused && (task.speed !== undefined || task.speedBytes !== undefined || task.download_speed !== undefined);
+        const hasSpeed = !isPaused && (task.speed !== undefined || task.download_speed !== undefined);
         const transferSize = task.total_length !== undefined || task.completed_length !== undefined ? transferProgress(task) : task.size;
         const subtitle = taskSubtitle(task);
         const fetchingMetadata = isFetchingTaskMetadata(task, subtitle);
@@ -748,7 +745,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
           : task.status === 'failed' ? (task.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
         const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : primaryAction === 'reauthorize' ? '重新授权' : '重新下载';
         const completedSize = isCompleted ? completedTaskSize(task) : undefined;
-        const completionTime = isCompleted ? completedAt(task.completed_at ?? task.completedAt) : undefined;
+        const completionTime = isCompleted ? completedAt(task.completed_at) : undefined;
         const completedHasPlayableMedia = isCompleted && taskHasPlayableMedia(task);
         const completedFileType = isCompleted ? taskAssociatedFileType(task) : undefined;
         const isDragged = dragState?.movingIds.includes(task.id) ?? false;
