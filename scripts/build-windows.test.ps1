@@ -90,6 +90,17 @@ try {
     Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $compileCargo -PnpmCommand 'pnpm' -TargetRoot $targetRoot -Profile quick -FrontendSignature $changedFrontendSignature
 
     Assert-True -Condition ((Get-Content -LiteralPath $compileMarker -Raw).Trim() -eq $changedFrontendSignature) -Message 'The quick Cargo build must receive the current frontend signature.'
+
+    # Cargo/linker helpers may leave a descendant alive after the build command
+    # itself exits. The build script must wait for that direct command, not the
+    # entire descendant tree, or a completed build can hang before publishing.
+    $backgroundCargo = Join-Path $testRoot 'background-cargo.cmd'
+    Write-TestFile -Path $backgroundCargo -Content "@echo off`r`nstart `"`" /b powershell.exe -NoProfile -Command `"Start-Sleep -Seconds 4`"`r`nexit /b 0"
+    $buildTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $backgroundCargo -PnpmCommand 'pnpm' -TargetRoot $targetRoot -Profile quick -FrontendSignature $changedFrontendSignature
+    $buildTimer.Stop()
+    Assert-True -Condition ($buildTimer.Elapsed.TotalSeconds -lt 2) -Message 'The quick build must not wait for detached compiler descendants after the build command exits.'
+
     Write-Host 'PASS: frontend-only changes preserve the incremental Rust target.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

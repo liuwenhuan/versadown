@@ -288,9 +288,15 @@ function Invoke-MsvcBuild {
         $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
     }
 
-    $process = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/s', '/c', $command) -NoNewWindow -PassThru -Wait
-    if ($process.ExitCode -ne 0) {
-        throw "Windows $Profile build failed with exit code $($process.ExitCode)."
+    # Start-Process -Wait follows the whole descendant process tree on Windows.
+    # Cargo/linker helpers can outlive the completed build command, which keeps
+    # the script from ever reaching publish. A direct native invocation waits
+    # for cmd.exe itself and preserves its exit code without following detached
+    # descendants.
+    & cmd.exe /d /s /c $command
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "Windows $Profile build failed with exit code $exitCode."
     }
 }
 
