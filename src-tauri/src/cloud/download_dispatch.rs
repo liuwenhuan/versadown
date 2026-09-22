@@ -551,7 +551,7 @@ mod tests {
             .create(NewTask::direct("cloud://xunlei/file-id"))
             .unwrap();
         task.status = TaskStatus::Paused;
-        task.aria_gid = Some("xunlei-native:42".into());
+        task.aria_gid = Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42".into());
         let task = store.apply_transfer_snapshot(task).unwrap();
         let dispatch = CloudDownloadDispatch::default();
 
@@ -567,7 +567,7 @@ mod tests {
         assert!(options.continue_download);
         assert_eq!(
             options.native_resume_gid.as_deref(),
-            Some("xunlei-native:42")
+            Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42")
         );
     }
 
@@ -601,7 +601,7 @@ mod tests {
             .create(NewTask::direct("cloud://xunlei/file-id"))
             .unwrap();
         task.status = TaskStatus::Paused;
-        task.aria_gid = Some("xunlei-native:42".into());
+        task.aria_gid = Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42".into());
         let task = store.apply_transfer_snapshot(task).unwrap();
         let dispatch = CloudDownloadDispatch::default();
         let directory_id = Uuid::new_v4();

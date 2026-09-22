@@ -5793,7 +5793,7 @@ mod tests {
             let mut task = store
                 .create(NewTask::direct("cloud://xunlei/file-id"))
                 .unwrap();
-            task.aria_gid = Some("xunlei-native:7".into());
+            task.aria_gid = Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:7".into());
             task = store.apply_transfer_snapshot(task).unwrap();
             store
                 .upsert_files(
@@ -5984,7 +5984,7 @@ mod tests {
             .apply_transfer_snapshot(DownloadTask {
                 status: TaskStatus::Completed,
                 progress: 100,
-                aria_gid: Some("xunlei-native:7".into()),
+                aria_gid: Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:7".into()),
                 total_length: Some(7),
                 completed_length: 7,
                 ..task

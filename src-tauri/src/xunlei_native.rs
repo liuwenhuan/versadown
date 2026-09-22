@@ -3,7 +3,9 @@
 //! P2SP tasks use the official SDK service without starting `Thunder.exe` or
 //! an extra Node host.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+#[cfg(windows)]
+use std::collections::BTreeMap;
+use std::{path::PathBuf, sync::Arc};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
@@ -11,6 +13,14 @@ use crate::{
     cloud::commands::ResolvedCloudDownload, DownloadAction, DownloadTask, TaskStatus, TaskStore,
     UriSubmissionOptions,
 };
+
+mod engine;
+use engine::{
+    parse_native_gid, NativeEngineSession, NativeProgress, NativeTaskHandle, NativeTransferMeter,
+    NATIVE_DOWNLOADING,
+};
+#[cfg(windows)]
+use engine::native_gid;
 
 #[cfg(all(test, windows))]
 #[path = "xunlei_native_live_tests.rs"]
@@ -26,16 +36,16 @@ pub(crate) const PEER_ID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Peer-Id";
 pub(crate) const CONTENT_LENGTH_MARKER_HEADER: &str = "X-Downloader-Xunlei-Content-Length";
 pub(crate) const CID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Cid";
 pub(crate) const GCID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Gcid";
-const NATIVE_GID_PREFIX: &str = "xunlei-native:";
 pub(crate) const PLUGIN_UPDATE_MESSAGE: &str = "迅雷云盘插件需要更新";
 pub(crate) const NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE: &str =
     "迅雷原生下载后端不可用，当前断点无法由普通下载继续；请安装或更新迅雷后重试，或选择重新下载";
 
 pub(crate) fn is_native_gid(gid: Option<&str>) -> bool {
-    gid.is_some_and(|value| value.starts_with(NATIVE_GID_PREFIX))
+    gid.and_then(parse_native_gid).is_some()
 }
 
 pub struct XunleiNativeBackend {
+    engine_session: NativeEngineSession,
     #[cfg(windows)]
     api: std::sync::Mutex<Option<WindowsApi>>,
     #[cfg(windows)]
@@ -47,6 +57,7 @@ pub struct XunleiNativeBackend {
 impl Default for XunleiNativeBackend {
     fn default() -> Self {
         Self {
+            engine_session: NativeEngineSession::new(),
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
             #[cfg(windows)]
@@ -60,6 +71,7 @@ impl Default for XunleiNativeBackend {
 impl XunleiNativeBackend {
     pub(crate) fn with_plugin_config(plugin_config_path: PathBuf) -> Self {
         Self {
+            engine_session: NativeEngineSession::new(),
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
             #[cfg(windows)]
@@ -211,6 +223,10 @@ impl XunleiNativeBackend {
                 }
                 native_id
             };
+            let native_handle = self
+                .engine_session
+                .allocate_handle(native_id)
+                .ok_or(NativeSubmitError::Incompatible)?;
 
             let mut task = store
                 .find(task_id)
@@ -229,7 +245,7 @@ impl XunleiNativeBackend {
                     .insert(native_id, token);
             }
             task.name.clone_from(&output_name);
-            task.aria_gid = Some(format!("{NATIVE_GID_PREFIX}{native_id}"));
+            task.aria_gid = Some(native_gid(native_handle));
             task.followed_by_gid = None;
             task.status = TaskStatus::Downloading;
             task.error = None;
@@ -264,7 +280,7 @@ impl XunleiNativeBackend {
                 app.clone(),
                 Arc::clone(store),
                 task_id,
-                native_id,
+                native_handle,
                 output_path,
             );
             Ok(Some(task))
@@ -278,7 +294,12 @@ impl XunleiNativeBackend {
         task: DownloadTask,
         action: DownloadAction,
     ) -> Result<DownloadTask, String> {
-        let native_id = native_id(&task).ok_or_else(|| "迅雷原生任务 ID 无效".to_string())?;
+        let native_handle =
+            native_handle(&task).ok_or_else(|| "迅雷原生任务 ID 无效".to_string())?;
+        if !self.engine_session.owns(native_handle) {
+            return Err(NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE.into());
+        }
+        let native_id = native_handle.task_id;
         #[cfg(not(windows))]
         {
             let _ = (app, store, action, native_id);
@@ -363,7 +384,7 @@ impl XunleiNativeBackend {
                         app.clone(),
                         Arc::clone(store),
                         updated.id,
-                        native_id,
+                        native_handle,
                         path,
                     );
                 }
@@ -397,7 +418,7 @@ impl XunleiNativeBackend {
         app: AppHandle,
         store: Arc<TaskStore>,
         id: Uuid,
-        expected_native_id: u32,
+        expected_native_handle: NativeTaskHandle,
         output_path: PathBuf,
     ) {
         let backend = Arc::clone(self);
@@ -407,14 +428,13 @@ impl XunleiNativeBackend {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 let Ok(mut task) = store.find(id) else { return };
-                if native_id(&task) != Some(expected_native_id)
+                if native_handle(&task) != Some(expected_native_handle)
+                    || !backend.engine_session.owns(expected_native_handle)
                     || task.status != TaskStatus::Downloading
                 {
                     return;
                 }
-                let Some(native_task_id) = native_id(&task) else {
-                    return;
-                };
+                let native_task_id = expected_native_handle.task_id;
                 #[cfg(windows)]
                 let native_progress = backend
                     .api
@@ -503,7 +523,7 @@ impl XunleiNativeBackend {
                 // A pause/resubmit can finish while QueryTaskInfo is in flight.
                 if !store.find(id).is_ok_and(|current| {
                     current.status == TaskStatus::Downloading
-                        && native_id(&current) == Some(expected_native_id)
+                        && native_handle(&current) == Some(expected_native_handle)
                 }) {
                     return;
                 }
@@ -533,7 +553,9 @@ impl XunleiNativeBackend {
 
     fn stop_completed_task(&self, task: &DownloadTask) -> Result<(), NativeSubmitError> {
         #[cfg(windows)]
-        if let Some(id) = native_id(task) {
+        if let Some(handle) = native_handle(task).filter(|handle| self.engine_session.owns(*handle))
+        {
+            let id = handle.task_id;
             if let Ok(mut api) = self.api.lock() {
                 if let Some(api) = api.as_mut() {
                     let _ = api.stop(id);
@@ -609,12 +631,8 @@ fn native_vip_token(resolved: &ResolvedCloudDownload) -> Option<&str> {
     marker_header(resolved, ACCELERATION_TOKEN_MARKER_HEADER).filter(|token| !token.is_empty())
 }
 
-fn native_id(task: &DownloadTask) -> Option<u32> {
-    native_task_id_from_gid(task.aria_gid.as_deref())
-}
-
-fn native_task_id_from_gid(gid: Option<&str>) -> Option<u32> {
-    gid?.strip_prefix(NATIVE_GID_PREFIX)?.parse().ok()
+fn native_handle(task: &DownloadTask) -> Option<NativeTaskHandle> {
+    task.aria_gid.as_deref().and_then(parse_native_gid)
 }
 
 fn emit_task(app: &AppHandle, store: &TaskStore, task: &DownloadTask) {
@@ -708,94 +726,9 @@ type XlTaskStringKind = unsafe extern "system" fn(u32, i32, *const std::ffi::c_c
 #[cfg(windows)]
 type XlRedirectOriginalResource = unsafe extern "system" fn(u32, *const u16, u32) -> i32;
 
-const NATIVE_DOWNLOADING: i32 = 3;
 const NATIVE_STOPPED: i32 = 5;
 const NATIVE_COMPLETE: i32 = 7;
 const NATIVE_ERROR: i32 = 8;
-
-#[derive(Clone, Copy, Debug, Default)]
-struct NativeProgress {
-    completed: u64,
-    total: u64,
-    status: i32,
-    error_code: i32,
-    connections: u32,
-    received: u64,
-    peer_received: u64,
-}
-
-impl NativeProgress {
-    fn from_bytes(info: &[u8; 924]) -> Self {
-        // Verified against XL_QueryTaskInfo in the installed 25.1.13 SDK and
-        // a throttled range server. Offset 44 is a connection count, NOT B/s.
-        let peer_received = read_u64(info, 60).saturating_add(read_u64(info, 68));
-        Self {
-            status: read_i32(info, 4),
-            error_code: read_i32(info, 8),
-            total: read_u64(info, 12),
-            completed: read_u64(info, 20),
-            connections: read_u32(info, 48),
-            received: read_u64(info, 52).saturating_add(peer_received),
-            peer_received,
-        }
-    }
-}
-
-struct NativeTransferMeter {
-    sampled_at: std::time::Instant,
-    received: u64,
-    peer_received: u64,
-    last_data_at: std::time::Instant,
-    has_baseline: bool,
-    svip_confirmed: bool,
-}
-
-impl NativeTransferMeter {
-    fn new(now: std::time::Instant) -> Self {
-        Self {
-            sampled_at: now,
-            received: 0,
-            peer_received: 0,
-            last_data_at: now,
-            has_baseline: false,
-            svip_confirmed: false,
-        }
-    }
-
-    fn sample(
-        &mut self,
-        progress: NativeProgress,
-        has_vip_token: bool,
-        now: std::time::Instant,
-    ) -> (u64, bool) {
-        if !self.has_baseline {
-            self.received = progress.received;
-            self.peer_received = progress.peer_received;
-            self.sampled_at = now;
-            self.has_baseline = true;
-            return (0, false);
-        }
-        let bytes = progress.received.saturating_sub(self.received);
-        let elapsed = now.duration_since(self.sampled_at).as_secs_f64();
-        let speed = if elapsed > 0.0 && progress.status == NATIVE_DOWNLOADING {
-            (bytes as f64 / elapsed) as u64
-        } else {
-            0
-        };
-        if bytes > 0 {
-            self.last_data_at = now;
-        }
-        if has_vip_token && progress.peer_received > self.peer_received && bytes > 0 {
-            self.svip_confirmed = true;
-        } else if !has_vip_token {
-            self.svip_confirmed = false;
-        }
-        self.received = progress.received;
-        self.peer_received = progress.peer_received;
-        self.sampled_at = now;
-        (speed, self.svip_confirmed)
-    }
-}
 
 fn update_svip_status_message(
     message: &mut Option<String>,
@@ -873,18 +806,6 @@ fn native_stale_task_action_call(
         0 | 0x4E20 | 0x4E21 => Ok(()),
         _ => native_call(code, message),
     }
-}
-
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
-}
-
-fn read_i32(bytes: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default())
-}
-
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap_or_default())
 }
 
 #[cfg(windows)]
@@ -1135,7 +1056,7 @@ impl WindowsApi {
             unsafe { (self.query_task_info)(id, info.as_mut_ptr()) },
             "迅雷原生任务进度暂不可用",
         )?;
-        Ok(NativeProgress::from_bytes(&info))
+        Ok(NativeProgress::from_windows_query_info(&info))
     }
 }
 
@@ -1460,7 +1381,10 @@ mod tests {
 
     #[test]
     fn native_gid_is_not_an_aria_gid() {
-        assert!(is_native_gid(Some("xunlei-native:42")));
+        assert!(is_native_gid(Some(
+            "xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42"
+        )));
+        assert!(!is_native_gid(Some("xunlei-native:42")));
         assert!(!is_native_gid(Some("0123456789abcdef")));
     }
 
@@ -1509,7 +1433,7 @@ mod tests {
         info[12..20].copy_from_slice(&16_777_216u64.to_le_bytes());
         info[20..28].copy_from_slice(&1_638_400u64.to_le_bytes());
         info[44..48].copy_from_slice(&1u32.to_le_bytes());
-        let progress = NativeProgress::from_bytes(&info);
+        let progress = NativeProgress::from_windows_query_info(&info);
         assert_eq!(progress.completed, 1_638_400);
         assert_eq!(progress.received, 0);
         let now = std::time::Instant::now();

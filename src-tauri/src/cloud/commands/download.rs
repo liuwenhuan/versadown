@@ -1782,13 +1782,21 @@ mod tests {
 
         assert_eq!(
             super::share_resolution_failure_message(
-                &xunlei_native_fallback_allowed(Some("xunlei-native:42"), false).unwrap_err(),
+                &xunlei_native_fallback_allowed(
+                    Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42"),
+                    false,
+                )
+                .unwrap_err(),
             ),
             crate::xunlei_native::NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE,
         );
         assert_eq!(
             super::share_resolution_failure_message(
-                &xunlei_native_fallback_allowed(Some("xunlei-native:42"), true).unwrap_err(),
+                &xunlei_native_fallback_allowed(
+                    Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42"),
+                    true,
+                )
+                .unwrap_err(),
             ),
             crate::xunlei_native::PLUGIN_UPDATE_MESSAGE,
         );
