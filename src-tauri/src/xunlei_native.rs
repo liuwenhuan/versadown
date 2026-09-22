@@ -15,6 +15,8 @@ use crate::{
 };
 
 mod engine;
+#[cfg(target_os = "linux")]
+mod linux;
 use engine::{
     parse_native_gid, NativeEngineSession, NativeProgress, NativeTaskHandle, NativeTransferMeter,
     NATIVE_DOWNLOADING,
