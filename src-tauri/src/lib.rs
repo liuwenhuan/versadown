@@ -567,6 +567,18 @@ pub fn run() {
         });
 }
 
+/// Runs the private no-UI Linux Xunlei worker before Tauri is initialized.
+/// It is selected only by the executable's internal multicall argument.
+#[cfg(target_os = "linux")]
+pub fn run_xunlei_native_worker() -> Result<(), ()> {
+    xunlei_native::run_linux_worker_from_args()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn run_xunlei_native_worker() -> Result<(), ()> {
+    Err(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{should_enable_peer_discovery, should_show_windows};

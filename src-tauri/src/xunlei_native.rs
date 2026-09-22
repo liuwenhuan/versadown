@@ -46,6 +46,11 @@ pub(crate) fn is_native_gid(gid: Option<&str>) -> bool {
     gid.and_then(parse_native_gid).is_some()
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn run_linux_worker_from_args() -> Result<(), ()> {
+    linux::run_worker_from_args()
+}
+
 pub struct XunleiNativeBackend {
     engine_session: NativeEngineSession,
     #[cfg(windows)]
