@@ -1,4 +1,5 @@
 use super::*;
+use uuid::Uuid;
 
 pub(crate) const MAX_DIRECTORY_DOWNLOAD_DIRECTORIES: usize = 1_000;
 
@@ -640,10 +641,11 @@ pub async fn queue_cloud_dispatch(
                         configured.max_connections_per_server = Some(connections);
                         configured
                     } else if directory_member {
-                        // A directory spends its per-task concurrency on files,
-                        // not HTTP ranges. Each child therefore has one URL
-                        // connection while the root admits several children.
-                        apply_cloud_directory_member_policy(configured)
+                        apply_cloud_directory_member_policy(
+                            provider,
+                            configured_connections,
+                            configured,
+                        )
                     } else {
                         apply_cloud_download_policy(provider, configured_connections, configured)
                     };
@@ -681,7 +683,31 @@ pub async fn queue_cloud_dispatch(
                         .service()
                         .await
                         .map_err(|_| QuarkError::DownloadEngineUnavailable)?;
-                    let (url, options) = share::share_submission_options(resolved, configured)?;
+                    let (signed_url, options) =
+                        share::share_submission_options(resolved, configured)?;
+                    let mut gateway_registration = None;
+                    let (url, options) = if provider == CloudProvider::Baidu {
+                        let gateway = state
+                            .baidu_range_gateway
+                            .get_or_try_init(|| async {
+                                crate::cloud::baidu_range_gateway::BaiduRangeGateway::start()
+                                    .await
+                                    .map(Arc::new)
+                            })
+                            .await
+                            .map_err(|_| QuarkError::DownloadSubmissionFailed)?;
+                        let (url, options, registration) = register_baidu_gateway_download(
+                            gateway,
+                            id,
+                            signed_url,
+                            options,
+                            replacing_gid.is_some(),
+                        )?;
+                        gateway_registration = Some((Arc::clone(gateway), registration));
+                        (url, options)
+                    } else {
+                        (signed_url, options)
+                    };
                     let submitted = if let Some(expected_gid) = replacing_gid.as_deref() {
                         // The old GID is a native checkpoint only.  Replace it
                         // atomically after aria2 has accepted this freshly
@@ -695,6 +721,12 @@ pub async fn queue_cloud_dispatch(
                             .submit_uri_with_options(id, vec![url], options)
                             .await
                     };
+                    if let Some((gateway, mut registration)) = gateway_registration {
+                        if submitted.is_ok() {
+                            gateway.retire(id, registration.token());
+                            registration.commit();
+                        }
+                    }
                     let submitted = submitted.map_err(cloud_download_submission_error)?;
                     let submitted = if xunlei_native_plugin_update_required {
                         let mut submitted = submitted;
@@ -762,6 +794,42 @@ pub(crate) fn emit_cloud_dispatch_update(app: &AppHandle, state: &AppState, task
     let _ = crate::commands::emit_task_update_for_task(app, &state.store, None, task.clone());
 }
 
+pub(crate) fn register_baidu_gateway_download(
+    gateway: &crate::cloud::baidu_range_gateway::BaiduRangeGateway,
+    task_id: Uuid,
+    signed_url: String,
+    mut options: UriSubmissionOptions,
+    refreshing: bool,
+) -> Result<
+    (
+        String,
+        UriSubmissionOptions,
+        crate::cloud::baidu_range_gateway::GatewayRegistration,
+    ),
+    QuarkError,
+> {
+    let registration = if refreshing {
+        gateway.register_refreshing(
+            task_id,
+            signed_url,
+            options.headers.clone(),
+            options.proxy.clone(),
+        )
+    } else {
+        gateway.register(
+            task_id,
+            signed_url,
+            options.headers.clone(),
+            options.proxy.clone(),
+        )
+    }
+    .map_err(|_| QuarkError::DownloadSubmissionFailed)?;
+    options.headers.clear();
+    options.proxy = None;
+    options.direct_loopback = true;
+    Ok((registration.url().to_owned(), options, registration))
+}
+
 pub fn apply_cloud_download_policy(
     provider: CloudProvider,
     configured_connections: u8,
@@ -802,12 +870,17 @@ fn xunlei_native_fallback_allowed(
     Ok(plugin_update_required)
 }
 
-/// Directory parallelism is expressed as several files, never ranges of the
-/// same signed link. Keeping a member to one connection avoids consuming the
-/// directory's file slots on a single large file.
+/// Baidu's range gateway can safely split each file into concurrent 4 MiB
+/// requests. Other providers retain directory-level parallelism by using one
+/// connection per member.
 pub fn apply_cloud_directory_member_policy(
+    provider: CloudProvider,
+    configured_connections: u8,
     mut options: UriSubmissionOptions,
 ) -> UriSubmissionOptions {
+    if provider == CloudProvider::Baidu {
+        return apply_cloud_download_policy(provider, configured_connections, options);
+    }
     options.max_connections_per_server = Some(1);
     options
 }

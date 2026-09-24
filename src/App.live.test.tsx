@@ -544,6 +544,57 @@ it('opens a unified task window and parses a typed download link immediately', a
   expect(state.parse).toHaveBeenCalledWith('magnet:?xt=urn:btih:abc', undefined, true);
 });
 
+it('shows a structured Baidu share preflight error in the batch task dialog', async () => {
+  const user = userEvent.setup();
+  const share = 'https://pan.baidu.com/s/1example?pwd=7gfb';
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input: share, valid: true, kind: 'cloud-share' }]);
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'cloud-share://baidu/plan', title: 'archive.7z', requiresConfirmation: true,
+      resources: [{ id: 'file-1', name: 'archive.7z', size: '1 GB', selected: true }], processing: [],
+    },
+  });
+  state.confirmCloud.mockRejectedValueOnce({
+    code: 'web_auth_required',
+    message: '网盘要求完成官方操作验证后重试',
+  });
+
+  render(<App />);
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), `${share}{Enter}`);
+  const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+  await within(dialog).findByText('archive.7z');
+  await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
+
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent('网盘要求完成官方操作验证后重试');
+  expect(within(dialog).queryByText('[object Object]')).not.toBeInTheDocument();
+});
+
+it('keeps a Baidu share task unsubmitted and asks for login when authorization is missing', async () => {
+  const user = userEvent.setup();
+  const share = 'https://pan.baidu.com/s/1example?pwd=7gfb';
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input: share, valid: true, kind: 'cloud-share' }]);
+  state.parse.mockResolvedValueOnce({
+    confirmation: {
+      taskId: 'cloud-share://baidu/plan', title: 'archive.7z', requiresConfirmation: true,
+      resources: [{ id: 'file-1', name: 'archive.7z', size: '1 GB', selected: true }], processing: [],
+    },
+  });
+  state.confirmCloud.mockRejectedValueOnce({
+    code: 'not_authorized',
+    message: '尚未授权此网盘，请登录后使用',
+  });
+
+  render(<App />);
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), `${share}{Enter}`);
+  const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+  await within(dialog).findByText('archive.7z');
+  await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
+
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent('尚未授权此网盘，请登录后使用');
+  expect(state.confirmCloud).toHaveBeenCalledTimes(1);
+  expect(dialog).toBeVisible();
+});
+
 it('uses the supplied dark SVG icon and vector icons in the primary navigation', async () => {
   const previousTheme = getThemeMode();
   setThemeMode('deep-ocean');
@@ -611,6 +662,72 @@ it('does not offer manual ordering from the task sort menu', async () => {
   expect(within(menu).queryByRole('menuitemradio', { name: '按手动拖动顺序' })).not.toBeInTheDocument();
 });
 
+it('uses status and task timestamps for each tab by default, ignoring saved sort choices', async () => {
+  const tasks: QueueTask[] = [
+    { ...oldTask, id: 'done-late-created', name: 'done-late-created.zip', status: 'completed', created_at: 500, completed_at: 600 },
+    { ...oldTask, id: 'failed-early-created', name: 'failed-early-created.zip', status: 'failed', created_at: 250, updated_at: 900 },
+    { ...oldTask, id: 'active-old', name: 'active-old.zip', created_at: 100 },
+    { ...oldTask, id: 'done-early-created', name: 'done-early-created.zip', status: 'completed', created_at: 200, completed_at: 1000 },
+    { ...oldTask, id: 'active-new', name: 'active-new.zip', created_at: 400 },
+    { ...oldTask, id: 'failed-late-created', name: 'failed-late-created.zip', status: 'failed', created_at: 300, updated_at: 700 },
+  ];
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'active' ? tasks.filter((task) => task.status === 'downloading')
+      : scope === 'terminal' ? tasks.filter((task) => task.status !== 'downloading') : tasks,
+  ));
+  window.localStorage.setItem('task-list-order-v1', JSON.stringify({
+    sorts: { all: 'name-asc', active: 'name-asc', completed: 'created-desc', failed: 'created-desc' },
+    orders: { all: tasks.map((task) => task.id) },
+  }));
+  const user = userEvent.setup();
+  render(<App />);
+
+  const queue = await screen.findByRole('region', { name: '下载队列' });
+  const visibleNames = () => Array.from(queue.querySelectorAll<HTMLElement>('.task-copy b')).map((item) => item.textContent);
+  await waitFor(() => expect(visibleNames()).toHaveLength(tasks.length));
+  expect(visibleNames()).toEqual([
+    'active-new.zip', 'active-old.zip', 'done-late-created.zip',
+    'failed-late-created.zip', 'failed-early-created.zip', 'done-early-created.zip',
+  ]);
+
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  expect(visibleNames()).toEqual(['active-new.zip', 'active-old.zip']);
+  await user.click(screen.getByRole('tab', { name: /已完成/ }));
+  expect(visibleNames()).toEqual(['done-early-created.zip', 'done-late-created.zip']);
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  expect(visibleNames()).toEqual(['failed-early-created.zip', 'failed-late-created.zip']);
+});
+
+it('keeps user sorting in memory and restores the all-tab default when the launcher opens it', async () => {
+  const tasks: QueueTask[] = [
+    { ...oldTask, id: 'terminal-new', name: 'alpha.zip', status: 'completed', created_at: 300, completed_at: 400 },
+    { ...oldTask, id: 'active-old', name: 'zeta.zip', created_at: 100 },
+  ];
+  state.list.mockImplementation((scope?: string) => Promise.resolve(
+    scope === 'active' ? tasks.filter((task) => task.status === 'downloading')
+      : scope === 'terminal' ? tasks.filter((task) => task.status !== 'downloading') : tasks,
+  ));
+  window.localStorage.removeItem('task-list-order-v1');
+  const user = userEvent.setup();
+  render(<App />);
+  const queue = await screen.findByRole('region', { name: '下载队列' });
+  const visibleNames = () => Array.from(queue.querySelectorAll<HTMLElement>('.task-copy b')).map((item) => item.textContent);
+  await waitFor(() => expect(visibleNames()).toEqual(['zeta.zip', 'alpha.zip']));
+
+  await user.click(screen.getByRole('button', { name: '排序任务' }));
+  await user.click(screen.getByRole('menuitemradio', { name: '按文件名称从 A 到 Z' }));
+  expect(visibleNames()).toEqual(['alpha.zip', 'zeta.zip']);
+  await user.click(screen.getByRole('tab', { name: /下载中/ }));
+  await user.click(screen.getByRole('tab', { name: /全部/ }));
+  expect(visibleNames()).toEqual(['alpha.zip', 'zeta.zip']);
+  expect(window.localStorage.getItem('task-list-order-v1')).toBeNull();
+
+  await waitFor(() => expect(state.listeners.get('launcher-open-all-tasks')).toBeDefined());
+  act(() => { state.listeners.get('launcher-open-all-tasks')?.({ payload: undefined }); });
+  expect(visibleNames()).toEqual(['zeta.zip', 'alpha.zip']);
+  expect(window.localStorage.getItem('task-list-order-v1')).toBeNull();
+});
+
 it('sorts only the active task tab from the menu beside total speed', async () => {
   const active = [
     { id: 'active-old', name: 'alpha.zip', kind: 'file', status: 'downloading' as const, progress: 80, total_length: 800, created_at: 100 },
@@ -675,6 +792,8 @@ it('places a newly added download first without changing the active sort prefere
   await waitFor(() => expect(visibleNames()).toEqual(['middle.zip', 'alpha.zip', 'zeta.zip']));
   await user.click(screen.getByRole('button', { name: '排序任务' }));
   expect(screen.getByRole('menuitemradio', { name: '按文件名称从 A 到 Z' })).toHaveAttribute('aria-checked', 'true');
+  act(() => { state.onTask?.({ id: 'new-middle', name: 'middle.zip', kind: 'file', status: 'completed', progress: 100 }); });
+  await waitFor(() => expect(visibleNames()).toEqual(['alpha.zip', 'middle.zip', 'zeta.zip']));
   window.localStorage.removeItem('task-list-order-v1');
 });
 

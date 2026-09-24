@@ -1874,6 +1874,27 @@ impl AliyunShareAdapter<'_> {
         }
         Err(QuarkError::InvalidResponse)
     }
+    fn personal_download_after_copy(
+        &self,
+        session: &AliyunSession,
+        file_id: &str,
+        name: &str,
+    ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
+        // A newly copied file may briefly be invisible to the download URL
+        // endpoint. Only retry this case immediately after a successful copy;
+        // a missing previously recorded file should be invalidated promptly.
+        for attempt in 0..=ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() {
+            match self.personal_download(session, file_id, name) {
+                Err(QuarkError::SourceFileMissing)
+                    if attempt < ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() =>
+                {
+                    aliyun_transient_retry_pause(attempt);
+                }
+                result => return result,
+            }
+        }
+        Err(QuarkError::InvalidResponse)
+    }
     fn raw(
         &self,
         path: &str,
@@ -2247,7 +2268,7 @@ impl ShareTransfer for AliyunShareAdapter<'_> {
                 &file_id,
                 &owner,
             )?;
-            self.personal_download(&session, &file_id, &entry.entry.name)
+            self.personal_download_after_copy(&session, &file_id, &entry.entry.name)
         })();
         Ok(ShareOperationResult {
             result,

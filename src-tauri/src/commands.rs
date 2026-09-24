@@ -41,6 +41,8 @@ pub struct AppState {
     pub privacy_session: crate::privacy::PrivacySession,
     pub cloud_download_sources: crate::cloud::commands::CloudDownloadSourceGate,
     pub cloud_download_dispatch: crate::cloud::download_dispatch::CloudDownloadDispatch,
+    pub baidu_range_gateway:
+        Arc<tokio::sync::OnceCell<Arc<crate::cloud::baidu_range_gateway::BaiduRangeGateway>>>,
     pub xunlei_native_backend: std::sync::Arc<crate::xunlei_native::XunleiNativeBackend>,
 }
 
@@ -2685,6 +2687,10 @@ const PLAYABLE_MEDIA_EXTENSIONS: &[&str] = &[
     "wav", "wma",
 ];
 
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "avif", "bmp", "gif", "heic", "ico", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp",
+];
+
 const ASSOCIATED_FILE_EXTENSIONS: &[&str] = &[
     "avif", "bmp", "cfg", "conf", "csv", "css", "doc", "docm", "docx", "dot", "dotm", "dotx",
     "gif", "heic", "htm", "html", "ico", "ini", "jpeg", "jpg", "json", "log", "markdown", "md",
@@ -2701,6 +2707,14 @@ fn is_video_path(path: &Path) -> bool {
         })
 }
 
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        })
+}
+
 fn is_associated_file_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -2709,13 +2723,56 @@ fn is_associated_file_path(path: &Path) -> bool {
         })
 }
 
-fn task_video_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, String> {
+fn completed_task_file_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, String> {
+    if store
+        .cloud_directory_group(task_id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        let items = store
+            .cloud_directory_group_items(task_id)
+            .map_err(|error| error.to_string())?;
+        if items.is_empty() {
+            return Err("下载文件已不存在，无法打开".to_string());
+        }
+        let mut paths = Vec::new();
+        for item in items {
+            let member_id = item
+                .task_id
+                .ok_or_else(|| "仅已完成任务可以打开文件".to_string())?;
+            let member = store.find(member_id).map_err(|error| error.to_string())?;
+            if member.status != TaskStatus::Completed {
+                return Err("仅已完成任务可以打开文件".to_string());
+            }
+            let files = store.files(member_id).map_err(|error| error.to_string())?;
+            let selected = files
+                .into_iter()
+                .filter(|file| file.selected)
+                .map(|file| PathBuf::from(file.path))
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Err("下载文件已不存在，无法打开".to_string());
+            }
+            paths.extend(selected);
+        }
+        return Ok(paths);
+    }
+    let task = store.find(task_id).map_err(|error| error.to_string())?;
+    if task.status != TaskStatus::Completed {
+        return Err("仅已完成任务可以打开文件".to_string());
+    }
     Ok(store
         .files(task_id)
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|file| file.selected)
         .map(|file| PathBuf::from(file.path))
+        .collect())
+}
+
+fn task_video_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, String> {
+    Ok(completed_task_file_paths(store, task_id)?
+        .into_iter()
         .filter(|path| path.is_file() && is_video_path(path))
         .collect())
 }
@@ -2757,19 +2814,11 @@ pub fn open_task_directory(task_id: String, state: State<'_, AppState>) -> Resul
 }
 
 fn task_associated_file_path(store: &TaskStore, task_id: Uuid) -> Result<PathBuf, String> {
-    let task = store.find(task_id).map_err(|error| error.to_string())?;
-    if task.status != TaskStatus::Completed {
-        return Err("仅已完成任务可以打开文件".to_string());
-    }
-    let files = store
-        .files(task_id)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|file| file.selected)
-        .map(|file| PathBuf::from(file.path))
-        .collect::<Vec<_>>();
-    let [path] = files.as_slice() else {
-        return Err("该任务包含多个文件，请打开下载目录".to_string());
+    let files = completed_task_file_paths(store, task_id)?;
+    let path = match files.as_slice() {
+        [path] => path,
+        [first, ..] if files.iter().all(|path| is_image_path(path)) => first,
+        _ => return Err("该任务包含多个文件，请打开下载目录".to_string()),
     };
     if !path.is_absolute() {
         return Err("下载文件路径不是本地绝对路径，无法打开".to_string());
@@ -2786,8 +2835,16 @@ fn task_associated_file_path(store: &TaskStore, task_id: Uuid) -> Result<PathBuf
 #[tauri::command]
 pub fn open_task_file(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    let task = state.store.find(id).map_err(|error| error.to_string())?;
-    ensure_private_task_access(&state, &task)?;
+    if let Some(group) = state
+        .store
+        .cloud_directory_group(id)
+        .map_err(|error| error.to_string())?
+    {
+        ensure_private_group_access(&state, &group)?;
+    } else {
+        let task = state.store.find(id).map_err(|error| error.to_string())?;
+        ensure_private_task_access(&state, &task)?;
+    }
     let path = task_associated_file_path(&state.store, id)?;
     tauri_plugin_opener::open_path(&path, None::<&str>)
         .map_err(|error| format!("无法使用系统默认应用打开文件：{error}"))
@@ -2811,10 +2868,18 @@ fn cloud_directory_group_output_root(group: &CloudDirectoryGroup) -> Result<Path
 #[tauri::command]
 pub fn play_task_videos(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    let task = state.store.find(id).map_err(|error| error.to_string())?;
-    ensure_private_task_access(&state, &task)?;
-    if task.status != TaskStatus::Completed {
-        return Err("仅已完成任务可以播放视频".to_string());
+    if let Some(group) = state
+        .store
+        .cloud_directory_group(id)
+        .map_err(|error| error.to_string())?
+    {
+        ensure_private_group_access(&state, &group)?;
+    } else {
+        let task = state.store.find(id).map_err(|error| error.to_string())?;
+        ensure_private_task_access(&state, &task)?;
+        if task.status != TaskStatus::Completed {
+            return Err("仅已完成任务可以播放视频".to_string());
+        }
     }
     let videos = task_video_paths(&state.store, id)?;
     if videos.is_empty() {
@@ -4530,8 +4595,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(terminal.len(), 2);
-        assert!(terminal.iter().any(|task| task.status == TaskStatus::Completed));
-        assert!(terminal.iter().any(|task| task.status == TaskStatus::Failed));
+        assert!(terminal
+            .iter()
+            .any(|task| task.status == TaskStatus::Completed));
+        assert!(terminal
+            .iter()
+            .any(|task| task.status == TaskStatus::Failed));
     }
 
     #[tokio::test]
@@ -4660,12 +4729,12 @@ mod tests {
 
         let failed_active_scope =
             project_cloud_directory_groups(&store, store.list().unwrap(), Some("active")).unwrap();
-        assert_eq!(failed_active_scope.len(), 1);
-        assert_eq!(failed_active_scope[0].status, TaskStatus::Failed);
+        assert!(failed_active_scope.is_empty());
         let terminal_scope =
             project_cloud_directory_groups(&store, store.list().unwrap(), Some("terminal"))
                 .unwrap();
-        assert!(terminal_scope.is_empty());
+        assert_eq!(terminal_scope.len(), 1);
+        assert_eq!(terminal_scope[0].status, TaskStatus::Failed);
     }
 
     #[test]
@@ -5475,7 +5544,7 @@ mod tests {
             .link_cloud_directory_group_item_task(group.id, items[1].id, second.id)
             .unwrap();
 
-        let failed = list_queue_tasks_for_scope(&store, Some("active")).unwrap();
+        let failed = list_queue_tasks_for_scope(&store, Some("terminal")).unwrap();
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].id, group.id.to_string());
         assert_eq!(failed[0].status, TaskStatus::Failed);
@@ -5725,7 +5794,10 @@ mod tests {
         recycle_local_task_for_permanent_deletion(&store, completed.id).unwrap();
         recycle_local_task_for_permanent_deletion(&store, failed.id).unwrap();
 
-        assert_eq!(store.find(completed.id).unwrap().status, TaskStatus::Recycled);
+        assert_eq!(
+            store.find(completed.id).unwrap().status,
+            TaskStatus::Recycled
+        );
         assert_eq!(store.find(failed.id).unwrap().status, TaskStatus::Recycled);
     }
 
@@ -6464,6 +6536,149 @@ mod tests {
     }
 
     #[test]
+    fn opens_first_image_only_when_every_selected_file_is_an_image() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("cover.jpg");
+        let second = root.path().join("back.png");
+        let note = root.path().join("notes.txt");
+        for path in [&first, &second, &note] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/images"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                ..task
+            })
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[
+                    (0, first.to_string_lossy().into_owned(), 7, 7, true),
+                    (1, second.to_string_lossy().into_owned(), 7, 7, true),
+                    (2, note.to_string_lossy().into_owned(), 7, 0, false),
+                ],
+            )
+            .unwrap();
+        assert_eq!(task_associated_file_path(&store, task.id).unwrap(), first);
+
+        store
+            .upsert_files(
+                task.id,
+                &[
+                    (0, first.to_string_lossy().into_owned(), 7, 7, true),
+                    (1, note.to_string_lossy().into_owned(), 7, 7, true),
+                ],
+            )
+            .unwrap();
+        assert!(task_associated_file_path(&store, task.id).is_err());
+    }
+
+    #[test]
+    fn opens_first_image_from_a_completed_cloud_directory_group() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = [root.path().join("cover.jpg"), root.path().join("back.png")];
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(CloudProvider::Quark, "album-id", "album", root.path()),
+                &[
+                    NewCloudDirectoryGroupItem::new("first", &[] as &[&str], "cover.jpg", Some(7)),
+                    NewCloudDirectoryGroupItem::new("second", &["nested"], "back.png", Some(7)),
+                ],
+            )
+            .unwrap();
+        for (item, path) in store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .iter()
+            .zip(&paths)
+        {
+            std::fs::write(path, b"fixture").unwrap();
+            let task = store
+                .create(NewTask::direct(format!(
+                    "cloud://quark/{}",
+                    item.remote_file_id
+                )))
+                .unwrap();
+            let task = store
+                .apply_transfer_snapshot(DownloadTask {
+                    status: TaskStatus::Completed,
+                    ..task
+                })
+                .unwrap();
+            store
+                .upsert_files(
+                    task.id,
+                    &[(0, path.to_string_lossy().into_owned(), 7, 7, true)],
+                )
+                .unwrap();
+            store
+                .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+                .unwrap();
+        }
+
+        assert_eq!(
+            task_associated_file_path(&store, group.id).unwrap(),
+            paths[0]
+        );
+    }
+
+    #[test]
+    fn collects_audio_files_from_a_completed_cloud_directory_group_for_playback() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = [
+            root.path().join("track.mp3"),
+            root.path().join("bonus.flac"),
+        ];
+        let store = TaskStore::open_in_memory().unwrap();
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(CloudProvider::Quark, "music-id", "music", root.path()),
+                &[
+                    NewCloudDirectoryGroupItem::new("first", &[] as &[&str], "track.mp3", Some(7)),
+                    NewCloudDirectoryGroupItem::new("second", &["nested"], "bonus.flac", Some(7)),
+                ],
+            )
+            .unwrap();
+        for (item, path) in store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .iter()
+            .zip(&paths)
+        {
+            std::fs::write(path, b"fixture").unwrap();
+            let task = store
+                .create(NewTask::direct(format!(
+                    "cloud://quark/{}",
+                    item.remote_file_id
+                )))
+                .unwrap();
+            let task = store
+                .apply_transfer_snapshot(DownloadTask {
+                    status: TaskStatus::Completed,
+                    ..task
+                })
+                .unwrap();
+            store
+                .upsert_files(
+                    task.id,
+                    &[(0, path.to_string_lossy().into_owned(), 7, 7, true)],
+                )
+                .unwrap();
+            store
+                .link_cloud_directory_group_item_task(group.id, item.id, task.id)
+                .unwrap();
+        }
+
+        assert_eq!(task_video_paths(&store, group.id).unwrap(), paths);
+    }
+
+    #[test]
     fn associated_application_rejects_relative_and_unsupported_file_paths() {
         let root = std::env::temp_dir().join(format!("task-open-file-policy-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -6532,6 +6747,12 @@ mod tests {
         let store = TaskStore::open_in_memory().unwrap();
         let task = store
             .create(NewTask::direct("https://example.test/episode.MKV"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                ..task
+            })
             .unwrap();
         store
             .upsert_files(

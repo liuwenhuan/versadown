@@ -1,6 +1,7 @@
 pub mod aliyun;
 pub mod auth_supervisor;
 pub mod baidu;
+pub mod baidu_range_gateway;
 mod browser_login;
 pub mod commands;
 mod common;

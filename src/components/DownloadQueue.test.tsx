@@ -855,7 +855,7 @@ it('offers reauthorization instead of a normal retry for a cloud task blocked by
   expect(onCommand).toHaveBeenCalledWith('reauthorize-cloud-task', 'reauthorize');
 });
 
-it('renders a completed video task compactly and plays its video files', async () => {
+it('opens the directory when a completed task mixes video and other files', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();
   const completedTask = {
@@ -878,8 +878,86 @@ it('renders a completed video task compactly and plays its video files', async (
   expect(screen.getByRole('progressbar', { name: '纪录片合集 下载进度' })).toHaveAttribute('aria-valuenow', '100');
   expect(screen.getByText('已完成')).toBeVisible();
 
-  await user.click(screen.getByRole('button', { name: '播放 纪录片合集' }));
-  expect(onCommand).toHaveBeenCalledWith('completed-video', 'play_videos');
+  await user.click(screen.getByRole('button', { name: '打开 纪录片合集 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith('completed-video', 'open_directory');
+});
+
+it.each([
+  ['video', '播放视频', 'play_videos', ['episode.mp4', 'trailer.mkv']],
+  ['audio', '播放音乐', 'play_videos', ['track.mp3', 'bonus.flac']],
+  ['image', '查看图片', 'open_file', ['cover.jpg', 'back.png']],
+] as const)('offers the %s action only when all selected files share that media type', async (type, label, command, names) => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: `completed-${type}-collection`, name: `${type} collection`, kind: 'torrent' as const,
+    status: 'completed' as const, progress: 100,
+    files: [
+      ...names.map((name, index) => ({ index: index + 1, path: `D:/Downloads/${name}`, length: 100, completed_length: 100, selected: true })),
+      { index: 3, path: 'D:/Downloads/unselected.txt', length: 100, completed_length: 0, selected: false },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: `${label} ${task.name}` }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, command);
+});
+
+it('opens the directory when completed selected files mix video and audio', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: 'completed-mixed-media', name: 'mixed media', kind: 'torrent' as const,
+    status: 'completed' as const, progress: 100,
+    files: [
+      { index: 1, path: 'D:/Downloads/episode.mp4', length: 100, completed_length: 100, selected: true },
+      { index: 2, path: 'D:/Downloads/soundtrack.mp3', length: 100, completed_length: 100, selected: true },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: '打开 mixed media 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, 'open_directory');
+});
+
+it.each([
+  ['image', '查看图片', 'open_file', ['cover.jpg', 'nested/back.png']],
+  ['video', '播放视频', 'play_videos', ['episode.mp4', 'nested/trailer.mkv']],
+  ['audio', '播放音乐', 'play_videos', ['track.mp3', 'nested/bonus.flac']],
+] as const)('classifies every descendant of a completed %s directory', async (type, label, command, names) => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: `completed-${type}-directory`, name: `${type} directory`, kind: 'folder' as const,
+    status: 'completed' as const, progress: 100,
+    children: [
+      { id: `${type}-first`, name: names[0], kind: 'cloud' as const, status: 'completed' as const, progress: 100 },
+      { id: `${type}-nested`, name: 'nested', kind: 'folder' as const, status: 'completed' as const, progress: 100,
+        children: [{ id: `${type}-second`, name: names[1].split('/').at(-1)!, kind: 'cloud' as const, status: 'completed' as const, progress: 100 }] },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: `${label} ${task.name}` }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, command);
+});
+
+it('opens a completed directory when descendant files have different types', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: 'completed-mixed-directory', name: 'mixed directory', kind: 'folder' as const,
+    status: 'completed' as const, progress: 100,
+    children: [
+      { id: 'mixed-cover', name: 'cover.jpg', kind: 'cloud' as const, status: 'completed' as const, progress: 100 },
+      { id: 'mixed-subdir', name: 'subdir', kind: 'folder' as const, status: 'completed' as const, progress: 100,
+        children: [{ id: 'mixed-song', name: 'track.mp3', kind: 'cloud' as const, status: 'completed' as const, progress: 100 }] },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: '打开 mixed directory 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, 'open_directory');
 });
 
 it('opens the download directory for a completed task without video files', async () => {
@@ -901,7 +979,7 @@ it('opens the download directory for a completed task without video files', asyn
   expect(onCommand).toHaveBeenCalledWith('completed-archive', 'open_directory');
 });
 
-it('opens completed text, image, PDF, and Office files with their associated applications', async () => {
+it('opens only completed images with the associated application and other files by directory', async () => {
   const user = userEvent.setup();
   const onCommand = vi.fn();
   render(<DownloadQueue
@@ -928,14 +1006,14 @@ it('opens completed text, image, PDF, and Office files with their associated app
     onCommand={onCommand}
   />);
 
-  await user.click(screen.getByRole('button', { name: '打开文本 notes.txt' }));
-  expect(onCommand).toHaveBeenLastCalledWith('completed-text', 'open_file');
-  await user.click(screen.getByRole('button', { name: '打开图片 cover.png' }));
+  await user.click(screen.getByRole('button', { name: '打开 notes.txt 所在目录' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-text', 'open_directory');
+  await user.click(screen.getByRole('button', { name: '查看图片 cover.png' }));
   expect(onCommand).toHaveBeenLastCalledWith('completed-image', 'open_file');
-  await user.click(screen.getByRole('button', { name: '打开 PDF guide.pdf' }));
-  expect(onCommand).toHaveBeenLastCalledWith('completed-pdf', 'open_file');
-  await user.click(screen.getByRole('button', { name: '打开 Office 文档 report.docx' }));
-  expect(onCommand).toHaveBeenLastCalledWith('completed-office', 'open_file');
+  await user.click(screen.getByRole('button', { name: '打开 guide.pdf 所在目录' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-pdf', 'open_directory');
+  await user.click(screen.getByRole('button', { name: '打开 report.docx 所在目录' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-office', 'open_directory');
 });
 
 it('classifies completed local filenames without treating hash or question-mark characters as URL syntax', () => {
@@ -963,9 +1041,9 @@ it('classifies completed local filenames without treating hash or question-mark 
     onCommand={() => {}}
   />);
 
-  expect(screen.getByRole('button', { name: '打开文本 notes#1.txt' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 notes#1.txt 所在目录' })).toBeVisible();
   expect(screen.getByRole('button', { name: '打开 notes.txt#1.exe 所在目录' })).toBeVisible();
-  expect(screen.getByRole('button', { name: '打开文本 notes?1.txt' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 notes?1.txt 所在目录' })).toBeVisible();
   expect(screen.getByRole('button', { name: '打开 notes.txt?1.exe 所在目录' })).toBeVisible();
 });
 

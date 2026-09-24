@@ -115,10 +115,16 @@ describe('reconcileTaskSnapshot', () => {
     expect(reconcileTaskSnapshot([completed], [], 'active')).toEqual([completed]);
   });
 
-  it('keeps failed tasks in the active scope while the terminal snapshot refreshes', () => {
+  it('keeps failed tasks when an active snapshot no longer contains them', () => {
     const failed = task({ id: 'failed-task', status: 'failed', progress: 12 });
 
-    expect(reconcileTaskSnapshot([failed], [], 'terminal')).toEqual([failed]);
+    expect(reconcileTaskSnapshot([failed], [], 'active')).toEqual([failed]);
+  });
+
+  it('removes failed tasks absent from the durable terminal snapshot', () => {
+    const failed = task({ id: 'failed-task', status: 'failed', progress: 12 });
+
+    expect(reconcileTaskSnapshot([failed], [], 'terminal')).toEqual([]);
   });
 
   it('keeps a task updated after the active snapshot request began', () => {

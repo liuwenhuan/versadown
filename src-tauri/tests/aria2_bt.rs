@@ -28,6 +28,7 @@ fn torrent_task(source: impl Into<String>) -> NewTask {
 #[tokio::test]
 async fn byte_complete_p2p_tasks_are_completed_while_aria2_continues_sharing() {
     let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => json!([[fixture::status("sharing-gid", "active", 100)]]),
         "aria2.getPeers" => json!([]),
         "aria2.getGlobalStat" => fixture::global(),
@@ -61,6 +62,7 @@ async fn byte_complete_p2p_tasks_are_completed_while_aria2_continues_sharing() {
 #[tokio::test]
 async fn terminal_p2p_completion_stops_the_sharing_marker() {
     let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => json!([[fixture::status("sharing-gid", "complete", 100)]]),
         "aria2.getPeers" => json!([]),
         "aria2.getGlobalStat" => fixture::global(),
@@ -87,6 +89,7 @@ async fn terminal_p2p_completion_stops_the_sharing_marker() {
 #[tokio::test]
 async fn byte_complete_paused_p2p_task_stays_completed_without_a_sharing_marker() {
     let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => json!([[fixture::status("paused-sharing-gid", "paused", 100)]]),
         "aria2.getGlobalStat" => fixture::global(),
         other => panic!("unexpected method {other}"),
@@ -160,6 +163,7 @@ async fn torrent_metadata_name_replaces_the_local_torrent_filename() {
 #[tokio::test]
 async fn reconcile_replaces_a_legacy_torrent_filename_with_its_content_name() {
     let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => {
             let mut status = fixture::status("legacy-torrent-gid", "paused", 0);
             status["bittorrent"] = json!({"info":{"name":"旧任务内容目录"}});
@@ -188,6 +192,7 @@ async fn reconcile_replaces_a_legacy_torrent_filename_with_its_content_name() {
 #[tokio::test]
 async fn reconcile_tracks_unique_peers_for_an_active_torrent() {
     let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "system.multicall" => json!([[fixture::status("torrent-gid", "active", 0)]]),
         "aria2.getPeers" => json!([
             {"ip":"203.0.113.10","port":"51413"},
@@ -225,6 +230,7 @@ async fn reconcile_retains_observed_peers_across_paused_and_queued_same_gid() {
     let wire_stage = stage.clone();
     let (client, server) =
         fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
             "system.multicall" => {
                 let status = match wire_stage.load(std::sync::atomic::Ordering::SeqCst) {
                     0 => "active",
@@ -277,6 +283,7 @@ async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
     let retry_state = retried.clone();
     let (client, server) =
         fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
             "system.multicall" => json!([[fixture::status(
                 if retry_state.load(std::sync::atomic::Ordering::SeqCst) {
                     "new-gid"
@@ -427,6 +434,7 @@ async fn confirmed_magnet_overwrite_restarts_selection_and_clears_observed_peers
     let resubmitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let wire_resubmitted = resubmitted.clone();
     let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
         "aria2.addTorrent" => {
             assert_eq!(request["params"][3]["pause"], "true");
             assert_eq!(request["params"][3]["check-integrity"], "true");

@@ -157,7 +157,7 @@ fn version_two_database_adds_persistent_metadata_gid_without_losing_tasks() {
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        13
+        15
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();
@@ -241,7 +241,7 @@ fn version_three_database_backfills_creation_time_from_the_existing_timestamp() 
         connection
             .query_row::<u32, _, _>("PRAGMA user_version", [], |row| row.get(0))
             .unwrap(),
-        13
+        15
     );
     drop(connection);
     std::fs::remove_file(path).unwrap();

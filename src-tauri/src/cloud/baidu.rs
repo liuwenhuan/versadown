@@ -293,6 +293,93 @@ mod tests {
             bytes.len()
         );
     }
+    #[test]
+    #[ignore = "requires explicit share URL, code, saved Baidu session; transfers one file, probes 1 KiB, then trashes the exact created copy"]
+    fn live_baidu_share_transfer_download_probe() {
+        assert_eq!(
+            std::env::var("ALLDOWNLOADER_LIVE_BAIDU_SHARE_TRANSFER").as_deref(),
+            Ok("1")
+        );
+        let input = std::env::var("BAIDU_SHARE_PROBE_URL").expect("share URL required");
+        let code = std::env::var("BAIDU_SHARE_PROBE_CODE").expect("access code required");
+        let candidate = crate::parser::extract_cloud_share_candidate(&input, Some(&code))
+            .expect("valid share URL required")
+            .expect("Baidu share URL required");
+        assert_eq!(candidate.provider, CloudProvider::Baidu);
+        let credentials = crate::cloud::DpapiCredentialStore::new(
+            std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
+                .join("com.alldownloader.desktop/cloud-sessions"),
+        )
+        .unwrap();
+        let session: BaiduSession =
+            serde_json::from_slice(&credentials.load("baidu").unwrap().unwrap()).unwrap();
+        let http = crate::cloud::ReqwestTransport::new().unwrap();
+        let adapter = BaiduShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate).unwrap() else {
+            panic!("share did not yield a file plan")
+        };
+        let entry = plan.entries.first().expect("share has no files");
+        let source = plan.source_for(&entry.entry_id);
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(
+            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+        );
+        store.upsert(&plan).unwrap();
+        let selection =
+            selected_share_download(&store, &source, &[entry.entry_fingerprint.clone()]).unwrap();
+        let result = (|| -> Result<(), QuarkError> {
+            preflight_selected_share_download(&store, &adapter, &selection)?;
+            let download = resolve_current_share_download(&store, &adapter, &source)?;
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|_| QuarkError::Transport("下载探针初始化失败".into()))?;
+            let mut request = client.get(&download.url).header("Range", "bytes=0-1023");
+            for (key, value) in download.headers {
+                request = request.header(key, value);
+            }
+            let response = request
+                .send()
+                .map_err(|_| QuarkError::Transport("下载探针请求失败".into()))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(QuarkError::Provider(format!("下载探针 HTTP {status}")));
+            }
+            let mut bytes = Vec::new();
+            response
+                .take(1024)
+                .read_to_end(&mut bytes)
+                .map_err(|_| QuarkError::Transport("下载探针读取失败".into()))?;
+            if bytes.is_empty() {
+                return Err(QuarkError::InvalidResponse);
+            }
+            eprintln!(
+                "Baidu share transfer probe: HTTP {status}, {} bytes",
+                bytes.len()
+            );
+            Ok(())
+        })();
+        let created = store
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .transfers
+            .iter()
+            .map(|record| record.created_file_id.clone())
+            .collect::<Vec<_>>();
+        if !created.is_empty() {
+            let client = BaiduClient::new(session, &http);
+            client
+                .trash_transferred_files(&created)
+                .unwrap_or_else(|error| {
+                    panic!("test copy cleanup failed for fs_id {created:?}: {error}")
+                });
+        }
+        result.unwrap();
+    }
     fn listing() -> Value {
         json!({"errno":0,"data":{"shareid":22,"uk":33,"seckey":"secret-key","has_more":false,"list":[{"fs_id":11,"server_filename":"movie.mp4","path":"/movie.mp4","isdir":0,"size":123}]}})
     }
@@ -338,11 +425,7 @@ mod tests {
     #[test]
     fn baidu_transfer_fallback_requires_current_login() {
         let credentials = MemoryCredentialStore::default();
-        let http = Http::new(vec![
-            listing(),
-            json!({"errno":0,"data":{"sign":"secret-sign","timestamp":1234}}),
-            json!({"errno":0,"list":[]}),
-        ]);
+        let http = Http::new(vec![listing()]);
         let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
         assert!(matches!(
             adapter.inspect(&candidate()),
@@ -368,9 +451,9 @@ mod tests {
             ShareResolution::TransferRequired(_)
         ));
         let requests = http.requests.lock().unwrap();
-        assert!(requests[2].url.contains("api/sharedownload"));
-        assert_eq!(requests[2].headers["User-Agent"], BAIDU_PAN_USER_AGENT);
-        assert!(requests[2].headers["Cookie"].contains("BDUSS=current"));
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers["User-Agent"], BAIDU_PAN_USER_AGENT);
+        assert!(requests[0].headers["Cookie"].contains("BDUSS=current"));
     }
     fn credentials() -> MemoryCredentialStore {
         let credentials = MemoryCredentialStore::default();
@@ -421,8 +504,6 @@ mod tests {
                     share_response(r#"{"errno":0,"randsk":"verified%2Bkey%2F%3D"}"#, &cookie),
                     share_response(r#"{"errno":0,"shareid":22,"uk":33,"list":[{"fs_id":12,"server_filename":"folder","path":"/folder","isdir":1}]}"#, &[]),
                     share_response(r#"{"errno":0,"list":[{"fs_id":11,"server_filename":"file.txt","path":"/folder/file.txt","isdir":0,"size":123}]}"#, &[]),
-                    share_response(r#"{"errno":0,"data":{"sign":"sign","timestamp":1234}}"#, &[]),
-                    share_response(r#"{"errno":0,"list":[{"fs_id":11,"dlink":"https://d.pcs.baidu.com/file"}]}"#, &[]),
                 ].into()),
                 requests: Mutex::new(vec![]),
             };
@@ -452,7 +533,7 @@ mod tests {
             };
             assert!(matches!(
                 adapter.resolve(&entry).unwrap(),
-                ShareResolution::Direct(_)
+                ShareResolution::TransferRequired(_)
             ));
             assert_eq!(
                 credentials.load("baidu").unwrap(),
@@ -460,7 +541,7 @@ mod tests {
                 "share cookies must not replace account credentials"
             );
             let requests = http.requests.lock().unwrap();
-            assert_eq!(requests.len(), 6);
+            assert_eq!(requests.len(), 4);
             assert_eq!(requests[0].url, input.url);
             assert_eq!(requests[1].method, "POST");
             let verify_url = url::Url::parse(&requests[1].url).unwrap();
@@ -482,11 +563,6 @@ mod tests {
                     "password belongs only in verification POST body"
                 );
             }
-            let body: BTreeMap<_, _> =
-                url::form_urlencoded::parse(requests[5].body.as_ref().unwrap().as_bytes())
-                    .into_owned()
-                    .collect();
-            assert_eq!(body["extra"], r#"{"sekey":"verified+key/="}"#);
         }
     }
     #[test]
@@ -569,7 +645,7 @@ mod tests {
         let http = crate::cloud::ReqwestTransport::new().unwrap();
         let mut client = BaiduClient::new(BaiduSession::cookie(""), &http);
         let (bdclnd, _) = client.verify_share_access(short, &code).unwrap();
-        let response = client.share_http("GET", &format!("/share/list?channel=chunlei&clienttype=0&app_id=250528&web=1&shorturl={}&root=1&dir=%2F&num=1&page=1", encoded(short)), None, &bdclnd).unwrap();
+        let response = client.share_http("GET", &format!("/share/list?channel=chunlei&clienttype=0&app_id=250528&web=1&shorturl={}&root=1&dir=%2F&num=1&page=1", encoded(short)), None, &bdclnd, None).unwrap();
         let value = share_json(&response).unwrap();
         assert!(
             value["list"].is_array(),
@@ -630,51 +706,110 @@ mod tests {
         assert_eq!(plan.provider_context["seckey"], "");
     }
     #[test]
-    fn baidu_share_direct_keeps_native_identity_and_secret_out_of_credentials() {
+    fn baidu_share_resolve_requires_personal_transfer_without_requesting_web_dlink() {
         let credentials = credentials();
-        let http = Http::new(vec![
-            listing(),
-            json!({"errno":0,"data":{"sign":"secret-sign","timestamp":1234}}),
-            json!({"errno":0,"list":[{"fs_id":11,"dlink":"https://d.pcs.baidu.com/file?sign=secret"}]}),
-        ]);
+        let http = Http::new(vec![listing()]);
         let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
         let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
-            panic!()
+            panic!("share plan required")
         };
+        let source = plan.source_for(&plan.entries[0].entry_id);
         let entry = CloudShareResolvedEntry {
             provider: plan.provider,
             entry: plan.entries[0].clone(),
             plan,
         };
-        let ShareResolution::Direct(download) = adapter.resolve(&entry).unwrap() else {
-            panic!()
+
+        assert!(matches!(
+            adapter.resolve(&entry).unwrap(),
+            ShareResolution::TransferRequired(request) if request.source == source
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+    }
+    #[test]
+    fn baidu_share_inspection_accepts_decimal_string_file_size() {
+        let credentials = credentials();
+        let mut response = listing();
+        response["data"]["list"][0]["size"] = json!("123");
+        let http = Http::new(vec![response]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!("share plan required")
         };
-        assert_eq!(download.url, "https://d.pcs.baidu.com/file?sign=secret");
-        assert!(download
-            .headers
-            .iter()
-            .any(|(k, v)| k == "Cookie" && v.contains("BDUSS=current")));
-        assert_eq!(http.requests.lock().unwrap().len(), 3);
-        let saved = String::from_utf8(credentials.load("baidu").unwrap().unwrap()).unwrap();
-        assert!(!saved.contains("secret"));
+        assert_eq!(plan.entries[0].size, Some(123));
+    }
+    #[test]
+    fn baidu_share_preflight_rejects_logged_out_account_without_creating_transfer() {
+        let credentials = credentials();
+        let http = Http::new(vec![listing()]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!("share plan required")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(
+            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+        );
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("11");
+        let selection = selected_share_download(
+            &store,
+            &source,
+            &[plan.entries[0].entry_fingerprint.clone()],
+        )
+        .unwrap();
+        credentials.remove("baidu").unwrap();
+
+        assert!(matches!(
+            preflight_selected_share_download(&store, adapter.as_ref(), &selection),
+            Err(QuarkError::NotAuthorized)
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+        assert!(store
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .transfers
+            .is_empty());
+    }
+    #[test]
+    fn baidu_share_preflight_checks_capacity_before_creating_transfer() {
+        let credentials = credentials();
+        let http = Http::new(vec![
+            listing(),
+            json!({"user":{"uk":"account-7"}}),
+            json!({"errno":0,"total":100,"used":10}),
+        ]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!("share plan required")
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new(
+            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+        );
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("11");
+        let selection = selected_share_download(
+            &store,
+            &source,
+            &[plan.entries[0].entry_fingerprint.clone()],
+        )
+        .unwrap();
+
+        let error =
+            preflight_selected_share_download(&store, adapter.as_ref(), &selection).unwrap_err();
+        assert!(error.to_string().contains("百度网盘转存空间不足"));
         let requests = http.requests.lock().unwrap();
-        let tplconfig = url::Url::parse(&requests[1].url).unwrap();
-        let tplconfig_query: BTreeMap<_, _> = tplconfig.query_pairs().into_owned().collect();
-        assert_eq!(
-            tplconfig_query.get("share_id").map(String::as_str),
-            Some("22")
-        );
-        assert_eq!(tplconfig_query.get("uk").map(String::as_str), Some("33"));
-        assert_eq!(
-            tplconfig_query.get("surl").map(String::as_str),
-            Some("1share123")
-        );
-        let form: BTreeMap<_, _> =
-            url::form_urlencoded::parse(requests[2].body.as_ref().unwrap().as_bytes())
-                .into_owned()
-                .collect();
-        assert_eq!(form["fid_list"], "[11]");
-        assert_eq!(form["extra"], "{\"sekey\":\"secret-key\"}");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].url.contains("/api/quota?"));
+        assert!(store
+            .resolve_entry(&source)
+            .unwrap()
+            .plan
+            .transfers
+            .is_empty());
     }
     #[test]
     fn baidu_share_access_code_and_expiry_never_transfer() {
@@ -744,8 +879,6 @@ mod tests {
         let credentials = credentials();
         let http = Http::new(vec![
             listing(),
-            json!({"errno":0,"data":{"sign":"sign","timestamp":123}}),
-            json!({"errno":0,"list":[]}),
             json!({"user":{"uk":"account-7"}}),
             json!({"errno":0,"result":{"bdstoken":"write-token"}}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/movie.mp4","to":"/movie (1).mp4"}]}}),
@@ -770,9 +903,13 @@ mod tests {
             "99"
         );
         let requests = http.requests.lock().unwrap();
-        assert!(requests[5].url.contains("ondup=newcopy"));
-        assert!(requests[8].url.contains("method=locatedownload"));
-        assert!(requests[8].url.contains("path=%2Fmovie+%281%29.mp4"));
+        assert!(requests[3].url.contains("ondup=newcopy"));
+        assert_eq!(
+            requests[3].headers["Referer"],
+            "https://pan.baidu.com/s/1share123"
+        );
+        assert!(requests[6].url.contains("method=locatedownload"));
+        assert!(requests[6].url.contains("path=%2Fmovie+%281%29.mp4"));
     }
     #[test]
     fn baidu_recorded_transfer_refreshes_personal_file_without_share_transfer() {
@@ -845,8 +982,6 @@ mod tests {
         listing["data"]["list"][0]["path"] = json!("/verify.mp4");
         let http = Http::new(vec![
             listing,
-            json!({"errno":0,"data":{"sign":"sign","timestamp":123}}),
-            json!({"errno":0,"list":[]}),
             json!({"user":{"uk":"account-7"}}),
             json!({"errno":0,"result":{"bdstoken":"write-token"}}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/verify.mp4","to":"/verify.mp4"}]}}),
@@ -871,10 +1006,10 @@ mod tests {
         assert_eq!(transfers.len(), 1);
         assert_eq!(transfers[0].created_file_id, "99");
         assert_eq!(transfers[0].cleanup_state, CloudShareCleanupState::Pending);
-        assert_eq!(http.requests.lock().unwrap().len(), 9);
+        assert_eq!(http.requests.lock().unwrap().len(), 7);
     }
     #[test]
-    fn baidu_share_errors_never_become_transfer_requests() {
+    fn baidu_share_transfer_errors_do_not_record_personal_files() {
         for error in [
             json!({"errno":-20}),
             json!({"errno":-6}),
@@ -884,7 +1019,8 @@ mod tests {
             let credentials = credentials();
             let http = Http::new(vec![
                 listing(),
-                json!({"errno":0,"data":{"sign":"sign","timestamp":123}}),
+                json!({"user":{"uk":"account-7"}}),
+                json!({"errno":0,"result":{"bdstoken":"write-token"}}),
                 error,
             ]);
             let adapter =
@@ -892,13 +1028,20 @@ mod tests {
             let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
                 panic!()
             };
-            let entry = CloudShareResolvedEntry {
-                provider: plan.provider,
-                entry: plan.entries[0].clone(),
-                plan,
-            };
-            assert!(adapter.resolve(&entry).is_err());
-            assert_eq!(http.requests.lock().unwrap().len(), 3);
+            let dir = tempfile::tempdir().unwrap();
+            let store = CloudSharePlanStore::new(
+                crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+            );
+            store.upsert(&plan).unwrap();
+            let source = plan.source_for("11");
+            assert!(resolve_current_share_download(&store, adapter.as_ref(), &source).is_err());
+            assert!(store
+                .resolve_entry(&source)
+                .unwrap()
+                .plan
+                .transfers
+                .is_empty());
+            assert_eq!(http.requests.lock().unwrap().len(), 4);
         }
     }
 }
@@ -2694,8 +2837,12 @@ impl<T: CloudHttpTransport + ?Sized> BaiduClient<'_, T> {
         path: &str,
         body: Option<String>,
         bdclnd: &str,
+        referer: Option<&str>,
     ) -> Result<CloudHttpResponse, QuarkError> {
         let mut headers = self.pan_headers();
+        if let Some(referer) = referer {
+            headers.insert("Referer".into(), referer.into());
+        }
         if !bdclnd.is_empty() {
             let mut cookies = BaiduLoginCookies::default();
             cookies.absorb_cookie_header(&self.session.cookie);
@@ -2799,6 +2946,7 @@ impl ShareInspect for BaiduShareAdapter<'_> {
                     ),
                     None,
                     context["bdclnd"].as_str().unwrap_or(""),
+                    None,
                 )?;
                 let raw: Value = serde_json::from_str(&response.body)
                     .map_err(|_| QuarkError::InvalidResponse)?;
@@ -2856,7 +3004,9 @@ impl ShareInspect for BaiduShareAdapter<'_> {
                             fid,
                             name,
                             directory.clone(),
-                            file["size"].as_u64(),
+                            file["size"]
+                                .as_u64()
+                                .or_else(|| file["size"].as_str()?.parse::<u64>().ok()),
                         ));
                     }
                 }
@@ -2912,6 +3062,7 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
         let client = self.client()?;
         let context = &entry.plan.provider_context;
         let token = client.web_token()?;
+        let referer = format!("{PAN}/s/1{}", encoded(&required(context, "shorturl")?));
         let response = client.share_http(
             "POST",
             &format!(
@@ -2931,6 +3082,7 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
                 ("path", "/".into()),
             ])),
             context["bdclnd"].as_str().unwrap_or(""),
+            Some(&referer),
         )?;
         let value = share_json(&response)?;
         let files = value
@@ -3009,63 +3161,14 @@ pub fn resolve_baidu_share(
     entry: &CloudShareResolvedEntry,
 ) -> Result<ShareResolution, QuarkError> {
     let adapter = BaiduShareAdapter { credentials, http };
-    let client = adapter.client()?;
     if entry.provider != CloudProvider::Baidu {
         return Err(QuarkError::InvalidResponse);
     }
-    let context = &entry.plan.provider_context;
-    let bdclnd = context["bdclnd"].as_str().unwrap_or("");
-    let tplconfig_query = form(&[
-        ("surl", format!("1{}", required(context, "shorturl")?)),
-        ("fields", "sign,timestamp".into()),
-        ("channel", "chunlei".into()),
-        ("web", "1".into()),
-        ("app_id", "250528".into()),
-        ("clienttype", "0".into()),
-        ("share_id", numeric_field(context, "shareid")?),
-        ("uk", numeric_field(context, "uk")?),
-    ]);
-    let response = client.share_http(
-        "GET",
-        &format!("/share/tplconfig?{tplconfig_query}"),
-        None,
-        bdclnd,
-    )?;
-    let value = share_json(&response)?;
-    let sign = required(&value["data"], "sign")?;
-    let timestamp = numeric_field(&value["data"], "timestamp")?;
-    let response = client.share_http("POST", &format!("/api/sharedownload?app_id=250528&channel=chunlei&clienttype=12&web=1&sign={}&timestamp={timestamp}", encoded(&sign)), Some(form(&[("encrypt","0".into()),("extra",json!({"sekey":context["seckey"].as_str().unwrap_or("")}).to_string()),("fid_list",format!("[{}]",numeric_field(&json!({"id":entry.entry.entry_id}),"id")?)),("primaryid",numeric_field(context,"shareid")?),("uk",numeric_field(context,"uk")?),("product","share".into()),("type","nolimit".into())])), bdclnd)?;
-    let value = share_json(&response)?;
-    let files = value["list"]
-        .as_array()
-        .ok_or(QuarkError::InvalidResponse)?;
-    // Only an explicit successful download response without a link can request
-    // transfer. Empty listings never reach this selected-file operation.
-    if files.is_empty() {
-        return Ok(ShareResolution::TransferRequired(TransferRequest {
-            source: entry.plan.source_for(&entry.entry.entry_id),
-        }));
-    }
-    let url = required(&files[0], "dlink")?;
-    super::share::validate_direct_url(&url)?;
-    let cookie = if bdclnd.is_empty() {
-        client.session.cookie.clone()
-    } else {
-        let mut cookies = BaiduLoginCookies::default();
-        cookies.absorb_cookie_header(&client.session.cookie);
-        cookies.insert("BDCLND", bdclnd);
-        cookies.header()
-    };
-    Ok(ShareResolution::Direct(
-        super::commands::ResolvedCloudDownload {
-            url,
-            name: entry.entry.name.clone(),
-            headers: super::share::download_headers(
-                &cookie,
-                &response.set_cookies,
-                BAIDU_PAN_USER_AGENT,
-                None,
-            ),
-        },
-    ))
+    // A share dlink can be returned even when the web download cannot serve
+    // the selected file. Use the account-bound transfer + PCS path for every
+    // Baidu share, and require a current login before a task is submitted.
+    adapter.client()?;
+    Ok(ShareResolution::TransferRequired(TransferRequest {
+        source: entry.plan.source_for(&entry.entry.entry_id),
+    }))
 }

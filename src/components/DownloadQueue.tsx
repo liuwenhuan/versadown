@@ -119,7 +119,9 @@ function buildBtFileTree(task: QueueTask): readonly QueueTask[] {
   return build(entries, []);
 }
 
-const playableMediaExtensions = new Set(['3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'ts', 'webm', 'wmv', 'aac', 'aiff', 'alac', 'ape', 'flac', 'm4a', 'mka', 'mp3', 'oga', 'ogg', 'opus', 'wav', 'wma']);
+const videoExtensions = new Set(['3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'ts', 'webm', 'wmv']);
+const audioExtensions = new Set(['aac', 'aiff', 'alac', 'ape', 'flac', 'm4a', 'mka', 'mp3', 'oga', 'ogg', 'opus', 'wav', 'wma']);
+const playableMediaExtensions = new Set([...videoExtensions, ...audioExtensions]);
 type AssociatedFileType = 'text' | 'image' | 'pdf' | 'office';
 
 const associatedFileExtensions: Record<AssociatedFileType, ReadonlySet<string>> = {
@@ -154,10 +156,47 @@ function taskAssociatedFileType(task: QueueTask): AssociatedFileType | undefined
   return files.length === 1 ? associatedFileType(files[0].path) : undefined;
 }
 
-export function taskHasPlayableMedia(task: QueueTask): boolean {
-  const files = task.files?.filter((file) => file.selected !== false) ?? [];
-  if (files.length) return files.some((file) => hasPlayableMediaExtension(file.path));
-  return task.kind !== 'folder' && hasPlayableMediaExtension(task.name);
+type CompletedQuickAction = 'image' | 'video' | 'audio' | 'directory';
+
+const completedQuickActionLabels: Record<'zh-CN' | 'en', Record<CompletedQuickAction, { aria: string; title: string }>> = {
+  'zh-CN': {
+    image: { aria: '查看图片 {name}', title: '查看图片' },
+    video: { aria: '播放视频 {name}', title: '播放视频' },
+    audio: { aria: '播放音乐 {name}', title: '播放音乐' },
+    directory: { aria: '打开 {name} 所在目录', title: '打开下载目录' },
+  },
+  en: {
+    image: { aria: 'View images in {name}', title: 'View images' },
+    video: { aria: 'Play videos in {name}', title: 'Play videos' },
+    audio: { aria: 'Play music in {name}', title: 'Play music' },
+    directory: { aria: 'Open folder containing {name}', title: 'Open download folder' },
+  },
+};
+
+function completedQuickActionText(action: CompletedQuickAction, name: string) {
+  const locale = document.documentElement.lang.toLowerCase().startsWith('en') ? 'en' : 'zh-CN';
+  const labels = completedQuickActionLabels[locale][action];
+  return { aria: labels.aria.replace('{name}', name), title: labels.title };
+}
+
+function selectedTaskPaths(task: QueueTask): string[] {
+  if (task.selected === false) return [];
+  if (task.files?.length) return task.files.filter((file) => file.selected !== false).map((file) => file.path);
+  if (task.children?.length) return task.children.flatMap(selectedTaskPaths);
+  return task.kind === 'folder' ? [] : [task.name];
+}
+
+function completedQuickAction(task: QueueTask): CompletedQuickAction {
+  const paths = selectedTaskPaths(task);
+  if (!paths.length) return 'directory';
+  const types = paths.map((path) => {
+    const extension = path.trim().replace(/\\/g, '/').split('/').at(-1)?.split('.').pop()?.toLowerCase();
+    if (extension && videoExtensions.has(extension)) return 'video';
+    if (extension && audioExtensions.has(extension)) return 'audio';
+    if (extension && associatedFileExtensions.image.has(extension)) return 'image';
+    return 'directory';
+  });
+  return types[0] !== 'directory' && types.every((type) => type === types[0]) ? types[0] : 'directory';
 }
 
 export function completedTaskSize(task: QueueTask): string | undefined {
@@ -267,13 +306,14 @@ function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 
-function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'play' | 'folder' | AssociatedFileType | 'more' }) {
+function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'play' | 'audio' | 'folder' | AssociatedFileType | 'more' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause'
     ? <><path d="M8 5v14" /><path d="M16 5v14" /></>
     : action === 'resume' ? <path d="m9 6 9 6-9 6z" />
       : action === 'cancel' ? <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>
         : action === 'retry' || action === 'reauthorize' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
           : action === 'play' ? <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>
+            : action === 'audio' ? <><path d="M10 17V5l9-2v12" /><ellipse cx="7" cy="18" rx="3" ry="2" /><ellipse cx="16" cy="16" rx="3" ry="2" /></>
             : action === 'folder' ? <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>
               : action === 'text' ? <><path d="M7 3.5h7l3 3V20.5H7z" /><path d="M14 3.5v3h3M9.5 11h5M9.5 14h5M9.5 17h3" /></>
                 : action === 'image' ? <><rect x="3.5" y="5" width="17" height="14" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m5.5 17 4.5-4 3.5 3 2.5-2 2.5 3" /></>
@@ -746,8 +786,8 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
         const primaryLabel = primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : primaryAction === 'reauthorize' ? '重新授权' : '重新下载';
         const completedSize = isCompleted ? completedTaskSize(task) : undefined;
         const completionTime = isCompleted ? completedAt(task.completed_at) : undefined;
-        const completedHasPlayableMedia = isCompleted && taskHasPlayableMedia(task);
-        const completedFileType = isCompleted ? taskAssociatedFileType(task) : undefined;
+        const completedAction = isCompleted ? completedQuickAction(task) : null;
+        const completedActionText = completedAction ? completedQuickActionText(completedAction, taskName) : null;
         const isDragged = dragState?.movingIds.includes(task.id) ?? false;
         const dropPosition = dragState?.targetId === task.id ? (dragState.placeAfter ? ' drop-after' : ' drop-before') : '';
         return <div data-task-id={task.id} className={`task-group${isCompleted ? ' completed-task-group' : ''}${isExpanded ? ' is-expanded' : ''}${isDragged ? ' is-dragging' : ''}${dropPosition}`} key={task.id}>
@@ -760,7 +800,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
             <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={`${taskName} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={isCompleted ? 100 : task.progress}><i style={{ width: `${isCompleted ? 100 : task.progress}%` }} /></div><div className="transfer-metrics">{isCompleted ? <>{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>P2P 分享中</span>}<span className="transfer-live"><span className="transfer-paused transfer-completed">已完成</span></span></> : <>{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error && !waitingForCloudAuthorization ? ' task-error' : ''}`} title={subtitle}>{subtitle}{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">{recoveringCloudAuthorization ? '登录恢复中' : '已暂停'}</span> : <>{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></>}</div></div>
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`重试网盘清理 ${taskName}`} title="重试网盘清理" onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
-              {isCompleted && <button className="completed-quick-action" aria-label={completedHasPlayableMedia ? `播放 ${taskName}` : completedFileType ? `${associatedFileLabels[completedFileType]} ${taskName}` : `打开 ${taskName} 所在目录`} title={completedHasPlayableMedia ? '播放视频或音频' : completedFileType ? '使用系统默认应用打开' : '打开下载目录'} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedHasPlayableMedia ? 'play_videos' : completedFileType ? 'open_file' : 'open_directory'); }}><ActionIcon action={completedHasPlayableMedia ? 'play' : completedFileType ?? 'folder'} /></button>}
+              {completedAction && completedActionText && <button className="completed-quick-action" aria-label={completedActionText.aria} title={completedActionText.title} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedAction === 'image' ? 'open_file' : completedAction === 'directory' ? 'open_directory' : 'play_videos'); }}><ActionIcon action={completedAction === 'video' ? 'play' : completedAction === 'directory' ? 'folder' : completedAction} /></button>}
               {task.status === 'queued'
                 ? <button className="queued-action" aria-label={`${taskName} 排队中`} aria-haspopup="menu" title="更多操作" onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}>排队中</button>
                 : primaryAction && <button className={primaryAction === 'reauthorize' ? 'reauthorize-action' : undefined} aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} />{primaryAction === 'reauthorize' && <span>重新授权</span>}</button>}

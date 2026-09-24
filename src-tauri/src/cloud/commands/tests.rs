@@ -1089,6 +1089,85 @@ fn resolved_quark_download_keeps_fresh_cookie_when_building_aria2_options() {
     );
 }
 
+#[tokio::test]
+async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options() {
+    let gateway = crate::cloud::baidu_range_gateway::BaiduRangeGateway::start()
+        .await
+        .unwrap();
+    let task_id = uuid::Uuid::new_v4();
+    let (url, options, mut registration) = super::register_baidu_gateway_download(
+        &gateway,
+        task_id,
+        "https://d.pcs.baidu.com/file?sign=secret".into(),
+        crate::UriSubmissionOptions {
+            headers: vec![("Cookie".into(), "BDUSS=secret".into())],
+            proxy: Some("http://proxy.example.test:8080".into()),
+            ..Default::default()
+        },
+        false,
+    )
+    .unwrap();
+    assert_eq!(url, registration.url());
+    assert!(url.starts_with("http://127.0.0.1:"));
+    assert!(!url.contains("secret"));
+    assert!(options.headers.is_empty());
+    assert!(options.proxy.is_none());
+    assert!(options.direct_loopback);
+    let aria2 = options.into_aria2_options().unwrap();
+    assert_eq!(aria2.get("all-proxy").map(String::as_str), Some(""));
+    assert!(!aria2.contains_key("header"));
+    registration.commit();
+    let (refreshed_url, _, mut refreshed) = super::register_baidu_gateway_download(
+        &gateway,
+        task_id,
+        "https://d.pcs.baidu.com/file?sign=renewed".into(),
+        crate::UriSubmissionOptions::default(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(refreshed_url, url);
+    refreshed.commit();
+    gateway.remove_task(task_id);
+}
+
+#[tokio::test]
+async fn baidu_share_submission_keeps_configured_connections_through_gateway() {
+    let configured = super::apply_cloud_download_policy(
+        CloudProvider::Baidu,
+        3,
+        crate::UriSubmissionOptions::default(),
+    );
+    let resolved = super::ResolvedCloudDownload {
+        url: "https://d.pcs.baidu.com/file?sign=secret".into(),
+        name: "share.bin".into(),
+        headers: vec![("Cookie".into(), "BDUSS=secret".into())],
+    };
+    let (signed_url, options) =
+        crate::cloud::share::share_submission_options(resolved, configured).unwrap();
+    let gateway = crate::cloud::baidu_range_gateway::BaiduRangeGateway::start()
+        .await
+        .unwrap();
+    let task_id = uuid::Uuid::new_v4();
+    let (_, options, mut registration) = super::register_baidu_gateway_download(
+        &gateway,
+        task_id,
+        signed_url,
+        options,
+        false,
+    )
+    .unwrap();
+
+    let aria2 = options.into_aria2_options().unwrap();
+    assert_eq!(aria2.get("split").map(String::as_str), Some("3"));
+    assert_eq!(
+        aria2.get("max-connection-per-server").map(String::as_str),
+        Some("3")
+    );
+    assert!(!aria2.contains_key("header"));
+    registration.commit();
+    gateway.remove_task(task_id);
+}
+
 #[test]
 fn aliyun_download_passes_its_official_web_referer_to_aria2() {
     // The live signed-object endpoint rejects a request without this

@@ -3,9 +3,9 @@ import type { DownloadGlobalStat, QueueTask, QueueTaskInput } from './types';
 
 export type TaskSnapshotScope = 'active' | 'terminal';
 
-// Failed tasks remain in the active download list so users can retry or
-// manage them without switching to a separate terminal scope.
-const terminalTaskStatuses = new Set<QueueTask['status']>(['completed', 'cancelled', 'recycled']);
+// Match the backend's durable active/terminal snapshot scopes. Failed tasks
+// remain visible in the Failed tab, not in the active snapshot.
+const terminalTaskStatuses = new Set<QueueTask['status']>(['completed', 'failed', 'cancelled', 'recycled']);
 
 /** One logical timeline for live updates and list/metadata requests. A snapshot
  * keeps its request version when it returns; receiving it is not a new event. */

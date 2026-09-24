@@ -127,6 +127,9 @@ impl DownloadService {
 
         for status in statuses {
             let Some(task) = store.find_by_gid(&status.gid)? else {
+                if self.discard_deleted_engine_job(&status).await? {
+                    continue;
+                }
                 // An application restart loses the in-memory knowledge of
                 // work that another RPC client submitted while this app was
                 // closed. Active and waiting jobs become ordinary local tasks;
@@ -169,10 +172,23 @@ impl DownloadService {
             }
 
             report.failed += 1;
-            // A malformed or temporarily stale status is not authorization to
-            // delete either the durable task or its local payload. Retain the
-            // observed GID so a later recovery can reconcile the same entry.
-            let mut paused = task;
+            let mut paused = store.find(task.id)?;
+            if paused.status == TaskStatus::Completed {
+                // A bad engine snapshot cannot undo a completed download.
+                // Disown its stale GID without touching the historical payload.
+                let retired = store.retire_completed_engine_task(
+                    paused.id,
+                    std::iter::once(status.gid.clone()).chain(status.followed_by.iter().cloned()),
+                )?;
+                self.discard_deleted_engine_job(&status).await?;
+                self.publish_task(&retired)?;
+                continue;
+            }
+            if matches!(paused.status, TaskStatus::Cancelled | TaskStatus::Recycled) {
+                continue;
+            }
+            // For incomplete work, keep the payload and the observed GID so
+            // a later recovery can reconcile the same engine entry.
             paused.status = TaskStatus::Paused;
             paused.error = Some("下载引擎任务状态无法同步；请稍后重试".into());
             paused.failure_code = None;

@@ -31,39 +31,23 @@ import { connectWindowInteraction, createWindowInteraction, supportsNativeWindow
 import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
 
 type TaskListTab = 'all' | 'active' | 'completed' | 'failed';
-type TaskSortMode = 'manual' | 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
+type TaskSortMode = 'manual' | 'default-all' | 'created-desc' | 'created-asc' | 'finished-desc' | 'finished-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
 type HeaderPanelMode = 'search' | 'download' | null;
 type PrivacyTaskFilter = 'all' | 'private' | 'ordinary';
 
-const defaultTaskSort: TaskSortMode = 'created-desc';
-const taskOrderStorageKey = 'task-list-order-v1';
 const backgroundPurgeFrameSize = 24;
 const backgroundPurgeFrameDelayMs = 16;
 const initialTaskSorts: Record<TaskListTab, TaskSortMode> = {
-  all: defaultTaskSort,
-  active: defaultTaskSort,
-  completed: defaultTaskSort,
-  failed: defaultTaskSort,
+  all: 'default-all',
+  active: 'created-desc',
+  completed: 'finished-desc',
+  failed: 'finished-desc',
 };
 const initialTaskOrders: Record<TaskListTab, string[]> = { all: [], active: [], completed: [], failed: [] };
-const taskListTabs: readonly TaskListTab[] = ['all', 'active', 'completed', 'failed'];
-const taskSortModes = new Set<TaskSortMode>(['manual', 'created-desc', 'created-asc', 'progress-asc', 'progress-desc', 'name-asc', 'name-desc', 'size-asc', 'size-desc']);
 
 interface TaskOrderPreferences {
   sorts: Record<TaskListTab, TaskSortMode>;
   orders: Record<TaskListTab, string[]>;
-}
-
-function loadTaskOrderPreferences(): TaskOrderPreferences {
-  try {
-    const saved = JSON.parse(window.localStorage.getItem(taskOrderStorageKey) ?? 'null') as { sorts?: Record<string, unknown>; orders?: Record<string, unknown> } | null;
-    return {
-      sorts: Object.fromEntries(taskListTabs.map((tab) => [tab, taskSortModes.has(saved?.sorts?.[tab] as TaskSortMode) ? saved!.sorts![tab] : initialTaskSorts[tab]])) as Record<TaskListTab, TaskSortMode>,
-      orders: Object.fromEntries(taskListTabs.map((tab) => [tab, Array.isArray(saved?.orders?.[tab]) ? saved!.orders![tab].filter((id): id is string => typeof id === 'string') : []])) as Record<TaskListTab, string[]>,
-    };
-  } catch {
-    return { sorts: { ...initialTaskSorts }, orders: { ...initialTaskOrders } };
-  }
 }
 
 function taskSizeBytes(task: QueueTask): number | undefined {
@@ -77,16 +61,26 @@ function taskSizeBytes(task: QueueTask): number | undefined {
 
 function sortTasks(tasks: readonly QueueTask[], mode: TaskSortMode): QueueTask[] {
   if (mode === 'manual') return [...tasks];
-  const [field, direction] = mode.split('-') as ['created' | 'progress' | 'name' | 'size', 'asc' | 'desc'];
+  if (mode === 'default-all') return [
+    ...sortTasks(tasks.filter((task) => isActiveDownloadTask(task.status)), 'created-desc'),
+    ...sortTasks(tasks.filter((task) => !isActiveDownloadTask(task.status)), 'created-desc'),
+  ];
+  const [field, direction] = mode.split('-') as ['created' | 'finished' | 'progress' | 'name' | 'size', 'asc' | 'desc'];
   return tasks.map((task, index) => ({ task, index })).sort((left, right) => {
     let comparison = 0;
     if (field === 'name') {
       comparison = displayTaskName(left.task).localeCompare(displayTaskName(right.task), 'zh-CN', { numeric: true, sensitivity: 'base' });
     } else {
       const leftValue = field === 'created' ? left.task.created_at || left.task.updated_at || undefined
+        : field === 'finished' ? left.task.status === 'failed'
+          ? left.task.updated_at || left.task.created_at || undefined
+          : left.task.completed_at || left.task.updated_at || left.task.created_at || undefined
         : field === 'progress' ? left.task.progress
           : taskSizeBytes(left.task);
       const rightValue = field === 'created' ? right.task.created_at || right.task.updated_at || undefined
+        : field === 'finished' ? right.task.status === 'failed'
+          ? right.task.updated_at || right.task.created_at || undefined
+          : right.task.completed_at || right.task.updated_at || right.task.created_at || undefined
         : field === 'progress' ? right.task.progress
           : taskSizeBytes(right.task);
       if (leftValue === undefined || rightValue === undefined) {
@@ -104,11 +98,14 @@ function sortTasks(tasks: readonly QueueTask[], mode: TaskSortMode): QueueTask[]
 function prioritizeNewActiveTasks(tasks: readonly QueueTask[], newTaskIds: readonly string[]): QueueTask[] {
   if (!newTaskIds.length) return [...tasks];
   const byId = new Map(tasks.map((task) => [task.id, task]));
-  const prioritizedIds = new Set(newTaskIds);
+  const prioritizedIds = new Set(newTaskIds.filter((id) => {
+    const task = byId.get(id);
+    return task && isActiveDownloadTask(task.status);
+  }));
   return [
     ...newTaskIds.flatMap((id) => {
       const task = byId.get(id);
-      return task ? [task] : [];
+      return task && prioritizedIds.has(id) ? [task] : [];
     }),
     ...tasks.filter((task) => !prioritizedIds.has(task.id)),
   ];
@@ -133,6 +130,19 @@ const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mo
   ] },
 ];
 
+const additionalTaskSortLabels = {
+  'zh-CN': {
+    defaultGroup: '默认排序', activeFirst: '下载中优先', activeFirstAria: '默认排序：下载中优先',
+    finishedGroup: '按结束时间', newest: '从新到旧', oldest: '从旧到新',
+    finishedNewestAria: '按结束时间从新到旧', finishedOldestAria: '按结束时间从旧到新',
+  },
+  en: {
+    defaultGroup: 'Default order', activeFirst: 'Active first', activeFirstAria: 'Default order: active first',
+    finishedGroup: 'By finish time', newest: 'Newest first', oldest: 'Oldest first',
+    finishedNewestAria: 'By finish time, newest first', finishedOldestAria: 'By finish time, oldest first',
+  },
+} as const;
+
 const privacyTaskFilterOptions: ReadonlyArray<{ value: Exclude<PrivacyTaskFilter, 'all'>; label: string }> = [
   { value: 'private', label: '显示隐私任务' },
   { value: 'ordinary', label: '显示普通任务' },
@@ -146,9 +156,18 @@ function PrivacyLockIcon({ unlocked }: { unlocked: boolean }) {
   </svg>;
 }
 
-function TaskSortControl({ value, onChange, privacyFilter, onPrivacyFilterChange, showPrivacyFilter }: { value: TaskSortMode; onChange(mode: TaskSortMode): void; privacyFilter: PrivacyTaskFilter; onPrivacyFilterChange(filter: PrivacyTaskFilter): void; showPrivacyFilter: boolean }) {
+function TaskSortControl({ tab, value, onChange, privacyFilter, onPrivacyFilterChange, showPrivacyFilter }: { tab: TaskListTab; value: TaskSortMode; onChange(mode: TaskSortMode): void; privacyFilter: PrivacyTaskFilter; onPrivacyFilterChange(filter: PrivacyTaskFilter): void; showPrivacyFilter: boolean }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const labels = additionalTaskSortLabels[document.documentElement.lang.toLowerCase().startsWith('en') ? 'en' : 'zh-CN'];
+  const availableSortGroups = tab === 'all'
+    ? [{ label: labels.defaultGroup, options: [{ mode: 'default-all' as const, label: labels.activeFirst, ariaLabel: labels.activeFirstAria }] }, ...taskSortGroups]
+    : tab === 'completed' || tab === 'failed'
+      ? [{ label: labels.finishedGroup, options: [
+        { mode: 'finished-desc' as const, label: labels.newest, ariaLabel: labels.finishedNewestAria },
+        { mode: 'finished-asc' as const, label: labels.oldest, ariaLabel: labels.finishedOldestAria },
+      ] }, ...taskSortGroups]
+      : taskSortGroups;
   useEffect(() => {
     if (!open) return;
     const closeFromOutside = (event: PointerEvent) => {
@@ -169,7 +188,7 @@ function TaskSortControl({ value, onChange, privacyFilter, onPrivacyFilterChange
       <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M10 6h9M10 12h6M10 18h3" /><path d="M5 5v14m-3-3 3 3 3-3" /></svg>
     </button>
     {open && <div className="task-sort-menu" role="menu" aria-label="任务排序">
-      {taskSortGroups.map((group) => <section key={group.label}><p>{group.label}</p><div>{group.options.map((option) => <button type="button" key={option.mode} role="menuitemradio" aria-checked={value === option.mode} aria-label={option.ariaLabel} className={value === option.mode ? 'selected' : ''} onClick={() => { onChange(option.mode); setOpen(false); }}>{option.label}</button>)}</div></section>)}
+      {availableSortGroups.map((group) => <section key={group.label}><p>{group.label}</p><div>{group.options.map((option) => <button type="button" key={option.mode} role="menuitemradio" aria-checked={value === option.mode} aria-label={option.ariaLabel} className={value === option.mode ? 'selected' : ''} onClick={() => { onChange(option.mode); setOpen(false); }}>{option.label}</button>)}</div></section>)}
       {showPrivacyFilter && <section><p>显示任务</p><div>{privacyTaskFilterOptions.map((option) => {
         const checked = privacyFilter === 'all' || privacyFilter === option.value;
         const onlySelected = privacyFilter === option.value;
@@ -329,7 +348,9 @@ export function App() {
   const [cloudPage, setCloudPage] = useState<CloudWorkspacePage>('management');
   const [authorizedCloudProviders, setAuthorizedCloudProviders] = useState<readonly ProviderDescriptor[]>([]);
   const [downloadTab, setDownloadTab] = useState<TaskListTab>('all');
-  const [taskOrderPreferences, setTaskOrderPreferences] = useState<TaskOrderPreferences>(loadTaskOrderPreferences);
+  const [taskOrderPreferences, setTaskOrderPreferences] = useState<TaskOrderPreferences>(() => ({
+    sorts: { ...initialTaskSorts }, orders: { ...initialTaskOrders },
+  }));
   const taskSorts = taskOrderPreferences.sorts;
   const taskOrders = taskOrderPreferences.orders;
   const [searchInput, setSearchInput] = useState('');
@@ -407,9 +428,6 @@ export function App() {
   const pendingStartTaskIds = useRef(new Set<string>());
   const searchDropTarget = useRef<HTMLLabelElement>(null);
   const confirmationGeneration = useRef(0);
-  useEffect(() => {
-    window.localStorage.setItem(taskOrderStorageKey, JSON.stringify(taskOrderPreferences));
-  }, [taskOrderPreferences]);
   const headerConfirmationGeneration = useRef(0);
   const shareConfirmationsInFlight = useRef(new Set<string>());
   const duplicateActionInFlight = useRef(false);
@@ -523,9 +541,8 @@ export function App() {
   function addNewDownloadTask(task: QueueTask) {
     applyTaskProjection(task);
     if (isActiveDownloadTask(task.status)) {
-      // New user-created tasks take precedence over a previously chosen
-      // ordering. This only affects the active list and keeps newest tasks
-      // first without changing the user's saved sort preference.
+      // Newly created active tasks stay visible first without changing the
+      // sort choice for the current session.
       setNewActiveTaskIds((current) => [task.id, ...current.filter((id) => id !== task.id)]);
     }
   }
@@ -1005,6 +1022,10 @@ export function App() {
     listen('launcher-open-all-tasks', () => {
       setView('downloads');
       setDownloadTab('all');
+      setTaskOrderPreferences((current) => ({
+        sorts: { ...current.sorts, all: initialTaskSorts.all },
+        orders: { ...current.orders, all: [] },
+      }));
       setHeaderPanel(null);
     }).then((stop) => { if (disposed) stop(); else unlisten.push(stop); }).catch(() => undefined);
     return () => { disposed = true; unlisten.forEach((stop) => stop()); };
@@ -1524,9 +1545,16 @@ export function App() {
       acceptCreated(task);
     }));
 
-    const failures = outcomes.flatMap((outcome) => outcome.status === 'rejected'
-      ? [outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)]
-      : []);
+    const failures = outcomes.flatMap((outcome) => {
+      if (outcome.status !== 'rejected') return [];
+      const reason = outcome.reason;
+      const message = reason instanceof Error
+        ? reason.message
+        : typeof reason === 'object' && reason !== null && 'message' in reason && typeof reason.message === 'string'
+          ? reason.message
+          : String(reason);
+      return [message];
+    });
     if (failures.length) {
       const message = `${failures.length} 个任务提交失败：${failures[0]}`;
       setNotice({ kind: 'error', message });
@@ -1656,7 +1684,7 @@ export function App() {
             <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
             <div className="task-privacy-actions">
               {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}><PrivacyLockIcon unlocked={privacyVisibility.unlocked} /></button>}
-              <TaskSortControl value={taskSorts[downloadTab]} onChange={(mode) => setTaskOrderPreferences((current) => ({
+              <TaskSortControl tab={downloadTab} value={taskSorts[downloadTab]} onChange={(mode) => setTaskOrderPreferences((current) => ({
                 sorts: { ...current.sorts, [downloadTab]: mode },
                 orders: mode === 'manual' && !current.orders[downloadTab].length
                   ? { ...current.orders, [downloadTab]: visibleTasks.map((task) => task.id) }
