@@ -306,7 +306,7 @@ mod tests {
             .expect("valid share URL required")
             .expect("Baidu share URL required");
         assert_eq!(candidate.provider, CloudProvider::Baidu);
-        let credentials = crate::cloud::DpapiCredentialStore::new(
+        let credentials = crate::cloud::SystemCredentialStore::new(
             std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
                 .join("com.alldownloader.desktop/cloud-sessions"),
         )
@@ -325,7 +325,7 @@ mod tests {
         let source = plan.source_for(&entry.entry_id);
         let dir = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
         let selection =
@@ -749,7 +749,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
         let source = plan.source_for("11");
@@ -787,7 +787,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
         let source = plan.source_for("11");
@@ -1030,7 +1030,7 @@ mod tests {
             };
             let dir = tempfile::tempdir().unwrap();
             let store = CloudSharePlanStore::new(
-                crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+                crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
             );
             store.upsert(&plan).unwrap();
             let source = plan.source_for("11");

@@ -2,7 +2,7 @@ use alldownloader_lib::aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process};
 use alldownloader_lib::cloud::baidu_range_gateway::BaiduRangeGateway;
 use alldownloader_lib::cloud::{
     baidu::{BaiduClient, BaiduDownload, BaiduSession},
-    CredentialStore, DpapiCredentialStore, ReqwestTransport,
+    CredentialStore, ReqwestTransport, SystemCredentialStore,
 };
 use alldownloader_lib::{
     DownloadService, DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
@@ -1058,7 +1058,7 @@ async fn fetch_live_baidu_range(
 #[cfg(windows)]
 async fn live_baidu_download_metadata(filename: String) -> (BaiduDownload, u64) {
     tokio::task::spawn_blocking(move || {
-        let store = DpapiCredentialStore::new(
+        let store = SystemCredentialStore::new(
             PathBuf::from(std::env::var_os("APPDATA").unwrap())
                 .join("com.alldownloader.desktop/cloud-sessions"),
         )
@@ -1082,7 +1082,7 @@ async fn live_baidu_download_metadata(filename: String) -> (BaiduDownload, u64) 
 #[cfg(windows)]
 async fn live_baidu_medium_download_metadata() -> (BaiduDownload, u64, String) {
     tokio::task::spawn_blocking(|| {
-        let store = DpapiCredentialStore::new(
+        let store = SystemCredentialStore::new(
             PathBuf::from(std::env::var_os("APPDATA").unwrap())
                 .join("com.alldownloader.desktop/cloud-sessions"),
         )

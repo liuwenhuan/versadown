@@ -1148,14 +1148,9 @@ async fn baidu_share_submission_keeps_configured_connections_through_gateway() {
         .await
         .unwrap();
     let task_id = uuid::Uuid::new_v4();
-    let (_, options, mut registration) = super::register_baidu_gateway_download(
-        &gateway,
-        task_id,
-        signed_url,
-        options,
-        false,
-    )
-    .unwrap();
+    let (_, options, mut registration) =
+        super::register_baidu_gateway_download(&gateway, task_id, signed_url, options, false)
+            .unwrap();
 
     let aria2 = options.into_aria2_options().unwrap();
     assert_eq!(aria2.get("split").map(String::as_str), Some("3"));

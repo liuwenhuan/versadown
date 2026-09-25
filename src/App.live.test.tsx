@@ -57,13 +57,19 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
     ? state.windowSnapshot() : state.cloudInvoke(command, args),
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite }));
-vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
+vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@tauri-apps/api/window')>(),
+  getCurrentWindow: () => ({
   onFocusChanged: vi.fn().mockImplementation((handler) => { state.onFocus = handler; return Promise.resolve(() => undefined); }),
   onResized: vi.fn().mockResolvedValue(() => undefined),
+  onScaleChanged: vi.fn().mockResolvedValue(() => undefined),
   onDragDropEvent: state.onDragDropEvent,
   scaleFactor: state.scaleFactor,
+  setMinSize: vi.fn().mockResolvedValue(undefined),
+  setSize: vi.fn().mockResolvedValue(undefined),
   startDragging: state.startDragging
-}) }));
+  }),
+}));
 import { App } from './App';
 
 const oldTask: QueueTask = { id: 'task-1', name: 'archive.iso', kind: 'file', status: 'downloading', progress: 10, total_length: 100, completed_length: 10 };
