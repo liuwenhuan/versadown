@@ -12,6 +12,23 @@ const DEB_RUNTIME_ROOT: &str = "/opt/apps/com.xunlei.download/files";
 const LINGLONG_LAYERS_ROOT: &str = "/var/lib/linglong/layers";
 const SDK_LIBRARY_NAME: &str = "libxl_thunder_sdk.so";
 const STAT_LIBRARY_NAME: &str = "libxl_stat.so";
+const NODE_LIBRARY_NAME: &str = "libnode.so";
+const AXDL_ADDON_RELATIVE_PATH: &str = "resources/bin/ThunderKernel.node";
+
+const SUPPORTED_AXDL_FINGERPRINTS: &[(&str, &str, &str, &str)] = &[
+    (
+        "61bd630d03333149c34c6d0f83fc88d316c508d4e6ae9e7389dd556e0a27eb59",
+        "6f8fa291b82a287bb690ab326f4f2aa6b1121ebf3891feb5451745458e7e87ee",
+        "f6edaccd68eab37a171f53d3cfaafa26f3c38e1494fd849ad8c88c8c622cf277",
+        "d6f8a46883185393c744d12e4724240daaf21e35f3639e9523f0a084440683c2",
+    ),
+    (
+        "61bd630d03333149c34c6d0f83fc88d316c508d4e6ae9e7389dd556e0a27eb59",
+        "6f8fa291b82a287bb690ab326f4f2aa6b1121ebf3891feb5451745458e7e87ee",
+        "f6edaccd68eab37a171f53d3cfaafa26f3c38e1494fd849ad8c88c8c622cf277",
+        "153fe8e22f5e1254c10cf4baf6ee4cc47e28ce9ff46acffe1043db28044bf639",
+    ),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LinuxRuntimeSource {
@@ -33,9 +50,14 @@ pub(super) struct LinuxXunleiRuntime {
     pub(super) source: LinuxRuntimeSource,
     pub(super) version: String,
     pub(super) root: PathBuf,
+    pub(super) node_library: PathBuf,
     pub(super) stat_library: PathBuf,
     pub(super) sdk_library: PathBuf,
+    pub(super) axdl_addon: PathBuf,
+    pub(super) node_sha256: String,
+    pub(super) stat_sha256: String,
     pub(super) sdk_sha256: String,
+    pub(super) axdl_addon_sha256: String,
 }
 
 impl LinuxXunleiRuntime {
@@ -45,6 +67,31 @@ impl LinuxXunleiRuntime {
             version: self.version.clone(),
         }
     }
+
+    pub(super) fn supports_axdl_bridge(&self) -> bool {
+        is_supported_axdl_fingerprint(
+            &self.node_sha256,
+            &self.stat_sha256,
+            &self.sdk_sha256,
+            &self.axdl_addon_sha256,
+        )
+    }
+}
+
+pub(super) fn is_supported_axdl_fingerprint(
+    node: &str,
+    stat: &str,
+    sdk: &str,
+    addon: &str,
+) -> bool {
+    SUPPORTED_AXDL_FINGERPRINTS.iter().any(
+        |(expected_node, expected_stat, expected_sdk, expected_addon)| {
+            node == *expected_node
+                && stat == *expected_stat
+                && sdk == *expected_sdk
+                && addon == *expected_addon
+        },
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,16 +259,31 @@ fn runtime_candidate(
     VersionKey::parse(&version)?;
     let sdk_library = root.join(SDK_LIBRARY_NAME);
     let stat_library = root.join(STAT_LIBRARY_NAME);
-    if !is_x86_64_elf(&sdk_library) || !is_x86_64_elf(&stat_library) {
+    let node_library = root.join(NODE_LIBRARY_NAME);
+    let axdl_addon = root.join(AXDL_ADDON_RELATIVE_PATH);
+    if !is_x86_64_elf(&sdk_library)
+        || !is_x86_64_elf(&stat_library)
+        || !is_x86_64_elf(&node_library)
+        || !is_x86_64_elf(&axdl_addon)
+    {
         return None;
     }
+    let stat_sha256 = sha256_file(&stat_library)?;
+    let sdk_sha256 = sha256_file(&sdk_library)?;
+    let node_sha256 = sha256_file(&node_library)?;
+    let axdl_addon_sha256 = sha256_file(&axdl_addon)?;
     Some(LinuxXunleiRuntime {
         source,
         version,
         root,
+        node_library,
         stat_library,
-        sdk_sha256: sha256_file(&sdk_library)?,
+        node_sha256,
+        stat_sha256,
+        sdk_sha256,
         sdk_library,
+        axdl_addon_sha256,
+        axdl_addon,
     })
 }
 
@@ -249,7 +311,7 @@ fn is_x86_64_elf(path: &Path) -> bool {
         && u16::from_le_bytes([bytes[18], bytes[19]]) == 62
 }
 
-fn sha256_file(path: &Path) -> Option<String> {
+pub(super) fn sha256_file(path: &Path) -> Option<String> {
     let mut file = fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 16 * 1024];
@@ -353,6 +415,10 @@ mod tests {
         .unwrap();
         fs::write(root.join("libxl_thunder_sdk.so"), elf_bytes(elf)).unwrap();
         fs::write(root.join("libxl_stat.so"), elf_bytes(elf)).unwrap();
+        fs::write(root.join("libnode.so"), elf_bytes(elf)).unwrap();
+        let addon = root.join("resources/bin/ThunderKernel.node");
+        fs::create_dir_all(addon.parent().unwrap()).unwrap();
+        fs::write(addon, elf_bytes(elf)).unwrap();
     }
 
     fn elf_bytes(kind: ElfKind) -> Vec<u8> {
@@ -381,6 +447,27 @@ mod tests {
         assert_eq!(runtime.version, "1.0.0.5");
 
         fs::remove_file(environment.deb_root().join("libxl_stat.so")).unwrap();
+        assert!(discover_with(&environment).is_none());
+    }
+
+    #[test]
+    fn runtime_requires_the_axdl_addon_in_addition_to_its_shared_libraries() {
+        let environment = FixtureEnvironment::with_deb("1.0.0.5");
+        fs::remove_file(
+            environment
+                .deb_root()
+                .join("resources/bin/ThunderKernel.node"),
+        )
+        .unwrap();
+
+        assert!(discover_with(&environment).is_none());
+    }
+
+    #[test]
+    fn runtime_requires_the_packaged_node_library_for_addon_registration() {
+        let environment = FixtureEnvironment::with_deb("1.0.0.5");
+        fs::remove_file(environment.deb_root().join("libnode.so")).unwrap();
+
         assert!(discover_with(&environment).is_none());
     }
 
@@ -443,5 +530,27 @@ mod tests {
                 version: "1.0.0.6".into(),
             }
         );
+    }
+
+    #[test]
+    fn only_the_observed_library_triple_is_accepted_for_private_axdl_calls() {
+        assert!(super::is_supported_axdl_fingerprint(
+            "61bd630d03333149c34c6d0f83fc88d316c508d4e6ae9e7389dd556e0a27eb59",
+            "6f8fa291b82a287bb690ab326f4f2aa6b1121ebf3891feb5451745458e7e87ee",
+            "f6edaccd68eab37a171f53d3cfaafa26f3c38e1494fd849ad8c88c8c622cf277",
+            "d6f8a46883185393c744d12e4724240daaf21e35f3639e9523f0a084440683c2",
+        ));
+        assert!(!super::is_supported_axdl_fingerprint(
+            "61bd630d03333149c34c6d0f83fc88d316c508d4e6ae9e7389dd556e0a27eb59",
+            "6f8fa291b82a287bb690ab326f4f2aa6b1121ebf3891feb5451745458e7e87ef",
+            "f6edaccd68eab37a171f53d3cfaafa26f3c38e1494fd849ad8c88c8c622cf277",
+            "d6f8a46883185393c744d12e4724240daaf21e35f3639e9523f0a084440683c2",
+        ));
+        assert!(super::is_supported_axdl_fingerprint(
+            "61bd630d03333149c34c6d0f83fc88d316c508d4e6ae9e7389dd556e0a27eb59",
+            "6f8fa291b82a287bb690ab326f4f2aa6b1121ebf3891feb5451745458e7e87ee",
+            "f6edaccd68eab37a171f53d3cfaafa26f3c38e1494fd849ad8c88c8c622cf277",
+            "153fe8e22f5e1254c10cf4baf6ee4cc47e28ce9ff46acffe1043db28044bf639",
+        ));
     }
 }

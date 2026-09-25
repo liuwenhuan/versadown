@@ -1,7 +1,7 @@
 //! Opt-in, redacted integration checks for the user-provided public share samples.
 //!
-//! The test uses the current Windows user's DPAPI-protected sessions through the
-//! production credential store.  An opt-in PikPak account read may rotate its existing
+//! The test uses the current user's system-credential-store sessions through the
+//! production credential store. An opt-in PikPak account read may rotate its existing
 //! refresh token before the share operation. The opt-in Aliyun acceptance test may save at
 //! most two selected share files when the provider does not issue a direct share URL.
 //! It never prints sessions, share URLs, access codes, identifiers, request headers, or
@@ -16,8 +16,8 @@ use alldownloader_lib::cloud::{
         resolve_current_share_download, selected_share_download, selected_share_sources,
         CloudShareAdapter, CloudSharePlanStore, ShareConfirmationOutcome,
     },
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, DpapiCredentialStore,
-    QuarkError, ReqwestTransport,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, QuarkError,
+    ReqwestTransport, SystemCredentialStore,
 };
 use alldownloader_lib::{
     aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process},
@@ -228,9 +228,9 @@ impl CloudHttpTransport for RedactedTransport {
     }
 }
 
-fn app_session_store() -> Result<DpapiCredentialStore, QuarkError> {
+fn app_session_store() -> Result<SystemCredentialStore, QuarkError> {
     let app_data = std::env::var_os("APPDATA").ok_or(QuarkError::Storage)?;
-    DpapiCredentialStore::new(
+    SystemCredentialStore::new(
         PathBuf::from(app_data)
             .join("com.alldownloader.desktop")
             .join("cloud-sessions"),
@@ -592,7 +592,7 @@ fn live_quark_and_pikpak_samples_report_redacted_inspection_outcomes() -> Result
     }
     let sessions = app_session_store()?;
     let temporary = tempfile::tempdir().map_err(|_| QuarkError::Storage)?;
-    let plans = CloudSharePlanStore::new(DpapiCredentialStore::new(temporary.path().into())?);
+    let plans = CloudSharePlanStore::new(SystemCredentialStore::new(temporary.path().into())?);
     let transport = RedactedTransport::new()?;
     let samples = [
         (
@@ -687,7 +687,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
     let sessions = app_session_store()?;
     let temporary = tempfile::tempdir()?;
     let plans =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(temporary.path().join("plans"))?);
+        CloudSharePlanStore::new(SystemCredentialStore::new(temporary.path().join("plans"))?);
     let transport = RedactedTransport::new()?;
     // The production share adapters use reqwest's blocking client, so inspect
     // and resolve before entering the async aria2 runtime.

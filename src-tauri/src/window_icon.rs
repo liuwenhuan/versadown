@@ -60,12 +60,7 @@ struct Palette {
     logo_right: Rgb,
 }
 
-fn latest_lighting_palette(
-    surface: Rgb,
-    accent: Rgb,
-    logo_left: Rgb,
-    logo_right: Rgb,
-) -> Palette {
+fn latest_lighting_palette(surface: Rgb, accent: Rgb, logo_left: Rgb, logo_right: Rgb) -> Palette {
     // Match the latest artwork's lighting hierarchy: a softly lit top,
     // left face brightening into the light, and the right face falling into
     // shadow.  Non-mint themes retain their own accent through these same
@@ -249,8 +244,10 @@ pub(crate) fn rasterize_icon(theme: &str) -> Vec<u8> {
                 continue;
             }
             let top_progress = gradient_progress(source_x, source_y, (307.2, 0.0), (716.8, 1024.0));
-            let left_progress = gradient_progress(source_x, source_y, (0.0, 102.4), (1024.0, 921.6));
-            let right_progress = gradient_progress(source_x, source_y, (1024.0, 0.0), (0.0, 1024.0));
+            let left_progress =
+                gradient_progress(source_x, source_y, (0.0, 102.4), (1024.0, 921.6));
+            let right_progress =
+                gradient_progress(source_x, source_y, (1024.0, 0.0), (0.0, 1024.0));
             let rim_progress = gradient_progress(source_x, source_y, (307.2, 0.0), (716.8, 1024.0));
             let mut color = gradient_color(palette.rim_start, palette.rim_end, rim_progress);
             if point_in_polygon(source_x, source_y, &top) {
@@ -411,7 +408,12 @@ mod tests {
         let icon = rasterize_icon("mint");
         let pixel = |x: u32, y: u32| {
             let index = ((y * ICON_SIZE + x) * 4) as usize;
-            [icon[index], icon[index + 1], icon[index + 2], icon[index + 3]]
+            [
+                icon[index],
+                icon[index + 1],
+                icon[index + 2],
+                icon[index + 3],
+            ]
         };
 
         // Source point (512, about 214): the updated mint artwork's top

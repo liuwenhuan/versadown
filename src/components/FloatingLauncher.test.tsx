@@ -22,7 +22,7 @@ it('keeps a single left click compact and does not render a new-task dialog', ()
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   expect(trigger).toHaveAttribute('data-size', '64');
-  expect(trigger.querySelector('svg.launcher-mark')).toHaveAttribute('viewBox', '175 123 674 778');
+  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('src', expect.stringContaining('mint_white.svg'));
   fireEvent.click(trigger);
 
   expect(onActivateTaskList).not.toHaveBeenCalled();
@@ -100,14 +100,13 @@ it('opens the launcher context menu on right click without a new-task dialog', (
   expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument();
 });
 
-it('uses the themed inline SVG graphic in dark theme', () => {
+it('uses the packaged dark artwork in dark theme', () => {
   theme.resolved = 'dark';
   render(<FloatingLauncher />);
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
-  expect(trigger.querySelector('svg.launcher-mark')).toBeInTheDocument();
-  expect(trigger.querySelector('.launcher-top-start')).toBeInTheDocument();
+  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('src', expect.stringContaining('dark_mint.svg'));
 });
 
 it('switches the launcher graphic when the theme changes', () => {
@@ -121,24 +120,23 @@ it('switches the launcher graphic when the theme changes', () => {
     theme.listeners.forEach((listener) => listener());
   });
   expect(trigger).toHaveAttribute('data-icon-variant', 'dark');
+  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('src', expect.stringContaining('dark_mint.svg'));
 });
 
-it('renders the themed inline SVG artwork for the light launcher', () => {
+it('renders packaged artwork instead of an inline SVG for the light launcher', () => {
   theme.resolved = 'light';
   render(<FloatingLauncher />);
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
-  expect(trigger.querySelector('svg.launcher-mark')).toBeInTheDocument();
-  expect(trigger.querySelector('img.launcher-mark')).not.toBeInTheDocument();
-  expect(trigger.querySelector('.launcher-logo-left')).toBeInTheDocument();
+  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('src', expect.stringContaining('mint_white.svg'));
+  expect(trigger.querySelector('svg.launcher-mark')).not.toBeInTheDocument();
 });
 
-it('uses the latest left-lit mint gradient on the floating launcher', () => {
+it('keeps the 64px packaged light artwork inside the launcher target', () => {
   theme.resolved = 'light';
   render(<FloatingLauncher />);
 
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
-  expect(trigger.querySelector('.launcher-top-start')).toHaveAttribute('stop-color', '#C4E0D4');
-  expect(trigger.querySelector('.launcher-rim-start')).toHaveAttribute('stop-color', '#DCECE4');
-  expect(trigger.querySelector('.launcher-right-end')).toHaveAttribute('stop-color', '#A8CABE');
+  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('width', '64');
+  expect(trigger.querySelector('img.launcher-mark')).toHaveAttribute('height', '64');
 });

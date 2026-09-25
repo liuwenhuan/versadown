@@ -1141,8 +1141,8 @@ pub(crate) fn existing_cloud_directory_duplicate(
         {
             continue;
         }
-        let root = cloud_directory_group_queue_task(store, group.id)
-            .map_err(QuarkError::Transport)?;
+        let root =
+            cloud_directory_group_queue_task(store, group.id).map_err(QuarkError::Transport)?;
         match root.status {
             TaskStatus::Draft
             | TaskStatus::Parsing
@@ -1834,7 +1834,10 @@ mod tests {
         store
             .bind_cloud_download_account(group.id, provider, account)
             .unwrap();
-        let item = store.cloud_directory_group_items(group.id).unwrap().remove(0);
+        let item = store
+            .cloud_directory_group_items(group.id)
+            .unwrap()
+            .remove(0);
         let task = store
             .claim_cloud_directory_leaf_task(
                 group.id,

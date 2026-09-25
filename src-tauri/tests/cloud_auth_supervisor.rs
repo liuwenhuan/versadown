@@ -893,7 +893,7 @@ fn actual_security_challenge_blocks_background_attempts_until_explicit_authoriza
 fn encrypted_maintenance_backoff_survives_reopening_the_disk_store() {
     let root = tempfile::tempdir().unwrap();
     {
-        let store = DpapiCredentialStore::new(root.path().to_path_buf()).unwrap();
+        let store = SystemCredentialStore::new(root.path().to_path_buf()).unwrap();
         let supervisor = AuthSupervisor::new(|| 1000, || 30);
         assert!(matches!(
             supervisor.maintain(&store, CloudProvider::Tianyi, None, true, || Err(
@@ -902,7 +902,7 @@ fn encrypted_maintenance_backoff_survives_reopening_the_disk_store() {
             Err(CloudError::AuthorizationExpired)
         ));
     }
-    let store = DpapiCredentialStore::new(root.path().to_path_buf()).unwrap();
+    let store = SystemCredentialStore::new(root.path().to_path_buf()).unwrap();
     let restarted = AuthSupervisor::new(|| 1100, || 30);
     assert_eq!(
         restarted

@@ -12,6 +12,7 @@ const native = vi.hoisted(() => {
     currentMonitor: vi.fn(),
     launcherPosition: vi.fn(),
     launcherSize: vi.fn(),
+    setSize: vi.fn().mockResolvedValue(undefined),
     setPosition: vi.fn().mockResolvedValue(undefined),
     mainWindow: {
       unminimize: vi.fn(async () => { calls.push('unminimize'); }),
@@ -26,12 +27,15 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ emitTo: native.emitTo }));
 vi.mock('@tauri-apps/api/window', () => ({
   currentMonitor: native.currentMonitor,
-  getCurrentWindow: vi.fn(() => ({ label: 'launcher', outerPosition: native.launcherPosition, outerSize: native.launcherSize, setPosition: native.setPosition })),
+  getCurrentWindow: vi.fn(() => ({ label: 'launcher', outerPosition: native.launcherPosition, outerSize: native.launcherSize, setSize: native.setSize, setPosition: native.setPosition })),
   LogicalSize: class LogicalSize {
     constructor(public width: number, public height: number) {}
   },
   PhysicalPosition: class PhysicalPosition {
     constructor(public x: number, public y: number) {}
+  },
+  PhysicalSize: class PhysicalSize {
+    constructor(public width: number, public height: number) {}
   },
   Window: { getByLabel: native.getByLabel }
 }));
@@ -45,6 +49,7 @@ beforeEach(() => {
   native.currentMonitor.mockReset();
   native.launcherPosition.mockReset();
   native.launcherSize.mockReset();
+  native.setSize.mockReset().mockResolvedValue(undefined);
 });
 
 it('uses one fixed canvas with an invariant hexagon anchor', () => {
@@ -69,6 +74,7 @@ it('installs the compact icon input region without changing native bounds', asyn
   await launcherWindow.setLauncherInputRegions([{ x: 346, y: 328, width: 64, height: 64 }]);
   expect(native.invoke).toHaveBeenCalledWith('set_launcher_input_regions', {
     regions: [{ x: 346, y: 328, width: 64, height: 64 }],
+    scaleFactor: 1,
   });
   expect(native.invoke).not.toHaveBeenCalledWith('set_launcher_bounds', expect.anything());
 });
@@ -87,8 +93,26 @@ it('positions the fixed canvas without consulting a variable native window size'
   });
   native.launcherSize.mockResolvedValueOnce({ width: 64, height: 64 });
   await launcherWindow.anchorLauncherToWorkArea();
+  expect(native.setSize).toHaveBeenCalledWith({ width: 615, height: 1080 });
   expect(native.setPosition).toHaveBeenCalledWith({ x: 1369, y: 506 });
   expect(native.launcherSize).not.toHaveBeenCalled();
+});
+
+it('uses the WebView pixel ratio when a Linux monitor reports an unscaled factor', async () => {
+  const original = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+  Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1.5 });
+  native.currentMonitor.mockResolvedValueOnce({
+    scaleFactor: 1,
+    workArea: { position: { x: 100, y: 50 }, size: { width: 1920, height: 1080 } },
+  });
+
+  try {
+    await launcherWindow.anchorLauncherToWorkArea();
+    expect(native.setPosition).toHaveBeenCalledWith({ x: 1369, y: 506 });
+  } finally {
+    if (original) Object.defineProperty(window, 'devicePixelRatio', original);
+    else Reflect.deleteProperty(window, 'devicePixelRatio');
+  }
 });
 
 it.each([
@@ -129,6 +153,15 @@ it('moves the fixed canvas above the work area when a captured icon drag reaches
     },
     { x: 378, y: -292 },
   )).toEqual({ x: 1369, y: -472 });
+});
+
+it('keeps WebKitGTK physical screen-pointer deltas unscaled at fractional DPI', () => {
+  expect(launcherWindow.launcherPointerCoordinateScaleFactor(
+    { x: 1909, y: 520 },
+    { x: 2476, y: 1060 },
+    { x: 378, y: 360 },
+    1.5,
+  )).toBe(1);
 });
 
 it('chooses the lower slot without moving the hexagon when upper space is insufficient', () => {

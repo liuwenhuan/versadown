@@ -9,8 +9,8 @@ use alldownloader_lib::cloud::{
     commands::CloudState,
     driver::ProviderDriver,
     CloudError, CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
-    CloudUploadTransport, CredentialStore, DpapiCredentialStore, ProviderRegistry, QuarkClient,
-    ReqwestTransport, ResolvedCloudDownload, SessionWorkKind, UploadHttpRequest,
+    CloudUploadTransport, CredentialStore, ProviderRegistry, QuarkClient, ReqwestTransport,
+    ResolvedCloudDownload, SessionWorkKind, SystemCredentialStore, UploadHttpRequest,
     UploadHttpResponse,
 };
 use std::{
@@ -597,7 +597,7 @@ fn run_requested_quark_upload() -> LiveResult<()> {
     let provider = CloudProvider::Quark;
     let http = LiveHttp::new()?;
     let root_id = ProviderRegistry::global().get(provider).root_directory_id;
-    let store = DpapiCredentialStore::new(session_root()?)?;
+    let store = SystemCredentialStore::new(session_root()?)?;
     let cookie = store
         .load(provider.key())?
         .ok_or_else(|| failure("Quark is not currently authorized"))?;

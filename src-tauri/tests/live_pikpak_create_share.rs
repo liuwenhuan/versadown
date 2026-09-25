@@ -1,7 +1,7 @@
 //! Explicit opt-in: uploads a harmless new fixture and publicly shares only that file.
 //! Leaves the fixture and one-day share available for manual verification.
 use alldownloader_lib::cloud::{
-    CloudShareOptions, DpapiCredentialStore, PikPakClient, ReqwestTransport,
+    CloudShareOptions, PikPakClient, ReqwestTransport, SystemCredentialStore,
 };
 use serde_json::{json, Value};
 use std::{error::Error, path::PathBuf, time::Duration};
@@ -13,7 +13,7 @@ fn inspect_own_share_list_schema() -> Result<(), Box<dyn Error>> {
         std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
-    let credentials = DpapiCredentialStore::new(PathBuf::from(std::env::var(
+    let credentials = SystemCredentialStore::new(PathBuf::from(std::env::var(
         "ALLDOWNLOADER_LIVE_SESSION_ROOT",
     )?))?;
     let transport = ReqwestTransport::new()?;
@@ -54,7 +54,7 @@ fn verify_existing_update_fixture() -> Result<(), Box<dyn Error>> {
     let id = std::env::var("ALLDOWNLOADER_UPDATE_FIXTURE_ID")?;
     let name = std::env::var("ALLDOWNLOADER_UPDATE_FIXTURE_NAME")?;
     assert!(name.starts_with("AllDownloader-share-update-test-") && name.ends_with(".txt"));
-    let credentials = DpapiCredentialStore::new(PathBuf::from(std::env::var(
+    let credentials = SystemCredentialStore::new(PathBuf::from(std::env::var(
         "ALLDOWNLOADER_LIVE_SESSION_ROOT",
     )?))?;
     let transport = ReqwestTransport::new()?;
@@ -90,7 +90,7 @@ fn own_file_share_update_roundtrip() -> Result<(), Box<dyn Error>> {
         std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
-    let credentials = DpapiCredentialStore::new(PathBuf::from(std::env::var(
+    let credentials = SystemCredentialStore::new(PathBuf::from(std::env::var(
         "ALLDOWNLOADER_LIVE_SESSION_ROOT",
     )?))?;
     let transport = ReqwestTransport::new()?;
@@ -184,7 +184,7 @@ fn own_file_creates_public_share_visible_without_login() -> Result<(), Box<dyn E
     }
     let root = PathBuf::from(std::env::var("ALLDOWNLOADER_LIVE_SESSION_ROOT")?);
     assert!(root.is_dir(), "explicit real session directory must exist");
-    let credentials = DpapiCredentialStore::new(root)?;
+    let credentials = SystemCredentialStore::new(root)?;
     let transport = ReqwestTransport::new()?;
     let client = PikPakClient::new(&transport, &credentials);
     client.account()?;

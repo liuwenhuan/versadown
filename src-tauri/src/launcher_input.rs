@@ -66,6 +66,44 @@ fn physical_regions(
         .collect()
 }
 
+const LAUNCHER_CANVAS_WIDTH: f64 = 410.0;
+
+// GDK button coordinates are physical pixels on fractional-scale X11
+// desktops, while WebKitGTK's widget scale can remain at one. The launcher
+// canvas itself is resized from the WebView's CSS pixel ratio, so its current
+// physical width is the authoritative conversion for native drag hit testing.
+fn launcher_drag_icon_regions(
+    physical_canvas_width: i32,
+) -> Result<Vec<PhysicalLauncherRegion>, String> {
+    if physical_canvas_width <= 0 {
+        return Err("悬浮窗 GTK 画布尚未实现".to_string());
+    }
+    physical_regions(
+        &[LauncherInputRegion {
+            x: 346.0,
+            y: 328.0,
+            width: 64.0,
+            height: 64.0,
+        }],
+        physical_canvas_width as f64 / LAUNCHER_CANVAS_WIDTH,
+    )
+}
+
+fn launcher_drag_capture_regions(
+    physical_canvas_width: i32,
+    physical_canvas_height: i32,
+) -> Result<Vec<PhysicalLauncherRegion>, String> {
+    if physical_canvas_width <= 0 || physical_canvas_height <= 0 {
+        return Err("悬浮窗 GTK 画布尚未实现".to_string());
+    }
+    Ok(vec![PhysicalLauncherRegion {
+        left: 0,
+        top: 0,
+        right: physical_canvas_width,
+        bottom: physical_canvas_height,
+    }])
+}
+
 fn point_hits_regions((x, y): (i32, i32), regions: &[PhysicalLauncherRegion]) -> bool {
     regions
         .iter()
@@ -99,12 +137,16 @@ fn should_ignore_cursor_events_at(point: (i32, i32), regions: &[PhysicalLauncher
 pub async fn set_launcher_input_regions(
     window: WebviewWindow,
     regions: Vec<LauncherInputRegion>,
+    scale_factor: f64,
     interaction: State<'_, crate::launcher::LauncherInteractionState>,
 ) -> Result<(), String> {
     if window.label() != "launcher" {
         return Err("只能设置悬浮球窗口的输入区域".to_string());
     }
-    let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return Err("悬浮窗输入区域无效".to_string());
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
     let physical = physical_regions(&regions, scale_factor)?;
     #[cfg(windows)]
     {
@@ -135,9 +177,29 @@ pub async fn set_launcher_input_regions(
         interaction.record_input_region_update();
         Ok(())
     }
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = (window, physical, interaction);
+        // Do not call Tao's set_ignore_cursor_events here. On Linux that
+        // request asynchronously resets the GTK input shape to the full
+        // window, racing and overriding this X11 fine-grained region.
+        let target = window.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        window
+            .run_on_main_thread(move || {
+                let _ = sender.send(platform::apply_input_region(
+                    &target,
+                    &regions,
+                    scale_factor,
+                ));
+            })
+            .map_err(|error| error.to_string())?;
+        receiver.await.map_err(|error| error.to_string())??;
+        interaction.record_input_region_update();
+        Ok(())
+    }
+    #[cfg(any(target_os = "macos", not(unix)))]
+    {
+        let _ = (window, regions, interaction);
         Err("当前平台尚未安装悬浮窗输入区域适配器".to_string())
     }
 }
@@ -172,9 +234,137 @@ pub async fn launcher_input_hit_test_for_test(
     }
     #[cfg(not(windows))]
     {
-        let _ = points;
-        Err("当前平台尚未安装悬浮窗输入区域适配器".to_string())
+        let _ = (window, points);
+        Err("Linux/macOS 不支持原生命中测试探针".to_string())
     }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod platform {
+    use super::{
+        launcher_drag_capture_regions, launcher_drag_icon_regions, physical_regions,
+        point_hits_regions, LauncherInputRegion, PhysicalLauncherRegion,
+    };
+    use gtk::prelude::*;
+    use tauri::WebviewWindow;
+    use webkit2gtk::WebViewExt;
+
+    /// Applies the X11 input shape to the GTK top-level window.  The visual
+    /// surface remains a full transparent canvas, while X11 dispatches events
+    /// only to the icon/menu rectangles supplied by the renderer.
+    fn gdk_window(window: &WebviewWindow) -> Result<gtk::gdk::Window, String> {
+        window
+            .gtk_window()
+            .map_err(|error| error.to_string())?
+            .window()
+            .ok_or_else(|| "悬浮窗 GTK 窗口尚未实现".to_string())
+    }
+
+    fn apply_physical_input_regions(
+        gdk_window: &gtk::gdk::Window,
+        regions: &[PhysicalLauncherRegion],
+    ) -> Result<(), String> {
+        let shape = gtk::cairo::Region::create();
+        for region in regions {
+            let rect = gtk::cairo::RectangleInt::new(
+                region.left,
+                region.top,
+                region.right - region.left,
+                region.bottom - region.top,
+            );
+            shape
+                .union_rectangle(&rect)
+                .map_err(|error| format!("创建悬浮窗输入区域失败: {error}"))?;
+        }
+        gdk_window.input_shape_combine_region(&shape, 0, 0);
+        Ok(())
+    }
+
+    pub fn apply_input_region(
+        window: &WebviewWindow,
+        logical_regions: &[LauncherInputRegion],
+        scale_factor: f64,
+    ) -> Result<(), String> {
+        let regions = physical_regions(logical_regions, scale_factor)?;
+        apply_physical_input_regions(&gdk_window(window)?, &regions)
+    }
+
+    fn begin_drag_capture(window: &WebviewWindow) -> Result<(), String> {
+        let gdk_window = gdk_window(window)?;
+        let regions = launcher_drag_capture_regions(gdk_window.width(), gdk_window.height())?;
+        apply_physical_input_regions(&gdk_window, &regions)
+    }
+
+    fn restore_compact_drag_input(window: &WebviewWindow) -> Result<(), String> {
+        let gdk_window = gdk_window(window)?;
+        let regions = launcher_drag_icon_regions(gdk_window.width())?;
+        apply_physical_input_regions(&gdk_window, &regions)
+    }
+
+    /// WebKitGTK handles its native context menu before the page's DOM handler
+    /// can reliably cancel it. Intercept it and ask React to render its own
+    /// menu, which also extends the X11 input region to the popup.
+    pub fn install_context_menu(window: &WebviewWindow) -> Result<(), String> {
+        window
+            .with_webview(|webview| {
+                let webview = webview.inner();
+                webview.connect_context_menu(|webview, _, _, _| {
+                    #[allow(deprecated)]
+                    webview.run_javascript(
+                        "window.dispatchEvent(new Event('alldownloader:launcher-context-menu'))",
+                        None::<&webkit2gtk::gio::Cancellable>,
+                        |_| {},
+                    );
+                    true
+                });
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    /// Once a pointer leaves the icon's 64px input shape, WebKitGTK no longer
+    /// receives its motion events. Temporarily capture the canvas while the
+    /// button is held, so the browser's position loop can move the icon above
+    /// the screen edge without GTK constraining the whole transparent canvas.
+    pub fn install_drag(window: &WebviewWindow) -> Result<(), String> {
+        let press_target = window.clone();
+        let release_target = window.clone();
+        window
+            .with_webview(move |webview| {
+                webview
+                    .inner()
+                    .connect_button_press_event(move |webview, event| {
+                        if event.button() == 1 {
+                            let icon = launcher_drag_icon_regions(webview.allocated_width());
+                            let (x, y) = event.position();
+                            if icon.is_ok_and(|regions| {
+                                point_hits_regions((x.round() as i32, y.round() as i32), &regions)
+                            }) {
+                                let _ = begin_drag_capture(&press_target);
+                            }
+                        }
+                        gtk::glib::Propagation::Proceed
+                    });
+                webview
+                    .inner()
+                    .connect_button_release_event(move |_, event| {
+                        if event.button() == 1 {
+                            let _ = restore_compact_drag_input(&release_target);
+                        }
+                        gtk::glib::Propagation::Proceed
+                    });
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn install_linux_context_menu(window: &WebviewWindow) -> Result<(), String> {
+    platform::install_context_menu(window)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn install_linux_drag(window: &WebviewWindow) -> Result<(), String> {
+    platform::install_drag(window)
 }
 
 #[cfg(windows)]
@@ -731,6 +921,20 @@ mod tests {
                 bottom: 588,
             }]
         );
+    }
+
+    #[test]
+    fn x11_drag_uses_the_physical_canvas_width_for_fractional_scale() {
+        let regions = launcher_drag_icon_regions(615).unwrap();
+        assert!(point_hits_regions((563, 538), &regions));
+    }
+
+    #[test]
+    fn x11_drag_temporarily_captures_the_entire_canvas() {
+        let regions = launcher_drag_capture_regions(615, 1080).unwrap();
+        assert!(point_hits_regions((100, 100), &regions));
+        assert!(point_hits_regions((614, 1079), &regions));
+        assert!(!point_hits_regions((615, 1080), &regions));
     }
 
     #[test]

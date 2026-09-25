@@ -283,11 +283,18 @@ pub fn set_launcher_window_visible(
         return Ok(());
     }
     if visible {
+        // macOS does not yet have a shaped-input adapter. Linux must not use
+        // Tao's generic cursor toggle here: it replaces the X11 input shape
+        // with a full-window region.
+        #[cfg(target_os = "macos")]
+        window
+            .set_ignore_cursor_events(false)
+            .map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())
     } else {
-        // Hiding is not enough for a transparent fixed-size WebView canvas:
-        // set the native click-through style first so it can never race a
-        // taskbar or tray click while the renderer is being torn down.
+        // The X11 shape remains installed while a Linux launcher is hidden.
+        // Calling Tao's generic toggle would replace it with an empty shape.
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
         window
             .set_ignore_cursor_events(true)
             .map_err(|error| error.to_string())?;

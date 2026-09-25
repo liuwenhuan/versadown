@@ -7,7 +7,7 @@ use uuid::Uuid;
 async fn share_directory_invalid_item_never_leaves_an_independent_task() {
     let directory = tempfile::tempdir().unwrap();
     let plans = share::CloudSharePlanStore::new(
-        crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+        crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
     );
     let plan = CloudSharePlan::new(
         CloudProvider::Baidu,

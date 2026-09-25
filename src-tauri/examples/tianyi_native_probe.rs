@@ -1,7 +1,7 @@
 use alldownloader_lib::cloud::{
     load_saved_password_login,
     tianyi::{TianyiClient, TIANYI_RECYCLE_BIN_ID},
-    CloudProvider, DpapiCredentialStore, ReqwestTransport,
+    CloudProvider, ReqwestTransport, SystemCredentialStore,
 };
 use std::{collections::VecDeque, path::PathBuf};
 
@@ -25,7 +25,7 @@ fn probe() -> Result<(usize, bool), &'static str> {
                 .join("cloud-sessions")
         })
         .ok_or("无法定位应用凭据目录")?;
-    let store = DpapiCredentialStore::new(credential_root).map_err(|_| "无法读取加密凭据存储")?;
+    let store = SystemCredentialStore::new(credential_root).map_err(|_| "无法读取加密凭据存储")?;
     let credentials = load_saved_password_login(&store, CloudProvider::Tianyi)
         .map_err(|_| "无法解密已保存的天翼登录信息")?
         .ok_or("没有已保存的天翼登录信息")?;

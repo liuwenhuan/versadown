@@ -211,7 +211,7 @@ fn share_transfer_poll_scenario(cancelled: bool) {
         )
         .unwrap();
     let root = tempfile::tempdir().unwrap();
-    let plans = CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+    let plans = CloudSharePlanStore::new(SystemCredentialStore::new(root.path().into()).unwrap());
     let plan = CloudSharePlan::new(
         CloudProvider::Xunlei,
         "share".into(),

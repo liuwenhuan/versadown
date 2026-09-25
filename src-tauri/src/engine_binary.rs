@@ -2,7 +2,8 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-const LINUX_X86_64_SHA256: &str = "61a7a6e68dc24aed20c078f59aa0fee3c480c79dc62c4d3174711a1e29435be6";
+const LINUX_X86_64_SHA256: &str =
+    "61a7a6e68dc24aed20c078f59aa0fee3c480c79dc62c4d3174711a1e29435be6";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineBinary {
@@ -50,7 +51,11 @@ impl EngineBinary {
         self.resource_name
     }
 
-    pub fn resolve(self, manifest_dir: &Path, resource_dir: &Path) -> Result<PathBuf, EngineBinaryError> {
+    pub fn resolve(
+        self,
+        manifest_dir: &Path,
+        resource_dir: &Path,
+    ) -> Result<PathBuf, EngineBinaryError> {
         let bundled = resource_dir.join("binaries").join(self.resource_name);
         let candidate = if bundled.is_file() {
             bundled
@@ -66,7 +71,13 @@ impl EngineBinary {
             return Err(EngineBinaryError::Missing(path.into()));
         }
         #[cfg(unix)]
-        if std::fs::metadata(path).map_err(|_| EngineBinaryError::Read(path.into()))?.permissions().mode() & 0o111 == 0 {
+        if std::fs::metadata(path)
+            .map_err(|_| EngineBinaryError::Read(path.into()))?
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
             return Err(EngineBinaryError::NotExecutable(path.into()));
         }
         if let Some(expected) = self.sha256 {

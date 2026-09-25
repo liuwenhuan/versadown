@@ -332,7 +332,7 @@ fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before
     let credentials = MemoryCredentialStore::default();
     let directory = tempfile::tempdir().unwrap();
     let plans = CloudSharePlanStore::new(
-        alldownloader_lib::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+        alldownloader_lib::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
     );
     for (provider, transfer) in [
         (CloudProvider::Quark, true),

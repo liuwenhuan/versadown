@@ -10,7 +10,7 @@ pub trait ShareInspect: Send + Sync {
 
 pub trait ShareResolve: Send + Sync {
     fn resolve(&self, entry: &CloudShareResolvedEntry) -> Result<ShareResolution, QuarkError>;
-    /// Internal-only context rotation. The dispatcher commits this to DPAPI
+    /// Internal-only context rotation. The dispatcher commits this to encrypted local storage
     /// before releasing a URL or starting the transfer phase.
     fn resolve_with_context(
         &self,
@@ -154,7 +154,7 @@ impl ShareCapabilities<'_> {
     }
 }
 
-/// Never serialize this result into IPC or task records: context is DPAPI-only.
+/// Never serialize this result into IPC or task records: context is encrypted-storage-only.
 pub struct ShareOperationResult<T> {
     /// A successful response may revoke context even when the operation fails.
     /// Persist updated_context before propagating this error.

@@ -1,76 +1,9 @@
 use super::*;
-#[cfg(windows)]
-#[test]
-fn sqlite_committed_migration_retries_backup_without_reimporting() {
-    use std::os::windows::fs::OpenOptionsExt;
-    let directory = tempfile::tempdir().unwrap();
-    let credentials = DpapiCredentialStore::new(directory.path().into()).unwrap();
-    let mut plan = fixture("rename-retry");
-    plan.last_used_at_ms = now_ms();
-    let source = plan.source_for("f1");
-    let mut document = PlanDocument::default();
-    document.plans.insert(
-        plan_key(plan.provider, &plan.share_fingerprint),
-        StoredPlan {
-            plan,
-            last_used_order: 0,
-        },
-    );
-    credentials
-        .save(SHARE_PLAN_SECRET, &serde_json::to_vec(&document).unwrap())
-        .unwrap();
-    let legacy = directory.path().join("cloud-share-plans-v1.bin");
-    let deny_delete = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(1)
-        .open(&legacy)
-        .unwrap();
-    let store = CloudSharePlanStore::new(credentials);
-    assert!(store.resolve_entry(&source).is_err());
-    assert!(legacy.exists());
-    let database =
-        rusqlite::Connection::open(directory.path().join("cloud-share-plans.sqlite")).unwrap();
-    assert_eq!(
-        database
-            .query_row("SELECT count(*) FROM share_plans", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        database
-            .query_row(
-                "SELECT value FROM share_metadata WHERE key='legacy_migrated'",
-                [],
-                |row| row.get::<_, i64>(0)
-            )
-            .unwrap(),
-        1
-    );
-    database.execute_batch("CREATE TRIGGER reject_reimport BEFORE INSERT ON share_journals BEGIN SELECT RAISE(FAIL, 'duplicate migration'); END;").unwrap();
-    drop(deny_delete);
-    // Corrupting the legacy document after commit must not undo the migrated rows.
-    DpapiCredentialStore::new(directory.path().into())
-        .unwrap()
-        .save(SHARE_PLAN_SECRET, b"not a plan document")
-        .unwrap();
-    assert_eq!(
-        store.resolve_entry(&source).unwrap().access_code(),
-        Some("secret-code")
-    );
-    assert!(!legacy.exists());
-    assert!(directory
-        .path()
-        .join("cloud-share-plans-v1.bin.migrated-backup")
-        .exists());
-}
-
-#[cfg(windows)]
 #[test]
 fn sqlite_failed_journal_claim_rolls_back_plan_and_remains_retryable() {
     let directory = tempfile::tempdir().unwrap();
     let store =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
     let plan = fixture("journal-rollback");
     let source = plan.source_for("f1");
     store.upsert(&plan).unwrap();
@@ -84,6 +17,12 @@ fn sqlite_failed_journal_claim_rolls_back_plan_and_remains_retryable() {
             row.get(0)
         })
         .unwrap();
+    assert!(
+        !before
+            .windows(b"secret-code".len())
+            .any(|bytes| bytes == b"secret-code"),
+        "the SQLite row must not contain the plan secret in plaintext"
+    );
     database.execute_batch("CREATE TRIGGER reject_journal_claim BEFORE UPDATE ON share_journals BEGIN SELECT RAISE(FAIL, 'journal rejected'); END;").unwrap();
     assert!(store.mark_cleanup_attempted(&source).is_err());
     let after: Vec<u8> = database
@@ -105,112 +44,14 @@ fn sqlite_failed_journal_claim_rolls_back_plan_and_remains_retryable() {
     assert_eq!(store.mark_cleanup_attempted(&source).unwrap().len(), 1);
     drop(store);
     let reopened =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
     assert!(reopened.mark_cleanup_attempted(&source).unwrap().is_empty());
 }
-#[cfg(windows)]
-#[test]
-fn sqlite_migrates_legacy_plans_and_journals_once_and_encrypts_rows() {
-    let directory = tempfile::tempdir().unwrap();
-    let credentials = DpapiCredentialStore::new(directory.path().into()).unwrap();
-    let mut document = PlanDocument::default();
-    for (index, id) in ["migration-one", "migration-two"].iter().enumerate() {
-        let mut plan = fixture(id);
-        plan.last_used_at_ms = now_ms();
-        plan.provider_context =
-            serde_json::json!({"cookie":"private-cookie", "token":"private-token"});
-        plan.transfers.push(CloudShareTransfer {
-            entry_fingerprint: plan.entries[0].entry_fingerprint.clone(),
-            created_file_id: format!("personal-{index}"),
-            owner_fingerprint: "a".repeat(64),
-            owner_scheme: CloudShareTransferOwnerScheme::AccountV2,
-            cleanup_state: CloudShareCleanupState::Pending,
-        });
-        document.plans.insert(
-            plan_key(plan.provider, &plan.share_fingerprint),
-            StoredPlan {
-                plan,
-                last_used_order: index as u64 + 1,
-            },
-        );
-    }
-    document.sequence = 2;
-    credentials
-        .save(SHARE_PLAN_SECRET, &serde_json::to_vec(&document).unwrap())
-        .unwrap();
-    let legacy = directory.path().join("cloud-share-plans-v1.bin");
-    let original = std::fs::read(&legacy).unwrap();
-    let store = CloudSharePlanStore::new(credentials);
-    let source = fixture("migration-one").source_for("f1");
-    assert_eq!(
-        store.resolve_entry(&source).unwrap().plan.transfers.len(),
-        1
-    );
-    let database = directory.path().join("cloud-share-plans.sqlite");
-    assert!(
-        database.exists(),
-        "first legacy read must migrate to row storage"
-    );
-    assert!(!legacy.exists());
-    assert_eq!(
-        std::fs::read(
-            directory
-                .path()
-                .join("cloud-share-plans-v1.bin.migrated-backup")
-        )
-        .unwrap(),
-        original
-    );
-    drop(store);
-    let connection = rusqlite::Connection::open(&database).unwrap();
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM share_plans", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM share_journals", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    let reopened =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(directory.path().into()).unwrap());
-    assert_eq!(
-        reopened.resolve_entry(&source).unwrap().access_code(),
-        Some("secret-code")
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM share_journals", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    drop(reopened);
-    drop(connection);
-    let raw = std::fs::read(database).unwrap();
-    for secret in [
-        "secret-code",
-        "private-cookie",
-        "private-token",
-        "personal-0",
-    ] {
-        assert!(!raw
-            .windows(secret.len())
-            .any(|bytes| bytes == secret.as_bytes()));
-    }
-}
-
-#[cfg(windows)]
 #[test]
 fn sqlite_failed_write_preserves_previous_row_and_other_plan() {
     let directory = tempfile::tempdir().unwrap();
     let store =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
     let mut plan = fixture("row-write");
     store.upsert(&plan).unwrap();
     store.upsert(&fixture("untouched-row")).unwrap();
@@ -250,60 +91,6 @@ fn sqlite_failed_write_preserves_previous_row_and_other_plan() {
     );
 }
 
-#[cfg(windows)]
-#[test]
-fn sqlite_migration_failure_keeps_legacy_until_commit_and_can_retry() {
-    let directory = tempfile::tempdir().unwrap();
-    let credentials = DpapiCredentialStore::new(directory.path().into()).unwrap();
-    let mut document = PlanDocument::default();
-    for id in ["retry-one", "retry-two"] {
-        let mut plan = fixture(id);
-        plan.last_used_at_ms = now_ms();
-        document.plans.insert(
-            plan_key(plan.provider, &plan.share_fingerprint),
-            StoredPlan {
-                plan,
-                last_used_order: 0,
-            },
-        );
-    }
-    credentials
-        .save(SHARE_PLAN_SECRET, &serde_json::to_vec(&document).unwrap())
-        .unwrap();
-    let database = directory.path().join("cloud-share-plans.sqlite");
-    let connection = rusqlite::Connection::open(&database).unwrap();
-    connection.execute_batch("CREATE TABLE share_plans (provider TEXT NOT NULL, share_fingerprint TEXT NOT NULL, last_used_order INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, last_used_at_ms INTEGER NOT NULL, pinned INTEGER NOT NULL, secret_payload BLOB NOT NULL, PRIMARY KEY(provider,share_fingerprint)); CREATE TRIGGER reject_second_plan BEFORE INSERT ON share_plans WHEN (SELECT count(*) FROM share_plans)=1 BEGIN SELECT RAISE(FAIL, 'migration rejected'); END;").unwrap();
-    let store = CloudSharePlanStore::new(credentials);
-    let source = fixture("retry-one").source_for("f1");
-    assert!(
-        store.resolve_entry(&source).is_err(),
-        "migration must fail atomically when a row write fails"
-    );
-    assert!(directory.path().join("cloud-share-plans-v1.bin").exists());
-    assert!(!directory
-        .path()
-        .join("cloud-share-plans-v1.bin.migrated-backup")
-        .exists());
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM share_plans", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    connection
-        .execute_batch("DROP TRIGGER reject_second_plan")
-        .unwrap();
-    assert!(store.resolve_entry(&source).is_ok());
-    assert_eq!(
-        connection
-            .query_row("SELECT count(*) FROM share_plans", [], |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        2
-    );
-    assert!(!directory.path().join("cloud-share-plans-v1.bin").exists());
-}
 use crate::cloud::{
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, MemoryCredentialStore,
 };
@@ -1000,7 +787,7 @@ fn legacy_session_owner_hash_never_matches_an_account_owner() {
     let plan = fixture("recorded-transfer-legacy-session-hash");
     let source = plan.source_for("f1");
     let owner = recorded_transfer_owner();
-    // Simulate a pre-account-v2 DPAPI record: it has a 64-character owner
+    // Simulate a pre-account-v2 encrypted record: it has a 64-character owner
     // hash but no owner-scheme field at all.
     store.upsert(&plan).unwrap();
     store
@@ -3051,7 +2838,7 @@ fn corrupt_or_unsupported_documents_fail_closed_without_leaking_contents() {
 fn dpapi_plan_round_trip_recovers_access_code_but_disk_and_source_do_not() {
     let directory = tempfile::tempdir().unwrap();
     let store =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
     let plan = fixture("private-share");
     store.upsert(&plan).unwrap();
     let encrypted = std::fs::read(directory.path().join("cloud-share-plans.sqlite")).unwrap();
@@ -3062,7 +2849,7 @@ fn dpapi_plan_round_trip_recovers_access_code_but_disk_and_source_do_not() {
     }
     drop(store);
     let reopened =
-        CloudSharePlanStore::new(DpapiCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
     assert_eq!(
         reopened
             .resolve_entry(&plan.source_for("f1"))

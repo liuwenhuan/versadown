@@ -25,13 +25,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) trait WorkerTransport {
+pub(crate) trait WorkerTransport {
     fn request(&mut self, request: WorkerRequest) -> Result<WorkerResponse, NativeEngineError>;
     fn is_alive(&mut self) -> bool;
     fn shutdown(&mut self);
 }
 
-pub(super) struct LinuxWorkerEngine<T = SocketWorkerTransport> {
+pub(crate) struct LinuxWorkerEngine<T = SocketWorkerTransport> {
     session: NativeEngineSession,
     transport: T,
     live_handles: Vec<NativeTaskHandle>,
@@ -39,10 +39,12 @@ pub(super) struct LinuxWorkerEngine<T = SocketWorkerTransport> {
 }
 
 impl LinuxWorkerEngine<SocketWorkerTransport> {
-    #[allow(dead_code)]
-    pub(super) fn start(runtime: LinuxXunleiRuntime) -> Result<Self, NativeEngineError> {
+    pub(super) fn start(
+        runtime: LinuxXunleiRuntime,
+        session: NativeEngineSession,
+    ) -> Result<Self, NativeEngineError> {
         Ok(Self {
-            session: NativeEngineSession::new(),
+            session,
             transport: SocketWorkerTransport::start(runtime)?,
             live_handles: Vec::new(),
             stopped_handles: Vec::new(),
@@ -201,7 +203,7 @@ fn map_worker_error(code: WorkerErrorCode) -> NativeEngineError {
     }
 }
 
-pub(super) struct SocketWorkerTransport {
+pub(crate) struct SocketWorkerTransport {
     child: Child,
     stream: UnixStream,
     runtime_directory: PathBuf,
@@ -226,12 +228,24 @@ impl SocketWorkerTransport {
                 socket.to_string_lossy().as_ref(),
                 "--runtime-root",
                 runtime.root.to_string_lossy().as_ref(),
+                "--runtime-version",
+                &runtime.version,
                 "--sdk",
                 runtime.sdk_library.to_string_lossy().as_ref(),
                 "--stat",
                 runtime.stat_library.to_string_lossy().as_ref(),
+                "--node",
+                runtime.node_library.to_string_lossy().as_ref(),
+                "--addon",
+                runtime.axdl_addon.to_string_lossy().as_ref(),
+                "--stat-sha256",
+                &runtime.stat_sha256,
+                "--node-sha256",
+                &runtime.node_sha256,
                 "--sdk-sha256",
                 &runtime.sdk_sha256,
+                "--addon-sha256",
+                &runtime.axdl_addon_sha256,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())

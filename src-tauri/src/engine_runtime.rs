@@ -971,10 +971,10 @@ mod tests {
         TaskStore,
         Vec<crate::DownloadTask>,
     ) {
-        use crate::cloud::{share::*, CloudProvider, DpapiCredentialStore};
+        use crate::cloud::{share::*, CloudProvider, SystemCredentialStore};
         let root = tempfile::tempdir().unwrap();
         let plans =
-            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+            CloudSharePlanStore::new(SystemCredentialStore::new(root.path().into()).unwrap());
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
             "share".into(),
@@ -1285,10 +1285,10 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_plan_gate_blocks_new_sibling_transfer_until_aria2_rebind() {
-        use crate::cloud::{share::*, CloudProvider, DpapiCredentialStore};
+        use crate::cloud::{share::*, CloudProvider, SystemCredentialStore};
         let root = tempfile::tempdir().unwrap();
         let plans =
-            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+            CloudSharePlanStore::new(SystemCredentialStore::new(root.path().into()).unwrap());
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
             "share".into(),
@@ -1367,11 +1367,11 @@ mod tests {
 
     #[test]
     fn task_listing_restores_attempted_cleanup_after_restart_without_aria2_or_network() {
-        use crate::cloud::{share::*, CloudProvider, DpapiCredentialStore};
+        use crate::cloud::{share::*, CloudProvider, SystemCredentialStore};
         let root = tempfile::tempdir().unwrap();
         let db = root.path().join("tasks.sqlite");
         let plans =
-            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+            CloudSharePlanStore::new(SystemCredentialStore::new(root.path().into()).unwrap());
         let tasks = TaskStore::open_path(&db).unwrap();
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
@@ -1414,9 +1414,9 @@ mod tests {
         drop(tasks);
 
         let reopened_plans =
-            CloudSharePlanStore::new(DpapiCredentialStore::new(root.path().into()).unwrap());
+            CloudSharePlanStore::new(SystemCredentialStore::new(root.path().into()).unwrap());
         let reopened_tasks = TaskStore::open_path(&db).unwrap();
-        let credentials = DpapiCredentialStore::new(root.path().into()).unwrap();
+        let credentials = SystemCredentialStore::new(root.path().into()).unwrap();
         let before = crate::cloud::CredentialStore::load(&credentials, SHARE_PLAN_SECRET).unwrap();
         let listed = crate::commands::list_tasks_with_cleanup_projection(
             &reopened_tasks,
@@ -1494,7 +1494,7 @@ mod tests {
 
     #[test]
     fn cleanup_projection_converges_all_siblings_after_one_successful_retry() {
-        use crate::cloud::{share::SHARE_PLAN_SECRET, CredentialStore, DpapiCredentialStore};
+        use crate::cloud::{share::SHARE_PLAN_SECRET, CredentialStore, SystemCredentialStore};
         let (root, plans, tasks, locals) = cleanup_fixture();
         let first = set_status(&tasks, locals[0].id, TaskStatus::Completed);
         let second = set_status(&tasks, locals[1].id, TaskStatus::Completed);
@@ -1519,7 +1519,7 @@ mod tests {
         assert_eq!(network_calls, 1);
         assert!(tasks.find(first.id).unwrap().error.is_none());
         assert!(tasks.find(second.id).unwrap().error.is_some());
-        let credentials = DpapiCredentialStore::new(root.path().into()).unwrap();
+        let credentials = SystemCredentialStore::new(root.path().into()).unwrap();
         let journal = credentials.load(SHARE_PLAN_SECRET).unwrap();
         let listed =
             crate::commands::list_tasks_with_cleanup_projection(&tasks, Some(&plans)).unwrap();

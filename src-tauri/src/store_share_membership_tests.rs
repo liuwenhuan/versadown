@@ -313,14 +313,14 @@ fn share_membership_reservation_failure_removes_only_new_tasks_and_preserves_ret
     use crate::cloud::{
         commands::{submit_new_cloud_share_file_scoped_with, DirectoryLeafContext},
         share::{self, CloudShareEntry, CloudSharePlan},
-        DpapiCredentialStore, QuarkError,
+        QuarkError, SystemCredentialStore,
     };
     for retry in [false, true] {
         let tasks = Arc::new(TaskStore::open_in_memory().unwrap());
         let (group, item) = group(&tasks);
         let directory = tempfile::tempdir().unwrap();
         let plans = Arc::new(share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            SystemCredentialStore::new(directory.path().into()).unwrap(),
         ));
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,

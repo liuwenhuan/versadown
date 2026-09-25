@@ -1,5 +1,5 @@
-//! Keep launcher movement on the native UI thread. Browser pointer messages
-//! must not drive a second position loop while this operation is running.
+//! Prefer native movement where the platform can preserve launcher geometry;
+//! otherwise the captured browser pointer loop owns positioning.
 use tauri::WebviewWindow;
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -53,7 +53,15 @@ pub async fn drag_launcher_window(
         receiver.await.map_err(|error| error.to_string())??;
         Ok(true)
     }
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // X11 temporarily expands the input shape while the button is held,
+        // allowing the browser's captured pointer loop to move the fixed
+        // canvas. Unlike GTK's window-manager drag, this does not clamp the
+        // icon to its large transparent canvas at the screen edge.
+        Ok(false)
+    }
+    #[cfg(any(target_os = "macos", not(unix)))]
     {
         Ok(false)
     }

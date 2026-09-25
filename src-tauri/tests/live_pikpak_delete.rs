@@ -1,8 +1,8 @@
 //! Opt-in diagnosis for one user-selected recycle-bin fixture. Mutation is
 //! blocked unless the exact fixture name is explicitly confirmed separately.
 use alldownloader_lib::cloud::{
-    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, DpapiCredentialStore,
-    PikPakClient, ProviderRegistry, QuarkError, ReqwestTransport,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, PikPakClient,
+    ProviderRegistry, QuarkError, ReqwestTransport, SystemCredentialStore,
 };
 use serde_json::Value;
 use std::{path::PathBuf, sync::Mutex};
@@ -118,7 +118,7 @@ fn live_pikpak_selected_recycle_delete() -> Result<(), Box<dyn std::error::Error
         std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
-    let store = DpapiCredentialStore::new(
+    let store = SystemCredentialStore::new(
         std::env::var_os("ALLDOWNLOADER_TEST_CLOUD_SESSIONS")
             .map(PathBuf::from)
             .unwrap_or(

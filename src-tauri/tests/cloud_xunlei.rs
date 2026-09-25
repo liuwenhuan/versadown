@@ -403,6 +403,12 @@ fn modern_web_signature_is_limited_to_verified_profile_and_version() {
     }
     assert!(profile.web_captcha_signature("").is_none());
     assert!(profile.web_captcha_signature("invalid timestamp").is_none());
+    profile.client_version = "1.93.6".into();
+    profile.device_id = "synthetic-device".into();
+    assert_eq!(
+        profile.web_captcha_signature("1788975001000").as_deref(),
+        Some("1.bd4592fbb60e031cab7aaf80fa4bd37c")
+    );
 }
 
 // Break caught: refreshed credentials must remain bound to the authorized account.

@@ -1,6 +1,6 @@
 use alldownloader_lib::cloud::{
-    baidu::BaiduClient, load_saved_password_login, CloudProvider, DpapiCredentialStore,
-    ReqwestTransport,
+    baidu::BaiduClient, load_saved_password_login, CloudProvider, ReqwestTransport,
+    SystemCredentialStore,
 };
 use std::path::PathBuf;
 
@@ -24,7 +24,7 @@ fn probe() -> Result<(String, usize), String> {
                 .join("cloud-sessions")
         })
         .ok_or_else(|| "无法定位应用凭据目录".to_owned())?;
-    let store = DpapiCredentialStore::new(credential_root)
+    let store = SystemCredentialStore::new(credential_root)
         .map_err(|_| "无法读取加密凭据存储".to_owned())?;
     let credentials = load_saved_password_login(&store, CloudProvider::Baidu)
         .map_err(|_| "无法解密已保存的百度登录信息".to_owned())?

@@ -1,7 +1,7 @@
 //! Opt-in, read-only download diagnostics. Never prints signed URLs or credentials.
 use alldownloader_lib::cloud::{
     commands::parse_stable_cloud_source, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
-    DpapiCredentialStore, PikPakClient, QuarkError, ReqwestTransport,
+    PikPakClient, QuarkError, ReqwestTransport, SystemCredentialStore,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::{io::Read, path::PathBuf, time::Duration};
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r.get(0)
         })?;
     probe("old", &old);
-    let store = DpapiCredentialStore::new(root.join("cloud-sessions"))?;
+    let store = SystemCredentialStore::new(root.join("cloud-sessions"))?;
     for fetch in [false, true] {
         let transport = UsageTransport {
             inner: ReqwestTransport::new()?,

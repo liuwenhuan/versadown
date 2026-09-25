@@ -8,8 +8,8 @@
 use alldownloader_lib::cloud::{
     xunlei::{XunleiClient, XunleiSession},
     CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport,
-    CredentialStore, DpapiCredentialStore, PikPakClient, PikPakSession, QuarkError,
-    ReqwestTransport, UploadHttpRequest, UploadHttpResponse,
+    CredentialStore, PikPakClient, PikPakSession, QuarkError, ReqwestTransport,
+    SystemCredentialStore, UploadHttpRequest, UploadHttpResponse,
 };
 use std::{
     error::Error,
@@ -220,17 +220,17 @@ fn require_live_authorization() -> LiveResult<()> {
     Ok(())
 }
 
-fn session_store() -> LiveResult<DpapiCredentialStore> {
+fn session_store() -> LiveResult<SystemCredentialStore> {
     // An isolated test app can authorize without replacing the user's normal
     // account store. This is an explicit opt-in test-data path, not APPDATA.
     if let Some(data_dir) = std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR") {
-        return Ok(DpapiCredentialStore::new(
+        return Ok(SystemCredentialStore::new(
             PathBuf::from(data_dir).join("cloud-sessions"),
         )?);
     }
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
-    Ok(DpapiCredentialStore::new(
+    Ok(SystemCredentialStore::new(
         PathBuf::from(app_data)
             .join("com.alldownloader.desktop")
             .join("cloud-sessions"),

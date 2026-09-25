@@ -37,7 +37,9 @@ pub use commands::list_queue_tasks_for_scope;
 pub use connectors::{
     CloudConnector, CloudDirectory, CloudItem, ConnectorError, MockConnector, Provider,
 };
-pub use downloader::{confirm_download, prepare_download, DownloadError, ParseOutcome, ParseResource};
+pub use downloader::{
+    confirm_download, prepare_download, DownloadError, ParseOutcome, ParseResource,
+};
 pub use duplicates::{duplicate_state, retry_duplicate_state};
 pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
@@ -261,7 +263,7 @@ pub fn run() {
                 }
             }
             let startup_store = std::sync::Arc::clone(&store);
-            let ai_secrets = cloud::DpapiCredentialStore::new(data_dir.join("ai-secrets"))?;
+            let ai_secrets = cloud::SystemCredentialStore::new(data_dir.join("ai-secrets"))?;
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
             // calls cannot race a later `manage` call.
@@ -271,7 +273,11 @@ pub fn run() {
                 .and_then(|binary| {
                     binary.resolve(
                         std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-                        &app.path().resource_dir().map_err(|_| engine_binary::EngineBinaryError::Missing(std::path::PathBuf::from("resource directory")))?,
+                        &app.path().resource_dir().map_err(|_| {
+                            engine_binary::EngineBinaryError::Missing(std::path::PathBuf::from(
+                                "resource directory",
+                            ))
+                        })?,
                     )
                 })
                 .map_err(std::io::Error::other)?;
@@ -358,20 +364,44 @@ pub fn run() {
             if should_show_windows(background_ui_test.as_deref()) {
                 launcher::setup_manager_tray(app.handle()).map_err(std::io::Error::other)?;
                 if let Some(main) = app.get_webview_window("main") {
+                    main.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)))?;
                     main.show()?;
                 }
                 if launcher_visibility == LauncherVisibility::Always {
                     if let Some(launcher) = app.get_webview_window("launcher") {
+                        // The launcher canvas is authored in CSS logical pixels.
+                        // A PhysicalSize here shrinks its WebKitGTK viewport on
+                        // fractional-scale X11 desktops, placing the icon outside
+                        // the rendered surface.
+                        launcher.set_size(tauri::LogicalSize::new(410.0, 720.0))?;
                         // A transparent 410x720 WebView is larger than its
                         // visible icon. Make its initial state click-through
                         // before it can be shown; the region monitor restores
                         // input only under the icon/popup once it is ready.
+                        #[cfg(windows)]
                         if let Err(error) = launcher.set_ignore_cursor_events(true) {
                             eprintln!("无法初始化悬浮窗鼠标穿透: {error}");
                         }
                         // The command installs the HWND subclass on its owner thread.
-                        // Await it outside setup so the UI thread stays available.
+                        // On Linux the GTK GdkWindow does not exist until it is shown,
+                        // so show first and install the X11 input shape afterwards.
                         tauri::async_runtime::spawn(async move {
+                            #[cfg(all(unix, not(target_os = "macos")))]
+                            {
+                                if let Err(error) = launcher.show() {
+                                    eprintln!("无法显示悬浮窗: {error}");
+                                    return;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                if let Err(error) =
+                                    launcher_input::install_linux_context_menu(&launcher)
+                                {
+                                    eprintln!("无法安装悬浮窗右键菜单: {error}");
+                                }
+                                if let Err(error) = launcher_input::install_linux_drag(&launcher) {
+                                    eprintln!("无法安装悬浮窗拖动: {error}");
+                                }
+                            }
                             let result = launcher_input::set_launcher_input_regions(
                                 launcher.clone(),
                                 vec![launcher_input::LauncherInputRegion {
@@ -380,6 +410,7 @@ pub fn run() {
                                     width: 64.0,
                                     height: 64.0,
                                 }],
+                                launcher.scale_factor().unwrap_or(1.0),
                                 launcher.state::<launcher::LauncherInteractionState>(),
                             )
                             .await;
@@ -394,6 +425,7 @@ pub fn run() {
                                     eprintln!("无法初始化悬浮窗输入区域，将由界面重试: {error}")
                                 }
                             }
+                            #[cfg(not(all(unix, not(target_os = "macos"))))]
                             if let Err(error) = launcher.show() {
                                 eprintln!("无法显示悬浮窗: {error}");
                             }

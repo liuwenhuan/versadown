@@ -14,7 +14,7 @@ impl SqliteSharePlanRepository {
     }
 
     fn open(&self) -> Result<Connection, QuarkError> {
-        let mut connection = Connection::open(self.root.join("cloud-share-plans.sqlite"))
+        let connection = Connection::open(self.root.join("cloud-share-plans.sqlite"))
             .map_err(|_| QuarkError::Storage)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
@@ -36,58 +36,6 @@ impl SqliteSharePlanRepository {
              CREATE INDEX IF NOT EXISTS share_journals_cleanup ON share_journals(provider,share_fingerprint,entry_fingerprint,cleanup_state);
              CREATE TABLE IF NOT EXISTS share_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);"
         ).map_err(|_| QuarkError::Storage)?;
-        let legacy = self.root.join("cloud-share-plans-v1.bin");
-        if legacy.exists() {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(|_| QuarkError::Storage)?;
-            let migrated = transaction
-                .query_row(
-                    "SELECT value FROM share_metadata WHERE key='legacy_migrated'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(|_| QuarkError::Storage)?
-                .is_some();
-            if !migrated {
-                let credentials = DpapiCredentialStore::new(self.root.clone())?;
-                let bytes = Zeroizing::new(
-                    credentials
-                        .load(SHARE_PLAN_SECRET)?
-                        .ok_or(QuarkError::Storage)?,
-                );
-                let document: PlanDocument =
-                    serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
-                validate_document(&document)?;
-                let mut current = Self::read_document(&transaction)?;
-                current.sequence = current.sequence.max(document.sequence);
-                // Existing committed rows win if an old encrypted backup is restored.
-                for (key, plan) in document.plans {
-                    current.plans.entry(key).or_insert(plan);
-                }
-                Self::write_document(&transaction, &current)?;
-                transaction
-                    .execute(
-                        "INSERT INTO share_metadata(key,value) VALUES('legacy_migrated',1)",
-                        [],
-                    )
-                    .map_err(|_| QuarkError::Storage)?;
-            }
-            transaction.commit().map_err(|_| QuarkError::Storage)?;
-            // A crash or rename failure after commit retries only the recoverable rename.
-            let backup = self.root.join("cloud-share-plans-v1.bin.migrated-backup");
-            if backup.exists() {
-                // Preserve both files rather than overwriting a previous recoverable copy.
-                let backup = self.root.join(format!(
-                    "cloud-share-plans-v1.bin.migrated-backup-{}",
-                    uuid::Uuid::new_v4()
-                ));
-                std::fs::rename(&legacy, backup).map_err(|_| QuarkError::Storage)?;
-            } else {
-                std::fs::rename(&legacy, backup).map_err(|_| QuarkError::Storage)?;
-            }
-        }
         Ok(connection)
     }
 
@@ -310,8 +258,8 @@ pub struct CloudSharePlanStore {
 }
 
 impl CloudSharePlanStore {
-    /// Production construction requires DPAPI; plaintext backing is test-only.
-    pub fn new(credentials: DpapiCredentialStore) -> Self {
+    /// Production uses the system credential store; the plaintext backing is test-only.
+    pub fn new(credentials: SystemCredentialStore) -> Self {
         Self {
             repository: Some(SqliteSharePlanRepository::new(credentials.root())),
             #[cfg(test)]

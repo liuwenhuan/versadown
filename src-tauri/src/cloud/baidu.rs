@@ -253,7 +253,7 @@ mod tests {
             std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
             Ok("1")
         );
-        let store = crate::cloud::DpapiCredentialStore::new(
+        let store = crate::cloud::SystemCredentialStore::new(
             std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
                 .join("com.alldownloader.desktop/cloud-sessions"),
         )
@@ -759,7 +759,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
         let source = plan.source_for("11");
@@ -860,7 +860,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(dir.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
         let source = plan.source_for("11");

@@ -13,8 +13,8 @@ use alldownloader_lib::{
         uc::{UcClient, UcSession},
         CloudDirectory, CloudError, CloudFile, CloudFileKind, CloudHttpRequest, CloudHttpResponse,
         CloudHttpTransport, CloudProvider, CloudShareOptions, CloudUploadTransport,
-        CredentialStore, DpapiCredentialStore, ProviderRegistry, ReqwestTransport,
-        ResolvedCloudDownload, UploadHttpRequest, UploadHttpResponse,
+        CredentialStore, ProviderRegistry, ReqwestTransport, ResolvedCloudDownload,
+        SystemCredentialStore, UploadHttpRequest, UploadHttpResponse,
     },
     Aria2Settings, DownloadService, NewTask, TaskStatus, TaskStore,
 };
@@ -653,7 +653,7 @@ fn run_provider(provider: CloudProvider) -> LiveResult<()> {
     require_live_authorization()?;
     let root_id = ProviderRegistry::global().get(provider).root_directory_id;
     let credentials_root = session_root()?;
-    let direct_store = DpapiCredentialStore::new(credentials_root.clone())?;
+    let direct_store = SystemCredentialStore::new(credentials_root.clone())?;
     direct_store.load(provider.key()).map_err(|error| {
         failure(format!(
             "{} credential decrypt failed: {}",
@@ -1044,7 +1044,7 @@ fn run_uc_personal_share_lifecycle() -> LiveResult<()> {
     let provider = CloudProvider::Uc;
     let root_id = ProviderRegistry::global().get(provider).root_directory_id;
     let credentials_root = session_root()?;
-    let direct_store = DpapiCredentialStore::new(credentials_root.clone())?;
+    let direct_store = SystemCredentialStore::new(credentials_root.clone())?;
     direct_store.load(provider.key()).map_err(|error| {
         failure(format!(
             "{} credential decrypt failed: {}",
@@ -1382,7 +1382,7 @@ fn live_uc_existing_file_download() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
     let credentials_root = session_root()?;
-    let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
+    let credentials = SystemCredentialStore::new(credentials_root.clone()).map_err(|error| {
         failure(format!(
             "UC credential store initialization failed: {}",
             error_kind(&error)
@@ -1503,7 +1503,7 @@ fn live_uc_current_session_and_pending_task_owners_are_consistent() -> LiveResul
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
     let credentials_root = session_root()?;
-    let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
+    let credentials = SystemCredentialStore::new(credentials_root.clone()).map_err(|error| {
         failure(format!(
             "UC credential store initialization failed: {}",
             error_kind(&error)
@@ -1648,7 +1648,7 @@ fn live_uc_member_identity_is_not_a_rotating_browser_marker() -> LiveResult<()> 
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
     let credentials_root = session_root()?;
-    let credentials = DpapiCredentialStore::new(credentials_root).map_err(|error| {
+    let credentials = SystemCredentialStore::new(credentials_root).map_err(|error| {
         failure(format!(
             "UC credential store initialization failed: {}",
             error_kind(&error)
@@ -1852,7 +1852,7 @@ fn live_uc_existing_file_aria2_download() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
     let credentials_root = session_root()?;
-    let credentials = DpapiCredentialStore::new(credentials_root.clone()).map_err(|error| {
+    let credentials = SystemCredentialStore::new(credentials_root.clone()).map_err(|error| {
         failure(format!(
             "UC credential store initialization failed: {}",
             error_kind(&error)

@@ -516,17 +516,17 @@ struct LoadRecordingStore {
 
 fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
     use alldownloader_lib::cloud::{
-        prepare_password_account_login, reset_password_profile_if_required, DpapiCredentialStore,
+        prepare_password_account_login, reset_password_profile_if_required, SystemCredentialStore,
     };
     let root = tempfile::tempdir().unwrap();
-    let store = DpapiCredentialStore::new(root.path().to_owned()).unwrap();
+    let store = SystemCredentialStore::new(root.path().to_owned()).unwrap();
     save_password_credential(
         &store,
         CloudPasswordCredential::new(provider, "old-account", "alice", "old-secret"),
     )
     .unwrap();
     store.save(provider.key(), b"old-session").unwrap();
-    let attempt = |store: &DpapiCredentialStore| -> Result<&str, QuarkError> {
+    let attempt = |store: &SystemCredentialStore| -> Result<&str, QuarkError> {
         let reset = prepare_password_account_login(store, provider, "bob")?;
         reset_password_profile_if_required(store, provider, reset, || Err(QuarkError::Storage))?;
         Ok("old-account")
@@ -534,7 +534,7 @@ fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
     assert!(attempt(&store).is_err());
     assert!(store.load(provider.key()).unwrap().is_none());
     drop(store);
-    let reopened = DpapiCredentialStore::new(root.path().to_owned()).unwrap();
+    let reopened = SystemCredentialStore::new(root.path().to_owned()).unwrap();
     assert!(
         attempt(&reopened).is_err(),
         "{provider:?} must not accept old-account after a failed profile reset and restart"

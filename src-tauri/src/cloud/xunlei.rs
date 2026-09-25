@@ -703,7 +703,8 @@ mod tests {
         ]);
         let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        let store =
+            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
         let entry = selected();
         store.upsert(&entry.plan).unwrap();
         let source = entry.plan.source_for("f1");
@@ -746,7 +747,8 @@ mod tests {
         ]);
         let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        let store =
+            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
         let entry = selected();
         store.upsert(&entry.plan).unwrap();
         let source = entry.plan.source_for("f1");
@@ -785,7 +787,8 @@ mod tests {
             Ok(ShareResolution::TransferRequired(_))
         ));
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        let store =
+            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
         store.upsert(&entry.plan).unwrap();
         credentials.remove("xunlei").unwrap();
         assert!(matches!(
@@ -1496,6 +1499,21 @@ const WEB_SIGNATURE_SALTS: [&str; 15] = [
     "GVEo",
     "8k4v5dntCyPof87pZ0gc/EixX3qv5RxoaGzZ",
 ];
+// Official pan.xunlei.com 1.93.6, utils-initial.f800c7326181a3f081fe.js:
+// filters.pubmtQgYZVqqN7uXVBgJsabTHcrjkRqS9XC. The chain's final
+// pubYvy... delegate returns its input unchanged; these are the ten MD5 rounds.
+const WEB_SIGNATURE_SALTS_1936: [&str; 10] = [
+    "hHx0aqfr+FQxmZZFd8uC",
+    "yCv9LPWcueqAqyAf0",
+    "4eXtCtkptUMWj0PHm+k6PlBQ8MLxub1yhPhhHYseH6JbG",
+    "CUO7z+eyFzwGn6yDreEVZdOTWJdInHLbLgmIyfm9YuQ8Op",
+    "NvvziNyP",
+    "tPlbjA7+D5m+Ex4A5j/r3YFzrYvS4GVyZZdObvm6v96P2qZ13Yoj",
+    "IW3GOz",
+    "86Qw6R3FFacF",
+    "/icv8Er",
+    "ydvTBcED6CZWZ/JvIA0txHGGqplHXpDKf2Oy95",
+];
 /// Non-secret identity values captured from the official browser/QR flow.
 /// They are retained because Xunlei binds refresh and drive calls to that
 /// profile; callers must never fabricate a replacement profile.
@@ -1572,20 +1590,40 @@ impl XunleiClientProfile {
         {
             return None;
         }
+        Some(self.web_captcha_signature_with_known_salts(timestamp))
+    }
+
+    fn web_captcha_signature_with_known_salts(&self, timestamp: &str) -> String {
         let mut current = format!(
             "{}{}{}{}{}",
             self.client_id, self.client_version, WEB_PACKAGE, self.device_id, timestamp
         );
-        for salt in WEB_SIGNATURE_SALTS {
+        let salts: &[&str] = if self.client_version == "1.93.6" {
+            &WEB_SIGNATURE_SALTS_1936
+        } else {
+            &WEB_SIGNATURE_SALTS
+        };
+        for salt in salts {
             current.push_str(salt);
             current = format!("{:x}", md5::compute(current.as_bytes()));
         }
-        Some(format!("1.{current}"))
+        format!("1.{current}")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn captured_web_signature_matches_known_salts(
+        &self,
+        timestamp: &str,
+        signature: &str,
+    ) -> bool {
+        !timestamp.is_empty()
+            && timestamp.bytes().all(|byte| byte.is_ascii_digit())
+            && signature == self.web_captcha_signature_with_known_salts(timestamp)
     }
 
     fn supports_web_signature(&self) -> bool {
         self.is_modern_web()
-            && self.client_version == WEB_VERSION_CODE
+            && matches!(self.client_version.as_str(), WEB_VERSION_CODE | "1.93.6")
             && !self.device_id.is_empty()
     }
     /// Headers accepted by the drive APIs.  The official browser does not

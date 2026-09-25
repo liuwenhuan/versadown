@@ -129,7 +129,7 @@ impl crate::cloud::CloudHttpTransport for RetryingShareReadTransport<'_> {
 
 /// The only cloud-share plan projection permitted across the IPC boundary.
 /// Its source is an opaque, validated `cloud-share://` reference; credentials,
-/// provider session context, and canonical share identifiers remain DPAPI-only.
+/// provider session context, and canonical share identifiers remain in encrypted local storage.
 #[derive(Clone, Serialize)]
 pub struct CloudShareConfirmation {
     pub plan_source: String,

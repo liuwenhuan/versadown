@@ -349,7 +349,8 @@ mod tests {
             json!({"stoken":"stale-share-token","files":{"11":{"token":"stale-file-token","parent":"0"}}}),
         );
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        let store =
+            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
         store.upsert(&plan).unwrap();
         let source = plan.source_for("11");
 
@@ -571,7 +572,8 @@ mod tests {
             panic!()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+        let store =
+            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
         store.upsert(&plan).unwrap();
         let source = plan.source_for("11");
         assert!(matches!(
@@ -691,7 +693,7 @@ mod tests {
             };
             let dir = tempfile::tempdir().unwrap();
             let store =
-                CloudSharePlanStore::new(DpapiCredentialStore::new(dir.path().into()).unwrap());
+                CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
             store.upsert(&plan).unwrap();
             let source = plan.source_for("11");
             assert!(matches!(

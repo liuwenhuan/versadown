@@ -354,7 +354,7 @@ impl CloudState {
     pub fn with_provider<T>(
         &self,
         provider: CloudProvider,
-        work: impl FnOnce(&DpapiCredentialStore) -> Result<T, QuarkError>,
+        work: impl FnOnce(&SystemCredentialStore) -> Result<T, QuarkError>,
     ) -> Result<T, QuarkError> {
         self.auth_supervisor
             .with_provider(provider, || work(&self.store))

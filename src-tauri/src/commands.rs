@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::downloader::load_torrent_base64;
 use crate::models::{CloudDirectoryGroup, CloudDirectoryGroupItem, QueueTaskPayload};
 use crate::{
-    cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, DpapiCredentialStore},
+    cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, SystemCredentialStore},
     confirm_download, duplicate_state, prepare_download, resolve_magnet_metadata,
     retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings, DownloadAction,
     DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility, ParseOutcome,
@@ -37,7 +37,7 @@ pub struct AppState {
     pub runtime: Arc<crate::EngineRuntime>,
     pub settings: Mutex<AppSettings>,
     pub settings_path: PathBuf,
-    pub ai_secrets: DpapiCredentialStore,
+    pub ai_secrets: SystemCredentialStore,
     pub privacy_session: crate::privacy::PrivacySession,
     pub cloud_download_sources: crate::cloud::commands::CloudDownloadSourceGate,
     pub cloud_download_dispatch: crate::cloud::download_dispatch::CloudDownloadDispatch,
@@ -4530,8 +4530,12 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(terminal.len(), 2);
-        assert!(terminal.iter().any(|task| task.status == TaskStatus::Completed));
-        assert!(terminal.iter().any(|task| task.status == TaskStatus::Failed));
+        assert!(terminal
+            .iter()
+            .any(|task| task.status == TaskStatus::Completed));
+        assert!(terminal
+            .iter()
+            .any(|task| task.status == TaskStatus::Failed));
     }
 
     #[tokio::test]
@@ -5070,7 +5074,7 @@ mod tests {
             .await
             .unwrap();
             let plans = crate::cloud::share::CloudSharePlanStore::new(
-                DpapiCredentialStore::new(output.path().to_path_buf()).unwrap(),
+                SystemCredentialStore::new(output.path().to_path_buf()).unwrap(),
             );
             purge_cloud_directory_group(&store, &plans, group.id, false).unwrap();
             assert!(store.cloud_directory_group(group.id).unwrap().is_none());
@@ -5674,7 +5678,7 @@ mod tests {
         );
 
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(output.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(output.path().to_path_buf()).unwrap(),
         );
         purge_cloud_directory_group(&store, &plans, group.id, false).unwrap();
         assert!(store.cloud_directory_group(group.id).unwrap().is_none());
@@ -5725,7 +5729,10 @@ mod tests {
         recycle_local_task_for_permanent_deletion(&store, completed.id).unwrap();
         recycle_local_task_for_permanent_deletion(&store, failed.id).unwrap();
 
-        assert_eq!(store.find(completed.id).unwrap().status, TaskStatus::Recycled);
+        assert_eq!(
+            store.find(completed.id).unwrap().status,
+            TaskStatus::Recycled
+        );
         assert_eq!(store.find(failed.id).unwrap().status, TaskStatus::Recycled);
     }
 
@@ -5734,7 +5741,7 @@ mod tests {
     fn permanent_purge_unlinks_each_recycled_cloud_share_task_after_sqlite_deletion() {
         let directory = tempfile::tempdir().unwrap();
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(directory.path().to_path_buf()).unwrap(),
         );
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
@@ -5780,7 +5787,7 @@ mod tests {
         for delete_files in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let plans = crate::cloud::share::CloudSharePlanStore::new(
-                DpapiCredentialStore::new(directory.path().join("credentials")).unwrap(),
+                SystemCredentialStore::new(directory.path().join("credentials")).unwrap(),
             );
             let store = TaskStore::open_in_memory().unwrap();
             let output = directory.path().join("file.zip");
@@ -5816,7 +5823,7 @@ mod tests {
     fn permanent_purge_keeps_a_task_when_its_cloud_share_plan_is_missing() {
         let directory = tempfile::tempdir().unwrap();
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(directory.path().to_path_buf()).unwrap(),
         );
         let source = format!("cloud-share://baidu/{}/{}", "a".repeat(64), "b".repeat(64));
         let store = TaskStore::open_in_memory().unwrap();
@@ -6232,7 +6239,7 @@ mod tests {
     fn cloud_share_resubmission_reservation_is_idempotent_for_the_original_task() {
         let directory = tempfile::tempdir().unwrap();
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(directory.path().to_path_buf()).unwrap(),
         );
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
@@ -6266,7 +6273,7 @@ mod tests {
     fn task_payload_projects_cleanup_pending_from_the_exact_plan_journal() {
         let directory = tempfile::tempdir().unwrap();
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(directory.path().to_path_buf()).unwrap(),
         );
         let plan = CloudSharePlan::new(
             CloudProvider::Baidu,
@@ -6322,7 +6329,7 @@ mod tests {
     fn task_payload_does_not_clear_cleanup_retry_when_the_plan_state_is_unknown() {
         let directory = tempfile::tempdir().unwrap();
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(directory.path().to_path_buf()).unwrap(),
         );
         let store = TaskStore::open_in_memory().unwrap();
         let task = store
@@ -6644,7 +6651,7 @@ mod tests {
     fn permanent_recycle_cleanup_accepts_legacy_zero_byte_metadata_preview_paths() {
         let directory = tempfile::tempdir().unwrap();
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(directory.path().to_path_buf()).unwrap(),
         );
         let store = TaskStore::open_in_memory().unwrap();
         let task = store
@@ -6675,7 +6682,7 @@ mod tests {
         for delete_files in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let plans = crate::cloud::share::CloudSharePlanStore::new(
-                DpapiCredentialStore::new(directory.path().join("credentials")).unwrap(),
+                SystemCredentialStore::new(directory.path().join("credentials")).unwrap(),
             );
             let store = TaskStore::open_in_memory().unwrap();
             let group = store
@@ -6762,7 +6769,7 @@ mod tests {
         ] {
             let directory = tempfile::tempdir().unwrap();
             let plans = crate::cloud::share::CloudSharePlanStore::new(
-                DpapiCredentialStore::new(directory.path().join("credentials")).unwrap(),
+                SystemCredentialStore::new(directory.path().join("credentials")).unwrap(),
             );
             let store = TaskStore::open_in_memory().unwrap();
             let group = store
@@ -6967,7 +6974,7 @@ mod tests {
     fn permanent_recycle_cleanup_removes_metadata_only_task_without_a_local_path() {
         let directory = tempfile::tempdir().unwrap();
         let plans = crate::cloud::share::CloudSharePlanStore::new(
-            DpapiCredentialStore::new(directory.path().to_path_buf()).unwrap(),
+            SystemCredentialStore::new(directory.path().to_path_buf()).unwrap(),
         );
         let store = TaskStore::open_in_memory().unwrap();
         let task = store

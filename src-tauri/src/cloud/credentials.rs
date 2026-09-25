@@ -1,10 +1,22 @@
 use super::QuarkError;
+use chacha20poly1305::{
+    aead::{Aead, KeyInit},
+    XChaCha20Poly1305, XNonce,
+};
+use keyring::{Entry, Error as KeyringError};
+use rand::{rngs::OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    io::Write,
     path::{Path, PathBuf},
     sync::Mutex,
 };
+use zeroize::Zeroize;
+
+const SYSTEM_CREDENTIAL_SERVICE_PREFIX: &str = "com.alldownloader.desktop";
+const SHARE_PROTECTOR_SERVICE: &str = "com.alldownloader.desktop.share-storage";
+const SHARE_PROTECTOR_KEY: &str = "share-storage-key-v1";
+const PROTECTED_BLOB_MAGIC: &[u8] = b"ADSC1";
 pub trait CredentialStore: Send + Sync {
     /// Snapshot consumers delegate renewal to AuthSupervisor.
     fn automatic_session_recovery(&self) -> bool {
@@ -37,10 +49,10 @@ impl CredentialStore for MemoryCredentialStore {
         Ok(())
     }
 }
-pub struct DpapiCredentialStore {
+#[derive(Clone)]
+pub struct SystemCredentialStore {
     root: PathBuf,
-    #[cfg(test)]
-    publish_failpoint: Option<fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>>,
+    service: String,
 }
 
 pub(crate) const BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY: &str =
@@ -93,292 +105,134 @@ pub fn credential_key_is_supported(key: &str) -> bool {
     )
 }
 
-impl DpapiCredentialStore {
+impl SystemCredentialStore {
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
+        let root_id = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
         Ok(Self {
             root,
-            #[cfg(test)]
-            publish_failpoint: None,
+            service: format!("{SYSTEM_CREDENTIAL_SERVICE_PREFIX}.{}", &root_id[..24]),
         })
     }
-    #[cfg(test)]
-    fn with_publish_failpoint(
-        root: PathBuf,
-        publish_failpoint: fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
-    ) -> Result<Self, QuarkError> {
-        std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
-        Ok(Self {
-            root,
-            publish_failpoint: Some(publish_failpoint),
-        })
-    }
-    fn path(&self, key: &str) -> Result<PathBuf, QuarkError> {
+    fn entry(&self, key: &str) -> Result<Entry, QuarkError> {
         if !credential_key_is_supported(key) {
             return Err(QuarkError::Storage);
         }
-        Ok(self.root.join(format!("{key}.bin")))
-    }
-    fn create_temp_file(&self, target: &Path) -> Result<(PathBuf, std::fs::File), QuarkError> {
-        let parent = target.parent().ok_or(QuarkError::Storage)?;
-        let filename = target
-            .file_name()
-            .ok_or(QuarkError::Storage)?
-            .to_string_lossy();
-        for _ in 0..16 {
-            let temp = parent.join(format!(".{filename}.tmp-{}", uuid::Uuid::new_v4()));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)
-            {
-                Ok(file) => return Ok((temp, file)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(_) => return Err(QuarkError::Storage),
-            }
-        }
-        Err(QuarkError::Storage)
-    }
-    fn write_temp_file(&self, target: &Path, ciphertext: &[u8]) -> Result<PathBuf, QuarkError> {
-        let (temp, mut file) = self.create_temp_file(target)?;
-        let result = file.write_all(ciphertext).and_then(|()| file.sync_all());
-        drop(file);
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temp);
-            return Err(QuarkError::Storage);
-        }
-        Ok(temp)
-    }
-    fn publish(&self, temp: &Path, target: &Path) -> std::io::Result<()> {
-        #[cfg(test)]
-        if let Some(publish_failpoint) = self.publish_failpoint {
-            return publish_failpoint(temp, target);
-        }
-        publish_file(temp, target)
+        Entry::new(&self.service, key).map_err(|_| QuarkError::Storage)
     }
 }
-impl CredentialStore for DpapiCredentialStore {
+impl CredentialStore for SystemCredentialStore {
     fn save(&self, k: &str, v: &[u8]) -> Result<(), QuarkError> {
-        let path = self.path(k)?;
-        let bytes = protect(v, true)?;
-        let temp = self.write_temp_file(&path, &bytes)?;
-        match self.publish(&temp, &path) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                let _ = std::fs::remove_file(temp);
-                Err(QuarkError::Storage)
-            }
-        }
+        self.entry(k)?
+            .set_secret(v)
+            .map_err(|_| QuarkError::Storage)
     }
     fn load(&self, k: &str) -> Result<Option<Vec<u8>>, QuarkError> {
-        match std::fs::read(self.path(k)?) {
-            Ok(b) => protect(&b, false).map(Some),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        match self.entry(k)?.get_secret() {
+            Ok(value) => Ok(Some(value)),
+            Err(KeyringError::NoEntry) => Ok(None),
             Err(_) => Err(QuarkError::Storage),
         }
     }
     fn remove(&self, k: &str) -> Result<(), QuarkError> {
-        match std::fs::remove_file(self.path(k)?) {
+        match self.entry(k)?.delete_credential() {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(KeyringError::NoEntry) => Ok(()),
             Err(_) => Err(QuarkError::Storage),
         }
     }
 }
-#[cfg(windows)]
+
+fn share_protector_entry() -> Result<Entry, QuarkError> {
+    Entry::new(SHARE_PROTECTOR_SERVICE, SHARE_PROTECTOR_KEY).map_err(|_| QuarkError::Storage)
+}
+
+fn share_protection_key() -> Result<[u8; 32], QuarkError> {
+    let entry = share_protector_entry()?;
+    let mut key = match entry.get_secret() {
+        Ok(key) if key.len() == 32 => key,
+        Ok(_) => return Err(QuarkError::Storage),
+        Err(KeyringError::NoEntry) => {
+            let mut key = vec![0_u8; 32];
+            OsRng.fill_bytes(&mut key);
+            entry.set_secret(&key).map_err(|_| QuarkError::Storage)?;
+            key
+        }
+        Err(_) => return Err(QuarkError::Storage),
+    };
+    let mut result = [0_u8; 32];
+    result.copy_from_slice(&key);
+    key.zeroize();
+    Ok(result)
+}
+
+/// Encrypts the SQLite share-plan payloads with a key kept only in the system
+/// credential store. This replaces the platform-specific adapter while leaving the transactional plan
+/// repository intact on Windows, Linux and macOS.
 pub(crate) fn protect(input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
-    use windows::Win32::{
-        Foundation::{LocalFree, HLOCAL},
-        Security::Cryptography::{
-            CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
-        },
-    };
-    let blob = CRYPT_INTEGER_BLOB {
-        cbData: input.len().try_into().map_err(|_| QuarkError::Storage)?,
-        pbData: input.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB::default();
-    // DPAPI binds ciphertext to the current Windows user.
-    unsafe {
-        if encrypt {
-            CryptProtectData(
-                &blob,
-                windows::core::PCWSTR::null(),
-                None,
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        } else {
-            CryptUnprotectData(
-                &blob,
-                None,
-                None,
-                None,
-                None,
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        }
+    let mut key = share_protection_key()?;
+    let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| QuarkError::Storage)?;
+    key.zeroize();
+    if encrypt {
+        let mut nonce = XNonce::default();
+        OsRng.fill_bytes(&mut nonce);
+        let ciphertext = cipher
+            .encrypt(&nonce, input)
+            .map_err(|_| QuarkError::Storage)?;
+        let mut protected =
+            Vec::with_capacity(PROTECTED_BLOB_MAGIC.len() + nonce.len() + ciphertext.len());
+        protected.extend_from_slice(PROTECTED_BLOB_MAGIC);
+        protected.extend_from_slice(&nonce);
+        protected.extend_from_slice(&ciphertext);
+        return Ok(protected);
+    }
+    let nonce_end = PROTECTED_BLOB_MAGIC.len() + XNonce::default().len();
+    if input.len() <= nonce_end || !input.starts_with(PROTECTED_BLOB_MAGIC) {
+        return Err(QuarkError::Storage);
+    }
+    let nonce = XNonce::try_from(&input[PROTECTED_BLOB_MAGIC.len()..nonce_end])
         .map_err(|_| QuarkError::Storage)?;
-        let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
-        Ok(bytes)
-    }
-}
-#[cfg(not(windows))]
-pub(crate) fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, QuarkError> {
-    Err(QuarkError::Storage)
+    cipher
+        .decrypt(&nonce, &input[nonce_end..])
+        .map_err(|_| QuarkError::Storage)
 }
 
-#[cfg(windows)]
-fn publish_file(temp: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::{
-        core::PCWSTR,
-        Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        },
-    };
-
-    let temp = temp
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    unsafe {
-        MoveFileExW(
-            PCWSTR(temp.as_ptr()),
-            PCWSTR(target.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-        .map_err(|_| std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(windows))]
-fn publish_file(temp: &Path, target: &Path) -> std::io::Result<()> {
-    std::fs::rename(temp, target)
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    use super::*;
-    use std::{
-        io,
-        sync::atomic::{AtomicBool, Ordering},
-    };
-
-    static TEMP_CONTAINS_PLAINTEXT: AtomicBool = AtomicBool::new(false);
-
-    fn fail_after_inspecting_temp(temp: &std::path::Path, _: &std::path::Path) -> io::Result<()> {
-        let ciphertext = std::fs::read(temp)?;
-        TEMP_CONTAINS_PLAINTEXT.store(
-            ciphertext
-                .windows(b"new-plan-secret".len())
-                .any(|bytes| bytes == b"new-plan-secret"),
-            Ordering::SeqCst,
-        );
-        Err(io::Error::other("publish failed"))
-    }
+#[cfg(test)]
+mod system_store_tests {
+    use super::{protect, CredentialStore, SystemCredentialStore};
 
     #[test]
-    fn dpapi_publish_failure_cannot_replace_existing_journal_or_leave_a_plaintext_temp() {
-        TEMP_CONTAINS_PLAINTEXT.store(false, Ordering::SeqCst);
+    fn system_credential_store_round_trips_binary_secrets_and_treats_missing_entries_as_absent() {
         let directory = tempfile::tempdir().unwrap();
-        let original = DpapiCredentialStore::new(directory.path().into()).unwrap();
-        original
-            .save("cloud-share-plans-v1", b"old-plan-secret")
-            .unwrap();
-        let failing = DpapiCredentialStore::with_publish_failpoint(
-            directory.path().into(),
-            fail_after_inspecting_temp,
-        )
-        .unwrap();
+        let store = SystemCredentialStore::new(directory.path().into()).unwrap();
 
-        assert!(matches!(
-            failing.save("cloud-share-plans-v1", b"new-plan-secret"),
-            Err(QuarkError::Storage)
-        ));
-        assert_eq!(
-            original.load("cloud-share-plans-v1").unwrap(),
-            Some(b"old-plan-secret".to_vec())
-        );
-        assert!(!TEMP_CONTAINS_PLAINTEXT.load(Ordering::SeqCst));
-        assert!(std::fs::read_dir(directory.path())
-            .unwrap()
-            .all(|entry| !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .contains(".tmp-")));
-    }
-
-    #[test]
-    fn dpapi_successful_overwrite_replaces_the_journal_value() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = DpapiCredentialStore::new(directory.path().into()).unwrap();
+        assert_eq!(store.load("privacy-download-password-v1").unwrap(), None);
         store
-            .save("cloud-share-plans-v1", b"old-plan-secret")
+            .save(
+                "privacy-download-password-v1",
+                b"correct horse battery staple",
+            )
             .unwrap();
-        store
-            .save("cloud-share-plans-v1", b"new-plan-secret")
-            .unwrap();
-
         assert_eq!(
-            store.load("cloud-share-plans-v1").unwrap(),
-            Some(b"new-plan-secret".to_vec())
+            store.load("privacy-download-password-v1").unwrap(),
+            Some(b"correct horse battery staple".to_vec())
         );
+        store.remove("privacy-download-password-v1").unwrap();
+        assert_eq!(store.load("privacy-download-password-v1").unwrap(), None);
     }
 
     #[test]
-    fn dpapi_encrypts_and_restores_password_login_drafts() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = DpapiCredentialStore::new(directory.path().into()).unwrap();
-        for provider in ["pikpak", "baidu", "tianyi"] {
-            let key = format!("cloud-password-draft-{provider}");
-            store.save(&key, b"username-and-password").unwrap();
-            assert_eq!(
-                store.load(&key).unwrap(),
-                Some(b"username-and-password".to_vec())
-            );
-            let raw = std::fs::read(directory.path().join(format!("{key}.bin"))).unwrap();
-            assert!(!raw
-                .windows(b"username-and-password".len())
-                .any(|bytes| bytes == b"username-and-password"));
-        }
-    }
+    fn share_plan_protector_never_persists_its_plaintext_payload() {
+        let plaintext = b"cloud-share-plan-secret";
+        let protected = protect(plaintext, true).unwrap();
 
-    #[test]
-    fn dpapi_concurrent_different_keys_keep_each_credential_readable() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().to_path_buf();
-        std::thread::scope(|scope| {
-            let quark_root = root.clone();
-            scope.spawn(move || {
-                let store = DpapiCredentialStore::new(quark_root).unwrap();
-                store.save("quark", b"quark-secret").unwrap();
-            });
-            scope.spawn(move || {
-                let store = DpapiCredentialStore::new(root).unwrap();
-                store.save("pikpak", b"pikpak-secret").unwrap();
-            });
-        });
-        let store = DpapiCredentialStore::new(directory.path().into()).unwrap();
-
-        assert_eq!(store.load("quark").unwrap(), Some(b"quark-secret".to_vec()));
-        assert_eq!(
-            store.load("pikpak").unwrap(),
-            Some(b"pikpak-secret".to_vec())
-        );
+        assert_ne!(protected, plaintext);
+        assert!(!protected
+            .windows(plaintext.len())
+            .any(|bytes| bytes == plaintext));
+        assert_eq!(protect(&protected, false).unwrap(), plaintext);
     }
 }

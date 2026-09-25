@@ -181,15 +181,23 @@ export function LauncherWindow() {
   }, []);
 
   function openContextMenu() {
-    if (requestedMode.current === 'context-menu') {
-      requestMode('compact');
-      return;
-    }
-    requestMode('context-menu');
+    // WebKitGTK can deliver its native context-menu signal before or after
+    // the DOM context-menu event. Treat both deliveries as one open request
+    // instead of allowing a duplicate to close the menu again.
+    if (requestedMode.current !== 'context-menu') requestMode('context-menu');
     void getLauncherManagerVisible().then(setManagerVisible).catch(() => undefined);
     // Records menu usage only; this command never changes native visibility.
     void showLauncherMenu().catch(() => undefined);
   }
+
+  useEffect(() => {
+    // Linux forwards WebKitGTK's native context-menu signal here. Keeping the
+    // state transition in React means the displayed menu and X11 input region
+    // always come from the same component.
+    const openNativeContextMenu = () => openContextMenu();
+    window.addEventListener('alldownloader:launcher-context-menu', openNativeContextMenu);
+    return () => window.removeEventListener('alldownloader:launcher-context-menu', openNativeContextMenu);
+  }, []);
 
   function closeContextMenu() {
     requestMode('compact');
@@ -234,14 +242,13 @@ export function LauncherWindow() {
         if (!disposed.current) await refreshLauncherGeometry();
         return;
       }
-      dragSession.current = await beginLauncherPointerDrag(pointer);
+      dragSession.current = await beginLauncherPointerDrag(pointer, grabOffset);
       if (disposed.current || !launcherDragging.current) return;
       const pendingPointer = dragPendingPointer.current;
       if (pendingPointer) queueLauncherDragMove(pendingPointer);
-      // Do not put native region work on the movement critical path. Closing
-      // the panel makes the next layout pass compact; the native update can
-      // safely finish while the already-captured pointer follows the mouse.
-      void applyRegions([launcherIconRegion]).catch(() => undefined);
+      // Linux keeps its X11 input shape expanded only until the native button
+      // release. Applying the compact shape here would stop pointer events
+      // before this captured browser drag reaches the screen edge.
       if (dragEndPointer.current) finishLauncherDrag(dragEndPointer.current);
     } catch {
       nativeDragInFlight.current = false;

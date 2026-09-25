@@ -33,6 +33,8 @@ hmac = "0.12"
 httpdate = "1"
 time = "0.3"
 zeroize = "1"
+keyring = "4.2"
+chacha20poly1305 = "0.11"
 md5 = "0.8"
 url = "2"
 percent-encoding = "2"
@@ -43,6 +45,12 @@ rsa = "0.9"
 tokio-tungstenite = "0.28"
 futures-util = { version = "0.3", features = ["sink"] }
 tauri-plugin-notification = "2"
+libloading = "0.7"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+gtk = "0.18"
+webkit2gtk = "2.0.2"
+libc = "0.2"
 
 [dev-dependencies]
 axum = "0.8"
@@ -50,7 +58,7 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_UI_Shell"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_UI_Shell"] }
 winreg = "0.55"
 
 [features]

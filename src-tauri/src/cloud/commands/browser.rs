@@ -457,7 +457,7 @@ pub(crate) fn browser_password_login(
     // Keep one provider profile so Baidu/Tianyi can reuse the official page's
     // stable device context. Explicit account replacement clears this profile
     // before this window is built; validated sessions and passwords remain
-    // persisted separately with DPAPI.
+    // persisted separately in the system credential store.
     .initialization_script_for_all_frames(script.as_str())
     .on_new_window(|_, _| NewWindowResponse::Deny)
     .on_page_load(move |window, payload| {

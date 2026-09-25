@@ -45,7 +45,7 @@ pub use upload_commands::*;
 mod tests;
 
 pub struct CloudState {
-    pub store: DpapiCredentialStore,
+    pub store: SystemCredentialStore,
     pub share_plans: share::CloudSharePlanStore,
     pub share_refresh_budget: share::CloudShareRefreshBudget,
     pub(crate) cloud_download_refresh_budget: browser_login::CloudDownloadRefreshBudget,
@@ -148,14 +148,14 @@ impl CloudState {
     }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         let state = Self {
-            share_plans: share::CloudSharePlanStore::new(DpapiCredentialStore::new(root.clone())?),
+            share_plans: share::CloudSharePlanStore::new(SystemCredentialStore::new(root.clone())?),
             share_refresh_budget: Default::default(),
             cloud_download_refresh_budget: Default::default(),
             authorization_resumption: Default::default(),
             authorization_completion: Default::default(),
             authorization_results: Default::default(),
             auth_supervisor: Default::default(),
-            store: DpapiCredentialStore::new(root)?,
+            store: SystemCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,
         };
         for descriptor in ProviderRegistry::global().all() {

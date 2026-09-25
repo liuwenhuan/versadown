@@ -1,6 +1,6 @@
 use alldownloader_lib::cloud::{
     credential_key_is_supported, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
-    CredentialStore, DpapiCredentialStore, MemoryCredentialStore, PikPakClient, QuarkError,
+    CredentialStore, MemoryCredentialStore, PikPakClient, QuarkError, SystemCredentialStore,
 };
 use std::sync::Mutex;
 
@@ -174,7 +174,7 @@ fn legacy_pikpak_password_session_recovers_its_login_method() {
 #[test]
 fn dpapi_session_roundtrip_never_writes_plaintext() {
     let root = std::env::temp_dir().join(format!("cloud-dpapi-{}", uuid::Uuid::new_v4()));
-    let store = DpapiCredentialStore::new(root.clone()).unwrap();
+    let store = SystemCredentialStore::new(root.clone()).unwrap();
     store
         .save("quark", b"cookie-secret-do-not-persist-in-cleartext")
         .unwrap();

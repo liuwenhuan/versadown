@@ -29,6 +29,7 @@ import type { CloudAuthorization, ProviderDescriptor } from './lib/cloudTypes';
 import { installWindowResizePerformanceMode } from './lib/windowResizePerformance';
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
 import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
+import { applyMainWindowDpiSizing } from './lib/mainWindow';
 
 type TaskListTab = 'all' | 'active' | 'completed' | 'failed';
 type TaskSortMode = 'manual' | 'created-desc' | 'created-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
@@ -360,6 +361,27 @@ export function App() {
     // icon.  Keep the native taskbar icon in step with the concrete palette.
     void syncMainWindowIcon(resolvedThemeId).catch(() => undefined);
   }, [resolvedThemeId]);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const mainWindow = getCurrentWindow();
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const synchronize = (nativeScaleFactor = 1) => {
+      void applyMainWindowDpiSizing(mainWindow, nativeScaleFactor).catch(() => undefined);
+    };
+
+    void mainWindow.scaleFactor()
+      .then((scaleFactor) => { if (!disposed) synchronize(scaleFactor); })
+      .catch(() => { if (!disposed) synchronize(); });
+    mainWindow.onScaleChanged(({ payload }) => {
+      if (!disposed) synchronize(payload.scaleFactor);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   const privacyVisibleTasks = useMemo(() => tasks.filter((task) => privacyVisibility.unlocked || !isPrivateTask(task)), [privacyVisibility.unlocked, tasks]);
   const filteredPrivacyTasks = useMemo(() => privacyVisibleTasks.filter((task) => {
     if (privacyTaskFilter === 'all') return true;

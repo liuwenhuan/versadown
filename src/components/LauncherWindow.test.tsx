@@ -166,14 +166,22 @@ it('keeps the hexagon compact on one click, activates tasks on double click, and
   expect(trigger.querySelector('.launcher-mark')).toBe(mark);
 });
 
-it.each(['left', 'right'] as const)('closes the launcher context menu after a %s click on the floating trigger', async (button) => {
+it('opens the self-drawn menu when WebKitGTK forwards a native context-menu signal', async () => {
+  render(<LauncherWindow />);
+
+  window.dispatchEvent(new Event('alldownloader:launcher-context-menu'));
+
+  expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
+  expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);
+});
+
+it('closes the launcher context menu after a left click on the floating trigger', async () => {
   render(<LauncherWindow />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
 
   fireEvent.contextMenu(trigger);
   await screen.findByRole('menu', { name: '悬浮球菜单' });
-  if (button === 'left') fireEvent.click(trigger);
-  else fireEvent.contextMenu(trigger);
+  fireEvent.click(trigger);
 
   await waitFor(() => expect(screen.queryByRole('menu', { name: '悬浮球菜单' })).not.toBeInTheDocument());
 });
@@ -253,7 +261,10 @@ it('begins a captured pointer drag before a slow compact input-region update', a
   fireEvent.mouseDown(trigger, { button: 0, buttons: 1, clientX: 10, clientY: 10, screenX: 100, screenY: 200 });
   fireEvent.mouseMove(trigger, { buttons: 1, clientX: 30, clientY: 30, screenX: 120, screenY: 220 });
   await waitFor(() => expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon]));
-  await waitFor(() => expect(beginLauncherPointerDrag).toHaveBeenCalledWith({ x: 100, y: 200 }));
+  await waitFor(() => expect(beginLauncherPointerDrag).toHaveBeenCalledWith(
+    { x: 100, y: 200 },
+    { x: 10, y: 10 },
+  ));
   await waitFor(() => expect(moveLauncherPointerDrag).toHaveBeenCalledWith(expect.anything(), { x: 120, y: 220 }));
   await act(async () => pending.resolve());
 });

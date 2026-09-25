@@ -48,7 +48,7 @@ pub(super) fn read_frame<T: DeserializeOwned>(reader: &mut impl Read) -> Result<
 /// Authentication arrives from the worker only after it has read the nonce
 /// from inherited stdin. It never appears in the worker command line.
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkerHello {
+pub(crate) struct WorkerHello {
     pub(super) protocol_version: u8,
     nonce: String,
 }
@@ -77,7 +77,7 @@ impl fmt::Debug for WorkerHello {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkerInitialization {
+pub(crate) struct WorkerInitialization {
     pub(super) user_id: String,
     pub(super) peer_id: String,
 }
@@ -89,7 +89,7 @@ impl fmt::Debug for WorkerInitialization {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkerSubmission {
+pub(crate) struct WorkerSubmission {
     pub(super) url: String,
     pub(super) headers: Vec<(String, String)>,
     pub(super) output_path: String,
@@ -108,7 +108,7 @@ impl fmt::Debug for WorkerSubmission {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum WorkerAction {
+pub(crate) enum WorkerAction {
     Pause,
     Resume,
     Cancel,
@@ -116,7 +116,7 @@ pub(super) enum WorkerAction {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "command", content = "payload", rename_all = "snake_case")]
-pub(super) enum WorkerRequest {
+pub(crate) enum WorkerRequest {
     Initialize(WorkerInitialization),
     Submit(WorkerSubmission),
     Poll { task_id: u32 },
@@ -143,7 +143,7 @@ impl fmt::Debug for WorkerRequest {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-pub(super) struct WorkerProgress {
+pub(crate) struct WorkerProgress {
     pub(super) completed: u64,
     pub(super) total: u64,
     pub(super) status: i32,
@@ -155,7 +155,7 @@ pub(super) struct WorkerProgress {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum WorkerErrorCode {
+pub(crate) enum WorkerErrorCode {
     Incompatible,
     TaskUnknown,
     OperationFailed,
@@ -163,7 +163,7 @@ pub(super) enum WorkerErrorCode {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "status", content = "payload", rename_all = "snake_case")]
-pub(super) enum WorkerResponse {
+pub(crate) enum WorkerResponse {
     Acknowledged,
     Submitted { task_id: u32 },
     Progress(WorkerProgress),

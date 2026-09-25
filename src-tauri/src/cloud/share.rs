@@ -1,6 +1,6 @@
 //! Share capability, service and encrypted row repository compatibility exports.
 //! Do not serialize these internal models into IPC, task records, or logs.
-use super::{CloudProvider, CredentialStore, DpapiCredentialStore, QuarkError};
+use super::{CloudProvider, CredentialStore, QuarkError, SystemCredentialStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{

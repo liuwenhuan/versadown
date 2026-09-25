@@ -122,12 +122,12 @@ fn manual_logout_blocks_automatic_password_recovery_until_explicit_login() {
 #[test]
 fn manual_logout_survives_reopening_encrypted_credentials() {
     use alldownloader_lib::cloud::{
-        auth_supervisor::is_manually_disconnected, DpapiCredentialStore,
+        auth_supervisor::is_manually_disconnected, SystemCredentialStore,
     };
     let root = tempfile::tempdir().unwrap();
     let provider = CloudProvider::Pikpak;
     {
-        let store = DpapiCredentialStore::new(root.path().to_owned()).unwrap();
+        let store = SystemCredentialStore::new(root.path().to_owned()).unwrap();
         save_password_credential(
             &store,
             CloudPasswordCredential::new(provider, "a", "alice", "secret"),
@@ -138,7 +138,7 @@ fn manual_logout_survives_reopening_encrypted_credentials() {
             .disconnect(&store, provider)
             .unwrap();
     }
-    let reopened = DpapiCredentialStore::new(root.path().to_owned()).unwrap();
+    let reopened = SystemCredentialStore::new(root.path().to_owned()).unwrap();
     assert!(is_manually_disconnected(&reopened, provider).unwrap());
     assert_eq!(
         load_saved_password_login(&reopened, provider)

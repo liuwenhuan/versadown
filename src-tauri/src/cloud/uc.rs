@@ -1437,7 +1437,7 @@ impl ShareInspect for UcShareAdapter<'_> {
                 }
             }
         }
-        // This internal context is serializable only through the DPAPI plan store.
+        // This internal context is serializable only through the encrypted plan store.
         context = session.context(context)?;
         Ok(ShareInspection::Plan(CloudSharePlan::new(
             CloudProvider::Uc,
@@ -2546,7 +2546,7 @@ mod tests {
         };
         let directory = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
         let selected = store.resolve_entry(&plan.source_for("f1")).unwrap();
@@ -2583,14 +2583,14 @@ mod tests {
         let source = share_entry().plan.source_for("f1");
         {
             let store = CloudSharePlanStore::new(
-                crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+                crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
             );
             store.upsert(&share_entry().plan).unwrap();
             let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
             resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
         }
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
         );
         let http = ShareReplies::new(vec![
             (token, vec![]),
@@ -2626,7 +2626,7 @@ mod tests {
                     provider_share_adapter(CloudProvider::Uc, &credentials, &http).unwrap();
                 let directory = tempfile::tempdir().unwrap();
                 let store = CloudSharePlanStore::new(
-                    crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+                    crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
                 );
                 let selected = share_entry();
                 store.upsert(&selected.plan).unwrap();
@@ -2656,7 +2656,7 @@ mod tests {
             let http = ShareReplies::new(replies);
             let directory = tempfile::tempdir().unwrap();
             let store = CloudSharePlanStore::new(
-                crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+                crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
             );
             let mut selected = share_entry();
             selected.plan.provider_context["headers"] = json!({"Cookie":"__pus=identity; __puus=session; csrf_token=csrf-secret","x-csrf-token":"csrf-secret"});
@@ -2687,7 +2687,7 @@ mod tests {
             );
             drop(store);
             let reopened = CloudSharePlanStore::new(
-                crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+                crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
             );
             let second = ShareReplies::new(vec![(token, vec![])]);
             let adapter = provider_share_adapter(CloudProvider::Uc, &credentials, &second).unwrap();
@@ -2746,7 +2746,7 @@ mod tests {
         ]);
         let directory = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
         );
         let selected = share_entry();
         store.upsert(&selected.plan).unwrap();
@@ -2903,7 +2903,7 @@ mod tests {
         ]);
         let directory = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
         );
         let entry = share_entry();
         store.upsert(&entry.plan).unwrap();
@@ -2976,7 +2976,7 @@ mod tests {
         ]);
         let directory = tempfile::tempdir().unwrap();
         let store = CloudSharePlanStore::new(
-            crate::cloud::DpapiCredentialStore::new(directory.path().into()).unwrap(),
+            crate::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
         );
         let entry = share_entry();
         store.upsert(&entry.plan).unwrap();

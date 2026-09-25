@@ -1,9 +1,8 @@
-//! Windows-only bridge to the native task API shipped with an installed
-//! Thunder client. It loads a private runtime copy of the official proxy DLL;
-//! P2SP tasks use the official SDK service without starting `Thunder.exe` or
-//! an extra Node host.
+//! Native bridge to the private task runtime shipped with an installed Thunder
+//! client. Each platform adapter stays isolated, while task ownership and
+//! progress handling are shared by this backend.
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::collections::BTreeMap;
 use std::{path::PathBuf, sync::Arc};
 use tauri::{AppHandle, Manager};
@@ -17,12 +16,14 @@ use crate::{
 mod engine;
 #[cfg(target_os = "linux")]
 mod linux;
-use engine::{
-    parse_native_gid, NativeEngineSession, NativeProgress, NativeTaskHandle, NativeTransferMeter,
-    NATIVE_DOWNLOADING,
-};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use engine::native_gid;
+#[cfg(target_os = "linux")]
+use engine::NativeEngine;
+use engine::{
+    parse_native_gid, NativeEngineSession, NativeProgress, NativeSubmission, NativeTaskHandle,
+    NativeTransferMeter, NATIVE_DOWNLOADING,
+};
 
 #[cfg(all(test, windows))]
 #[path = "xunlei_native_live_tests.rs"]
@@ -55,8 +56,10 @@ pub struct XunleiNativeBackend {
     engine_session: NativeEngineSession,
     #[cfg(windows)]
     api: std::sync::Mutex<Option<WindowsApi>>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     vip_tokens: std::sync::Mutex<BTreeMap<u32, String>>,
+    #[cfg(target_os = "linux")]
+    linux_engine: std::sync::Mutex<Option<linux::LinuxWorkerEngine>>,
     #[cfg(windows)]
     plugin_config_path: Option<PathBuf>,
 }
@@ -67,8 +70,10 @@ impl Default for XunleiNativeBackend {
             engine_session: NativeEngineSession::new(),
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             vip_tokens: std::sync::Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
+            linux_engine: std::sync::Mutex::new(None),
             #[cfg(windows)]
             plugin_config_path: None,
         }
@@ -81,8 +86,10 @@ impl XunleiNativeBackend {
             engine_session: NativeEngineSession::new(),
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             vip_tokens: std::sync::Mutex::new(BTreeMap::new()),
+            #[cfg(target_os = "linux")]
+            linux_engine: std::sync::Mutex::new(None),
             #[cfg(windows)]
             plugin_config_path: Some(plugin_config_path),
         }
@@ -113,8 +120,8 @@ impl NativeSubmitError {
 }
 
 impl XunleiNativeBackend {
-    /// Returns `Ok(None)` when Thunder is not installed or the resolved item
-    /// does not carry the account identity required by the native SDK.
+    /// Returns `Ok(None)` when Thunder is unavailable or the resolved file
+    /// lacks both login identity and a file-level acceleration credential.
     pub fn submit(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -123,18 +130,22 @@ impl XunleiNativeBackend {
         resolved: &ResolvedCloudDownload,
         options: &UriSubmissionOptions,
     ) -> Result<Option<DownloadTask>, NativeSubmitError> {
-        let Some(user_id) = marker_header(resolved, USER_ID_MARKER_HEADER) else {
+        let Some((user_id, peer_id, vip_token)) = native_vip_credentials(resolved) else {
             return Ok(None);
         };
-        let Some(peer_id) = marker_header(resolved, PEER_ID_MARKER_HEADER) else {
-            return Ok(None);
-        };
-        let vip_token = native_vip_token(resolved).map(str::to_owned);
+        let vip_token = Some(vip_token.to_owned());
 
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(target_os = "linux")))]
         {
             let _ = (app, store, task_id, resolved, options, user_id, peer_id);
             return Ok(None);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            return self.submit_linux(
+                app, store, task_id, resolved, options, user_id, peer_id, vip_token,
+            );
         }
 
         #[cfg(windows)]
@@ -242,7 +253,7 @@ impl XunleiNativeBackend {
                 // Cancellation can deliberately bypass a blocked native
                 // submission. Never publish this late SDK result over the
                 // user's durable terminal state.
-                self.spawn_task_cleanup(native_id);
+                self.spawn_task_cleanup(native_handle);
                 return Ok(Some(task));
             }
             if let Some(token) = vip_token {
@@ -294,6 +305,141 @@ impl XunleiNativeBackend {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn submit_linux(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        store: &Arc<TaskStore>,
+        task_id: Uuid,
+        resolved: &ResolvedCloudDownload,
+        options: &UriSubmissionOptions,
+        user_id: &str,
+        peer_id: &str,
+        vip_token: Option<String>,
+    ) -> Result<Option<DownloadTask>, NativeSubmitError> {
+        let output_directory = options
+            .directory
+            .clone()
+            .ok_or_else(|| NativeSubmitError::Failed("迅雷原生下载缺少保存目录".into()))?;
+        let requested_output_name = options
+            .output_name
+            .clone()
+            .unwrap_or_else(|| resolved.name.clone());
+        if requested_output_name.is_empty() || requested_output_name.contains(['/', '\\']) {
+            return Err(NativeSubmitError::Failed("迅雷原生下载文件名无效".into()));
+        }
+        std::fs::create_dir_all(&output_directory)
+            .map_err(|_| NativeSubmitError::Failed("无法创建迅雷下载目录".into()))?;
+        let output_path = crate::reserve_unique_output_path(
+            store,
+            task_id,
+            &output_directory,
+            &requested_output_name,
+        )
+        .map_err(|_| NativeSubmitError::Failed("无法分配迅雷下载文件名".into()))?;
+        let output_name = output_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| NativeSubmitError::Failed("迅雷原生下载文件名无效".into()))?
+            .to_owned();
+        prepare_native_output(
+            &output_path,
+            options.allow_overwrite,
+            options.continue_download,
+        )?;
+
+        let native_handle = {
+            let mut engine = self
+                .linux_engine
+                .lock()
+                .map_err(|_| NativeSubmitError::Incompatible)?;
+            if engine.is_none() {
+                match linux::start_engine(self.engine_session) {
+                    Ok(started) => *engine = Some(started),
+                    Err(error) => {
+                        linux_native_start_fallback(error)?;
+                        return Ok(None);
+                    }
+                }
+            }
+            let engine = engine.as_mut().ok_or(NativeSubmitError::Incompatible)?;
+            let headers = resolved
+                .headers
+                .iter()
+                .filter(|(name, _)| !name.starts_with("X-Downloader-Xunlei-"))
+                .cloned()
+                .collect();
+            engine
+                .submit(NativeSubmission {
+                    url: resolved.url.clone(),
+                    headers,
+                    output_path: output_path.clone(),
+                    output_name: output_name.clone(),
+                    user_id: user_id.to_owned(),
+                    peer_id: peer_id.to_owned(),
+                    acceleration_token: vip_token.clone(),
+                    cid: marker_header(resolved, CID_MARKER_HEADER).map(str::to_owned),
+                    gcid: marker_header(resolved, GCID_MARKER_HEADER).map(str::to_owned),
+                    total_length: resolved.size_hint(),
+                })
+                .map_err(|_| NativeSubmitError::Incompatible)?
+        };
+
+        let mut task = store
+            .find(task_id)
+            .map_err(|_| NativeSubmitError::Failed("下载任务已不存在".into()))?;
+        if task.status != TaskStatus::Queued {
+            self.spawn_task_cleanup(native_handle);
+            return Ok(Some(task));
+        }
+        if let Some(token) = vip_token {
+            self.vip_tokens
+                .lock()
+                .map_err(|_| NativeSubmitError::Incompatible)?
+                .insert(native_handle.task_id, token);
+        }
+        task.name.clone_from(&output_name);
+        task.aria_gid = Some(native_gid(native_handle));
+        task.followed_by_gid = None;
+        task.status = TaskStatus::Downloading;
+        task.error = None;
+        task.status_message = if self
+            .vip_tokens
+            .lock()
+            .is_ok_and(|tokens| tokens.contains_key(&native_handle.task_id))
+        {
+            Some("正在启用迅雷加速".into())
+        } else {
+            Some("迅雷SVIP加速凭据不可用，正在使用普通通道".into())
+        };
+        task.failure_code = None;
+        task.aria_error_code = None;
+        task.total_length = resolved.size_hint();
+        task.download_speed = 0;
+        task.connections = 0;
+        task = store
+            .apply_transfer_snapshot_with_files(
+                task,
+                &[(
+                    0,
+                    output_path.to_string_lossy().into_owned(),
+                    resolved.size_hint().unwrap_or(0),
+                    0,
+                    true,
+                )],
+            )
+            .map_err(|_| NativeSubmitError::Failed("无法保存迅雷原生任务".into()))?;
+        emit_task(app, store, &task);
+        self.spawn_progress_monitor(
+            app.clone(),
+            Arc::clone(store),
+            task_id,
+            native_handle,
+            output_path,
+        );
+        Ok(Some(task))
+    }
+
     pub fn control(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -307,10 +453,75 @@ impl XunleiNativeBackend {
             return Err(NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE.into());
         }
         let native_id = native_handle.task_id;
-        #[cfg(not(windows))]
+        #[cfg(all(not(windows), not(target_os = "linux")))]
         {
             let _ = (app, store, action, native_id);
             return Err(PLUGIN_UPDATE_MESSAGE.into());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut engine = self
+                .linux_engine
+                .lock()
+                .map_err(|_| PLUGIN_UPDATE_MESSAGE.to_string())?;
+            let engine = engine
+                .as_mut()
+                .ok_or_else(|| NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE.to_string())?;
+            engine
+                .control(native_handle, action)
+                .map_err(|_| PLUGIN_UPDATE_MESSAGE.to_string())?;
+            if action == DownloadAction::Cancel {
+                if let Ok(mut tokens) = self.vip_tokens.lock() {
+                    tokens.remove(&native_id);
+                }
+            }
+
+            let mut updated = task;
+            match action {
+                DownloadAction::Pause => {
+                    updated.status = TaskStatus::Paused;
+                    updated.status_message = None;
+                }
+                DownloadAction::Resume => {
+                    updated.status = TaskStatus::Downloading;
+                    updated.status_message = self
+                        .vip_tokens
+                        .lock()
+                        .is_ok_and(|tokens| tokens.contains_key(&native_id))
+                        .then(|| "正在启用迅雷加速".into());
+                }
+                DownloadAction::Cancel => {
+                    updated.status = TaskStatus::Cancelled;
+                    updated.status_message = None;
+                }
+            }
+            updated.download_speed = 0;
+            updated.error = None;
+            updated.aria_error_code = None;
+            let updated = store
+                .apply_transfer_snapshot(updated)
+                .map_err(|error| error.to_string())?;
+            emit_task(app, store, &updated);
+            if action == DownloadAction::Cancel {
+                release_cloud_slot(app, store, &updated);
+            }
+            if action == DownloadAction::Resume {
+                if let Some(path) = store
+                    .files(updated.id)
+                    .ok()
+                    .and_then(|files| files.into_iter().next())
+                    .map(|file| PathBuf::from(file.path))
+                {
+                    self.spawn_progress_monitor(
+                        app.clone(),
+                        Arc::clone(store),
+                        updated.id,
+                        native_handle,
+                        path,
+                    );
+                }
+            }
+            return Ok(updated);
         }
         #[cfg(windows)]
         {
@@ -400,21 +611,34 @@ impl XunleiNativeBackend {
         }
     }
 
-    #[cfg(windows)]
-    fn spawn_task_cleanup(self: &Arc<Self>, native_id: u32) {
+    #[cfg(any(windows, target_os = "linux"))]
+    fn spawn_task_cleanup(self: &Arc<Self>, native_handle: NativeTaskHandle) {
         let backend = Arc::clone(self);
         tauri::async_runtime::spawn_blocking(move || {
+            #[cfg(windows)]
+            let native_id = native_handle.task_id;
+            #[cfg(windows)]
             let Ok(mut api) = backend.api.lock() else {
                 return;
             };
-            // A persisted SDK id from an earlier application process is not
-            // safe to delete: the new process may have reused that numeric id
-            // for another task. Only clean tasks owned by this SDK instance.
-            if let Some(api) = api.as_mut() {
-                if api.task_paths.values().any(|id| *id == native_id) {
-                    if let Err(error) = api.delete(native_id) {
-                        eprintln!("迅雷原生任务后台清理失败：{}", error.user_message());
+            #[cfg(windows)]
+            {
+                // A persisted SDK id from an earlier application process is not
+                // safe to delete: the new process may have reused that numeric id
+                // for another task. Only clean tasks owned by this SDK instance.
+                if let Some(api) = api.as_mut() {
+                    if api.task_paths.values().any(|id| *id == native_id) {
+                        if let Err(error) = api.delete(native_id) {
+                            eprintln!("迅雷原生任务后台清理失败：{}", error.user_message());
+                        }
                     }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if let Ok(mut engine) = backend.linux_engine.lock() {
+                if let Some(engine) = engine.as_mut() {
+                    let _ = engine.control(native_handle, DownloadAction::Cancel);
+                    let _ = engine.release(native_handle);
                 }
             }
         });
@@ -448,7 +672,15 @@ impl XunleiNativeBackend {
                     .lock()
                     .ok()
                     .and_then(|api| api.as_ref().map(|api| api.progress(native_task_id)));
-                #[cfg(not(windows))]
+                #[cfg(target_os = "linux")]
+                let native_progress = backend.linux_engine.lock().ok().and_then(|mut engine| {
+                    engine.as_mut().map(|engine| {
+                        engine
+                            .poll(expected_native_handle)
+                            .map_err(|_| NativeSubmitError::Incompatible)
+                    })
+                });
+                #[cfg(all(not(windows), not(target_os = "linux")))]
                 let native_progress: Option<
                     Result<NativeProgress, NativeSubmitError>,
                 > = None;
@@ -487,7 +719,14 @@ impl XunleiNativeBackend {
                             .lock()
                             .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
                     }
-                    #[cfg(not(windows))]
+                    #[cfg(target_os = "linux")]
+                    {
+                        backend
+                            .vip_tokens
+                            .lock()
+                            .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
+                    }
+                    #[cfg(all(not(windows), not(target_os = "linux")))]
                     {
                         false
                     }
@@ -583,14 +822,14 @@ impl ResolvedCloudDownload {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn native_checkpoint_path(output: &std::path::Path, suffix: &str) -> PathBuf {
     let mut path = output.as_os_str().to_os_string();
     path.push(suffix);
     PathBuf::from(path)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn prepare_native_output(
     output: &std::path::Path,
     allow_overwrite: bool,
@@ -636,6 +875,23 @@ fn marker_header<'a>(resolved: &'a ResolvedCloudDownload, marker: &str) -> Optio
 
 fn native_vip_token(resolved: &ResolvedCloudDownload) -> Option<&str> {
     marker_header(resolved, ACCELERATION_TOKEN_MARKER_HEADER).filter(|token| !token.is_empty())
+}
+
+fn native_vip_credentials(resolved: &ResolvedCloudDownload) -> Option<(&str, &str, &str)> {
+    marker_header(resolved, ACCESS_TOKEN_MARKER_HEADER).filter(|value| !value.is_empty())?;
+    Some((
+        marker_header(resolved, USER_ID_MARKER_HEADER).filter(|value| !value.is_empty())?,
+        marker_header(resolved, PEER_ID_MARKER_HEADER).filter(|value| !value.is_empty())?,
+        native_vip_token(resolved)?,
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_native_start_fallback(error: engine::NativeEngineError) -> Result<(), NativeSubmitError> {
+    match error {
+        engine::NativeEngineError::Unavailable => Ok(()),
+        _ => Err(NativeSubmitError::Incompatible),
+    }
 }
 
 fn native_handle(task: &DownloadTask) -> Option<NativeTaskHandle> {
@@ -1432,6 +1688,71 @@ mod tests {
     }
 
     #[test]
+    fn native_submission_without_file_acceleration_credential_uses_aria2_fallback() {
+        let resolved = ResolvedCloudDownload {
+            url: "https://cdn.example/file".into(),
+            name: "file.zip".into(),
+            headers: vec![
+                (ACCESS_TOKEN_MARKER_HEADER.into(), "login-access".into()),
+                (USER_ID_MARKER_HEADER.into(), "account-id".into()),
+                (PEER_ID_MARKER_HEADER.into(), "device-id".into()),
+            ],
+        };
+
+        assert!(native_vip_credentials(&resolved).is_none());
+    }
+
+    #[test]
+    fn native_submission_without_login_access_uses_aria2_fallback() {
+        let resolved = ResolvedCloudDownload {
+            url: "https://cdn.example/file".into(),
+            name: "file.zip".into(),
+            headers: vec![
+                (USER_ID_MARKER_HEADER.into(), "account-id".into()),
+                (PEER_ID_MARKER_HEADER.into(), "device-id".into()),
+                (
+                    ACCELERATION_TOKEN_MARKER_HEADER.into(),
+                    "file-acceleration-token".into(),
+                ),
+            ],
+        };
+
+        assert!(native_vip_credentials(&resolved).is_none());
+    }
+
+    #[test]
+    fn native_submission_with_login_and_file_acceleration_uses_native_backend() {
+        let resolved = ResolvedCloudDownload {
+            url: "https://cdn.example/file".into(),
+            name: "file.zip".into(),
+            headers: vec![
+                (ACCESS_TOKEN_MARKER_HEADER.into(), "login-access".into()),
+                (USER_ID_MARKER_HEADER.into(), "account-id".into()),
+                (PEER_ID_MARKER_HEADER.into(), "device-id".into()),
+                (
+                    ACCELERATION_TOKEN_MARKER_HEADER.into(),
+                    "file-acceleration-token".into(),
+                ),
+            ],
+        };
+
+        assert_eq!(
+            native_vip_credentials(&resolved),
+            Some(("account-id", "device-id", "file-acceleration-token"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_linux_client_falls_back_without_plugin_update_warning() {
+        assert!(linux_native_start_fallback(engine::NativeEngineError::Unavailable).is_ok());
+        assert!(matches!(
+            linux_native_start_fallback(engine::NativeEngineError::Incompatible),
+            Err(NativeSubmitError::Incompatible)
+        ));
+    }
+
+    #[test]
     fn native_progress_uses_received_bytes_not_the_sdk_connection_counter() {
         // Captured from a stopped 16 MiB real SDK download; retained bytes are
         // a checkpoint, and the historical connection count remains 1.
@@ -1885,7 +2206,7 @@ mod tests {
                 serde_json::from_str(&json).expect("in-memory Xunlei session should be valid")
             } else {
                 let credentials =
-                    crate::cloud::DpapiCredentialStore::new(session_root.clone()).unwrap();
+                    crate::cloud::SystemCredentialStore::new(session_root.clone()).unwrap();
                 serde_json::from_slice(
                     &credentials
                         .load("xunlei")
@@ -1903,7 +2224,7 @@ mod tests {
             "prepare a current session with the app recovery flow before this SDK-only test",
         );
         let refreshed_credentials =
-            crate::cloud::DpapiCredentialStore::new(session_root.clone()).unwrap();
+            crate::cloud::SystemCredentialStore::new(session_root.clone()).unwrap();
         refreshed_credentials
             .save("xunlei", &serde_json::to_vec(&client.session()).unwrap())
             .expect("the refreshed live session should be persisted for the download probe");

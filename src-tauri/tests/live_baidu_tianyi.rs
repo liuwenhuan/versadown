@@ -14,8 +14,8 @@ use alldownloader_lib::cloud::{
     },
     tianyi::{TianyiClient, TianyiSession},
     CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
-    CloudUploadTransport, CredentialStore, DpapiCredentialStore, ProviderRegistry, QuarkError,
-    ReqwestTransport, SessionWorkKind, UploadHttpRequest, UploadHttpResponse,
+    CloudUploadTransport, CredentialStore, ProviderRegistry, QuarkError, ReqwestTransport,
+    SessionWorkKind, SystemCredentialStore, UploadHttpRequest, UploadHttpResponse,
 };
 use alldownloader_lib::extract_cloud_share_candidate;
 use std::{
@@ -287,10 +287,10 @@ fn require_live_authorization() -> LiveResult<()> {
     Ok(())
 }
 
-fn session_store() -> LiveResult<DpapiCredentialStore> {
+fn session_store() -> LiveResult<SystemCredentialStore> {
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
-    Ok(DpapiCredentialStore::new(
+    Ok(SystemCredentialStore::new(
         PathBuf::from(app_data)
             .join("com.alldownloader.desktop")
             .join("cloud-sessions"),
@@ -492,10 +492,10 @@ fn require_live_share_samples() -> LiveResult<()> {
     Ok(())
 }
 
-fn app_session_store() -> LiveResult<DpapiCredentialStore> {
+fn app_session_store() -> LiveResult<SystemCredentialStore> {
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
-    Ok(DpapiCredentialStore::new(
+    Ok(SystemCredentialStore::new(
         PathBuf::from(app_data)
             .join("com.alldownloader.desktop")
             .join("cloud-sessions"),
@@ -522,7 +522,7 @@ fn report_share_error(provider: &str, category: &str, error: &QuarkError) {
 /// the read-only share-list endpoint. Each request only lists the same public
 /// root and logs the numeric result code, never the response or session data.
 fn probe_baidu_share_header_profiles(
-    credentials: &DpapiCredentialStore,
+    credentials: &SystemCredentialStore,
     http: &LiveTransport,
 ) -> LiveResult<()> {
     let session: BaiduSession = serde_json::from_slice(

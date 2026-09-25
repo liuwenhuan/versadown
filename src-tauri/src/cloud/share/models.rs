@@ -18,7 +18,7 @@ pub(super) fn valid_owner_fingerprint(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Hash a provider's stable personal-drive identity for the local DPAPI plan
+/// Hash a provider's stable personal-drive identity for the local encrypted plan
 /// journal. Session cookies, bearer tokens and password material must never
 /// participate: those rotate while the same account still owns a transfer.
 pub(crate) fn stable_owner_fingerprint(

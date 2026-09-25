@@ -1,6 +1,6 @@
 import { emitTo } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { currentMonitor, getCurrentWindow, PhysicalPosition, Window } from '@tauri-apps/api/window';
+import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, Window } from '@tauri-apps/api/window';
 import { isTauriRuntime } from './api';
 
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
@@ -31,6 +31,17 @@ export const launcherIconRegion: LauncherInputRegion = {
   height: launcherCanvas.iconSize,
 };
 
+function launcherDisplayScaleFactor(nativeScaleFactor = 1) {
+  // On fractional-scale X11 desktops WebKitGTK's CSS viewport follows
+  // devicePixelRatio, while Tao can report an unscaled monitor factor. Use
+  // the larger valid value so the fixed CSS canvas and native input shape
+  // share one physical coordinate system.
+  const webviewScaleFactor = Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+    ? window.devicePixelRatio
+    : 1;
+  return Math.max(nativeScaleFactor, webviewScaleFactor, 1);
+}
+
 export async function setLauncherInputRegions(regions: LauncherInputRegion[]) {
   if (!isTauriRuntime()) return;
   if (regions.length === 0 || regions.some((region) => (
@@ -43,7 +54,10 @@ export async function setLauncherInputRegions(regions: LauncherInputRegion[]) {
   ))) {
     throw new Error('悬浮窗输入区域无效');
   }
-  await invoke('set_launcher_input_regions', { regions });
+  await invoke('set_launcher_input_regions', {
+    regions,
+    scaleFactor: launcherDisplayScaleFactor(),
+  });
 }
 
 export function launcherCanvasPosition(workArea: WorkArea, scaleFactor: number) {
@@ -85,15 +99,45 @@ export function launcherPointerDragPosition(
   };
 }
 
+// WebView implementations disagree on whether screenX/screenY are CSS or
+// physical pixels. Compare the press location with the known physical icon
+// location: a direct match is already physical (WebKitGTK/X11), otherwise a
+// CSS-coordinate value needs the display scale to become physical.
+export function launcherPointerCoordinateScaleFactor(
+  windowPosition: { x: number; y: number },
+  pointerPosition: LauncherPointerPosition,
+  grabOffset: LauncherPointerPosition | undefined,
+  displayScaleFactor: number,
+) {
+  const scaleFactor = Math.max(displayScaleFactor, 1);
+  if (!grabOffset || scaleFactor === 1) return scaleFactor;
+  const expectedPhysical = {
+    x: windowPosition.x + Math.round(grabOffset.x * scaleFactor),
+    y: windowPosition.y + Math.round(grabOffset.y * scaleFactor),
+  };
+  const directDistance = Math.abs(pointerPosition.x - expectedPhysical.x)
+    + Math.abs(pointerPosition.y - expectedPhysical.y);
+  const scaledDistance = Math.abs(pointerPosition.x * scaleFactor - expectedPhysical.x)
+    + Math.abs(pointerPosition.y * scaleFactor - expectedPhysical.y);
+  return directDistance <= scaledDistance ? 1 : scaleFactor;
+}
+
 export async function beginLauncherPointerDrag(
   pointerPosition: LauncherPointerPosition,
+  grabOffset?: LauncherPointerPosition,
 ): Promise<LauncherPointerDragSession> {
   const launcher = getCurrentWindow();
   const [windowPosition, monitor] = await Promise.all([launcher.outerPosition(), currentMonitor()]);
+  const displayScaleFactor = launcherDisplayScaleFactor(monitor?.scaleFactor);
   return {
     windowPosition,
     pointerPosition,
-    scaleFactor: monitor?.scaleFactor ?? 1,
+    scaleFactor: launcherPointerCoordinateScaleFactor(
+      windowPosition,
+      pointerPosition,
+      grabOffset,
+      displayScaleFactor,
+    ),
   };
 }
 
@@ -130,8 +174,8 @@ export async function getLauncherPopupPlacement(): Promise<LauncherPopupPlacemen
   const [position, monitor] = await Promise.all([launcher.outerPosition(), currentMonitor()]);
   if (!monitor) return 'above';
   return launcherPopupPlacementFromIcon(
-    launcherIconScreenRect(position, monitor.scaleFactor),
-    Math.round(launcherCanvas.popupSlotHeight * monitor.scaleFactor),
+    launcherIconScreenRect(position, launcherDisplayScaleFactor(monitor.scaleFactor)),
+    Math.round(launcherCanvas.popupSlotHeight * launcherDisplayScaleFactor(monitor.scaleFactor)),
     { x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }
   );
 }
@@ -147,9 +191,14 @@ export async function anchorLauncherToWorkArea() {
   const monitor = await currentMonitor();
   if (!monitor) return;
   const workArea = monitor.workArea;
+  const scaleFactor = launcherDisplayScaleFactor(monitor.scaleFactor);
+  await launcher.setSize(new PhysicalSize(
+    Math.round(launcherCanvas.width * scaleFactor),
+    Math.round(launcherCanvas.height * scaleFactor),
+  ));
   const corner = launcherCanvasPosition(
     { x: workArea.position.x, y: workArea.position.y, width: workArea.size.width, height: workArea.size.height },
-    monitor.scaleFactor
+    scaleFactor
   );
   await launcher.setPosition(new PhysicalPosition(corner.x, corner.y));
 }

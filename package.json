@@ -13,7 +13,7 @@
     "test:live:xunlei-auth": "node scripts/verify-xunlei-auth-live.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "build:linux:quick": "pnpm run build && cargo build --manifest-path src-tauri/Cargo.toml --features custom-protocol",
+    "build:linux:quick": "pnpm run build && ALLDOWNLOADER_FRONTEND_SIGNATURE=\"$(find dist -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1)\" cargo build --manifest-path src-tauri/Cargo.toml --features custom-protocol",
     "build:windows:quick": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Quick",
     "build:windows:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Release",
     "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Release",
