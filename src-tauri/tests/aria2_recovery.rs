@@ -196,6 +196,44 @@ async fn native_recovery_imports_unowned_active_engine_job_without_deleting_payl
 }
 
 #[tokio::test]
+async fn native_recovery_does_not_restore_a_permanently_deleted_engine_job() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("tasks.sqlite");
+    {
+        let store = TaskStore::open_path(&database).unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/deleted.bin"))
+            .unwrap();
+        store.bind_gid(task.id, "deleted-gid").unwrap();
+        store.remove_task_records(&[task.id]).unwrap();
+    }
+    let removals = Arc::new(AtomicUsize::new(0));
+    let observed_removals = Arc::clone(&removals);
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => json!([fixture::status("deleted-gid", "active", 25)]),
+            "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            "aria2.forceRemove" | "aria2.removeDownloadResult" => {
+                observed_removals.fetch_add(1, Ordering::SeqCst);
+                json!("deleted-gid")
+            }
+            other => panic!("{other}"),
+        })
+        .await;
+    let store = Arc::new(TaskStore::open_path(&database).unwrap());
+
+    let report = DownloadService::new(Arc::new(client), Arc::clone(&store))
+        .recover_native(root.path())
+        .await
+        .unwrap();
+
+    assert_eq!(report.imported, 0);
+    assert!(store.list().unwrap().is_empty());
+    assert!(removals.load(Ordering::SeqCst) > 0);
+    server.abort();
+}
+
+#[tokio::test]
 async fn native_recovery_preserves_missing_nonterminal_record_and_payload_for_resume() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("missing.bin");
@@ -274,5 +312,225 @@ async fn native_recovery_preserves_completed_history_when_job_is_absent() {
     assert_eq!(report.removed_tasks, 0);
     assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Completed);
     assert!(output.exists());
+    server.abort();
+}
+
+#[tokio::test]
+async fn native_recovery_keeps_completed_history_when_engine_rechecks_moved_files() {
+    for (kind, engine_status) in [
+        ("magnet", "paused"),
+        ("torrent", "paused"),
+        ("ed2k", "paused"),
+        ("file", "paused"),
+        ("file", "complete"),
+        ("cloud", "paused"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("tasks.sqlite");
+        let gid = format!("completed-{kind}");
+        let missing_output = root.path().join(format!("moved-{kind}.bin"));
+        let task_id = {
+            let store = TaskStore::open_path(&database).unwrap();
+            let task = store
+                .create(NewTask {
+                    source: format!("{kind}://completed-fixture"),
+                    name: format!("{kind}-fixture"),
+                    kind: kind.into(),
+                    is_private: false,
+                })
+                .unwrap();
+            let mut task = store.bind_gid(task.id, &gid).unwrap();
+            task.status = TaskStatus::Completed;
+            task.progress = 100;
+            task.total_length = Some(100);
+            task.completed_length = 100;
+            store.apply_transfer_snapshot(task.clone()).unwrap();
+            store
+                .upsert_files(
+                    task.id,
+                    &[(
+                        1,
+                        missing_output.to_string_lossy().into_owned(),
+                        100,
+                        100,
+                        true,
+                    )],
+                )
+                .unwrap();
+            task.id
+        };
+        let removals = Arc::new(AtomicUsize::new(0));
+        let observed_removals = Arc::clone(&removals);
+        let reported_gid = gid.clone();
+        let (client, server) =
+            fixture::server(move |request| match request["method"].as_str().unwrap() {
+                "aria2.tellActive" => json!([]),
+                "aria2.tellWaiting" if engine_status == "paused" => {
+                    json!([fixture::status(&reported_gid, engine_status, 0)])
+                }
+                "aria2.tellStopped" if engine_status == "complete" => {
+                    json!([fixture::status(&reported_gid, engine_status, 0)])
+                }
+                "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+                "aria2.forceRemove" | "aria2.removeDownloadResult" => {
+                    observed_removals.fetch_add(1, Ordering::SeqCst);
+                    json!(reported_gid)
+                }
+                other => panic!("{other}"),
+            })
+            .await;
+        let store = Arc::new(TaskStore::open_path(&database).unwrap());
+        let service = DownloadService::new(Arc::new(client), Arc::clone(&store));
+
+        service.recover_native(root.path()).await.unwrap();
+        service.recover_native(root.path()).await.unwrap();
+
+        let restored = store.find(task_id).unwrap();
+        assert_eq!(
+            restored.status,
+            TaskStatus::Completed,
+            "{kind}/{engine_status}"
+        );
+        assert_eq!(restored.progress, 100, "{kind}/{engine_status}");
+        assert_eq!(restored.completed_length, 100, "{kind}/{engine_status}");
+        assert_eq!(restored.aria_gid, None, "{kind}/{engine_status}");
+        assert_eq!(store.list().unwrap().len(), 1, "{kind}/{engine_status}");
+        assert!(
+            removals.load(Ordering::SeqCst) > 0,
+            "{kind}/{engine_status}"
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn native_recovery_keeps_completed_progress_when_engine_reports_larger_total() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/finished.bin"))
+        .unwrap();
+    let mut task = store.bind_gid(task.id, "grown-total-gid").unwrap();
+    task.status = TaskStatus::Completed;
+    task.progress = 100;
+    task.total_length = Some(100);
+    task.completed_length = 100;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+        "aria2.tellActive" | "aria2.tellWaiting" => json!([]),
+        "aria2.tellStopped" => {
+            let mut status = fixture::status("grown-total-gid", "complete", 100);
+            status["totalLength"] = json!("200");
+            json!([status])
+        }
+        "aria2.removeDownloadResult" => json!("grown-total-gid"),
+        other => panic!("{other}"),
+    })
+    .await;
+
+    DownloadService::new(Arc::new(client), Arc::clone(&store))
+        .recover_native(root.path())
+        .await
+        .unwrap();
+
+    let restored = store.find(task.id).unwrap();
+    assert_eq!(restored.status, TaskStatus::Completed);
+    assert_eq!(restored.progress, 100);
+    assert_eq!(restored.total_length, Some(100));
+    assert_eq!(restored.aria_gid, None);
+    server.abort();
+}
+
+#[tokio::test]
+async fn native_recovery_keeps_completed_history_when_engine_snapshot_is_malformed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/finished.bin"))
+        .unwrap();
+    let mut task = store.bind_gid(task.id, "malformed-complete-gid").unwrap();
+    task.status = TaskStatus::Completed;
+    task.progress = 100;
+    task.total_length = Some(100);
+    task.completed_length = 100;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    let removals = Arc::new(AtomicUsize::new(0));
+    let observed_removals = Arc::clone(&removals);
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => json!([]),
+            "aria2.tellWaiting" => {
+                let mut status = fixture::status("malformed-complete-gid", "paused", 0);
+                status["completedLength"] = json!("not-a-number");
+                json!([status])
+            }
+            "aria2.tellStopped" => json!([]),
+            "aria2.forceRemove" => {
+                observed_removals.fetch_add(1, Ordering::SeqCst);
+                json!("malformed-complete-gid")
+            }
+            other => panic!("{other}"),
+        })
+        .await;
+
+    DownloadService::new(Arc::new(client), Arc::clone(&store))
+        .recover_native(root.path())
+        .await
+        .unwrap();
+
+    let restored = store.find(task.id).unwrap();
+    assert_eq!(restored.status, TaskStatus::Completed);
+    assert_eq!(restored.progress, 100);
+    assert_eq!(restored.aria_gid, None);
+    assert_eq!(removals.load(Ordering::SeqCst), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn native_recovery_does_not_import_a_completed_magnet_child_after_bad_parent_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask {
+            source: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567".into(),
+            name: "completed-magnet".into(),
+            kind: "magnet".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let mut task = store.bind_gid(task.id, "metadata-parent").unwrap();
+    task.status = TaskStatus::Completed;
+    task.progress = 100;
+    task.total_length = Some(100);
+    task.completed_length = 100;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    let phase = Arc::new(AtomicUsize::new(0));
+    let observed_phase = Arc::clone(&phase);
+    let (client, server) =
+        fixture::server(move |request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" if observed_phase.load(Ordering::SeqCst) == 0 => {
+                let mut parent = fixture::status("metadata-parent", "active", 100);
+                parent["followedBy"] = json!(["payload-child"]);
+                json!([parent])
+            }
+            "aria2.tellActive" => json!([fixture::status("payload-child", "active", 0)]),
+            "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+            "aria2.tellStatus" => {
+                let mut child = fixture::status("payload-child", "paused", 0);
+                child["completedLength"] = json!("not-a-number");
+                child
+            }
+            "aria2.forceRemove" => json!("removed"),
+            other => panic!("{other}"),
+        })
+        .await;
+    let service = DownloadService::new(Arc::new(client), Arc::clone(&store));
+
+    service.recover_native(root.path()).await.unwrap();
+    phase.store(1, Ordering::SeqCst);
+    service.recover_native(root.path()).await.unwrap();
+
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Completed);
     server.abort();
 }

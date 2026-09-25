@@ -8,7 +8,10 @@ use std::{
 };
 
 use alldownloader_lib::{
-    aria2::{Aria2Api, Aria2Error, Aria2GlobalStat, Aria2Options, Aria2Status, RpcCall, RpcFault},
+    aria2::{
+        Aria2Api, Aria2Error, Aria2File, Aria2GlobalStat, Aria2Options, Aria2Status, Aria2Uri,
+        RpcCall, RpcFault,
+    },
     cloud::{
         commands::{apply_cloud_directory_member_policy, apply_cloud_download_policy},
         CloudProvider,
@@ -28,6 +31,7 @@ struct RecordingAria2 {
     add_error: bool,
     pause_error: bool,
     status_error_message: Option<String>,
+    status_override: Option<Aria2Status>,
     completed_status_error_message: Option<String>,
     cancel_release: Option<Arc<tokio::sync::Notify>>,
     next_gid: AtomicUsize,
@@ -231,6 +235,9 @@ impl Aria2Api for RecordingAria2 {
     }
     async fn tell_status(&self, gid: &str) -> Result<Aria2Status, Aria2Error> {
         self.record("aria2.tellStatus");
+        if let Some(status) = &self.status_override {
+            return Ok(status.clone());
+        }
         let mut status = Self::active(gid);
         if let Some(message) = &self.status_error_message {
             status.status = "error".into();
@@ -294,7 +301,8 @@ impl Aria2Api for RecordingAria2 {
         _: &str,
         _: BTreeMap<String, String>,
     ) -> Result<String, Aria2Error> {
-        unimplemented!()
+        self.record("aria2.changeOption");
+        Ok("OK".into())
     }
     async fn change_uri(
         &self,
@@ -416,6 +424,139 @@ async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallbac
 }
 
 #[tokio::test]
+async fn paused_cloud_refresh_removes_old_gateway_uri_without_a_native_checkpoint() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let old_url = "http://127.0.0.1:49152/old-token";
+    let new_url = "http://127.0.0.1:49152/new-token";
+    let task = store
+        .create(NewTask {
+            source: "cloud://baidu/file-id".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let task = store
+        .apply_transfer_snapshot(DownloadTask {
+            status: TaskStatus::Queued,
+            aria_gid: Some("0123456789abcdef".into()),
+            failure_code: Some("cloud_url_refreshing".into()),
+            total_length: Some(1_000),
+            completed_length: 250,
+            progress: 25,
+            ..task
+        })
+        .unwrap();
+    let mut status = RecordingAria2::active("0123456789abcdef");
+    status.status = "paused".into();
+    status.files = vec![Aria2File {
+        index: "1".into(),
+        path: "file.bin".into(),
+        length: "1000".into(),
+        completed_length: "250".into(),
+        selected: "true".into(),
+        uris: vec![Aria2Uri {
+            uri: old_url.into(),
+            status: "used".into(),
+        }],
+    }];
+    let api = Arc::new(RecordingAria2 {
+        status_override: Some(status),
+        ..Default::default()
+    });
+    let service = DownloadService::new(api.clone(), store);
+
+    service
+        .replace_cloud_uri_with_options(
+            task.id,
+            "0123456789abcdef",
+            vec![new_url.into()],
+            UriSubmissionOptions {
+                direct_loopback: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        api.changed_uris(),
+        vec![(vec![old_url.into()], vec![new_url.into()])]
+    );
+}
+
+#[tokio::test]
+async fn failed_cloud_snapshot_without_lengths_keeps_verified_download_progress() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask {
+            source: "cloud://baidu/file-id".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let task = store
+        .apply_transfer_snapshot(DownloadTask {
+            status: TaskStatus::Downloading,
+            aria_gid: Some("0123456789abcdef".into()),
+            total_length: Some(1_000),
+            completed_length: 700,
+            progress: 70,
+            ..task
+        })
+        .unwrap();
+    let mut status = RecordingAria2::active("0123456789abcdef");
+    status.status = "error".into();
+    status.total_length = "0".into();
+    status.completed_length = "0".into();
+    status.error_code = Some("13".into());
+    status.error_message = Some("File already exists".into());
+    let api = Arc::new(RecordingAria2 {
+        status_override: Some(status),
+        ..Default::default()
+    });
+    let service = DownloadService::new(api, Arc::clone(&store));
+
+    let failed = service.reconcile_task(task.id).await.unwrap();
+
+    assert_eq!(failed.status, TaskStatus::Failed);
+    assert_eq!(failed.progress, 70);
+    assert_eq!(failed.completed_length, 700);
+    assert_eq!(failed.total_length, Some(1_000));
+    assert_eq!(store.find(task.id).unwrap().completed_length, 700);
+}
+
+#[tokio::test]
+async fn baidu_gateway_resume_places_fresh_local_uri_before_checkpoint_mirror() {
+    let (_root, store, task) = native_resume_fixture();
+    let api = RecordingAria2::successful();
+    let service = DownloadService::new(api.clone(), store);
+    let loopback = "http://127.0.0.1:49152/fresh-token";
+    service
+        .resubmit_uri_with_options(
+            task.id,
+            vec![loopback.into()],
+            UriSubmissionOptions {
+                continue_download: true,
+                direct_loopback: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        api.uris.lock().unwrap()[0],
+        vec![loopback, "https://example.test/old"]
+    );
+    assert!(api.changed_uris().is_empty());
+    assert_eq!(
+        api.added_options()[0].get("pause").map(String::as_str),
+        Some("false")
+    );
+}
+
+#[tokio::test]
 async fn native_resume_rejects_disappeared_checkpoint_without_submitting_or_touching_payload() {
     let (root, store, task) = native_resume_fixture();
     std::fs::remove_file(root.path().join("aria2-next-state/stream/state.db")).unwrap();
@@ -474,11 +615,29 @@ fn cloud_download_connection_policy_retains_user_value_below_provider_cap() {
 }
 
 #[test]
-fn cloud_directory_members_always_use_one_connection() {
-    let options = apply_cloud_directory_member_policy(UriSubmissionOptions {
-        max_connections_per_server: Some(16),
-        ..UriSubmissionOptions::default()
-    });
+fn baidu_directory_members_use_configured_connections_up_to_provider_cap() {
+    let selected = apply_cloud_directory_member_policy(
+        CloudProvider::Baidu,
+        2,
+        UriSubmissionOptions::default(),
+    );
+    let capped = apply_cloud_directory_member_policy(
+        CloudProvider::Baidu,
+        8,
+        UriSubmissionOptions::default(),
+    );
+
+    assert_eq!(selected.max_connections_per_server, Some(2));
+    assert_eq!(capped.max_connections_per_server, Some(4));
+}
+
+#[test]
+fn other_cloud_directory_members_keep_one_connection() {
+    let options = apply_cloud_directory_member_policy(
+        CloudProvider::Aliyun,
+        8,
+        UriSubmissionOptions::default(),
+    );
 
     assert_eq!(options.max_connections_per_server, Some(1));
 }

@@ -34,6 +34,8 @@ pub struct UriSubmissionOptions {
     pub output_name: Option<String>,
     pub headers: Vec<(String, String)>,
     pub proxy: Option<String>,
+    /// Route only to an app-owned 127.0.0.1 endpoint; its upstream applies the user proxy.
+    pub direct_loopback: bool,
     pub max_connections_per_server: Option<u8>,
     pub max_tries: Option<u8>,
     pub retry_wait_seconds: Option<u16>,
@@ -80,7 +82,10 @@ impl UriSubmissionOptions {
                 options.insert("header".into(), headers.join("\n"));
             }
         }
-        if let Some(proxy) = self.proxy {
+        if self.direct_loopback {
+            options.insert("all-proxy".into(), String::new());
+            options.insert("no-proxy".into(), "127.0.0.1".into());
+        } else if let Some(proxy) = self.proxy {
             if proxy.trim().is_empty() || proxy.contains(['\r', '\n']) {
                 return Err(DownloadServiceError::InvalidUriOption("proxy"));
             }
@@ -129,6 +134,21 @@ fn valid_header(name: &str, value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::NewTask;
+
+    #[test]
+    fn loopback_download_never_uses_a_configured_external_proxy() {
+        let options = UriSubmissionOptions {
+            direct_loopback: true,
+            ..Default::default()
+        }
+        .into_aria2_options()
+        .unwrap();
+        assert_eq!(options.get("all-proxy").map(String::as_str), Some(""));
+        assert_eq!(
+            options.get("no-proxy").map(String::as_str),
+            Some("127.0.0.1")
+        );
+    }
 
     #[test]
     fn detached_partial_download_recovers_the_native_checkpoint_before_resubmission() {
@@ -283,6 +303,24 @@ fn resume_checkpoint(
         return Err(DownloadServiceError::InvalidNativeCheckpoint);
     }
     Ok(checkpoint)
+}
+
+fn p2p_download_complete(task: &DownloadTask, snapshot: &TransferSnapshot) -> bool {
+    matches!(task.kind.as_str(), "magnet" | "torrent" | "ed2k")
+        && matches!(
+            snapshot.status,
+            TaskStatus::Downloading | TaskStatus::Paused | TaskStatus::Processing
+        )
+        && snapshot
+            .total_length
+            .is_some_and(|total| total > 0 && snapshot.completed_length >= total)
+}
+
+fn snapshot_is_completed_for_task(task: &DownloadTask, snapshot: &TransferSnapshot) -> bool {
+    matches!(
+        snapshot.status,
+        TaskStatus::Completed | TaskStatus::Processing
+    ) || p2p_download_complete(task, snapshot)
 }
 
 pub struct DownloadService {
@@ -661,6 +699,21 @@ impl DownloadService {
                     .await?;
             }
             let checkpoint_uri = checkpoint.map(|checkpoint| checkpoint.uri);
+            let mut previous_uris = status
+                .files
+                .iter()
+                .flat_map(|file| file.uris.iter())
+                .map(|uri| uri.uri.trim())
+                .filter(|uri| !uri.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if let Some(checkpoint_uri) = checkpoint_uri.as_ref() {
+                if !previous_uris.contains(checkpoint_uri) {
+                    previous_uris.push(checkpoint_uri.clone());
+                }
+            }
+            previous_uris.sort_unstable();
+            previous_uris.dedup();
             if let Some(checkpoint_uri) = checkpoint_uri.as_ref() {
                 if !uris.contains(checkpoint_uri) {
                     // Aria2 Next matches this URI before restoring the native
@@ -670,13 +723,13 @@ impl DownloadService {
                     uris.push(checkpoint_uri.clone());
                 }
             }
-            self.change_uri_for_task(
-                task_id,
-                expected_gid,
-                checkpoint_uri.into_iter().collect(),
-                uris,
-            )
-            .await?;
+            // A refreshed Baidu gateway can keep the same local URI while
+            // replacing its signed upstream. Do not remove/reinsert that URI:
+            // aria2-next uses it to identify the persisted byte ranges.
+            if uris.len() != 1 || !previous_uris.contains(&uris[0]) {
+                self.change_uri_for_task(task_id, expected_gid, previous_uris, uris)
+                    .await?;
+            }
             let directory = self
                 .store
                 .cloud_directory_group_for_task(task_id)?
@@ -1583,6 +1636,9 @@ impl DownloadService {
             if self.store.find_by_gid(&status.gid)?.is_some() {
                 continue;
             }
+            if self.discard_deleted_engine_job(&status).await? {
+                continue;
+            }
             let waiting = status.status == "waiting";
             let task = self.import_external_rpc_status_unlocked(status).await?;
             if waiting && self.external_rpc_slot_base.is_some() {
@@ -1603,6 +1659,24 @@ impl DownloadService {
             self.reserve_external_rpc_slot(task.id).await?;
         }
         Ok(())
+    }
+
+    /// A removed SQLite row is not an external RPC submission. Keep the
+    /// durable deletion intent even when the engine is unavailable or an RPC
+    /// cleanup fails; the next snapshot can retry removing the orphaned GID.
+    pub(super) async fn discard_deleted_engine_job(
+        &self,
+        status: &Aria2Status,
+    ) -> Result<bool, DownloadServiceError> {
+        if !self.store.was_engine_gid_deleted(&status.gid)? {
+            return Ok(false);
+        }
+        if matches!(status.status.as_str(), "active" | "waiting" | "paused") {
+            let _ = self.api().force_remove(&status.gid).await;
+        } else {
+            let _ = self.api().remove_download_result(&status.gid).await;
+        }
+        Ok(true)
     }
 
     pub(super) async fn import_external_rpc_status_unlocked(
@@ -1771,6 +1845,7 @@ impl DownloadService {
                 } else {
                     None
                 };
+                let engine_status = status.status.clone();
                 let mut snapshot = TransferSnapshot::try_from(status)?;
                 if let Some(selected_indices) = confirmed_magnet_selection {
                     for file in &mut snapshot.files {
@@ -1794,6 +1869,31 @@ impl DownloadService {
                     {
                         snapshot.files.clear();
                     }
+                }
+                let completed_content_regressed = snapshot.completed_length
+                    < current.completed_length
+                    || snapshot.progress_percent.unwrap_or(0) < current.progress
+                    || current.total_length.is_some_and(|expected| {
+                        snapshot
+                            .total_length
+                            .is_none_or(|observed| observed < expected)
+                    });
+                if current.status == TaskStatus::Completed
+                    && (completed_content_regressed
+                        || !snapshot_is_completed_for_task(&current, &snapshot))
+                {
+                    let retired = self.store.retire_completed_engine_task(
+                        current.id,
+                        std::iter::once(snapshot.gid.clone()),
+                    )?;
+                    if matches!(engine_status.as_str(), "active" | "waiting" | "paused") {
+                        let _ = self.api().force_remove(&snapshot.gid).await;
+                    } else {
+                        let _ = self.api().remove_download_result(&snapshot.gid).await;
+                    }
+                    self.clear_observed_peers(retired.id);
+                    self.publish_task(&retired)?;
+                    return Ok(retired);
                 }
                 return self.persist_snapshot(current, snapshot);
             };
@@ -1916,18 +2016,22 @@ impl DownloadService {
             && snapshot.status == TaskStatus::Paused
             && (snapshot.completed_length < task.completed_length
                 || (task.total_length.is_some() && snapshot.total_length.is_none()));
+        // A failed cloud submission can report no length before touching the
+        // existing payload. Zero in that snapshot is unknown, not proof that
+        // the previously recorded byte ranges disappeared.
+        let preserve_failed_cloud_progress =
+            crate::cloud::download_dispatch::is_cloud_download_source(&task.source)
+                && snapshot.status == TaskStatus::Failed
+                && snapshot.total_length.is_none()
+                && snapshot.completed_length == 0
+                && task.total_length.is_some()
+                && task.completed_length > 0;
+        let preserve_existing_progress = preserve_paused_progress || preserve_failed_cloud_progress;
         if task.aria_gid.as_deref() != Some(&snapshot.gid) {
             task.followed_by_gid = Some(snapshot.gid.clone());
         }
         task.aria_gid = Some(snapshot.gid.clone());
-        let p2p_download_complete = matches!(task.kind.as_str(), "magnet" | "torrent" | "ed2k")
-            && matches!(
-                snapshot.status,
-                TaskStatus::Downloading | TaskStatus::Paused | TaskStatus::Processing
-            )
-            && snapshot
-                .total_length
-                .is_some_and(|total| total > 0 && snapshot.completed_length >= total);
+        let p2p_download_complete = p2p_download_complete(&task, &snapshot);
         // A P2P task can be byte-complete while aria2 remains active to upload.
         // Keep the user-facing download status complete and carry sharing separately.
         task.status = if snapshot.status == TaskStatus::Processing || p2p_download_complete {
@@ -1936,7 +2040,7 @@ impl DownloadService {
             snapshot.status
         };
         task.p2p_sharing = p2p_download_complete && snapshot.status == TaskStatus::Downloading;
-        if !preserve_paused_progress {
+        if !preserve_existing_progress {
             task.progress = snapshot.progress_percent.unwrap_or(0);
             task.total_length = snapshot.total_length;
             task.completed_length = snapshot.completed_length;
@@ -1982,7 +2086,7 @@ impl DownloadService {
                     .then_some((file.index, file.path))
             })
             .collect::<BTreeMap<_, _>>();
-        let files = (!preserve_paused_progress)
+        let files = (!preserve_existing_progress)
             .then(|| {
                 snapshot
                     .files

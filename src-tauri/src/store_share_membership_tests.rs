@@ -179,7 +179,8 @@ fn group(store: &TaskStore) -> (Uuid, Uuid) {
                 "share-root",
                 "Share",
                 Path::new("C:/downloads"),
-            ),
+            )
+            .with_private_download(true),
             &[NewCloudDirectoryGroupItem::new(
                 "file",
                 &["Share"],

@@ -1090,11 +1090,24 @@ impl TaskStore {
     /// Removes only the durable task record. `task_files` rows cascade, while
     /// the actual downloaded payload is never touched by this operation.
     pub fn remove_task_record(&self, id: Uuid) -> Result<(), StoreError> {
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let changed = connection.execute("DELETE FROM tasks WHERE id = ?1", [id.to_string()])?;
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let gids = transaction
+            .query_row(
+                "SELECT aria_gid, metadata_gid, followed_by_gid FROM tasks WHERE id = ?1",
+                [id.to_string()],
+                |row| Ok([row.get::<_, Option<String>>(0)?, row.get(1)?, row.get(2)?]),
+            )
+            .optional()?;
+        let Some(gids) = gids else {
+            return Err(StoreError::NotFound(id));
+        };
+        remember_deleted_engine_gids(&transaction, gids.into_iter().flatten())?;
+        let changed = transaction.execute("DELETE FROM tasks WHERE id = ?1", [id.to_string()])?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
         }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1118,25 +1131,32 @@ impl TaskStore {
         let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.transaction()?;
         let mut found = HashSet::with_capacity(ids.len());
+        let mut gids = HashSet::new();
 
         for batch in id_strings.chunks(SQLITE_ID_BATCH_SIZE) {
             let placeholders = std::iter::repeat("?")
                 .take(batch.len())
                 .collect::<Vec<_>>()
                 .join(", ");
-            let sql = format!("SELECT id FROM tasks WHERE id IN ({placeholders})");
+            let sql = format!("SELECT id, aria_gid, metadata_gid, followed_by_gid FROM tasks WHERE id IN ({placeholders})");
             let mut statement = transaction.prepare(&sql)?;
             let rows = statement.query_map(params_from_iter(batch.iter()), |row| {
-                row.get::<_, String>(0)
+                Ok((
+                    row.get::<_, String>(0)?,
+                    [row.get::<_, Option<String>>(1)?, row.get(2)?, row.get(3)?],
+                ))
             })?;
             for row in rows {
-                found.insert(row?);
+                let (id, task_gids) = row?;
+                found.insert(id);
+                gids.extend(task_gids.into_iter().flatten());
             }
         }
         if let Some(missing) = ids.iter().find(|id| !found.contains(&id.to_string())) {
             return Err(StoreError::NotFound(*missing));
         }
 
+        remember_deleted_engine_gids(&transaction, gids)?;
         for batch in id_strings.chunks(SQLITE_ID_BATCH_SIZE) {
             let placeholders = std::iter::repeat("?")
                 .take(batch.len())
@@ -1147,6 +1167,15 @@ impl TaskStore {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn was_engine_gid_deleted(&self, gid: &str) -> Result<bool, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_engine_gids WHERE gid = ?1)",
+            [gid],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn fail(&self, id: Uuid, message: impl Into<String>) -> Result<DownloadTask, StoreError> {
@@ -1249,6 +1278,39 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    /// A completed download is historical user state, even when the engine
+    /// later rechecks a moved payload as incomplete. Disown the old GID and
+    /// prevent it from being imported as an external task on the next start.
+    pub fn retire_completed_engine_task(
+        &self,
+        id: Uuid,
+        observed_gids: impl IntoIterator<Item = String>,
+    ) -> Result<DownloadTask, StoreError> {
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let task = find_with_transaction(&transaction, id)?.ok_or(StoreError::NotFound(id))?;
+        if task.status != TaskStatus::Completed {
+            return Err(StoreError::InvalidTransition {
+                from: task.status,
+                to: TaskStatus::Completed,
+            });
+        }
+        let gids = [task.aria_gid, task.metadata_gid, task.followed_by_gid]
+            .into_iter()
+            .flatten()
+            .chain(observed_gids);
+        remember_deleted_engine_gids(&transaction, gids)?;
+        transaction.execute(
+            "UPDATE tasks SET aria_gid = NULL, metadata_gid = NULL,
+             followed_by_gid = NULL, p2p_sharing = 0, download_speed = 0,
+             upload_speed = 0, connections = 0, discovered_nodes = 0,
+             eta_seconds = NULL, updated_at = ?2 WHERE id = ?1",
+            params![id.to_string(), current_timestamp()],
+        )?;
+        transaction.commit()?;
+        find_with_connection(&connection, id)
+    }
+
     /// Records an aria2 GID accepted for an explicit retry without creating a
     /// second task. Output-file rows intentionally remain in place so a later
     /// retry can still decide whether it may resume or needs overwrite consent.
@@ -1263,8 +1325,9 @@ impl TaskStore {
                 "empty aria2 gid".into(),
             )));
         }
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let current = find_with_connection(&connection, id)?;
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let current = find_with_transaction(&transaction, id)?.ok_or(StoreError::NotFound(id))?;
         if !matches!(
             current.status,
             TaskStatus::Paused | TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::Completed
@@ -1275,13 +1338,25 @@ impl TaskStore {
                 to: TaskStatus::Parsing,
             });
         }
-        connection.execute(
+        transaction.execute(
             "UPDATE tasks SET status='parsing',progress=0,error=NULL,failure_code=NULL,aria_gid=?1,followed_by_gid=NULL,
              metadata_gid=NULL,total_length=NULL,completed_length=0,download_speed=0,upload_speed=0,
              connections=0,discovered_nodes=0,eta_seconds=NULL,aria_error_code=NULL,selection_confirmed=0,completed_at=NULL,updated_at=?2
              WHERE id=?3",
             params![gid, current_timestamp(), id.to_string()],
         )?;
+        remember_deleted_engine_gids(
+            &transaction,
+            [
+                current.aria_gid,
+                current.metadata_gid,
+                current.followed_by_gid,
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|old_gid| old_gid != gid),
+        )?;
+        transaction.commit()?;
         find_with_connection(&connection, id)
     }
 
@@ -1300,8 +1375,10 @@ impl TaskStore {
                 "empty aria2 gid".into(),
             )));
         }
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        let changed = connection.execute(
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let current = find_with_transaction(&transaction, id)?.ok_or(StoreError::NotFound(id))?;
+        let changed = transaction.execute(
             "UPDATE tasks SET status = 'parsing', error = NULL, status_message = NULL,
              failure_code = NULL, aria_gid = ?1, followed_by_gid = NULL,
              metadata_gid = NULL, download_speed = 0, upload_speed = 0,
@@ -1318,12 +1395,20 @@ impl TaskStore {
             ],
         )?;
         if changed == 0 {
-            return Err(if find_with_connection(&connection, id).is_ok() {
-                StoreError::Database(rusqlite::Error::QueryReturnedNoRows)
-            } else {
-                StoreError::NotFound(id)
-            });
+            return Err(StoreError::Database(rusqlite::Error::QueryReturnedNoRows));
         }
+        remember_deleted_engine_gids(
+            &transaction,
+            [
+                current.aria_gid,
+                current.metadata_gid,
+                current.followed_by_gid,
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|old_gid| old_gid != replacement_gid),
+        )?;
+        transaction.commit()?;
         find_with_connection(&connection, id)
     }
 
@@ -1794,8 +1879,28 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
          CREATE UNIQUE INDEX IF NOT EXISTS task_output_reservations_path_unique
             ON task_output_reservations(path COLLATE NOCASE);",
     )?;
-    transaction.execute_batch("PRAGMA user_version = 14;")?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS deleted_engine_gids (
+            gid TEXT PRIMARY KEY NOT NULL
+         );
+         PRAGMA user_version = 15;",
+    )?;
     transaction.commit()?;
+    Ok(())
+}
+
+fn remember_deleted_engine_gids(
+    transaction: &Transaction<'_>,
+    gids: impl IntoIterator<Item = String>,
+) -> Result<(), StoreError> {
+    for gid in gids {
+        if !gid.is_empty() && !crate::xunlei_native::is_native_gid(Some(&gid)) {
+            transaction.execute(
+                "INSERT OR IGNORE INTO deleted_engine_gids (gid) VALUES (?1)",
+                [gid],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -2232,6 +2337,30 @@ mod tests {
     }
 
     #[test]
+    fn resubmission_retires_the_previous_engine_gid() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://baidu/file-id"))
+            .unwrap();
+        let paused = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Paused,
+                aria_gid: Some("old-gid".into()),
+                ..task
+            })
+            .unwrap();
+
+        store.rebind_for_resubmission(paused.id, "new-gid").unwrap();
+
+        assert!(store.was_engine_gid_deleted("old-gid").unwrap());
+        assert!(!store.was_engine_gid_deleted("new-gid").unwrap());
+        assert_eq!(
+            store.find(paused.id).unwrap().aria_gid.as_deref(),
+            Some("new-gid")
+        );
+    }
+
+    #[test]
     fn cloud_url_replacement_switches_only_after_the_new_gid_is_accepted() {
         let store = TaskStore::open_in_memory().unwrap();
         let task = store
@@ -2259,6 +2388,33 @@ mod tests {
         assert_eq!(replaced.total_length, Some(100));
         assert!(replaced.failure_code.is_none());
         assert!(replaced.aria_error_code.is_none());
+    }
+
+    #[test]
+    fn cloud_url_replacement_retires_the_previous_engine_gid() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("cloud://baidu/file-id"))
+            .unwrap();
+        let queued = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Queued,
+                aria_gid: Some("old-gid".into()),
+                failure_code: Some("cloud_url_refreshing".into()),
+                ..task
+            })
+            .unwrap();
+
+        store
+            .replace_cloud_url_gid(queued.id, "old-gid", "new-gid")
+            .unwrap();
+
+        assert!(store.was_engine_gid_deleted("old-gid").unwrap());
+        assert!(!store.was_engine_gid_deleted("new-gid").unwrap());
+        assert_eq!(
+            store.find(queued.id).unwrap().aria_gid.as_deref(),
+            Some("new-gid")
+        );
     }
 
     #[test]
@@ -2541,6 +2697,7 @@ mod tests {
         let second = store
             .create(NewTask::direct("https://example.test/second"))
             .unwrap();
+        store.bind_gid(first.id, "first-gid").unwrap();
         let missing = Uuid::new_v4();
 
         assert!(matches!(
@@ -2550,6 +2707,21 @@ mod tests {
 
         assert!(store.find(first.id).is_ok());
         assert!(store.find(second.id).is_ok());
+        assert!(!store.was_engine_gid_deleted("first-gid").unwrap());
+    }
+
+    #[test]
+    fn removing_one_task_records_its_engine_gid() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask::direct("https://example.test/one"))
+            .unwrap();
+        store.bind_gid(task.id, "single-gid").unwrap();
+
+        store.remove_task_record(task.id).unwrap();
+
+        assert!(store.was_engine_gid_deleted("single-gid").unwrap());
+        assert!(matches!(store.find(task.id), Err(StoreError::NotFound(_))));
     }
 
     #[test]

@@ -58,7 +58,9 @@ async fn load_torrent_base64_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<String, DownloadError> {
     let parsed_url = url::Url::parse(source).ok();
-    let path = if parsed_url
+    let path = if std::path::Path::new(source).is_absolute() {
+        std::path::PathBuf::from(source)
+    } else if parsed_url
         .as_ref()
         .is_some_and(|url| url.scheme() == "file")
     {

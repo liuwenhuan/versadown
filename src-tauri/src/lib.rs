@@ -90,6 +90,9 @@ struct TauriDownloadEvents {
     cloud: std::sync::Arc<cloud::commands::CloudState>,
     directory_refreshes: std::sync::Arc<cloud_directory_events::CloudDirectoryRefreshes>,
     cloud_download_dispatch: cloud::download_dispatch::CloudDownloadDispatch,
+    baidu_range_gateway: std::sync::Arc<
+        tokio::sync::OnceCell<std::sync::Arc<cloud::baidu_range_gateway::BaiduRangeGateway>>,
+    >,
 }
 
 impl TauriDownloadEvents {
@@ -155,6 +158,9 @@ impl EventSink for TauriDownloadEvents {
             });
             self.cloud_download_dispatch
                 .release_terminal(task.id, directory_finished);
+            if let Some(gateway) = self.baidu_range_gateway.get() {
+                gateway.remove_task(task.id);
+            }
         }
         if let Some(group) = group {
             self.schedule_directory_refresh(group.id);
@@ -322,6 +328,7 @@ pub fn run() {
             };
             let cloud_download_dispatch =
                 cloud::download_dispatch::CloudDownloadDispatch::default();
+            let baidu_range_gateway = std::sync::Arc::new(tokio::sync::OnceCell::new());
             let xunlei_native_backend =
                 std::sync::Arc::new(xunlei_native::XunleiNativeBackend::with_plugin_config(
                     data_dir.join("plugins").join("xunlei-native.json"),
@@ -333,6 +340,7 @@ pub fn run() {
                 cloud,
                 directory_refreshes: Default::default(),
                 cloud_download_dispatch: cloud_download_dispatch.clone(),
+                baidu_range_gateway: std::sync::Arc::clone(&baidu_range_gateway),
             });
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,
@@ -350,6 +358,7 @@ pub fn run() {
                 privacy_session: Default::default(),
                 cloud_download_sources: Default::default(),
                 cloud_download_dispatch,
+                baidu_range_gateway,
                 xunlei_native_backend,
             });
             app.manage(launcher::LauncherInteractionState::new(
