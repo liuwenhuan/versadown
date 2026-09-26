@@ -351,6 +351,8 @@ pub enum CloudError {
     CaptchaRequired,
     #[error("PikPak {0}需要官方操作验证，并非登录失效；请完成验证后返回重试")]
     PikpakOperationVerificationRequired(&'static str),
+    #[error("baidu_operation_verification_required")]
+    BaiduOperationVerificationRequired,
     #[error("区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员")]
     PikpakRegionalMembershipRestricted,
     #[error("正在等待网页登录，请在授权窗口完成登录")]
@@ -392,6 +394,7 @@ impl Serialize for CloudError {
             Self::PikpakOperationVerificationRequired(_) => {
                 "pikpak_operation_verification_required"
             }
+            Self::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
             Self::SourceFileMissing => "source_file_missing",

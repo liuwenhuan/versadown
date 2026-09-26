@@ -114,6 +114,21 @@ it('uses the share management command contract for creating, listing, and cancel
   expect(native.invoke).toHaveBeenNthCalledWith(3, 'cloud_cancel_shares', { provider: 'quark', shareIds: ['share-1'] });
 });
 
+it('opens Baidu operation verification and captures the same account afterward', async () => {
+  const api = await import('./cloudApi');
+  native.invoke.mockClear();
+
+  await api.openCloudOperationVerification('baidu', 'account-1', 'en-US');
+  await api.completeCloudOperationVerification('baidu', 'account-1');
+
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'cloud_open_operation_verification', {
+    provider: 'baidu', expectedAccountId: 'account-1', locale: 'en-US'
+  });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_complete_operation_verification', {
+    provider: 'baidu', expectedAccountId: 'account-1'
+  });
+});
+
 it('updates the extraction code of an existing share without recreating it', async () => {
   const api = await import('./cloudApi');
   await api.updateCloudSharePassCode('pikpak', 'share-existing', 'a1B2');

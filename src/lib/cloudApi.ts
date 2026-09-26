@@ -9,7 +9,8 @@ export const getCloudProviderCatalog = () => invoke<ProviderDescriptor[]>('cloud
 
 export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
 export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
-export const openCloudOperationVerification = (provider: CloudProvider, expectedAccountId: string) => invoke<void>('cloud_open_operation_verification', { provider, expectedAccountId });
+export const openCloudOperationVerification = (provider: CloudProvider, expectedAccountId: string, locale?: string) => invoke<void>('cloud_open_operation_verification', { provider, expectedAccountId, locale });
+export const completeCloudOperationVerification = (provider: CloudProvider, expectedAccountId: string) => invoke<CloudAccount>('cloud_complete_operation_verification', { provider, expectedAccountId });
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
 export const getCompletedCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount | null>('cloud_completed_authorization', { provider });
 const authorizationSubscribers = new Set<{ provider: CloudProvider; receive: (event: CloudAuthorizationStateEvent) => void }>();

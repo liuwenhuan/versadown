@@ -46,6 +46,9 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试".into()
         }
+        QuarkError::BaiduOperationVerificationRequired => {
+            "baidu_operation_verification_required".into()
+        }
         QuarkError::PikpakRegionalMembershipRestricted => {
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
                 .into()
@@ -90,6 +93,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "pikpak_operation_verification_required"
         }
+        QuarkError::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
         QuarkError::SourceFileMissing => "source_file_missing",

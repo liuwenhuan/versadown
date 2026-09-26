@@ -930,16 +930,44 @@ pub async fn cloud_complete_authorization(
     Ok(account)
 }
 
-/// Opens only the server challenge stored with the current encrypted session.
-/// Unlike login authorization, this window deliberately has no account-ready
-/// callback and cannot submit/replay the user's file operation.
+pub(crate) fn refresh_baidu_operation_verification_session(
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+    cookies: &[String],
+    expected_account_id: &str,
+) -> Result<CloudAccount, QuarkError> {
+    if expected_account_id.is_empty() {
+        return Err(QuarkError::AccountMismatch);
+    }
+    let saved: baidu::BaiduSession = load_provider_session(CloudProvider::Baidu, store)?;
+    if baidu::BaiduClient::new(saved, http).account()?.id != expected_account_id {
+        return Err(QuarkError::AccountMismatch);
+    }
+    let candidate = baidu::parse_baidu_web_session(cookies)?;
+    let client = baidu::BaiduClient::new(candidate.clone(), http);
+    let account = client.account()?;
+    if account.id != expected_account_id {
+        return Err(QuarkError::AccountMismatch);
+    }
+    client.directory(
+        ProviderRegistry::global()
+            .get(CloudProvider::Baidu)
+            .root_directory_id,
+    )?;
+    save_provider_session(CloudProvider::Baidu, store, &candidate)?;
+    Ok(account)
+}
+
+/// Opens the provider's official operation-verification page in its existing
+/// browser profile. This window never submits or replays a file operation.
 #[tauri::command]
 pub async fn cloud_open_operation_verification(
     app: AppHandle,
     provider: CloudProvider,
     expected_account_id: String,
+    locale: Option<String>,
 ) -> Result<(), QuarkError> {
-    if provider != CloudProvider::Pikpak {
+    if !matches!(provider, CloudProvider::Pikpak | CloudProvider::Baidu) {
         return Err(QuarkError::InvalidInput(
             "此网盘没有待处理的操作验证".into(),
         ));
@@ -949,9 +977,31 @@ pub async fn cloud_open_operation_verification(
         if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
             return Err(QuarkError::NotAuthorized);
         }
-        let url = PikPakClient::new(http, &state.store)
-            .operation_verification_url(&expected_account_id)?;
-        let label = "cloud-operation-pikpak";
+        let (url, label, title) = if provider == CloudProvider::Baidu {
+            let saved: baidu::BaiduSession = load_provider_session(provider, &state.store)?;
+            if baidu::BaiduClient::new(saved, http).account()?.id != expected_account_id {
+                return Err(QuarkError::AccountMismatch);
+            }
+            (
+                "https://pan.baidu.com/disk/main#/recyclebin".to_owned(),
+                "cloud-operation-baidu",
+                if locale
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().starts_with("en"))
+                {
+                    "Baidu Netdisk verification: return to the app when finished"
+                } else {
+                    "百度网盘安全验证：完成后请返回应用重试"
+                },
+            )
+        } else {
+            (
+                PikPakClient::new(http, &state.store)
+                    .operation_verification_url(&expected_account_id)?,
+                "cloud-operation-pikpak",
+                "PikPak 操作验证：完成后请返回应用重试",
+            )
+        };
         if let Some(window) = window_app.get_webview_window(label) {
             // Never leave a previous account's/challenge's page in this window.
             window
@@ -966,16 +1016,63 @@ pub async fn cloud_open_operation_verification(
             label,
             WebviewUrl::External(url.parse().map_err(|_| QuarkError::InvalidResponse)?),
         )
-        .title("PikPak 操作验证：完成后请返回应用重试")
+        .title(title)
         .inner_size(1024.0, 760.0)
         .data_directory(authorization_profile_directory(&window_app, provider)?)
-        .on_navigation(|url| allows_pikpak_operation_verification_url(url.as_str()))
+        .on_navigation(move |url| {
+            if provider == CloudProvider::Baidu {
+                url.scheme() == "https"
+                    && matches!(url.host_str(), Some("pan.baidu.com" | "passport.baidu.com"))
+            } else {
+                allows_pikpak_operation_verification_url(url.as_str())
+            }
+        })
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()
         .map_err(|_| QuarkError::Storage)?;
         Ok(())
     })
     .await
+}
+
+#[tauri::command]
+pub async fn cloud_complete_operation_verification(
+    app: AppHandle,
+    provider: CloudProvider,
+    expected_account_id: String,
+) -> Result<CloudAccount, QuarkError> {
+    if provider != CloudProvider::Baidu {
+        return Err(QuarkError::InvalidInput(
+            "此网盘没有待处理的操作验证".into(),
+        ));
+    }
+    let window = app
+        .get_webview_window("cloud-operation-baidu")
+        .ok_or(QuarkError::WebAuthorizationRequired)?;
+    let capture_window = window.clone();
+    let account = run(app, provider, move |state, http| {
+        if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
+            return Err(QuarkError::NotAuthorized);
+        }
+        let cookies = browser_cookies(&capture_window, web_session_cookie_urls(provider))?;
+        let account = refresh_baidu_operation_verification_session(
+            &state.store,
+            http,
+            &cookies,
+            &expected_account_id,
+        )?;
+        state.auth_supervisor.ready_locked(
+            &state.store,
+            provider,
+            Some(account.id.clone()),
+            Some(account.auth_method),
+            auth_supervisor::session_expiry(&state.store, provider)?,
+        )?;
+        Ok(account)
+    })
+    .await?;
+    let _ = window.close();
+    Ok(account)
 }
 
 #[tauri::command]

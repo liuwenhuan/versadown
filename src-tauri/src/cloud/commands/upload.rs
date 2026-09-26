@@ -507,6 +507,7 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "pikpak_operation_verification_required"
         }
+        QuarkError::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",

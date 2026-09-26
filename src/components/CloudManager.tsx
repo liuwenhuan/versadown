@@ -13,7 +13,8 @@ export interface CloudManagerClient {
   getCloudProviderCatalog(): Promise<readonly ProviderDescriptor[]>;
   getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
   beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
-  openCloudOperationVerification?(provider: CloudProvider, expectedAccountId: string): Promise<void>;
+  openCloudOperationVerification?(provider: CloudProvider, expectedAccountId: string, locale?: string): Promise<void>;
+  completeCloudOperationVerification?(provider: CloudProvider, expectedAccountId: string): Promise<CloudAccount>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
   getCompletedCloudAuthorization?(provider: CloudProvider): Promise<CloudAccount | null>;
   subscribeCloudAuthorization?(provider: CloudProvider, receive: (event: CloudAuthorizationStateEvent) => void): Promise<() => void>;
@@ -71,7 +72,7 @@ export interface CloudManagerProps {
 type DirectoryState = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'expired';
 type Editor = 'create' | 'rename' | null;
 type DestinationAction = 'move' | 'copy';
-type OperationState = { kind: 'working' | 'success' | 'error' | 'cancelled'; message: string; operationVerification?: boolean; uploadProgress?: CloudUploadProgress } | null;
+type OperationState = { kind: 'working' | 'success' | 'error' | 'cancelled'; message: string; operationVerification?: boolean; verificationOpened?: boolean; uploadProgress?: CloudUploadProgress } | null;
 type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'share' | 'copyShareLink' | 'updateSharePassCode' | 'cancelShare' | 'delete' | 'create' | 'upload' | 'refresh';
@@ -139,6 +140,36 @@ function requiresOfficialWebAuthorization(error: unknown) {
 function requiresPikpakOperationVerification(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error
     && error.code === 'pikpak_operation_verification_required';
+}
+
+function requiresBaiduOperationVerification(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && error.code === 'baidu_operation_verification_required';
+}
+
+const baiduOperationVerificationText = {
+  'zh-CN': {
+    required: '百度网盘需要安全验证。请打开官方回收站完成验证，然后返回应用重试永久删除。',
+    open: '打开百度网盘官方回收站验证',
+    opened: '请在百度网盘官方页面完成安全验证，返回后点击“我已完成验证”。不会自动永久删除文件。',
+    complete: '我已完成验证',
+    completed: '已同步官方页面的账号会话。请刷新回收站；若文件仍在，再次确认永久删除。是否通过安全验证以重试结果为准。',
+    completeFailed: '无法同步官方页面的账号会话。请在官方页面完成验证后再试。',
+    accountMismatch: '验证账号与当前会话不一致。请使用原账号完成验证。',
+  },
+  en: {
+    required: 'Baidu Netdisk requires security verification. Open the official recycle bin, complete verification, then return and retry permanent deletion.',
+    open: 'Open Baidu recycle bin for verification',
+    opened: 'Complete verification on Baidu Netdisk, then return and select “I have verified”. Files will not be permanently deleted automatically.',
+    complete: 'I have verified',
+    completed: 'The official account session was synced. Refresh the recycle bin; if the file remains, confirm permanent deletion again. The retry will show whether verification succeeded.',
+    completeFailed: 'Could not sync the official account session. Complete verification on the official page and try again.',
+    accountMismatch: 'The verified account does not match the current session. Verify with the original account.',
+  },
+} as const;
+
+function baiduVerificationText() {
+  return baiduOperationVerificationText[document.documentElement.lang.toLowerCase().startsWith('en') ? 'en' : 'zh-CN'];
 }
 
 function isSessionRenewedRetryOperation(error: unknown) {
@@ -689,15 +720,16 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     pendingAuthorizationAction.current = null;
     setPendingAuthorizationName(null);
     setReauthorizationRequired(false);
-    setOperation({ kind: 'error', message: errorMessage(error, '请完成 PikPak 官方操作验证后重试。'), operationVerification: true });
+    setOperation({ kind: 'error', message: requiresBaiduOperationVerification(error) ? baiduVerificationText().required : errorMessage(error, '请完成 PikPak 官方操作验证后重试。'), operationVerification: true });
   }
 
   async function openOperationVerification() {
     if (!activeAccount || !client.openCloudOperationVerification || openingOperationVerification) return;
     setOpeningOperationVerification(true);
     try {
-      await client.openCloudOperationVerification(provider, activeAccount.id);
-      setOperation({ kind: 'error', operationVerification: true, message: '请在官方页面完成操作验证；返回后重新执行原操作。不会自动永久删除文件。' });
+      if (provider === 'baidu') await client.openCloudOperationVerification(provider, activeAccount.id, document.documentElement.lang);
+      else await client.openCloudOperationVerification(provider, activeAccount.id);
+      setOperation({ kind: 'error', operationVerification: true, verificationOpened: true, message: provider === 'baidu' ? baiduVerificationText().opened : '请在官方页面完成操作验证；返回后重新执行原操作。不会自动永久删除文件。' });
     } catch (error) {
       setOperation({ kind: 'error', operationVerification: true, message: errorMessage(error, '无法打开官方操作验证页面，请稍后重试。') });
     } finally {
@@ -839,6 +871,25 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setDirectoryState(isCredentialExpired(error) ? 'expired' : 'error');
       setAuthorizationStatus(errorMessage(error, '无法读取此目录'));
       return null;
+    }
+  }
+
+  async function completeOperationVerification() {
+    if (provider !== 'baidu' || !activeAccount || !client.completeCloudOperationVerification || openingOperationVerification) return;
+    setOpeningOperationVerification(true);
+    try {
+      const account = await client.completeCloudOperationVerification(provider, activeAccount.id);
+      if (account.id !== activeAccount.id || account.provider !== provider) throw { code: 'account_mismatch', message: baiduVerificationText().accountMismatch };
+      setActiveAccount(account);
+      onAccountAuthorized?.(account);
+      setOperation({ kind: 'success', message: baiduVerificationText().completed });
+    } catch (error) {
+      const message = typeof error === 'object' && error !== null && 'code' in error && error.code === 'account_mismatch'
+        ? baiduVerificationText().accountMismatch
+        : baiduVerificationText().completeFailed;
+      setOperation({ kind: 'error', operationVerification: true, verificationOpened: true, message });
+    } finally {
+      setOpeningOperationVerification(false);
     }
   }
 
@@ -1160,7 +1211,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setEditor(null);
       setEditorValue('');
     } catch (error) {
-      if (requiresPikpakOperationVerification(error)) {
+      if (requiresPikpakOperationVerification(error) || requiresBaiduOperationVerification(error)) {
         showOperationVerification(error);
       } else if (needsInPlaceWebAuthorization(error)) {
         // Keep the existing account and directory alive while the official
@@ -1447,7 +1498,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   function authorizationContinuationButton() {
     if (operation?.operationVerification && client.openCloudOperationVerification) {
-      return <button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void openOperationVerification()}>打开 PikPak 操作验证</button>;
+      return <><button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void openOperationVerification()}>{provider === 'baidu' ? baiduVerificationText().open : '打开 PikPak 操作验证'}</button>{provider === 'baidu' && operation.verificationOpened && client.completeCloudOperationVerification && <button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void completeOperationVerification()}>{baiduVerificationText().complete}</button>}</>;
     }
     if (!pendingAuthorizationName || !effectiveAuthorizationCapabilities.web) return null;
     return <button className="secondary cloud-authorization-continuation" disabled={operationBusy || webAuthorization !== null} onClick={() => void beginWebAuthorization()}>打开 {label} 授权并继续{pendingAuthorizationName}</button>;

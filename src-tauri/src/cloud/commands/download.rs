@@ -997,6 +997,10 @@ pub(crate) fn directory_download_failure_fields(
             "pikpak_operation_verification_required",
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试",
         ),
+        QuarkError::BaiduOperationVerificationRequired => (
+            "baidu_operation_verification_required",
+            "baidu_operation_verification_required",
+        ),
         QuarkError::SourceFileMissing => (
             "source_file_missing",
             "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载",

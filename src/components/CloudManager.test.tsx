@@ -2384,6 +2384,79 @@ it.each([
   expect(listCloudDirectory).toHaveBeenCalledTimes(2);
 });
 
+it('opens Baidu recycle-bin verification and waits for an explicit retry of permanent deletion', async () => {
+  const user = userEvent.setup();
+  const recycleBinId = cloudRecycleBinDirectoryId.baidu;
+  const deleteCloudFiles = vi.fn()
+    .mockRejectedValueOnce({ code: 'baidu_operation_verification_required', message: 'baidu_operation_verification_required' })
+    .mockResolvedValueOnce(undefined);
+  const openCloudOperationVerification = vi.fn().mockResolvedValue(undefined);
+  const completeCloudOperationVerification = vi.fn().mockResolvedValue({ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' });
+  const client = createCloudFake({
+    deleteCloudFiles,
+    openCloudOperationVerification,
+    completeCloudOperationVerification,
+    listCloudDirectory: vi.fn().mockImplementation((_provider: CloudProvider, parentId = '/') => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [{ id: '987', parentId: recycleBinId, name: '待验证.txt', kind: 'file', size: 12 }] }
+      : { id: parentId, items: [] })),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await user.dblClick(await screen.findByText('回收站'));
+  await user.click(await screen.findByText('待验证.txt'));
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('百度网盘需要安全验证');
+  await user.click(screen.getByRole('button', { name: '打开百度网盘官方回收站验证' }));
+  expect(openCloudOperationVerification).toHaveBeenCalledWith('baidu', 'b-1', document.documentElement.lang);
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(deleteCloudFiles).toHaveBeenCalledTimes(1);
+
+  await user.click(screen.getByRole('button', { name: '我已完成验证' }));
+  expect(completeCloudOperationVerification).toHaveBeenCalledWith('baidu', 'b-1');
+  expect(deleteCloudFiles).toHaveBeenCalledTimes(1);
+  expect(screen.getByText('待验证.txt')).toBeVisible();
+
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
+  await waitFor(() => expect(deleteCloudFiles).toHaveBeenCalledTimes(2));
+  expect(deleteCloudFiles).toHaveBeenNthCalledWith(2, 'baidu', ['987']);
+});
+
+it('localizes a Baidu verification account mismatch without retrying permanent deletion', async () => {
+  const previousLanguage = document.documentElement.lang;
+  document.documentElement.lang = 'en';
+  try {
+    const user = userEvent.setup();
+    const recycleBinId = cloudRecycleBinDirectoryId.baidu;
+    const deleteCloudFiles = vi.fn().mockRejectedValueOnce({ code: 'baidu_operation_verification_required' });
+    const completeCloudOperationVerification = vi.fn().mockRejectedValue({ code: 'account_mismatch', message: '验证账号不一致' });
+    const client = createCloudFake({
+      deleteCloudFiles,
+      openCloudOperationVerification: vi.fn().mockResolvedValue(undefined),
+      completeCloudOperationVerification,
+      listCloudDirectory: vi.fn().mockImplementation((_provider: CloudProvider, parentId = '/') => Promise.resolve(parentId === recycleBinId
+        ? { id: recycleBinId, items: [{ id: '987', parentId: recycleBinId, name: 'verify.txt', kind: 'file', size: 12 }] }
+        : { id: parentId, items: [] })),
+    });
+    render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+
+    await user.dblClick(await screen.findByText('回收站'));
+    await user.click(await screen.findByText('verify.txt'));
+    await user.click(screen.getByRole('button', { name: '永久删除' }));
+    await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
+    await user.click(await screen.findByRole('button', { name: 'Open Baidu recycle bin for verification' }));
+    await user.click(screen.getByRole('button', { name: 'I have verified' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The verified account does not match the current session.');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('验证账号不一致');
+    expect(deleteCloudFiles).toHaveBeenCalledTimes(1);
+  } finally {
+    document.documentElement.lang = previousLanguage;
+  }
+});
+
 it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as const)('retries the server-backed directory listing until an uploaded %s file is visible', async (provider) => {
   const user = userEvent.setup();
   const rootId = cloudCatalog.find((descriptor) => descriptor.provider === provider)!.rootDirectoryId;

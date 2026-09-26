@@ -875,6 +875,38 @@ mod tests {
         assert_eq!(http.requests.lock().unwrap().len(), 1);
     }
     #[test]
+    fn baidu_share_expands_a_folder_with_string_isdir_instead_of_listing_it_as_a_file() {
+        let credentials = credentials();
+        let root = json!({
+            "errno": 0, "shareid": 22, "uk": 33, "has_more": false,
+            "list": [{"fs_id": 12, "server_filename": "BiliDownloader", "path": "/BiliDownloader", "isdir": "1", "size": 0}]
+        });
+        let children = json!({
+            "errno": 0, "has_more": false,
+            "list": [
+                {"fs_id": 13, "server_filename": "video.mp4", "path": "/BiliDownloader/video.mp4", "isdir": 0, "size": 1024},
+                {"fs_id": 14, "server_filename": "cover.jpg", "path": "/BiliDownloader/cover.jpg", "isdir": 0, "size": 256}
+            ]
+        });
+        let http = Http::new(vec![root, children]);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!("expected share plan")
+        };
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries[0].name, "video.mp4");
+        assert_eq!(plan.entries[0].relative_directory, vec!["BiliDownloader"]);
+        assert_eq!(plan.entries[1].name, "cover.jpg");
+        assert_eq!(plan.entries[1].relative_directory, vec!["BiliDownloader"]);
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let nested = url::Url::parse(&requests[1].url).unwrap();
+        assert!(nested
+            .query_pairs()
+            .any(|(name, value)| name == "dir" && value == "/BiliDownloader"));
+    }
+    #[test]
     fn baidu_share_transfer_records_exact_id_and_downloads_personal_file() {
         let credentials = credentials();
         let http = Http::new(vec![
@@ -1554,7 +1586,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                                 .map(str::to_owned)
                                 .ok_or(QuarkError::InvalidResponse)
                         })?,
-                    kind: if file.get("isdir").and_then(Value::as_i64) == Some(1) {
+                    kind: if baidu_is_directory(file) {
                         "folder"
                     } else {
                         "file"
@@ -1609,7 +1641,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                     id,
                     parent_id: BAIDU_RECYCLE_BIN_ID.into(),
                     name: required(file, "server_filename").or_else(|_| required(file, "name"))?,
-                    kind: if file.get("isdir").and_then(Value::as_i64) == Some(1) {
+                    kind: if baidu_is_directory(file) {
                         "folder"
                     } else {
                         "file"
@@ -1775,12 +1807,20 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     fn recycle_operation(&self, action: &str, ids: &[String]) -> Result<(), QuarkError> {
         let fidlist = baidu_recycle_fidlist(ids)?;
         let token = self.web_token()?;
-        self.web_form(
+        let response = self.web_form_response(
             &format!("/api/recycle/{action}"),
             &format!("channel=chunlei&async=1&bdstoken={}", encoded(&token)),
             form(&[("fidlist", fidlist)]),
-        )
-        .map(|_| ())
+        )?;
+        if action == "delete"
+            && serde_json::from_str::<Value>(&response.body)
+                .ok()
+                .and_then(|value| value.get("errno").and_then(baidu_error_number))
+                == Some(132)
+        {
+            return Err(QuarkError::BaiduOperationVerificationRequired);
+        }
+        baidu_json(&response).map(|_| ())
     }
 
     pub(crate) fn trash_transferred_files(&self, ids: &[String]) -> Result<(), QuarkError> {
@@ -2110,18 +2150,26 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     fn web_form(&self, path: &str, query: &str, body: String) -> Result<Value, QuarkError> {
+        baidu_json(&self.web_form_response(path, query, body)?)
+    }
+
+    fn web_form_response(
+        &self,
+        path: &str,
+        query: &str,
+        body: String,
+    ) -> Result<CloudHttpResponse, QuarkError> {
         let mut headers = self.web_headers();
         headers.insert(
             "Content-Type".into(),
             "application/x-www-form-urlencoded".into(),
         );
-        let response = self.http.send(CloudHttpRequest {
+        self.http.send(CloudHttpRequest {
             method: "POST",
             url: format!("{PAN}{path}?{query}"),
             headers,
             body: Some(body),
-        })?;
-        baidu_json(&response)
+        })
     }
 
     fn web_file_manager(
@@ -2493,6 +2541,9 @@ fn challenge(value: &Value) -> bool {
 fn baidu_error_number(value: &Value) -> Option<i64> {
     value.as_i64().or_else(|| value.as_str()?.parse().ok())
 }
+fn baidu_is_directory(value: &Value) -> bool {
+    value.get("isdir").and_then(baidu_error_number) == Some(1)
+}
 fn string_or_number(value: &Value) -> Option<String> {
     value
         .as_str()
@@ -2679,7 +2730,7 @@ fn baidu_share_from_value(
         id,
         url: short_url,
         name: name.into(),
-        kind: if value.get("isdir").and_then(Value::as_i64) == Some(1) {
+        kind: if baidu_is_directory(value) {
             CloudFileKind::Folder
         } else {
             CloudFileKind::File
@@ -2993,7 +3044,7 @@ impl ShareInspect for BaiduShareAdapter<'_> {
                     let name = required(file, "server_filename")?;
                     let path = required(file, "path")?;
                     validate_path(&path)?;
-                    if file["isdir"].as_i64() == Some(1) {
+                    if baidu_is_directory(file) {
                         let mut relative = directory.clone();
                         relative.push(name);
                         queue.push_back((path, relative, false));

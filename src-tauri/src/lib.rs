@@ -555,6 +555,7 @@ pub fn run() {
             cloud::commands::cloud_begin_authorization,
             cloud::commands::cloud_complete_authorization,
             cloud::commands::cloud_open_operation_verification,
+            cloud::commands::cloud_complete_operation_verification,
             cloud::commands::cloud_completed_authorization,
             cloud::commands::cloud_reauthorize_failed_task,
             cloud::commands::cloud_login_password,

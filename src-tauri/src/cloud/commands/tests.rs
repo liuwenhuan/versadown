@@ -8,10 +8,50 @@ use super::{
     bind_reauthorized_cloud_task_owner, cloud_failure_code, create_cloud_task,
     directory_download_failure_fields, password_webview_data_directory_from_root,
     prepare_baidu_account_login, recover_provider_password_session,
-    requires_cloud_reauthorization_failure, resolve_download,
-    retry_read_with_refreshed_web_session, should_attempt_silent_provider_recovery,
+    refresh_baidu_operation_verification_session, requires_cloud_reauthorization_failure,
+    resolve_download, retry_read_with_refreshed_web_session,
+    should_attempt_silent_provider_recovery,
     should_release_startup_directory_pause,
 };
+
+#[test]
+fn baidu_operation_verification_refreshes_only_the_same_accounts_valid_browser_session() {
+    let store = MemoryCredentialStore::default();
+    let original = serde_json::to_vec(&BaiduSession::cookie("BDUSS=original")).unwrap();
+    store.save("baidu", &original).unwrap();
+    let transport = SequenceTransport(Mutex::new(VecDeque::from([
+        r#"{"errno":0,"uk":123,"netdisk_name":"Alice"}"#,
+        r#"{"errno":0,"uk":123,"netdisk_name":"Alice"}"#,
+        r#"{"errno":0,"list":[]}"#,
+    ])));
+
+    let account = refresh_baidu_operation_verification_session(
+        &store, &transport, &["BDUSS=verified".into()], "123",
+    ).unwrap();
+
+    assert_eq!(account.id, "123");
+    let saved: BaiduSession = super::load_provider_session(CloudProvider::Baidu, &store).unwrap();
+    assert!(saved.cookie.contains("BDUSS=verified"));
+}
+
+#[test]
+fn baidu_operation_verification_rejects_another_browser_account_without_replacing_session() {
+    let store = MemoryCredentialStore::default();
+    let original = serde_json::to_vec(&BaiduSession::cookie("BDUSS=original")).unwrap();
+    store.save("baidu", &original).unwrap();
+    let transport = SequenceTransport(Mutex::new(VecDeque::from([
+        r#"{"errno":0,"uk":123,"netdisk_name":"Alice"}"#,
+        r#"{"errno":0,"uk":456,"netdisk_name":"Bob"}"#,
+    ])));
+
+    assert!(matches!(
+        refresh_baidu_operation_verification_session(
+            &store, &transport, &["BDUSS=other-account".into()], "123",
+        ),
+        Err(QuarkError::AccountMismatch)
+    ));
+    assert_eq!(store.load("baidu").unwrap().as_deref(), Some(original.as_slice()));
+}
 use crate::cloud::share::{CloudShareDownloadEntry, CloudShareDownloadSelection};
 use crate::cloud::{
     baidu::{parse_baidu_web_session, BaiduSession, BAIDU_AUTO_OPEN_LOGIN_JS},

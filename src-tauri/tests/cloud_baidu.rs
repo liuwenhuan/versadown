@@ -944,6 +944,33 @@ fn baidu_recycle_operations_use_the_recycle_record_not_a_live_path() {
 }
 
 #[test]
+fn baidu_recycle_delete_requires_official_operation_verification_for_errno_132() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"result":{"bdstoken":"delete-token"}}"#,
+        r#"{"errno":132}"#,
+    ]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    assert!(matches!(
+        client.delete_recycle_entries(&["987".into()]),
+        Err(QuarkError::BaiduOperationVerificationRequired)
+    ));
+    let requests = http.requests();
+    assert_eq!(form_field(requests[1].body.as_deref().unwrap(), "fidlist"), "[987]");
+}
+
+#[test]
+fn baidu_non_recycle_errno_132_remains_a_provider_error() {
+    let http = RecordingHttp::sequence(&[r#"{"errno":132}"#]);
+    let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
+
+    assert!(matches!(
+        client.storage_capacity(),
+        Err(QuarkError::Provider(message)) if message.contains("132")
+    ));
+}
+
+#[test]
 fn baidu_recycle_mutations_reject_non_record_ids_before_transport() {
     let http = RecordingHttp::sequence(&[]);
     let client = BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http);
