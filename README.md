@@ -33,6 +33,17 @@ pnpm run build:linux:quick
 
 产物包含 Linux x86_64 的 aria2-next 2.8.0 sidecar。该命令生成调试二进制，不生成 Release 包或安装包。
 
+### Linux x86_64 发布包
+
+在具备上述依赖的 Linux x86_64 系统执行：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build:linux:release
+```
+
+脚本使用 Tauri 生成 `.deb` 和 `.AppImage`，只打包 Linux 版 aria2-next，并把安装包及 `SHA256SUMS` 放在 `artifacts/linux/`。该命令是完整 Release 编译，不是日常调试入口。GitHub Actions 的 `Linux release` 工作流可手动运行并下载产物；推送 `v*` 标签后，它会把同样的产物添加到**草稿** GitHub Release，仍需人工检查后发布。
+
 ### Windows
 
 Windows 10/11、WebView2 runtime、Node 24+、Rust stable MSVC、Visual Studio C++ Build Tools。项目构建时会使用 Tauri 的 Windows WiX 打包链。
