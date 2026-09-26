@@ -1,4 +1,4 @@
-use alldownloader_lib::{plan_processing, ProcessingHint, Resource};
+use versadown_lib::{plan_processing, ProcessingHint, Resource};
 
 #[test]
 fn password_from_page_can_be_attached_without_being_serialized_in_trace() {

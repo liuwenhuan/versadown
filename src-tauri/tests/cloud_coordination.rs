@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     commands::{restore_account, CloudState},
     *,
 };
@@ -86,7 +86,7 @@ fn initial_account_restore_is_not_authorized_without_a_network_request() {
 
 #[test]
 fn cancelled_or_expired_share_poll_does_not_send_another_request() {
-    use alldownloader_lib::cloud::share::ShareWorkControl;
+    use versadown_lib::cloud::share::ShareWorkControl;
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Http(AtomicUsize);
     impl CloudHttpTransport for Http {
@@ -132,7 +132,7 @@ fn cancelled_share_poll_keeps_completed_transfer_journal_and_replacement_account
 }
 
 fn share_transfer_poll_scenario(cancelled: bool) {
-    use alldownloader_lib::cloud::{auth_supervisor::AuthSupervisor, share::*, xunlei::*};
+    use versadown_lib::cloud::{auth_supervisor::AuthSupervisor, share::*, xunlei::*};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Barrier, Mutex,

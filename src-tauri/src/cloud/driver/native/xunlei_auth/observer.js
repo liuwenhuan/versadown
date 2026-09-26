@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  if (location.origin !== 'https://pan.xunlei.com' || window.__alldownloaderXunleiAuth) return;
+  if (location.origin !== 'https://pan.xunlei.com' || window.__versadownXunleiAuth) return;
   const clientId = 'Xqp0kJBXWhwaTpB6';
   const driveHost = 'api-pan.xunlei.com';
   const authHost = 'xluser-ssl.xunlei.com';
@@ -15,7 +15,7 @@
   const tickets = new Map();
   window.addEventListener('message', event => {
     if (event.origin === 'https://i.xunlei.com'
-      && event.data?.type === 'alldownloader-xunlei-password'
+      && event.data?.type === 'versadown-xunlei-password'
       && event.data.error === 'plugin_update_required' && !candidate) phase = 'incompatible';
   });
   function begin(url, method, headers, body) {
@@ -104,7 +104,7 @@
     }, {once:true});
     return send.apply(this,arguments);
   };
-  window.__alldownloaderXunleiAuth = Object.freeze({
+  window.__versadownXunleiAuth = Object.freeze({
     snapshot() {
       if (candidate && candidate.user_id === identity && candidate.expires_at > Date.now()/1000) return JSON.parse(JSON.stringify(candidate));
       if (phase === 'incompatible' || (signedInAt && Date.now()-signedInAt > 45000)) return {authorization_error:'plugin_update_required'};

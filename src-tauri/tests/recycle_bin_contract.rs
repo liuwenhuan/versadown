@@ -1,4 +1,4 @@
-use alldownloader_lib::{may_transition, TaskStatus};
+use versadown_lib::{may_transition, TaskStatus};
 
 #[test]
 fn terminal_tasks_can_move_to_the_recycle_bin() {

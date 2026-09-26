@@ -1,4 +1,4 @@
-use alldownloader_lib::{
+use versadown_lib::{
     launcher_menu_entries, should_apply_launcher_window_visibility, tray_menu_entries, AppSettings,
     LauncherInteractionState, LauncherVisibility,
 };

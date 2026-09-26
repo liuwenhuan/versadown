@@ -174,4 +174,4 @@ Observed: 本次天翼与分享文件的 scoped rustfmt 检查成功，`git diff
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
 
-Observed: `scripts/build-windows.ps1` exit 0；`artifacts/alldownloader.exe` 已更新。
+Observed: `scripts/build-windows.ps1` exit 0；`artifacts/versadown.exe` 已更新。

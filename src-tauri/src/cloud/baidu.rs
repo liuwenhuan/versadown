@@ -250,12 +250,12 @@ mod tests {
     #[ignore = "read-only: saved Baidu session and 1 KiB native download probe"]
     fn live_baidu_native_download_probe() {
         assert_eq!(
-            std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+            std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
             Ok("1")
         );
         let store = crate::cloud::SystemCredentialStore::new(
             std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
-                .join("com.alldownloader.desktop/cloud-sessions"),
+                .join("com.versadown.desktop/cloud-sessions"),
         )
         .unwrap();
         let session: BaiduSession =
@@ -297,7 +297,7 @@ mod tests {
     #[ignore = "requires explicit share URL, code, saved Baidu session; transfers one file, probes 1 KiB, then trashes the exact created copy"]
     fn live_baidu_share_transfer_download_probe() {
         assert_eq!(
-            std::env::var("ALLDOWNLOADER_LIVE_BAIDU_SHARE_TRANSFER").as_deref(),
+            std::env::var("VERSADOWN_LIVE_BAIDU_SHARE_TRANSFER").as_deref(),
             Ok("1")
         );
         let input = std::env::var("BAIDU_SHARE_PROBE_URL").expect("share URL required");
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(candidate.provider, CloudProvider::Baidu);
         let credentials = crate::cloud::SystemCredentialStore::new(
             std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
-                .join("com.alldownloader.desktop/cloud-sessions"),
+                .join("com.versadown.desktop/cloud-sessions"),
         )
         .unwrap();
         let session: BaiduSession =
@@ -1054,7 +1054,7 @@ const BAIDU_WEB_USER_AGENT: &str =
 const BAIDU_PAN_USER_AGENT: &str =
     "netdisk;P2SP;3.0.0.8;netdisk;11.12.3;ANG-AN00;android-android;10.0;JSbridge4.4.0;jointBridge;1.1.0;";
 const REFERENCE_PREFIX: &str = "bdr_";
-pub const BAIDU_RECYCLE_BIN_ID: &str = "__all_downloader_baidu_recycle_bin__";
+pub const BAIDU_RECYCLE_BIN_ID: &str = "__versa_down_baidu_recycle_bin__";
 const BAIDU_RECYCLE_BIN_NAME: &str = "回收站";
 const BAIDU_UPLOAD_HOST: &str = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2";
 pub(crate) const BAIDU_AUTO_OPEN_LOGIN_JS: &str = include_str!("baidu-auto-open-login.js");
@@ -2296,7 +2296,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             }
             _ => {
                 let message =
-                    if std::env::var("ALLDOWNLOADER_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
+                    if std::env::var("VERSADOWN_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
                         format!(
                             "登录被服务拒绝（code {}）",
                             code.as_deref().unwrap_or("unparseable")
@@ -2450,7 +2450,7 @@ fn baidu_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
         .unwrap_or(0);
     if errno != 0 {
         if matches!(errno, -6 | -7 | 110 | 111 | 31045) {
-            if std::env::var("ALLDOWNLOADER_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
+            if std::env::var("VERSADOWN_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
                 return Err(QuarkError::Provider(format!(
                     "百度授权拒绝（errno {errno}，HTTP {}）",
                     response.status

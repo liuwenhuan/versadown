@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(saved.captcha_token, "rotated-captcha");
     }
 }
-pub(crate) const PIKPAK_RECYCLE_BIN_ID: &str = "__all_downloader_pikpak_recycle_bin__";
+pub(crate) const PIKPAK_RECYCLE_BIN_ID: &str = "__versa_down_pikpak_recycle_bin__";
 const PIKPAK_RECYCLE_BIN_NAME: &str = "回收站";
 const CAPTCHA_SALTS: &[&str] = &[
     "SOP04dGzk0TNO7t7t9ekDbAmx+eq0OI1ovEx",
@@ -918,9 +918,9 @@ impl<'a, T: CloudHttpTransport, S: CredentialStore> PikPakClient<'a, T, S> {
         Self {
             http,
             store,
-            client_id: std::env::var("ALLDOWNLOADER_PIKPAK_CLIENT_ID")
+            client_id: std::env::var("VERSADOWN_PIKPAK_CLIENT_ID")
                 .unwrap_or_else(|_| "YNxT9w7GMdWvEOKa".into()),
-            client_secret: std::env::var("ALLDOWNLOADER_PIKPAK_CLIENT_SECRET")
+            client_secret: std::env::var("VERSADOWN_PIKPAK_CLIENT_SECRET")
                 .unwrap_or_else(|_| "dbw2OtmVEeuUvIptb1Coyg".into()),
         }
     }

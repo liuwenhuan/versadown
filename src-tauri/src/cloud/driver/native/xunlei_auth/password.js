@@ -1,7 +1,7 @@
 (function (_provider, _hosts, username, password, attempt) {
   'use strict';
   if (location.origin !== 'https://i.xunlei.com') return;
-  const key = '__alldownloaderXunleiPassword';
+  const key = '__versadownXunleiPassword';
   if (window[key]) return;
   const state = {submitted:false, error:''}; window[key] = state;
   const visible = element => element && element.getClientRects().length > 0 && !element.disabled;
@@ -10,7 +10,7 @@
   const timer = setInterval(() => {
     if (Date.now()-started > 120000) {
       state.error='plugin_update_required';
-      window.parent.postMessage({type:'alldownloader-xunlei-password',error:state.error},'https://pan.xunlei.com');
+      window.parent.postMessage({type:'versadown-xunlei-password',error:state.error},'https://pan.xunlei.com');
       clear(); return;
     }
     const fields = Array.from(document.querySelectorAll('input.xlubase-login-input'));

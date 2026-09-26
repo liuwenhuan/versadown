@@ -1228,7 +1228,7 @@ git commit -m "fix: reject share tasks before transfer overflow"
 - Modify: `src-tauri/tests/live_share_quark_pikpak.rs`
 
 **Interfaces:**
-- Consumes: `preflight_selected_share_download`, exact public share URL from `ALLDOWNLOADER_LIVE_ALIYUN_SHARE`, current DPAPI Aliyun session and isolated Aria2.
+- Consumes: `preflight_selected_share_download`, exact public share URL from `VERSADOWN_LIVE_ALIYUN_SHARE`, current DPAPI Aliyun session and isolated Aria2.
 - Produces: redacted evidence for one-shot 2427-file inspection, one capacity query without `/v2/file/copy`, the real account's sufficient/insufficient result, and nonzero bytes for two reusable files; deterministic insufficient/no-task behavior is always covered by Task 2.
 
 - [ ] **Step 1: Update the live test before running it**
@@ -1273,8 +1273,8 @@ Keep the existing reusable-transfer selection and `wait_for_first_download_bytes
 Run:
 
 ```powershell
-$env:ALLDOWNLOADER_LIVE_CLOUD='1'
-$env:ALLDOWNLOADER_LIVE_ALIYUN_SHARE='https://www.alipan.com/s/2VsPJYYxm1u'
+$env:VERSADOWN_LIVE_CLOUD='1'
+$env:VERSADOWN_LIVE_ALIYUN_SHARE='https://www.alipan.com/s/2VsPJYYxm1u'
 C:\Users\deepin\.cargo\bin\cargo.exe test --manifest-path src-tauri\Cargo.toml --test live_share_quark_pikpak live_aliyun_share_parses_once_and_two_files_download -- --ignored --nocapture
 ```
 
@@ -1302,7 +1302,7 @@ git commit -m "test: verify Aliyun transfer capacity preflight live"
 
 **Files:**
 - Verify: all files listed above.
-- Output: `artifacts/alldownloader.exe` or, if that running file is locked, a versioned `artifacts/alldownloader-master-*.exe` whose suffix is computed from `git rev-parse --short HEAD`.
+- Output: `artifacts/versadown.exe` or, if that running file is locked, a versioned `artifacts/versadown-master-*.exe` whose suffix is computed from `git rev-parse --short HEAD`.
 
 **Interfaces:**
 - Consumes: completed feature branch and current `master` checkout with unrelated user changes preserved.
@@ -1336,8 +1336,8 @@ Expected: selected Vitest passes and TypeScript/Vite production build succeeds.
 Run:
 
 ```powershell
-$env:ALLDOWNLOADER_LIVE_CLOUD='1'
-$env:ALLDOWNLOADER_LIVE_ALIYUN_SHARE='https://www.alipan.com/s/2VsPJYYxm1u'
+$env:VERSADOWN_LIVE_CLOUD='1'
+$env:VERSADOWN_LIVE_ALIYUN_SHARE='https://www.alipan.com/s/2VsPJYYxm1u'
 C:\Users\deepin\.cargo\bin\cargo.exe test --manifest-path src-tauri\Cargo.toml --test live_share_quark_pikpak live_aliyun_share_parses_once_and_two_files_download -- --ignored --nocapture
 ```
 
@@ -1364,24 +1364,24 @@ From `D:\projects\downloader` after master integration, run:
 $buildStarted = Get-Date
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 if ($LASTEXITCODE -ne 0) {
-    $builtBinary = Get-Item '.tools\release-target\release\alldownloader.exe' -ErrorAction Stop
+    $builtBinary = Get-Item '.tools\release-target\release\versadown.exe' -ErrorAction Stop
     if ($builtBinary.LastWriteTime -lt $buildStarted) {
         throw 'Windows release build failed before producing a fresh binary'
     }
     $shortSha = git rev-parse --short HEAD
-    $versionedBinary = "artifacts\alldownloader-master-$shortSha.exe"
+    $versionedBinary = "artifacts\versadown-master-$shortSha.exe"
     Copy-Item -LiteralPath $builtBinary.FullName -Destination $versionedBinary -Force
 }
 ```
 
-Expected: release build with `custom-protocol` succeeds. If the final `artifacts\alldownloader.exe` copy is locked by the running application after compilation succeeds, the fresh `.tools\release-target\release\alldownloader.exe` is copied to the computed versioned name without terminating the user's running app.
+Expected: release build with `custom-protocol` succeeds. If the final `artifacts\versadown.exe` copy is locked by the running application after compilation succeeds, the fresh `.tools\release-target\release\versadown.exe` is copied to the computed versioned name without terminating the user's running app.
 
 - [ ] **Step 6: Record the binary identity and final repository state**
 
 Run:
 
 ```powershell
-$binary = Get-ChildItem artifacts\alldownloader*.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$binary = Get-ChildItem artifacts\versadown*.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 Get-FileHash -Algorithm SHA256 -LiteralPath $binary.FullName
 git rev-parse HEAD
 git status --short

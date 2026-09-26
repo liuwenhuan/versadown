@@ -7,7 +7,7 @@
   try {
     const chunks = window.webpackJsonp;
     if (!Array.isArray(chunks) || chunks.push === Array.prototype.push) return {};
-    const key = '__alldownloader_uc_profile_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    const key = '__versadown_uc_profile_' + Date.now() + '_' + Math.random().toString(36).slice(2);
     const entry = [[key], { [key]: (_module, _exports, require) => { requireModule = require; } }, [[key]]];
     try { chunks.push(entry); }
     finally {

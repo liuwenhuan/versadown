@@ -51,54 +51,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alldownloader"
-version = "0.2.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chacha20poly1305",
- "futures-util",
- "gtk",
- "hmac 0.12.1",
- "httpdate",
- "keyring",
- "libc",
- "libloading",
- "md5",
- "percent-encoding",
- "quick-xml 0.42.0",
- "rand 0.8.7",
- "regex",
- "reqwest 0.12.28",
- "rsa",
- "rusqlite",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "suppaftp",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tempfile",
- "thiserror 2.0.20",
- "time",
- "tokio",
- "tokio-tungstenite",
- "url",
- "uuid",
- "webkit2gtk",
- "webview2-com",
- "windows",
- "winreg",
- "zeroize",
-]
-
-[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5644,6 +5596,54 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "versadown"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "futures-util",
+ "gtk",
+ "hmac 0.12.1",
+ "httpdate",
+ "keyring",
+ "libc",
+ "libloading",
+ "md5",
+ "percent-encoding",
+ "quick-xml 0.42.0",
+ "rand 0.8.7",
+ "regex",
+ "reqwest 0.12.28",
+ "rsa",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "suppaftp",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tempfile",
+ "thiserror 2.0.20",
+ "time",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "uuid",
+ "webkit2gtk",
+ "webview2-com",
+ "windows",
+ "winreg",
+ "zeroize",
+]
 
 [[package]]
 name = "version-compare"

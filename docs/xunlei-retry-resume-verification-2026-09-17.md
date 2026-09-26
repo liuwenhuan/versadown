@@ -32,14 +32,14 @@
 最终后台探测通过，退出码0。执行命令：
 
 ```powershell
-$env:ALLDOWNLOADER_TEST_BINARY='artifacts/alldownloader.exe'
-$env:ALLDOWNLOADER_XUNLEI_PASSWORD_LIVE='1'
-$env:ALLDOWNLOADER_XUNLEI_DOWNLOAD_LIVE='1'
-$env:ALLDOWNLOADER_XUNLEI_RETRY_LIVE='1'
+$env:VERSADOWN_TEST_BINARY='artifacts/versadown.exe'
+$env:VERSADOWN_XUNLEI_PASSWORD_LIVE='1'
+$env:VERSADOWN_XUNLEI_DOWNLOAD_LIVE='1'
+$env:VERSADOWN_XUNLEI_RETRY_LIVE='1'
 node scripts/verify-xunlei-auth-live.cjs
 ```
 
-测试目录为`alldownloader-xunlei-auth-live-hfJQuY`。透明本地桥接仍转发到原代理，只关闭隔离引擎的桥接连接来模拟断连，不修改用户代理或原任务。此前只设置`all-proxy`的注入没有生效，不能算通过；最终同时设置隔离引擎的HTTP/HTTPS代理并确认桥接收到6次连接后才注入。
+测试目录为`versadown-xunlei-auth-live-hfJQuY`。透明本地桥接仍转发到原代理，只关闭隔离引擎的桥接连接来模拟断连，不修改用户代理或原任务。此前只设置`all-proxy`的注入没有生效，不能算通过；最终同时设置隔离引擎的HTTP/HTTPS代理并确认桥接收到6次连接后才注入。
 
 - 同一个真实迅雷文件，128543808字节。在266240字节暂停后恢复；日志显示从`266240-128543808`接续，空响应等待3057/3032/3049ms再试。
 - 409600字节时断连，应用最终进入失败；经真实`task_action: retry`返回`resume_available`，再走`resolve_duplicate_download: resume`接续。
@@ -52,4 +52,4 @@ node scripts/verify-xunlei-auth-live.cjs
 
 见`xunlei-acceleration-assessment-2026-09-17.md`。本轮未接入SDK，不能承诺普通HTTP直链获得官方P2P/离线通道速度。
 
-发布文件：`artifacts/alldownloader.exe`，SHA256 `295C9B344F06B962BA72DD59DD3F39A81702575889F915A239B60A39EA560650`。同目录`binaries`中的aria2 sidecar需保留。
+发布文件：`artifacts/versadown.exe`，SHA256 `295C9B344F06B962BA72DD59DD3F39A81702575889F915A239B60A39EA560650`。同目录`binaries`中的aria2 sidecar需保留。

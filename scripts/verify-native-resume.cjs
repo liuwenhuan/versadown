@@ -24,7 +24,7 @@ async function until(description, operation, timeout = 20000) {
 }
 
 async function main() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-native-resume-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'versadown-native-resume-'));
   const output = path.join(root, 'payload');
   const stateDir = path.join(root, 'aria2-next-state');
   const session = path.join(root, 'aria2-next.tasks');

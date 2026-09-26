@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AllDownloader",
+  "productName": "VersaDown",
   "version": "0.2.0",
-  "identifier": "com.alldownloader.desktop",
+  "identifier": "com.versadown.desktop",
   "build": {
     "beforeDevCommand": "pnpm run dev",
     "beforeBuildCommand": "pnpm run build",
@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [
-      { "label": "main", "title": "AllDownloader", "width": 960, "height": 640, "minWidth": 960, "minHeight": 640, "decorations": false, "shadow": true, "visible": false },
+      { "label": "main", "title": "VersaDown", "width": 960, "height": 640, "minWidth": 960, "minHeight": 640, "decorations": false, "shadow": true, "visible": false },
       { "label": "launcher", "title": "", "width": 410, "height": 720, "resizable": false, "decorations": false, "transparent": true, "shadow": false, "alwaysOnTop": true, "skipTaskbar": true, "dragDropEnabled": false, "visible": false }
     ],
     "security": { "csp": null }

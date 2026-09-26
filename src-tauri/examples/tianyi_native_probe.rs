@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     load_saved_password_login,
     tianyi::{TianyiClient, TIANYI_RECYCLE_BIN_ID},
     CloudProvider, ReqwestTransport, SystemCredentialStore,
@@ -21,7 +21,7 @@ fn probe() -> Result<(usize, bool), &'static str> {
     let credential_root = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .map(|path| {
-            path.join("com.alldownloader.desktop")
+            path.join("com.versadown.desktop")
                 .join("cloud-sessions")
         })
         .ok_or("无法定位应用凭据目录")?;

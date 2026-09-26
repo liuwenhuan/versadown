@@ -47,7 +47,7 @@ Rust 使用 `C:/Users/deepin/.cargo/bin/cargo.exe` 和 `CARGO_TARGET_DIR=.tools/
 
 简报中在两个 integration 后附加 `cloud::share` 会过滤掉这两个 integration 的测试；实际分别无过滤运行指定 integration，并通过 `--lib cloud::share`/`--lib share` 运行分享测试，避免零测试假阳性。
 
-构建仍有原有 browser/common/command helper dead-code 警告、链接器信息及本机路径 canonicalize 警告；没有新增 unused import 或编译错误。发布产物位于当前工作树 `artifacts/alldownloader.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。
+构建仍有原有 browser/common/command helper dead-code 警告、链接器信息及本机路径 canonicalize 警告；没有新增 unused import 或编译错误。发布产物位于当前工作树 `artifacts/versadown.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。
 
 ## 范围内自审
 

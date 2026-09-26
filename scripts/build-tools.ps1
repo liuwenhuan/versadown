@@ -1,4 +1,4 @@
-function Resolve-AllDownloaderBuildTool {
+function Resolve-VersaDownBuildTool {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -48,7 +48,7 @@ function Resolve-AllDownloaderBuildTool {
     throw "No usable $ToolName tool was found."
 }
 
-function Get-AllDownloaderBuildTools {
+function Get-VersaDownBuildTools {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -67,11 +67,11 @@ function Get-AllDownloaderBuildTools {
     $projectPnpm = Join-Path $ProjectRoot '.tools\node-v24.20.0-win-x64\node_modules\corepack\shims\pnpm.cmd'
 
     [pscustomobject]@{
-        Cargo = Resolve-AllDownloaderBuildTool -ToolName 'Cargo' -Candidates @(
+        Cargo = Resolve-VersaDownBuildTool -ToolName 'Cargo' -Candidates @(
             (Join-Path $userProfile '.cargo\bin\cargo.exe'),
             $projectCargo
         )
-        Pnpm = Resolve-AllDownloaderBuildTool -ToolName 'pnpm' -Candidates @(
+        Pnpm = Resolve-VersaDownBuildTool -ToolName 'pnpm' -Candidates @(
             (Join-Path $codexRuntime 'bin\fallback\pnpm.cmd'),
             $projectPnpm
         )

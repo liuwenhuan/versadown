@@ -25,7 +25,7 @@ $script:probeWindow = [IntPtr]::Zero
     if ($owner -ne $AppProcessId) { return $true }
     $title = [System.Text.StringBuilder]::new(256)
     [void][WindowInteractionProbe]::GetWindowText($windowHandle, $title, 256)
-    if ($title.ToString() -eq 'AllDownloader') { $script:probeWindow = $windowHandle; return $false }
+    if ($title.ToString() -eq 'VersaDown') { $script:probeWindow = $windowHandle; return $false }
     return $true
 }, [IntPtr]::Zero)
 if ($script:probeWindow -eq [IntPtr]::Zero) { throw 'Isolated main window not found' }

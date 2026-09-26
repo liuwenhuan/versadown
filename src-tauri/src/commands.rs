@@ -2778,7 +2778,7 @@ fn task_video_paths(store: &TaskStore, task_id: Uuid) -> Result<Vec<PathBuf>, St
 }
 
 fn video_playlist_path(task_id: Uuid, videos: &[PathBuf]) -> Result<PathBuf, String> {
-    let directory = std::env::temp_dir().join("AllDownloader").join("playlists");
+    let directory = std::env::temp_dir().join("VersaDown").join("playlists");
     fs::create_dir_all(&directory).map_err(|error| format!("无法准备播放列表目录：{error}"))?;
     let playlist = directory.join(format!("{task_id}-{}.m3u", Uuid::new_v4()));
     let entries = videos

@@ -6,13 +6,13 @@ const path = require('node:path');
 const WebSocket = require('ws');
 
 const projectRoot = path.resolve(__dirname, '..');
-const executable = process.env.ALLDOWNLOADER_LIVE_EXECUTABLE
-  || path.join(projectRoot, 'artifacts', 'alldownloader.exe');
-const savedSessionOnly = process.env.ALLDOWNLOADER_TIANYI_SAVED_SESSION_ONLY === '1';
-const shapeOnly = process.env.ALLDOWNLOADER_TIANYI_SHAPE_ONLY === '1';
-const manualAuthorization = process.env.ALLDOWNLOADER_TIANYI_MANUAL_AUTH === '1';
-const sourceDataDirectory = process.env.ALLDOWNLOADER_LIVE_DATA_DIR
-  || path.join(process.env.APPDATA || '', 'com.alldownloader.desktop');
+const executable = process.env.VERSADOWN_LIVE_EXECUTABLE
+  || path.join(projectRoot, 'artifacts', 'versadown.exe');
+const savedSessionOnly = process.env.VERSADOWN_TIANYI_SAVED_SESSION_ONLY === '1';
+const shapeOnly = process.env.VERSADOWN_TIANYI_SHAPE_ONLY === '1';
+const manualAuthorization = process.env.VERSADOWN_TIANYI_MANUAL_AUTH === '1';
+const sourceDataDirectory = process.env.VERSADOWN_LIVE_DATA_DIR
+  || path.join(process.env.APPDATA || '', 'com.versadown.desktop');
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function availablePort() {
@@ -93,7 +93,7 @@ async function captureOfficialAccountRequestShape(target) {
           method: 'Runtime.evaluate',
           params: {
             expression: `(async () => {
-              const context = window.__alldownloaderTianyiContext;
+              const context = window.__versadownTianyiContext;
               const response = await fetch('/api/open/user/getUserInfoForPortal.action?diagnostic=' + Date.now(), {
                 method: 'GET', credentials: 'include', cache: 'no-store',
                 headers: { Accept: 'application/json;charset=UTF-8', 'Browser-Id': String(context?.browser_id || '') },
@@ -137,7 +137,7 @@ async function captureOfficialAccountRequestShape(target) {
 
 async function probeNativeVariants(page, cookieResult, cookieOrder) {
   const context = await evaluate(page, `(() => ({
-    browserId: String(window.__alldownloaderTianyiContext?.browser_id || ''),
+    browserId: String(window.__versadownTianyiContext?.browser_id || ''),
     userAgent: String(navigator.userAgent || ''),
     brands: Array.isArray(navigator.userAgentData?.brands) ? navigator.userAgentData.brands : [],
     mobile: Boolean(navigator.userAgentData?.mobile),
@@ -242,7 +242,7 @@ async function loginWithSavedCredentials(target) {
 
 async function resolveOneNativeDownload(manager, rootDirectory) {
   const pending = (rootDirectory?.items || [])
-    .filter((item) => item?.kind === 'folder' && item?.id && item.id !== '__all_downloader_tianyi_recycle_bin__')
+    .filter((item) => item?.kind === 'folder' && item?.id && item.id !== '__versa_down_tianyi_recycle_bin__')
     .map((item) => item.id);
   let file = (rootDirectory?.items || []).find((item) => item?.kind === 'file' && item?.id);
   for (let visited = 0; !file && pending.length > 0 && visited < 20; visited += 1) {
@@ -268,8 +268,8 @@ async function officialPageState(port) {
   });
   if (!page) return { open: false };
   return await evaluate(page, `(() => {
-    const context = window.__alldownloaderTianyiContext;
-    const diagnostic = window.__alldownloaderAuthDiagnostic;
+    const context = window.__versadownTianyiContext;
+    const diagnostic = window.__versadownAuthDiagnostic;
     let iframeBrowserId = false;
     for (const frame of document.querySelectorAll('iframe[src]')) {
       try { iframeBrowserId ||= /^[a-f0-9]{32}$/i.test(new URL(frame.src, location.href).searchParams.get('browserId') || ''); } catch (_) {}
@@ -277,7 +277,7 @@ async function officialPageState(port) {
     return {
       open: true,
       loggedIn: Boolean(document.body?.innerText?.includes('全部文件') && document.body?.innerText?.includes('回收站')),
-      captureInstalled: window.__alldownloaderTianyiCapture === true,
+      captureInstalled: window.__versadownTianyiCapture === true,
       browserIdCaptured: /^[a-f0-9]{32}$/i.test(context?.browser_id || ''),
       userAgentCaptured: typeof context?.user_agent === 'string' && context.user_agent.length > 0,
       iframeBrowserId,
@@ -295,7 +295,7 @@ async function officialAccountProbe(port) {
   });
   if (!page) return { available: false };
   const account = await evaluate(page, `(async () => {
-    const context = window.__alldownloaderTianyiContext;
+    const context = window.__versadownTianyiContext;
     const response = await fetch('/api/open/user/getUserInfoForPortal.action', {
       method: 'GET',
       credentials: 'include',
@@ -355,8 +355,8 @@ async function run() {
     if (!fs.existsSync(required)) throw new Error('当前应用数据目录中没有所需的天翼会话样本');
   }
   const testDataDirectory = manualAuthorization
-    ? path.join(os.tmpdir(), 'alldownloader-tianyi-manual-auth')
-    : fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-tianyi-live-'));
+    ? path.join(os.tmpdir(), 'versadown-tianyi-manual-auth')
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'versadown-tianyi-live-'));
   fs.mkdirSync(testDataDirectory, { recursive: true });
   const testSessions = path.join(testDataDirectory, 'cloud-sessions');
   fs.mkdirSync(testSessions, { recursive: true });
@@ -370,9 +370,9 @@ async function run() {
     env: {
       ...process.env,
       APPDATA: path.join(testDataDirectory, 'roaming'),
-      ALLDOWNLOADER_BACKGROUND_UI_TEST: '1',
-      ALLDOWNLOADER_TEST_DATA_DIR: testDataDirectory,
-      ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(testDataDirectory, 'downloads'),
+      VERSADOWN_BACKGROUND_UI_TEST: '1',
+      VERSADOWN_TEST_DATA_DIR: testDataDirectory,
+      VERSADOWN_TEST_DOWNLOAD_DIR: path.join(testDataDirectory, 'downloads'),
       WEBVIEW2_USER_DATA_FOLDER: path.join(testDataDirectory, 'webview2'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
     },

@@ -43,7 +43,7 @@ Rust 命令使用 `C:/Users/deepin/.cargo/bin/cargo.exe`，设置 `CARGO_TARGET_
 | `node_modules/.bin/vitest.cmd run src/components/CloudManager.test.tsx src/components/CloudWorkspace.test.tsx src/lib/cloudApi.test.ts --exclude '.worktrees/**'` | 96 + 16 + 5 = 117 通过 |
 | `node_modules/.bin/vitest.cmd run src/App.live.test.tsx --exclude '.worktrees/**' -t 'reauthorized Baidu\|automatic password renewal'` | 3 通过，50 未运行 |
 | `pnpm build` | 两轮均退出 0；最终 62 modules，产出 dist |
-| `./scripts/build-windows.ps1` | 两轮退出 0，release 分别 50.66 / 48.10 秒；最终 artifacts/alldownloader.exe 25,444,352 字节及 aria2 sidecar |
+| `./scripts/build-windows.ps1` | 两轮退出 0，release 分别 50.66 / 48.10 秒；最终 artifacts/versadown.exe 25,444,352 字节及 aria2 sidecar |
 | `rustfmt --edition 2021 --config skip_children=true`（本次 Rust 文件） | 退出 0 |
 | `git diff --check` | 当前退出 0 |
 

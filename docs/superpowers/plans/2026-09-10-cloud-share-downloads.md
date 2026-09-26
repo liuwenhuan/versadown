@@ -61,7 +61,7 @@ fn rejects_multiple_share_urls() {
 
 - [ ] **Step 2: Run the test and observe the expected failure**
 
-Run: `cargo test -p alldownloader parser::tests::recognizes_all_provider_hosts_and_strips_pwd_from_canonical_url -- --exact`
+Run: `cargo test -p versadown parser::tests::recognizes_all_provider_hosts_and_strips_pwd_from_canonical_url -- --exact`
 
 Expected: FAIL because the candidate type and extractor do not exist.
 
@@ -82,7 +82,7 @@ Allow only the seven documented host families, remove `pwd`/`passcode` query val
 
 - [ ] **Step 4: Run focused tests**
 
-Run: `cargo test -p alldownloader parser::tests downloader::tests --lib`
+Run: `cargo test -p versadown parser::tests downloader::tests --lib`
 
 Expected: PASS.
 
@@ -127,7 +127,7 @@ fn dpapi_plan_round_trip_recovers_access_code_but_source_does_not() {
 
 - [ ] **Step 2: Run the test and observe the expected failure**
 
-Run: `cargo test -p alldownloader cloud::share::tests --lib`
+Run: `cargo test -p versadown cloud::share::tests --lib`
 
 Expected: FAIL because the `share` module does not exist.
 
@@ -144,7 +144,7 @@ Persist a fixed-key versioned JSON map through DPAPI, keyed by `(provider, share
 
 - [ ] **Step 4: Run focused tests**
 
-Run: `cargo test -p alldownloader cloud::share::tests --lib`
+Run: `cargo test -p versadown cloud::share::tests --lib`
 
 Expected: PASS, including malformed source and expiry cases.
 
@@ -200,7 +200,7 @@ The new confirmation command must only accept validated `cloud-share://` sources
 
 - [ ] **Step 4: Run Rust and frontend contract tests**
 
-Run: `cargo test -p alldownloader commands::tests --lib; npm run test:run -- --exclude '.worktrees/**' src/lib/api.test.ts`
+Run: `cargo test -p versadown commands::tests --lib; npm run test:run -- --exclude '.worktrees/**' src/lib/api.test.ts`
 
 Expected: PASS.
 
@@ -239,7 +239,7 @@ fn expired_share_url_refreshes_once_with_new_headers_without_persisting_url() {
 
 - [ ] **Step 2: Run the test and observe the expected failure**
 
-Run: `cargo test -p alldownloader cloud::share::tests::expired_share_url_refreshes_once_with_new_headers_without_persisting_url --lib`
+Run: `cargo test -p versadown cloud::share::tests::expired_share_url_refreshes_once_with_new_headers_without_persisting_url --lib`
 
 Expected: FAIL because no `cloud-share://` resolver exists.
 
@@ -256,7 +256,7 @@ At submission and 401/403/412/signature expiry, refresh once and pass fresh head
 
 - [ ] **Step 4: Run common download tests**
 
-Run: `cargo test -p alldownloader cloud::share::tests downloader --lib`
+Run: `cargo test -p versadown cloud::share::tests downloader --lib`
 
 Expected: PASS while existing `cloud://` behavior is unchanged.
 
@@ -291,7 +291,7 @@ fn baidu_transfer_fallback_requires_current_login() {
 
 - [ ] **Step 2: Run the test and observe the expected failure**
 
-Run: `cargo test -p alldownloader cloud::baidu::tests::baidu_transfer_fallback_requires_current_login --lib`
+Run: `cargo test -p versadown cloud::baidu::tests::baidu_transfer_fallback_requires_current_login --lib`
 
 Expected: FAIL because Baidu share resolution does not exist.
 
@@ -301,7 +301,7 @@ Quark validates access code, pages its share tree and uses existing authenticate
 
 - [ ] **Step 4: Run adapter tests**
 
-Run: `cargo test -p alldownloader cloud::quark::tests cloud::baidu::tests --lib`
+Run: `cargo test -p versadown cloud::quark::tests cloud::baidu::tests --lib`
 
 Expected: PASS for access code, pagination, direct headers, transfer and no-login fixtures.
 
@@ -337,7 +337,7 @@ fn aliyun_share_url_uses_share_token_not_personal_bearer() {
 
 - [ ] **Step 2: Run the test and observe the expected failure**
 
-Run: `cargo test -p alldownloader cloud::aliyun::tests::aliyun_share_url_uses_share_token_not_personal_bearer --lib`
+Run: `cargo test -p versadown cloud::aliyun::tests::aliyun_share_url_uses_share_token_not_personal_bearer --lib`
 
 Expected: FAIL because Aliyun only implements personal-drive download URLs.
 
@@ -347,7 +347,7 @@ PikPak uses the web share captcha context and maps regional membership limits. T
 
 - [ ] **Step 4: Run adapter tests**
 
-Run: `cargo test -p alldownloader cloud::pikpak::tests cloud::tianyi::tests cloud::aliyun::tests --lib`
+Run: `cargo test -p versadown cloud::pikpak::tests cloud::tianyi::tests cloud::aliyun::tests --lib`
 
 Expected: PASS for code, expiry, recursion, headers and membership fixtures.
 
@@ -383,7 +383,7 @@ fn uc_share_direct_url_keeps_identity_headers_out_of_source() {
 
 - [ ] **Step 2: Run the test and observe the expected failure**
 
-Run: `cargo test -p alldownloader cloud::uc::tests::uc_share_direct_url_keeps_identity_headers_out_of_source --lib`
+Run: `cargo test -p versadown cloud::uc::tests::uc_share_direct_url_keeps_identity_headers_out_of_source --lib`
 
 Expected: FAIL because UC has no share implementation.
 
@@ -393,7 +393,7 @@ Xunlei creates a share captcha context, pages share results, prefers share file-
 
 - [ ] **Step 4: Run adapter tests**
 
-Run: `cargo test -p alldownloader cloud::xunlei::tests cloud::uc::tests --lib`
+Run: `cargo test -p versadown cloud::xunlei::tests cloud::uc::tests --lib`
 
 Expected: PASS for direct URL, fallback/no-login, recursive, expiry and risk fixtures.
 
@@ -484,7 +484,7 @@ fn disabled_cleanup_or_failed_sibling_keeps_transfer() {
 
 - [ ] **Step 2: Run the test and observe the expected failure**
 
-Run: `cargo test -p alldownloader engine_runtime::tests::last_completed_local_task_trashes_only_recorded_transfer_when_enabled --lib`
+Run: `cargo test -p versadown engine_runtime::tests::last_completed_local_task_trashes_only_recorded_transfer_when_enabled --lib`
 
 Expected: FAIL because completion does not examine share plans.
 
@@ -494,7 +494,7 @@ After `Completed`, parse only `cloud-share://`, atomically mark the exact plan t
 
 - [ ] **Step 4: Run cleanup tests**
 
-Run: `cargo test -p alldownloader engine_runtime::tests cloud::share::tests --lib`
+Run: `cargo test -p versadown engine_runtime::tests cloud::share::tests --lib`
 
 Expected: PASS.
 
@@ -522,7 +522,7 @@ Expected: test fixtures only; no task source, SQLite assertion, debug event or U
 
 - [ ] **Step 2: Run all targeted tests**
 
-Run: `cargo test -p alldownloader --lib cloud::; cargo test -p alldownloader --test cloud_directory_download --test downloader; npm run test:run -- --exclude '.worktrees/**' src/lib/api.test.ts src/components/NewDownloadDialog.test.tsx src/components/ParseConfirmDialog.test.tsx src/components/CloudManager.test.tsx src/components/SettingsPanel.test.tsx`
+Run: `cargo test -p versadown --lib cloud::; cargo test -p versadown --test cloud_directory_download --test downloader; npm run test:run -- --exclude '.worktrees/**' src/lib/api.test.ts src/components/NewDownloadDialog.test.tsx src/components/ParseConfirmDialog.test.tsx src/components/CloudManager.test.tsx src/components/SettingsPanel.test.tsx`
 
 Expected: PASS.
 

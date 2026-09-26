@@ -70,7 +70,7 @@
 2. 单独实现网页协议客户端，按官方文件列表调用链构造请求；将旧接口兼容逻辑与原生客户端 profile 分开。
 3. 实现网页 token 续期和按 action 维护的操作验证；保留服务返回的验证入口，验证完成后重新请求。公开客户端参数可版本化维护，不能靠换成百度 `netdisk` User-Agent 解决。
 4. 授权状态明确区分未登录、已登录待验证、服务端拒绝、可读目录。只有后端用刚取得的会话真实读取目录成功，才保存并关闭授权窗口。
-5. 用该账号比较官方成功的根目录请求与 Rust 请求，再验证非根目录、分页和续期。之后只在专用 `AllDownloader-IT-*` 目录测试上传、下载字节一致性、改名、移动和移入回收站。
+5. 用该账号比较官方成功的根目录请求与 Rust 请求，再验证非根目录、分页和续期。之后只在专用 `VersaDown-IT-*` 目录测试上传、下载字节一致性、改名、移动和移入回收站。
 
 原生客户端路线可作为后续独立适配器：需要确认客户端身份、登录/令牌交换、设备验证以及下载头的完整组合。不能把多个产品的 client ID、版本、secret、签名元信息和 User-Agent 混搭。
 
@@ -215,14 +215,14 @@ captcha_sign = "1." + value
 - `node node_modules/vitest/vitest.mjs run src/components/CloudManager.test.tsx src/components/CloudWorkspace.test.tsx --exclude '.worktrees/**'`：72/72，通过。
 - `cargo test --manifest-path src-tauri/Cargo.toml --target-dir .cargo-target-xunlei-auth-completion --lib xunlei`：16/16，通过。
 - 同 target 运行 `--test cloud_xunlei --test cloud_xunlei_upload --test cloud_upload --test live_pikpak_xunlei`：29+6+5+1 项通过，4 个真实账号测试明确 ignored，并非实机通过。
-- `scripts/build-windows.ps1`：Release 编译成功。首次复制被旧进程占用；关闭已核实路径的旧 AllDownloader 进程后再次执行成功发布，未打包安装程序。
-- 二进制：`artifacts/alldownloader.exe`；SHA-256 `801F36A3AE79D4494F02F4D387EC88C09BC66E8CAFF314857F154B9CBD9E2444`。
+- `scripts/build-windows.ps1`：Release 编译成功。首次复制被旧进程占用；关闭已核实路径的旧 VersaDown 进程后再次执行成功发布，未打包安装程序。
+- 二进制：`artifacts/versadown.exe`；SHA-256 `801F36A3AE79D4494F02F4D387EC88C09BC66E8CAFF314857F154B9CBD9E2444`。
 
 上传补齐了官方网页的 `resumable.supported_providers` 协商（仅声明已实现的 `PROVIDER_ALIYUN`）、OSS/AWS 分发与秒传完成分支，修复 GCID 在 128 MiB 等边界的分块判断。下载沿用当前浏览器的 User-Agent/Referer，不向 CDN 传送 API bearer、captcha 或 cookie。复制、移动、重命名与移入回收站继续走 Rust 接口。未实测的超大文件分片上限不在本轮成功声明范围内。
 
 新二进制已通过实际 React 页面打开官方授权窗口；检查确认官方 captcha client/device 与捕获 profile 一致，主界面仍显示等待人工登录，尚无迅雷标签页。此处是**等待用户授权，不是成功接入的实机验收结论**。
 
-后续实机只允许操作新建的 `AllDownloader-IT-*` 专用目录与其子项。`live_xunlei_directory_upload_rename_move_download_and_trash` 现覆盖上传、改名、移动、下载字节比对、复制、测试副本移入回收站及测试目录清理；需要 `ALLDOWNLOADER_LIVE_CLOUD=1` 显式启用。可通过 `ALLDOWNLOADER_TEST_DATA_DIR` 指向本轮隔离测试应用目录读取其加密凭证，不修改其他网盘账号。
+后续实机只允许操作新建的 `VersaDown-IT-*` 专用目录与其子项。`live_xunlei_directory_upload_rename_move_download_and_trash` 现覆盖上传、改名、移动、下载字节比对、复制、测试副本移入回收站及测试目录清理；需要 `VERSADOWN_LIVE_CLOUD=1` 显式启用。可通过 `VERSADOWN_TEST_DATA_DIR` 指向本轮隔离测试应用目录读取其加密凭证，不修改其他网盘账号。
 
 ## 人工授权后的实机验收（2026-09-10）
 
@@ -250,7 +250,7 @@ captcha_sign = "1." + value
 ### 最终发布验收
 
 - 主代理重新执行启动测试 3/3、迅雷 lib 定向 17/17；定向独立用例共 68 项后端、75 项界面、22 项桥接通过，未为此运行无关全量套件。
-- 最终 Release 构建成功，未打包安装程序。`artifacts/alldownloader.exe` 与正常构建产物 `.tools/release-target/release/alldownloader.exe` SHA-256 一致：`0CAC9547122C1CC5FFC63C30F13F69C42BBFBD6304B6A1452FDB87CE99B97453`。
+- 最终 Release 构建成功，未打包安装程序。`artifacts/versadown.exe` 与正常构建产物 `.tools/release-target/release/versadown.exe` SHA-256 一致：`0CAC9547122C1CC5FFC63C30F13F69C42BBFBD6304B6A1452FDB87CE99B97453`。
 - **最终二进制**启动恢复检查通过；真实应用随机 32 KiB 文件操作验收连续 **3/3** 通过：上传、改名、移动、复制、递归目录下载由 aria2 完成，两份下载逐字节一致且保存的父/子目录结构正确，完成任务的重复下载被识别；每轮自建测试根目录均移入回收站。
 - 已先在内存中核对隔离测试与日常实例为同一迅雷账号；日常实例仍保存旧协议会话。备份旧加密凭据后，仅更新日常实例的 `xunlei.bin`，其他网盘凭据、任务库和设置不动。正常数据目录启动新二进制后实际出现迅雷标签，选择该标签能够渲染目录，无加载中或目录错误。最后去除测试调试参数重新启动日常实例。
 - 上述结论限定于本次账号和基本操作验收，不包含超大文件/长时断网恢复压力测试；固定分片大小导致的超大文件分片上限仍是已知边界。删除验收采用移入回收站，不包含个人文件永久删除。

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the Windows system title bar with an AllDownloader title bar and make every close request hide, rather than destroy, the download manager.
+**Goal:** Replace the Windows system title bar with an VersaDown title bar and make every close request hide, rather than destroy, the download manager.
 
 **Architecture:** React owns title-bar presentation and invokes a small window-controller module for minimize, maximize/restore, and hide. Rust intercepts native close requests such as Alt+F4 so the `main` WebviewWindow remains registered; the launcher reuses its existing reveal path.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Windows-first; automated UI tests must not activate or manipulate the user's foreground applications.
-- Closing the manager hides it; only launcher action `launcher.quit` exits AllDownloader.
+- Closing the manager hides it; only launcher action `launcher.quit` exits VersaDown.
 - Preserve the launcher menu, circular region, position, and background-test mode.
 - The main window must remain reopenable after both the custom close button and a native close request.
 - Do not change download-engine behavior in this plan.
@@ -36,7 +36,7 @@
 - [ ] **Step 1: Write the failing lifecycle policy test**
 
 ```rust
-use alldownloader_lib::{manager_close_disposition, ManagerCloseDisposition};
+use versadown_lib::{manager_close_disposition, ManagerCloseDisposition};
 
 #[test]
 fn main_close_hides_until_application_exit_begins() {
@@ -217,7 +217,7 @@ Expected: command-not-found failure for background-only commands.
 
 - [ ] **Step 3: Implement gated observability using production routing**
 
-Reject these commands unless `ALLDOWNLOADER_BACKGROUND_UI_TEST=1`. `activate_launcher_menu_for_test` calls the same handler as native menu events. The snapshot returns `{ exists, visible, minimized }` without focusing any window.
+Reject these commands unless `VERSADOWN_BACKGROUND_UI_TEST=1`. `activate_launcher_menu_for_test` calls the same handler as native menu events. The snapshot returns `{ exists, visible, minimized }` without focusing any window.
 
 - [ ] **Step 4: Rebuild and run hidden integration**
 
@@ -238,7 +238,7 @@ git commit -m "test: cover manager hide and reopen lifecycle"
 - Modify only files from Tasks 1–4 if verification exposes a defect.
 
 **Interfaces:**
-- Produces: `src-tauri/target/release/alldownloader.exe` plus MSI and NSIS bundles.
+- Produces: `src-tauri/target/release/versadown.exe` plus MSI and NSIS bundles.
 
 - [ ] **Step 1: Run full frontend and Rust suites**
 
@@ -250,7 +250,7 @@ Expected: zero failures.
 
 Run: `powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1; npm run test:launcher; powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1`
 
-Expected: EXE/MSI/NSIS exist, hidden smoke passes, and no AllDownloader process remains.
+Expected: EXE/MSI/NSIS exist, hidden smoke passes, and no VersaDown process remains.
 
 - [ ] **Step 3: Inspect the final repository state**
 

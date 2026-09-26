@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 直接在 `master` 工作；绝不覆盖现有未提交的悬浮窗相关修改，也不使用临时构建目录。
-- 不生成安装包；最终只构建并启动 `src-tauri/target/release/alldownloader.exe`。
+- 不生成安装包；最终只构建并启动 `src-tauri/target/release/versadown.exe`。
 - 目录组仅保存提供方、稳定远端 ID、安全相对路径和本地任务关联，不保存凭据或带签名直链。
 - 仅由持久化组项目关联任务；禁止按文件名或本地路径猜测成员关系。
 - 每项行为必须先写 RED 测试、确认失败后再写最小实现。
@@ -288,7 +288,7 @@ Expected: all pass, no installer is produced.
 
 ```powershell
 cmd.exe /d /s /c '"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul && set "CARGO_HOME=D:\\projects\\downloader\\.tools\\cargo" && set "RUSTUP_HOME=D:\\projects\\downloader\\.tools\\rustup" && "D:\\projects\\downloader\\.tools\\cargo\\bin\\cargo.exe" build --manifest-path "D:\\projects\\downloader\\src-tauri\\Cargo.toml" --release --features custom-protocol'
-Start-Process 'D:\\projects\\downloader\\src-tauri\\target\\release\\alldownloader.exe'
+Start-Process 'D:\\projects\\downloader\\src-tauri\\target\\release\\versadown.exe'
 ```
 
 - [ ] **Step 6: Commit only a required correction**

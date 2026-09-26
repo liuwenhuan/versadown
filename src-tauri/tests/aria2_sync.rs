@@ -1,4 +1,4 @@
-use alldownloader_lib::{
+use versadown_lib::{
     aria2::{Aria2GlobalStat, Aria2RpcClient, EventSink, RpcSecret},
     DownloadService, DownloadTask, NewTask, TaskStore,
 };
@@ -127,7 +127,7 @@ async fn reconcile_imports_an_unowned_active_rpc_task_without_confirmation() {
     assert_eq!(task.aria_gid.as_deref(), Some("external-gid"));
     assert_eq!(task.source, "https://external.example.test/external.iso");
     assert_eq!(task.name, "external.iso");
-    assert_eq!(task.status, alldownloader_lib::TaskStatus::Downloading);
+    assert_eq!(task.status, versadown_lib::TaskStatus::Downloading);
     assert!(store.selection_confirmed(task.id).unwrap());
     assert_eq!(store.files(task.id).unwrap().len(), 1);
     assert_eq!(*events.values.lock().unwrap(), [25]);
@@ -189,7 +189,7 @@ async fn reconcile_does_not_restart_a_completed_task_when_engine_reports_zero_by
         .create(NewTask::direct("https://example.test/finished.bin"))
         .unwrap();
     let mut task = store.bind_gid(task.id, "completed-gid").unwrap();
-    task.status = alldownloader_lib::TaskStatus::Completed;
+    task.status = versadown_lib::TaskStatus::Completed;
     task.progress = 100;
     task.total_length = Some(100);
     task.completed_length = 100;
@@ -201,7 +201,7 @@ async fn reconcile_does_not_restart_a_completed_task_when_engine_reports_zero_by
         .unwrap();
 
     let restored = store.find(task.id).unwrap();
-    assert_eq!(restored.status, alldownloader_lib::TaskStatus::Completed);
+    assert_eq!(restored.status, versadown_lib::TaskStatus::Completed);
     assert_eq!(restored.completed_length, 100);
     assert_eq!(restored.aria_gid, None);
     assert_eq!(*removals.lock().unwrap(), 1);
@@ -350,7 +350,7 @@ async fn cancelling_external_rpc_task_returns_its_temporary_concurrency_slot() {
     service.reconcile_now().await.unwrap();
     let task = store.find_by_gid("external-gid").unwrap().unwrap();
     service
-        .control(task.id, alldownloader_lib::DownloadAction::Cancel)
+        .control(task.id, versadown_lib::DownloadAction::Cancel)
         .await
         .unwrap();
 
@@ -366,16 +366,16 @@ async fn cancelling_external_rpc_task_returns_its_temporary_concurrency_slot() {
 
 #[tokio::test]
 async fn late_directory_uri_is_admitted_paused_without_starting_connections() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::{create_cloud_directory_group_for_download, plan_cloud_directory_download},
         CloudProvider,
     };
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let temp = tempfile::tempdir().unwrap();
     let plan = plan_cloud_directory_download(CloudProvider::Pikpak, "root", "Series", |id| {
-        Ok(alldownloader_lib::cloud::CloudDirectory {
+        Ok(versadown_lib::cloud::CloudDirectory {
             id: id.into(),
-            items: vec![alldownloader_lib::cloud::CloudFile {
+            items: vec![versadown_lib::cloud::CloudFile {
                 id: "file".into(),
                 name: "video.mp4".into(),
                 kind: "file".into(),
@@ -444,7 +444,7 @@ async fn late_directory_uri_is_admitted_paused_without_starting_connections() {
         )
         .await
         .unwrap();
-    assert_eq!(result.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(result.status, versadown_lib::TaskStatus::Paused);
     assert_eq!(options.lock().unwrap()["pause"], "true");
     assert!(engine_paused.load(std::sync::atomic::Ordering::SeqCst));
     service
@@ -453,16 +453,16 @@ async fn late_directory_uri_is_admitted_paused_without_starting_connections() {
         .unwrap();
     // An older pause completing after a newer resume must obey the new intent.
     let resumed = service
-        .control_directory_member(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+        .control_directory_member(task.id, versadown_lib::aria2::DownloadAction::Pause)
         .await
         .unwrap();
-    assert_eq!(resumed.status, alldownloader_lib::TaskStatus::Downloading);
+    assert_eq!(resumed.status, versadown_lib::TaskStatus::Downloading);
     // Explicit leaf pause still works while the rest of the directory runs.
     let paused = service
-        .control(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+        .control(task.id, versadown_lib::aria2::DownloadAction::Pause)
         .await
         .unwrap();
-    assert_eq!(paused.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(paused.status, versadown_lib::TaskStatus::Paused);
     server.abort();
 }
 
@@ -532,7 +532,7 @@ async fn pause_wins_when_an_inflight_resume_finishes_after_the_fast_interrupt() 
         let service = service.clone();
         async move {
             service
-                .control(task.id, alldownloader_lib::aria2::DownloadAction::Resume)
+                .control(task.id, versadown_lib::aria2::DownloadAction::Resume)
                 .await
         }
     });
@@ -541,7 +541,7 @@ async fn pause_wins_when_an_inflight_resume_finishes_after_the_fast_interrupt() 
         let service = service.clone();
         async move {
             service
-                .control(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+                .control(task.id, versadown_lib::aria2::DownloadAction::Pause)
                 .await
         }
     });
@@ -550,7 +550,7 @@ async fn pause_wins_when_an_inflight_resume_finishes_after_the_fast_interrupt() 
     resume.await.unwrap().unwrap();
     let result = pause.await.unwrap().unwrap();
     server.abort();
-    assert_eq!(result.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(result.status, versadown_lib::TaskStatus::Paused);
     assert!(paused.load(Ordering::SeqCst));
 }
 
@@ -602,7 +602,7 @@ async fn pause_interrupt_reaches_engine_while_snapshot_rpc_is_still_blocked() {
         let service = service.clone();
         async move {
             service
-                .control(task.id, alldownloader_lib::aria2::DownloadAction::Pause)
+                .control(task.id, versadown_lib::aria2::DownloadAction::Pause)
                 .await
         }
     });
@@ -612,7 +612,7 @@ async fn pause_interrupt_reaches_engine_while_snapshot_rpc_is_still_blocked() {
     poll.await.unwrap().unwrap();
     assert_eq!(
         control.await.unwrap().unwrap().status,
-        alldownloader_lib::TaskStatus::Paused
+        versadown_lib::TaskStatus::Paused
     );
     server.abort();
     assert!(
@@ -647,7 +647,7 @@ async fn paused_task_keeps_persisted_progress_when_aria2_restores_without_length
         .unwrap();
     store.bind_gid(task.id, "gid-1").unwrap();
     task = store.find(task.id).unwrap();
-    task.status = alldownloader_lib::TaskStatus::Paused;
+    task.status = versadown_lib::TaskStatus::Paused;
     task.progress = 60;
     task.total_length = Some(100);
     task.completed_length = 60;
@@ -662,7 +662,7 @@ async fn paused_task_keeps_persisted_progress_when_aria2_restores_without_length
         .unwrap();
 
     let restored = store.find(task.id).unwrap();
-    assert_eq!(restored.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(restored.status, versadown_lib::TaskStatus::Paused);
     assert_eq!(restored.progress, 60);
     assert_eq!(restored.total_length, Some(100));
     assert_eq!(restored.completed_length, 60);
@@ -704,7 +704,7 @@ async fn paused_task_keeps_persisted_progress_when_restore_has_placeholder_files
         .unwrap();
     store.bind_gid(task.id, "gid-1").unwrap();
     task = store.find(task.id).unwrap();
-    task.status = alldownloader_lib::TaskStatus::Paused;
+    task.status = versadown_lib::TaskStatus::Paused;
     task.progress = 60;
     task.total_length = Some(100);
     task.completed_length = 60;
@@ -719,7 +719,7 @@ async fn paused_task_keeps_persisted_progress_when_restore_has_placeholder_files
         .unwrap();
 
     let restored = store.find(task.id).unwrap();
-    assert_eq!(restored.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(restored.status, versadown_lib::TaskStatus::Paused);
     assert_eq!(restored.progress, 60);
     assert_eq!(restored.total_length, Some(100));
     assert_eq!(restored.completed_length, 60);
@@ -749,7 +749,7 @@ async fn followed_by_uses_child_snapshot_without_completing_metadata_parent() {
     let service = DownloadService::new(Arc::new(client), store.clone());
     let result = service.reconcile_task(task.id).await.unwrap();
     assert_eq!(result.aria_gid.as_deref(), Some("child"));
-    assert_eq!(result.status, alldownloader_lib::TaskStatus::Paused);
+    assert_eq!(result.status, versadown_lib::TaskStatus::Paused);
     assert_eq!(result.progress, 0);
     assert_eq!(store.list().unwrap().len(), 1);
     server.abort();
@@ -757,7 +757,7 @@ async fn followed_by_uses_child_snapshot_without_completing_metadata_parent() {
 
 #[tokio::test]
 async fn synchronizer_polls_active_at_half_second_and_idle_at_two_seconds() {
-    use alldownloader_lib::aria2::sync::TransferSynchronizer;
+    use versadown_lib::aria2::sync::TransferSynchronizer;
     use std::time::Duration;
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let wire = calls.clone();
@@ -782,18 +782,18 @@ async fn synchronizer_polls_active_at_half_second_and_idle_at_two_seconds() {
         .unwrap();
     store.bind_gid(task.id, "gid").unwrap();
     let mut task = store.find(task.id).unwrap();
-    task.status = alldownloader_lib::TaskStatus::Downloading;
+    task.status = versadown_lib::TaskStatus::Downloading;
     store.apply_transfer_snapshot(task.clone()).unwrap();
     let sync = TransferSynchronizer::new(Arc::new(DownloadService::new(
         Arc::new(client),
         store.clone(),
     )));
     assert_eq!(sync.poll_interval().unwrap(), Duration::from_millis(500));
-    task.status = alldownloader_lib::TaskStatus::Paused;
+    task.status = versadown_lib::TaskStatus::Paused;
     store.apply_transfer_snapshot(task.clone()).unwrap();
     assert_eq!(sync.poll_interval().unwrap(), Duration::from_secs(2));
     let mut sharing = store.find(task.id).unwrap();
-    sharing.status = alldownloader_lib::TaskStatus::Completed;
+    sharing.status = versadown_lib::TaskStatus::Completed;
     sharing.progress = 100;
     sharing.total_length = Some(100);
     sharing.completed_length = 100;
@@ -819,7 +819,7 @@ async fn synchronizer_polls_active_at_half_second_and_idle_at_two_seconds() {
 
 #[test]
 fn notifications_accept_only_documented_events_with_gid() {
-    use alldownloader_lib::aria2::sync::notification_gid;
+    use versadown_lib::aria2::sync::notification_gid;
     assert_eq!(
         notification_gid(
             &json!({"jsonrpc":"2.0","method":"aria2.onDownloadComplete","params":[{"gid":"abc"}]})
@@ -846,7 +846,7 @@ fn notifications_accept_only_documented_events_with_gid() {
 
 #[tokio::test]
 async fn websocket_download_start_imports_an_unknown_rpc_task_before_idle_polling() {
-    use alldownloader_lib::aria2::sync::TransferSynchronizer;
+    use versadown_lib::aria2::sync::TransferSynchronizer;
     use futures_util::{SinkExt, StreamExt};
     use std::time::Duration;
     let external_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -940,10 +940,10 @@ async fn complete_transfer_finishes_without_nonexistent_postprocessing() {
     store.bind_gid(task.id, "gid").unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
     let result = service.reconcile_task(task.id).await.unwrap();
-    assert_eq!(result.status, alldownloader_lib::TaskStatus::Completed);
+    assert_eq!(result.status, versadown_lib::TaskStatus::Completed);
     assert_eq!(
         store.find(task.id).unwrap().status,
-        alldownloader_lib::TaskStatus::Completed
+        versadown_lib::TaskStatus::Completed
     );
     server.abort();
 }
@@ -969,7 +969,7 @@ async fn invalid_file_persistence_rolls_back_task_snapshot_and_emits_nothing() {
     assert_eq!(store.find(task.id).unwrap().progress, 0);
     assert_eq!(
         store.find(task.id).unwrap().status,
-        alldownloader_lib::TaskStatus::Parsing
+        versadown_lib::TaskStatus::Parsing
     );
     assert!(events.values.lock().unwrap().is_empty());
     server.abort();
@@ -1018,11 +1018,11 @@ async fn cancel_acknowledgement_persists_event_and_missing_gid_does_not_break_la
     let service = DownloadService::new(Arc::new(client), store.clone()).with_events(events.clone());
     assert_eq!(
         service
-            .control(cancelled.id, alldownloader_lib::DownloadAction::Cancel)
+            .control(cancelled.id, versadown_lib::DownloadAction::Cancel)
             .await
             .unwrap()
             .status,
-        alldownloader_lib::TaskStatus::Cancelled
+        versadown_lib::TaskStatus::Cancelled
     );
     assert_eq!(
         events.values.lock().unwrap().len(),
@@ -1040,7 +1040,7 @@ async fn cancel_acknowledgement_persists_event_and_missing_gid_does_not_break_la
     assert_eq!(store.find(active.id).unwrap().progress, 50);
     assert_eq!(
         store.find(cancelled.id).unwrap().status,
-        alldownloader_lib::TaskStatus::Cancelled
+        versadown_lib::TaskStatus::Cancelled
     );
     server.abort();
 }

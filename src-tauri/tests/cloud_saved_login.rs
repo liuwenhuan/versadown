@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     auth_supervisor::AuthSupervisor, commands::logout_provider, load_saved_password_login,
     prepare_password_account_login, run_with_session_recovery, save_password_credential,
     CloudPasswordCredential, CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError,
@@ -75,13 +75,13 @@ fn manual_logout_blocks_automatic_password_recovery_until_explicit_login() {
         let supervisor = AuthSupervisor::default();
         supervisor.restore(&store, provider).unwrap();
         struct NoRecovery;
-        impl alldownloader_lib::cloud::driver::ProviderAuth for NoRecovery {
+        impl versadown_lib::cloud::driver::ProviderAuth for NoRecovery {
             fn refresh_session(&mut self) -> Result<bool, QuarkError> {
                 panic!("manual logout must not refresh tokens or use a saved password");
             }
         }
         assert!(matches!(
-            alldownloader_lib::cloud::auth_supervisor::recover_in_order(
+            versadown_lib::cloud::auth_supervisor::recover_in_order(
                 provider,
                 &store,
                 &mut NoRecovery,
@@ -121,7 +121,7 @@ fn manual_logout_blocks_automatic_password_recovery_until_explicit_login() {
 
 #[test]
 fn manual_logout_survives_reopening_encrypted_credentials() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::is_manually_disconnected, SystemCredentialStore,
     };
     let root = tempfile::tempdir().unwrap();

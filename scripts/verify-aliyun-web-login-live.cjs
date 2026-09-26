@@ -6,7 +6,7 @@ const path = require('node:path');
 const WebSocket = require('ws');
 
 const projectRoot = path.resolve(__dirname, '..');
-const provider = process.env.ALLDOWNLOADER_TEST_PROVIDER || 'aliyun';
+const provider = process.env.VERSADOWN_TEST_PROVIDER || 'aliyun';
 const providerLabels = {
   quark: '夸克网盘',
   pikpak: 'PikPak网盘',
@@ -16,11 +16,11 @@ const providerLabels = {
   xunlei: '迅雷云盘',
   uc: 'UC网盘',
 };
-const executable = process.env.ALLDOWNLOADER_TEST_BINARY || path.join(
+const executable = process.env.VERSADOWN_TEST_BINARY || path.join(
   projectRoot,
   'artifacts',
-  'AllDownloader-cloud-workspace-v16',
-  'AllDownloader.exe',
+  'VersaDown-cloud-workspace-v16',
+  'VersaDown.exe',
 );
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -250,8 +250,8 @@ async function removeTemporaryDirectory(directory) {
 
 async function run() {
   if (!fs.existsSync(executable)) throw new Error(`未找到发布二进制：${executable}`);
-  const viewportOnly = process.env.ALLDOWNLOADER_VERIFY_AUTH_VIEWPORT_ONLY === '1';
-  const popupOnly = process.env.ALLDOWNLOADER_VERIFY_OAUTH_POPUP_ONLY === '1';
+  const viewportOnly = process.env.VERSADOWN_VERIFY_AUTH_VIEWPORT_ONLY === '1';
+  const popupOnly = process.env.VERSADOWN_VERIFY_OAUTH_POPUP_ONLY === '1';
   if (!viewportOnly && !popupOnly && provider !== 'aliyun') {
     throw new Error('完整网页登录验证当前仅支持 aliyun；其他网盘请设置视口或 OAuth 弹窗测试模式');
   }
@@ -259,7 +259,7 @@ async function run() {
     throw new Error('OAuth 弹窗测试当前仅支持 pikpak');
   }
 
-  const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-aliyun-live-'));
+  const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'versadown-aliyun-live-'));
   const port = await availablePort();
   const child = spawn(executable, [], {
     cwd: path.dirname(executable),
@@ -267,9 +267,9 @@ async function run() {
     stdio: 'ignore',
     env: {
       ...process.env,
-      ALLDOWNLOADER_BACKGROUND_UI_TEST: '1',
-      ALLDOWNLOADER_TEST_DATA_DIR: dataDirectory,
-      ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(dataDirectory, 'downloads'),
+      VERSADOWN_BACKGROUND_UI_TEST: '1',
+      VERSADOWN_TEST_DATA_DIR: dataDirectory,
+      VERSADOWN_TEST_DOWNLOAD_DIR: path.join(dataDirectory, 'downloads'),
       WEBVIEW2_USER_DATA_FOLDER: path.join(dataDirectory, 'webview2'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
     },

@@ -70,7 +70,7 @@ $env:CARGO_TARGET_DIR = Join-Path (Get-Location) '.tools/test-target'
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib cloud::commands` | 退出 0；78 项通过，241 项未运行 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_session --test cloud_baidu --test cloud_tianyi --test cloud_aliyun --test cloud_xunlei --test cloud_uc --test cloud_quark` | 退出 0；15 + 31 + 31 + 18 + 34 + 11 + 16 = 156 项通过 |
 | `node_modules/.bin/vitest.cmd run src/lib/cloudApi.test.ts src/components/CloudWorkspace.test.tsx src/components/CloudManager.test.tsx --exclude '.worktrees/**'` | 退出 0；113 项通过 |
-| 通过仓库 `Get-AllDownloaderBuildTools` 解析 pnpm 后执行 `pnpm build` | 退出 0；62 模块 |
+| 通过仓库 `Get-VersaDownBuildTools` 解析 pnpm 后执行 `pnpm build` | 退出 0；62 模块 |
 | `./scripts/build-windows.ps1` | 退出 0；release 1 分 13 秒，重新发布 exe 与 aria2 sidecar |
 | `git diff --check` | 退出 0 |
 
@@ -78,7 +78,7 @@ $env:CARGO_TARGET_DIR = Join-Path (Get-Location) '.tools/test-target'
 
 前端测试初次在沙箱内被 esbuild 父目录读取权限阻断，获准在沙箱外运行后通过；`pnpm exec vitest` 的 PATH 找不到 shim，改用仓库已有 `vitest.cmd`。这些启动错误均未记作功能 RED。最终仅保留基线两个 dead_code、Windows linker 导出提示、rustup 路径提示及 Vite 的已有静态/动态 window 导入提示。
 
-发布产物：`artifacts/alldownloader.exe`（24,822,272 字节）和 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。仅生成工作树产物，未安装或启动真实账号授权。
+发布产物：`artifacts/versadown.exe`（24,822,272 字节）和 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。仅生成工作树产物，未安装或启动真实账号授权。
 
 ## 自审与疑虑
 

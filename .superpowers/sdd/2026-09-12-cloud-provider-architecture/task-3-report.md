@@ -75,7 +75,7 @@ C:/Users/deepin/.cargo/bin/cargo.exe test --manifest-path src-tauri/Cargo.toml -
 
 分别退出 0：12、2、5 项通过。旧密码格式兼容、草稿清理、候选根目录校验失败保留旧会话、验证成功再保存等既有行为没有回归。
 
-`./scripts/build-windows.ps1` 已多次退出 0；自审每次改变 Rust 之后都会重建，最终一轮退出 0（release 52.62 秒），产物路径为 `artifacts/alldownloader.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。仅构建，不安装、不启动真实账号登录。
+`./scripts/build-windows.ps1` 已多次退出 0；自审每次改变 Rust 之后都会重建，最终一轮退出 0（release 52.62 秒），产物路径为 `artifacts/versadown.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。仅构建，不安装、不启动真实账号登录。
 
 Rust 既有警告：两个无关的 dead_code、Windows linker 导出信息与 rustup 路径 canonicalize 提示；均未阻断编译或测试。`git diff --check` 通过，仅 Git 行尾提示。
 

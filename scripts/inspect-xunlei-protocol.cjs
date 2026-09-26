@@ -8,16 +8,16 @@ const { evaluate, targets } = require('./xunlei-live-probe.cjs');
 const WebSocket = require('ws');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function main() {
-  const source = process.env.ALLDOWNLOADER_XUNLEI_REUSE_TEST_DATA;
+  const source = process.env.VERSADOWN_XUNLEI_REUSE_TEST_DATA;
   if (!source || !path.resolve(source).startsWith(path.resolve(os.tmpdir()) + path.sep)
-    || !path.basename(source).startsWith('alldownloader-xunlei-auth-live-')) throw Error('isolated_profile_required');
-  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-xunlei-protocol-'));
+    || !path.basename(source).startsWith('versadown-xunlei-auth-live-')) throw Error('isolated_profile_required');
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'versadown-xunlei-protocol-'));
   fs.cpSync(path.join(source, 'webview2'), path.join(data, 'webview2'), {recursive:true,
     filter: source => !['LOCK','SingletonLock','SingletonCookie','SingletonSocket'].includes(path.basename(source))});
   const port = await new Promise(resolve => {const server = net.createServer();server.listen(0,'127.0.0.1',()=>{const p=server.address().port;server.close(()=>resolve(p));});});
-  const binary = path.resolve('artifacts/alldownloader.exe');
+  const binary = path.resolve('artifacts/versadown.exe');
   const child = spawn(binary, [], {cwd:path.dirname(binary),windowsHide:true,stdio:'ignore',env:{...process.env,
-    ALLDOWNLOADER_BACKGROUND_UI_TEST:'1',ALLDOWNLOADER_TEST_DATA_DIR:data,ALLDOWNLOADER_TEST_DOWNLOAD_DIR:path.join(data,'downloads'),
+    VERSADOWN_BACKGROUND_UI_TEST:'1',VERSADOWN_TEST_DATA_DIR:data,VERSADOWN_TEST_DOWNLOAD_DIR:path.join(data,'downloads'),
     WEBVIEW2_USER_DATA_FOLDER:path.join(data,'webview2'),WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${port}`}});
   let manager, socket;
   try {
@@ -46,12 +46,12 @@ async function main() {
     await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});
     await call('Network.enable');
     await call('Page.enable');
-    if(process.env.ALLDOWNLOADER_XUNLEI_OBSERVER_SCRIPT){
-      await call('Page.addScriptToEvaluateOnNewDocument',{source:fs.readFileSync(process.env.ALLDOWNLOADER_XUNLEI_OBSERVER_SCRIPT,'utf8')});
+    if(process.env.VERSADOWN_XUNLEI_OBSERVER_SCRIPT){
+      await call('Page.addScriptToEvaluateOnNewDocument',{source:fs.readFileSync(process.env.VERSADOWN_XUNLEI_OBSERVER_SCRIPT,'utf8')});
     }
     await call('Page.navigate',{url:'https://pan.xunlei.com/'});
     await delay(20000);
-    const safe=await evaluate(page,`(()=>({path:location.pathname,version:window.PAN_VERSION||'',observer:window.__alldownloaderXunleiAuth?.status?.(),snapshotKeys:Object.keys(window.__alldownloaderXunleiAuth?.snapshot?.()||{})}))()`);
+    const safe=await evaluate(page,`(()=>({path:location.pathname,version:window.PAN_VERSION||'',observer:window.__versadownXunleiAuth?.status?.(),snapshotKeys:Object.keys(window.__versadownXunleiAuth?.snapshot?.()||{})}))()`);
     console.log(JSON.stringify(safe));
   } finally {
     socket?.close();

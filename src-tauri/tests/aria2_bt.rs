@@ -1,6 +1,6 @@
 #[path = "aria2_sync.rs"]
 mod fixture;
-use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
+use versadown_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -331,7 +331,7 @@ async fn retry_does_not_merge_peers_from_a_cancelled_torrent_session() {
     service.reconcile_now().await.unwrap();
     assert_eq!(store.find(task.id).unwrap().discovered_nodes, 2);
     service
-        .control(task.id, alldownloader_lib::DownloadAction::Cancel)
+        .control(task.id, versadown_lib::DownloadAction::Cancel)
         .await
         .unwrap();
     service
@@ -1120,7 +1120,7 @@ async fn external_magnet_preview_defers_selection_until_metadata_child_is_ready(
     let task = store.create(magnet_task()).unwrap();
     store.transition(task.id, TaskStatus::AwaitingUser).unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
-    let preview_directory = std::env::temp_dir().join("alldownloader-magnet-preview");
+    let preview_directory = std::env::temp_dir().join("versadown-magnet-preview");
     let preview_paths = [
         preview_directory
             .join("a.bin")
@@ -1260,7 +1260,7 @@ async fn aria2_next_same_gid_selection_is_applied_before_resuming_a_paused_magne
     let service = DownloadService::new(Arc::new(client), store.clone());
 
     let resumed_task = service
-        .control(task.id, alldownloader_lib::DownloadAction::Resume)
+        .control(task.id, versadown_lib::DownloadAction::Resume)
         .await
         .unwrap();
 

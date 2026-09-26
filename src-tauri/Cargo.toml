@@ -1,12 +1,12 @@
 [package]
-name = "alldownloader"
+name = "versadown"
 version = "0.2.0"
 description = "Local-first universal download manager"
-authors = ["AllDownloader Build"]
+authors = ["VersaDown Build"]
 edition = "2021"
 
 [lib]
-name = "alldownloader_lib"
+name = "versadown_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

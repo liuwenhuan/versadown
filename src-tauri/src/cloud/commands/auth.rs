@@ -312,7 +312,7 @@ pub(crate) fn tianyi_session_safe_shape(session: &tianyi::TianyiSession) -> serd
 pub async fn cloud_tianyi_session_shape_for_test(
     app: AppHandle,
 ) -> Result<serde_json::Value, QuarkError> {
-    if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+    if std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
         .ok()
         .as_deref()
         != Some("1")
@@ -332,7 +332,7 @@ pub async fn cloud_tianyi_resolve_download_for_test(
     app: AppHandle,
     file_id: String,
 ) -> Result<bool, QuarkError> {
-    if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+    if std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
         .ok()
         .as_deref()
         != Some("1")
@@ -396,7 +396,7 @@ pub async fn cloud_begin_authorization(
         let url = crate::cloud::ProviderRegistry::global()
             .get(provider)
             .authorization_url;
-        let background_ui_test = std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+        let background_ui_test = std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
             .ok()
             .as_deref()
             == Some("1");

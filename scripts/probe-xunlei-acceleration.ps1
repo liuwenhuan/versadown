@@ -5,7 +5,7 @@ $ErrorActionPreference='Stop'
 $stage='start'
 $root=[IO.Path]::GetFullPath($SessionDirectory)
 $temporaryRoot=[IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')+'\'
-if(-not $root.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $root -Leaf) -notlike 'alldownloader-xunlei-auth-live-*'){throw 'isolated_profile_required'}
+if(-not $root.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase) -or (Split-Path $root -Leaf) -notlike 'versadown-xunlei-auth-live-*'){throw 'isolated_profile_required'}
 Add-Type -AssemblyName System.Security
 $plain=$null
 try {
@@ -23,7 +23,7 @@ try {
     }catch{}
   }
   $stage='find_file'
-  $fileId=node -e "const {DatabaseSync}=require('node:sqlite');const p=require('node:path');const d=new DatabaseSync(p.join(process.env.APPDATA,'com.alldownloader.desktop','tasks.sqlite'),{readOnly:true});console.log(d.prepare('select source from tasks where name=? order by updated_at desc limit 1').get('midysj.zip').source.split('/').pop());"
+  $fileId=node -e "const {DatabaseSync}=require('node:sqlite');const p=require('node:path');const d=new DatabaseSync(p.join(process.env.APPDATA,'com.versadown.desktop','tasks.sqlite'),{readOnly:true});console.log(d.prepare('select source from tasks where name=? order by updated_at desc limit 1').get('midysj.zip').source.split('/').pop());"
   if($LASTEXITCODE -ne 0 -or -not $fileId){throw 'test_file_missing'}
   $headers=@{Authorization='Bearer '+$session.access_token;'X-Device-Id'=$session.profile.device_id;'X-Client-Id'=$session.profile.client_id;'X-Client-Version'=$session.profile.client_version;Origin='https://pan.xunlei.com';Referer='https://pan.xunlei.com/';'X-Captcha-Token'=$session.web_security.captcha_token}
   $stage='fetch_file'

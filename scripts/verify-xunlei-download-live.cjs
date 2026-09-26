@@ -3,8 +3,8 @@ const path=require('node:path'),fs=require('node:fs');
 const {DatabaseSync}=require('node:sqlite');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 exports.run=async function(invoke,root,data,account){
-  if(!path.basename(data).startsWith('alldownloader-xunlei-auth-live-'))throw Error('isolated_data_required');
-  const primary=new DatabaseSync(path.join(process.env.APPDATA,'com.alldownloader.desktop','tasks.sqlite'),{readOnly:true});
+  if(!path.basename(data).startsWith('versadown-xunlei-auth-live-'))throw Error('isolated_data_required');
+  const primary=new DatabaseSync(path.join(process.env.APPDATA,'com.versadown.desktop','tasks.sqlite'),{readOnly:true});
   const reported=primary.prepare('select id,source from tasks where name=? order by updated_at desc limit 1').get('midysj.zip');
   const binding=primary.prepare('select account_id from cloud_download_accounts where id=?').get(reported.id);primary.close();
   if(binding?.account_id!==account.id)throw Error('reported_task_belongs_to_different_account');
@@ -15,7 +15,7 @@ exports.run=async function(invoke,root,data,account){
     const value=await (await fetch(`http://127.0.0.1:${settings.aria2.rpcPort}/jsonrpc`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params:['token:'+settings.aria2.rpcToken,...params]})})).json();
     if(value.error)throw Error('isolated_rpc:'+method+':'+value.error.code);return value.result;
   };
-  const retryProbe=process.env.ALLDOWNLOADER_XUNLEI_RETRY_LIVE==='1';
+  const retryProbe=process.env.VERSADOWN_XUNLEI_RETRY_LIVE==='1';
   let bridge,disconnect=false,bridgeConnections=0;
   const sockets=new Set();
   if(retryProbe){

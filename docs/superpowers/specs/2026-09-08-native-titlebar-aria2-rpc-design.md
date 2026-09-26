@@ -1,8 +1,8 @@
-# AllDownloader 自绘标题栏与 aria2 RPC 完整接入设计
+# VersaDown 自绘标题栏与 aria2 RPC 完整接入设计
 
 ## 目标
 
-本设计补充 `2026-09-07-alldownloader-windows-beta-design.md`，解决三个已确认问题：下载管理器仍使用 Windows 原生标题栏；现有 aria2 仅按任务启动进程，界面状态和控制不代表真实下载状态；关闭下载管理器会销毁 `main` 窗口，导致悬浮球无法再次打开。
+本设计补充 `2026-09-07-versadown-windows-beta-design.md`，解决三个已确认问题：下载管理器仍使用 Windows 原生标题栏；现有 aria2 仅按任务启动进程，界面状态和控制不代表真实下载状态；关闭下载管理器会销毁 `main` 窗口，导致悬浮球无法再次打开。
 
 “完整接入 aria2”在本阶段指：下载管理器展示的传输状态、进度和控制均以 aria2 1.37.0 JSON-RPC 为唯一真实来源，并覆盖 HTTP/HTTPS、磁力和种子任务所需的产品级能力。不在界面暴露 aria2 的全部低层配置项或任意 RPC 调试入口。
 
@@ -12,7 +12,7 @@
 
 主窗口的关闭语义统一为“隐藏”：自绘关闭按钮、Alt+F4 和系统关闭请求均阻止销毁并调用 `hide()`。下载任务、aria2 sidecar 和悬浮球继续运行。悬浮球菜单的“打开下载管理器”和“设置”总能获取仍存活的 `main` 窗口，先取消最小化、显示并聚焦；“设置”额外发送内部导航事件。
 
-只有悬浮球右键菜单中的“退出”结束应用。退出顺序为：停止接受新任务，调用 `aria2.saveSession`，调用 `aria2.shutdown`，等待最多 5 秒；仍未退出则结束本应用持有的 aria2 子进程；最后关闭 SQLite 并退出 AllDownloader。下次启动从 aria2 session 和本地任务映射恢复。
+只有悬浮球右键菜单中的“退出”结束应用。退出顺序为：停止接受新任务，调用 `aria2.saveSession`，调用 `aria2.shutdown`，等待最多 5 秒；仍未退出则结束本应用持有的 aria2 子进程；最后关闭 SQLite 并退出 VersaDown。下次启动从 aria2 session 和本地任务映射恢复。
 
 ## aria2 进程模型与安全
 

@@ -7,10 +7,10 @@ const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
 
 async function main() {
-  if (process.env.ALLDOWNLOADER_LIVE_CLOUD !== '1') throw Error('explicit_live_opt_in_required');
+  if (process.env.VERSADOWN_LIVE_CLOUD !== '1') throw Error('explicit_live_opt_in_required');
   const port = Number(process.argv[2]);
   const dataDir = path.resolve(process.argv[3] || '.');
-  if (!path.basename(dataDir).startsWith('alldownloader-xunlei-live-')) throw Error('isolated_app_required');
+  if (!path.basename(dataDir).startsWith('versadown-xunlei-live-')) throw Error('isolated_app_required');
   let app;
   for (const candidate of (await targets(port)).filter(t => /tauri.localhost/.test(t.url))) {
     if (await evaluate(candidate, `!!document.querySelector('.cloud-workspace')`)) { app = candidate; break; }
@@ -29,7 +29,7 @@ async function main() {
     if (!result?.ok) throw Error(`${command}: ${result?.code || 'invalid_reply'}`);
     return result.value;
   }
-  const local = fs.mkdtempSync(path.join(os.tmpdir(), 'AllDownloader-IT-xunlei-app-'));
+  const local = fs.mkdtempSync(path.join(os.tmpdir(), 'VersaDown-IT-xunlei-app-'));
   const name = path.basename(local);
   const payload = crypto.randomBytes(32768);
   const fixture = path.join(local, `${name}.bin`);

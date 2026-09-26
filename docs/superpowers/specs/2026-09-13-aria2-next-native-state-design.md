@@ -2,13 +2,13 @@
 
 ## 目标
 
-AllDownloader 只使用 Aria2 Next 2.7.5 的原生任务文件和 `--state-dir` 持久化状态。应用不再创建、读取或依据相邻 `.aria2` 控制文件判断完成、续传与覆盖，也不再导入、迁移或修复旧 aria2 会话。
+VersaDown 只使用 Aria2 Next 2.7.5 的原生任务文件和 `--state-dir` 持久化状态。应用不再创建、读取或依据相邻 `.aria2` 控制文件判断完成、续传与覆盖，也不再导入、迁移或修复旧 aria2 会话。
 
 ## 状态归属
 
 - `aria2-next.tasks` 是 Aria2 Next 的任务队列清单，由 `--input-file`、`--save-session` 和 `aria2.saveSession` 管理。
 - `aria2-next-state` 是 Aria2 Next 的原生进度状态目录。HTTP、HTTPS、SFTP、Metalink、BitTorrent、ED2K 与媒体下载的恢复数据均归该目录所有。
-- `tasks.sqlite` 只保存 AllDownloader 的任务展示、目录分组、网盘来源、GID 映射和已完成历史，不保存字节区间或协议级断点状态。
+- `tasks.sqlite` 只保存 VersaDown 的任务展示、目录分组、网盘来源、GID 映射和已完成历史，不保存字节区间或协议级断点状态。
 - FTP 仍由进程内 Rust 引擎负责，依据目标文件长度续传，不进入 Aria2 Next 状态域。
 
 ## 启动与退出
@@ -23,10 +23,10 @@ AllDownloader 只使用 Aria2 Next 2.7.5 的原生任务文件和 `--state-dir` 
 启动后枚举 Aria2 Next 中 active、waiting、stopped 的任务，并与 `tasks.sqlite` 的 GID 映射严格核对：
 
 1. 两边都存在且 GID 唯一：同步状态与文件列表。
-2. AllDownloader 存在未完成任务，但 Aria2 Next 不存在对应 GID：该任务不兼容，永久删除其任务记录、记录的局部下载文件和相邻遗留 `.aria2` 文件。
-3. Aria2 Next 存在任务，但 AllDownloader 没有对应 GID：该任务不受应用管理，从 Aria2 Next 永久移除；只删除位于配置下载根目录内的输出文件。
+2. VersaDown 存在未完成任务，但 Aria2 Next 不存在对应 GID：该任务不兼容，永久删除其任务记录、记录的局部下载文件和相邻遗留 `.aria2` 文件。
+3. Aria2 Next 存在任务，但 VersaDown 没有对应 GID：该任务不受应用管理，从 Aria2 Next 永久移除；只删除位于配置下载根目录内的输出文件。
 4. GID 映射冲突、元数据父子关系不唯一或恢复状态无法解析：相关应用任务和原生任务都按不兼容处理并删除，不创建“恢复的下载任务”，不猜测旧磁力父子关系。
-5. 已完成的 AllDownloader 历史及其完整文件保留；已完成历史不会因为引擎清理而重新下载。
+5. 已完成的 VersaDown 历史及其完整文件保留；已完成历史不会因为引擎清理而重新下载。
 
 清理必须限制在配置的下载根目录内。路径解析失败、越界路径、目录或非普通文件不得删除；对应任务记录仍可删除，错误记录为可诊断但不含凭据的启动错误。
 

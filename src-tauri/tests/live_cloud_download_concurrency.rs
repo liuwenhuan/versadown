@@ -5,7 +5,7 @@
 //! The probe never prints cloud item metadata, resolved URLs, request headers,
 //! session material, or proxy configuration.
 
-use alldownloader_lib::{
+use versadown_lib::{
     cloud::{
         commands::CloudState, CloudError, CloudFile, CloudFileKind, CloudProvider, CredentialStore,
         ProviderRegistry, ReqwestTransport, ResolvedCloudDownload,
@@ -27,13 +27,13 @@ const MAX_DIRECTORIES: usize = 32;
 
 fn app_data_root() -> Result<PathBuf, &'static str> {
     let app_data = std::env::var_os("APPDATA").ok_or("app-data-unavailable")?;
-    Ok(PathBuf::from(app_data).join("com.alldownloader.desktop"))
+    Ok(PathBuf::from(app_data).join("com.versadown.desktop"))
 }
 
 fn direct_or_configured_proxy_client(
     root: &PathBuf,
 ) -> Result<(reqwest::blocking::Client, &'static str), &'static str> {
-    let proxy_url = match std::env::var("ALLDOWNLOADER_LIVE_PROXY") {
+    let proxy_url = match std::env::var("VERSADOWN_LIVE_PROXY") {
         Ok(value) => Some(live_proxy_url(&value)?),
         Err(std::env::VarError::NotPresent) => {
             let bytes = fs::read(root.join("settings.json")).map_err(|_| "settings-unavailable")?;
@@ -253,7 +253,7 @@ fn print_fail(provider: CloudProvider, reason: &str) {
 }
 
 fn selected_providers() -> Result<Vec<CloudProvider>, &'static str> {
-    let filter = match std::env::var("ALLDOWNLOADER_LIVE_PROVIDER") {
+    let filter = match std::env::var("VERSADOWN_LIVE_PROVIDER") {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err("provider-filter-invalid"),
@@ -270,7 +270,7 @@ fn selected_providers() -> Result<Vec<CloudProvider>, &'static str> {
 }
 
 #[test]
-#[ignore = "requires saved cloud sessions and ALLDOWNLOADER_LIVE_CLOUD_CONCURRENCY=1"]
+#[ignore = "requires saved cloud sessions and VERSADOWN_LIVE_CLOUD_CONCURRENCY=1"]
 fn enabled_providers_support_four_concurrent_disjoint_ranges() {
     let providers = match selected_providers() {
         Ok(providers) => providers,
@@ -279,7 +279,7 @@ fn enabled_providers_support_four_concurrent_disjoint_ranges() {
             return;
         }
     };
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD_CONCURRENCY").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD_CONCURRENCY").as_deref() != Ok("1") {
         for provider in providers {
             print_skip(provider, "opt-in-disabled");
         }

@@ -1,4 +1,4 @@
-use alldownloader_lib::aria2::{rpc, types};
+use versadown_lib::aria2::{rpc, types};
 use axum::{http::StatusCode, routing::post, Json, Router};
 use rpc::{Aria2Api, Aria2DebugLogger, Aria2RpcClient};
 use serde_json::{json, Value};

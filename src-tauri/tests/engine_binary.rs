@@ -1,4 +1,4 @@
-use alldownloader_lib::engine_binary::{EngineBinary, EngineBinaryError};
+use versadown_lib::engine_binary::{EngineBinary, EngineBinaryError};
 
 #[test]
 fn linux_x86_64_uses_the_pinned_resource_name() {

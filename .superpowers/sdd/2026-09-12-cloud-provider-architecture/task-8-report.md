@@ -36,7 +36,7 @@ Rust 命令使用 `C:/Users/deepin/.cargo/bin/cargo.exe`，环境 `CARGO_TARGET_
 | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1` | 首次因沙箱内 esbuild 读取祖先目录 Access denied 退出 1；同脚本获准权限重试后退出 0，前端构建成功、Rust release 1m17s |
 | `git diff --check` | 通过 |
 
-发布产物：当前工作树 `artifacts/alldownloader.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。保留已有 dead-code、linker/canonicalize 信息及前端 dynamic/static import 警告；未新增构建错误。发布构建本身没有触发全量测试。
+发布产物：当前工作树 `artifacts/versadown.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。保留已有 dead-code、linker/canonicalize 信息及前端 dynamic/static import 警告；未新增构建错误。发布构建本身没有触发全量测试。
 
 自审限定本项 diff：source map/source mutex 锁顺序、snapshot CAS/取消边界、mutation 不重放、迅雷 preflight，以及原有 owner/cleanup journal 均有对应验证。提交说明：`perf(cloud): narrow session locks and reclaim source gates`。
 

@@ -7,17 +7,17 @@ const net = require('node:net');
 const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 const { evaluate, targets } = require('./xunlei-live-probe.cjs');
-const targetName = 'AllDownloader-IT-pikpak-cache-1788958358211-root';
-const binary = process.env.ALLDOWNLOADER_TEST_BINARY || path.resolve(__dirname, '../artifacts/alldownloader.exe');
+const targetName = 'VersaDown-IT-pikpak-cache-1788958358211-root';
+const binary = process.env.VERSADOWN_TEST_BINARY || path.resolve(__dirname, '../artifacts/versadown.exe');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function run() {
-  if (process.env.ALLDOWNLOADER_LIVE_CLOUD !== '1') throw new Error('Explicit live test opt-in required');
+  if (process.env.VERSADOWN_LIVE_CLOUD !== '1') throw new Error('Explicit live test opt-in required');
   const root = path.resolve(__dirname, '../.tools');
   const data = fs.mkdtempSync(path.join(root, 'pikpak-ui-'));
   // MSIX can redirect APPDATA to a different credential store. Never silently
   // accept that default for a live-session regression test.
-  const sessions = process.env.ALLDOWNLOADER_TEST_CLOUD_SESSIONS;
+  const sessions = process.env.VERSADOWN_TEST_CLOUD_SESSIONS;
   if (!sessions) throw new Error('Explicit physical cloud session directory required');
   // Keep task/download databases separate but use the same encrypted session
   // store as the application, so token renewal cannot strand the user's login.
@@ -29,8 +29,8 @@ async function run() {
     });
   });
   const child = spawn(binary, [], { cwd: path.dirname(binary), windowsHide: true, stdio: 'ignore', env: {
-    ...process.env, ALLDOWNLOADER_BACKGROUND_UI_TEST: '1', ALLDOWNLOADER_TEST_DATA_DIR: data,
-    ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(data, 'downloads'),
+    ...process.env, VERSADOWN_BACKGROUND_UI_TEST: '1', VERSADOWN_TEST_DATA_DIR: data,
+    VERSADOWN_TEST_DOWNLOAD_DIR: path.join(data, 'downloads'),
     WEBVIEW2_USER_DATA_FOLDER: path.join(data, 'webview2'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
   }});

@@ -1,9 +1,9 @@
 #![cfg(windows)]
 
-use alldownloader_lib::aria2::{
+use versadown_lib::aria2::{
     Aria2Api, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, Aria2Status,
 };
-use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
+use versadown_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
 use axum::{
     body::{Body, Bytes},
     extract::{OriginalUri, State},
@@ -336,7 +336,7 @@ impl LiveAria2Fixture {
             axum::serve(listener, app).await.unwrap();
         });
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut aria2 = alldownloader_lib::Aria2Settings::default();
+        let mut aria2 = versadown_lib::Aria2Settings::default();
         aria2.rpc_port = listener.local_addr().unwrap().port();
         aria2.rpc_token = format!("aria2-live-test-{}", aria2.rpc_port);
         drop(listener);

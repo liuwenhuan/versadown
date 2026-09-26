@@ -49,7 +49,7 @@ PikPak/Aliyun/Xunlei 快照消费者禁用客户端内置 token 刷新及失败�
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib cloud::commands` | 90 通过，241 未运行 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_auth_supervisor` | 最终补充 DPAPI 重开用例后 13 通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test cloud_xunlei --test cloud_auth_supervisor --test cloud_upload` | 最终补充 Xunlei preflight 用例后 35 + 13 + 6 = 54 通过，0 失败 |
-| `./scripts/build-windows.ps1` | 首次退出 0，release 1 分 27 秒；最新生产代码重建退出 0，release 17.60 秒；前端未变化，脚本复用 dist；产物 artifacts/alldownloader.exe（24,935,424 字节）及 aria2 sidecar |
+| `./scripts/build-windows.ps1` | 首次退出 0，release 1 分 27 秒；最新生产代码重建退出 0，release 17.60 秒；前端未变化，脚本复用 dist；产物 artifacts/versadown.exe（24,935,424 字节）及 aria2 sidecar |
 | `rustfmt --edition 2021 --config skip_children=true`（仅本次变更 Rust 文件） | 退出 0 |
 | `git diff --check` | 提交前确认退出 0 |
 

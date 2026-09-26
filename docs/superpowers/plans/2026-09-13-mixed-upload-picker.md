@@ -53,7 +53,7 @@ Interface: `LocalUploadEntry {path:string; name:string; kind:'file'|'directory'}
 - `npm run build` 和 `scripts/build-windows.ps1` 均成功；存在已有非阻塞编译警告。
 - 浏览器真实组件夹具验证：多文件/多目录混选、跨目录保留选择、父子去重、1280×720 浅色和 960×640 深色布局。
 - 只读审查发现的磁盘枚举阻塞风险和全选半选状态重载问题已修复并补测。
-- 独立测试版：`artifacts/VersaDown-mixed-upload-20260913-122047/alldownloader.exe`，附带 `binaries/aria2-next-x86_64-pc-windows-msvc.exe`。两文件与发布源的 SHA-256 分别一致。
+- 独立测试版：`artifacts/VersaDown-mixed-upload-20260913-122047/versadown.exe`，附带 `binaries/aria2-next-x86_64-pc-windows-msvc.exe`。两文件与发布源的 SHA-256 分别一致。
 - 主程序 SHA-256：`A0416E9D5E6EA99938270D5331F6F01B48FD1FAAF6753F63BCDC33A9A07BFF2B`。
 - 验证边界：本次验证环境为 Windows；未向真实网盘上传用户文件，需人工测试真实授权账号的上传结果。未执行全量测试，未提交或合并。
 
@@ -67,4 +67,4 @@ Interface: `LocalUploadEntry {path:string; name:string; kind:'file'|'directory'}
 - 浏览器夹具：960×640 浅色/深色布局、列对齐、长文件名省略、关闭、单击路径跳转、双击原路径编辑、Escape 退出编辑、选中计数和主按钮悬停配色。未上传真实文件。
 - 审查修正：按 Windows `GetDoubleClickTime` 判断双击；新导航取消旧单击定时器；表头与列表保留相同滚动条间隙；主按钮悬停不被普通按钮规则覆盖。
 - 已知边界：沿用上版链接/reparse point 排除策略，因此 Windows 云占位文件仍不在选择范围；本次未扩大本地读取和递归上传安全边界。非 Windows 未实机验证。
-- 最终 `scripts/build-windows.ps1` 成功（含前端构建与 Rust 发布构建，已有非阻塞警告）；独立测试版 `artifacts/VersaDown-upload-picker-20260913-132331/alldownloader.exe`，附带下载引擎。主程序 SHA-256：`891063C7E61645146C573E868C68F01C4A0F718B221DBCC56B4B9A5990D4192C`；主程序与引擎复制后哈希均与发布源一致。
+- 最终 `scripts/build-windows.ps1` 成功（含前端构建与 Rust 发布构建，已有非阻塞警告）；独立测试版 `artifacts/VersaDown-upload-picker-20260913-132331/versadown.exe`，附带下载引擎。主程序 SHA-256：`891063C7E61645146C573E868C68F01C4A0F718B221DBCC56B4B9A5990D4192C`；主程序与引擎复制后哈希均与发布源一致。

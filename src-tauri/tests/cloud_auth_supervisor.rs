@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{auth_supervisor::*, *};
+use versadown_lib::cloud::{auth_supervisor::*, *};
 use std::sync::{
     atomic::{AtomicI64, AtomicUsize, Ordering},
     Arc,
@@ -142,7 +142,7 @@ fn review_captcha_on_the_second_read_persists_risk_blocked_without_a_third_read(
 
 #[test]
 fn web_authorization_required_uses_saved_password_before_requesting_user_login() {
-    use alldownloader_lib::cloud::driver::ProviderAuth;
+    use versadown_lib::cloud::driver::ProviderAuth;
 
     struct SavedPassword<'a>(&'a AtomicUsize);
     impl ProviderAuth for SavedPassword<'_> {
@@ -213,7 +213,7 @@ fn web_authorization_required_uses_saved_password_before_requesting_user_login()
 
 #[test]
 fn review_proactive_auth_failure_can_continue_to_profile_in_the_same_run() {
-    use alldownloader_lib::cloud::driver::ProviderAuth;
+    use versadown_lib::cloud::driver::ProviderAuth;
     struct Rejected<'a>(&'a AtomicUsize);
     impl ProviderAuth for Rejected<'_> {
         fn refresh_session(&mut self) -> Result<bool, CloudError> {
@@ -761,7 +761,7 @@ fn stale_snapshot_cannot_overwrite_a_new_account_session() {
 
 #[test]
 fn recovery_tries_refresh_then_saved_password_then_profile_only_for_real_auth_errors() {
-    use alldownloader_lib::cloud::driver::ProviderAuth;
+    use versadown_lib::cloud::driver::ProviderAuth;
     use std::sync::Mutex;
     struct Auth<'a>(&'a Mutex<Vec<&'static str>>);
     impl ProviderAuth for Auth<'_> {
@@ -811,7 +811,7 @@ fn recovery_tries_refresh_then_saved_password_then_profile_only_for_real_auth_er
 
 #[test]
 fn transport_failure_does_not_start_password_or_profile_login() {
-    use alldownloader_lib::cloud::driver::ProviderAuth;
+    use versadown_lib::cloud::driver::ProviderAuth;
     struct Offline;
     impl ProviderAuth for Offline {
         fn refresh_session(&mut self) -> Result<bool, CloudError> {

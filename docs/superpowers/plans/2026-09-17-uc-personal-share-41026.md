@@ -21,8 +21,8 @@ credential store, `cargo test`, Windows release build script.
 
 - Do not print credential bytes, cookie values, share URLs, or share IDs.
 - Do not select, change, or remove any pre-existing user files or shares.
-- The live test must use `ALLDOWNLOADER_LIVE_CLOUD=1`, create only an
-  `AllDownloader-E2E-uc-*` directory, cancel only the share it created, and
+- The live test must use `VERSADOWN_LIVE_CLOUD=1`, create only an
+  `VersaDown-E2E-uc-*` directory, cancel only the share it created, and
   permanently clear only that test fixture from the recycle bin.
 - Keep unrelated worktree edits intact. This narrowly changes UC personal-share
   identity handling and its tests; no frontend test suite is needed.

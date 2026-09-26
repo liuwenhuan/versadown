@@ -774,7 +774,7 @@ const QUARK_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
     object_host: "pds.quark.cn",
     object_store_user_agent: "aliyun-sdk-js/6.6.1",
 };
-pub(crate) const QUARK_RECYCLE_BIN_ID: &str = "__all_downloader_quark_recycle_bin__";
+pub(crate) const QUARK_RECYCLE_BIN_ID: &str = "__versa_down_quark_recycle_bin__";
 const QUARK_RECYCLE_BIN_NAME: &str = "回收站";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

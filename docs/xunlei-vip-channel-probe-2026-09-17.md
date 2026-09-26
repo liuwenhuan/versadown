@@ -11,18 +11,18 @@
 旧隔离会话请求返回 HTTP 400，不能据此认定协议变化。重新运行隐藏授权实例后成功：
 
 ```powershell
-$env:ALLDOWNLOADER_TEST_BINARY='artifacts/alldownloader.exe'
-$env:ALLDOWNLOADER_XUNLEI_PASSWORD_LIVE='1'
-$env:ALLDOWNLOADER_XUNLEI_ACCELERATION_PROBE='1'
+$env:VERSADOWN_TEST_BINARY='artifacts/versadown.exe'
+$env:VERSADOWN_XUNLEI_PASSWORD_LIVE='1'
+$env:VERSADOWN_XUNLEI_ACCELERATION_PROBE='1'
 node scripts/verify-xunlei-auth-live.cjs
 ```
 
-结果退出0；隔离目录 `alldownloader-xunlei-auth-live-LPVK6I`。脚本同时断言登录、目录读取、容量显示、授权窗口关闭和网盘菜单正常。测试实例已退出。后续官方客户端对照使用了用户已运行并登录的官方客户端，不复用该隐藏实例的窗口。
+结果退出0；隔离目录 `versadown-xunlei-auth-live-LPVK6I`。脚本同时断言登录、目录读取、容量显示、授权窗口关闭和网盘菜单正常。测试实例已退出。后续官方客户端对照使用了用户已运行并登录的官方客户端，不复用该隐藏实例的窗口。
 
 随后执行：
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts/probe-xunlei-acceleration.ps1 -SessionDirectory 'C:/Users/deepin/AppData/Local/Temp/alldownloader-xunlei-auth-live-LPVK6I'
+powershell.exe -ExecutionPolicy Bypass -File scripts/probe-xunlei-acceleration.ps1 -SessionDirectory 'C:/Users/deepin/AppData/Local/Temp/versadown-xunlei-auth-live-LPVK6I'
 ```
 
 结果退出0，HTTP 200：

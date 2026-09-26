@@ -1,4 +1,4 @@
-# AllDownloader · Desktop Beta
+# VersaDown · Desktop Beta
 
 本地优先的桌面下载客户端。它把标准下载链接、磁力/种子、迅雷链接、网盘分享链接和复杂文本放入统一任务流程，并使用小型悬浮输入窗与下载管理器显示进度。
 
@@ -28,7 +28,7 @@
 ```bash
 pnpm install --frozen-lockfile
 pnpm run build:linux:quick
-./src-tauri/target/debug/alldownloader
+./src-tauri/target/debug/versadown
 ```
 
 产物包含 Linux x86_64 的 aria2-next 2.8.0 sidecar。该命令生成调试二进制，不生成 Release 包或安装包。
@@ -74,11 +74,11 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
 ```
 
 快速构建输出到 `artifacts/quick/`，用于本机验证；正式主程序输出到
-`artifacts/alldownloader.exe`，安装包位于
+`artifacts/versadown.exe`，安装包位于
 `.tools/release-target/release/bundle/`。`build:windows` 继续等同于
 `build:windows:release`，以保持旧自动化命令兼容。
 
-默认下载目录为当前 Windows 用户的 `Downloads`。任务数据库位于 Windows 应用数据目录中的 `AllDownloader/tasks.sqlite`；不要手动复制其中可能关联授权会话的信息。
+默认下载目录为当前 Windows 用户的 `Downloads`。任务数据库位于 Windows 应用数据目录中的 `VersaDown/tasks.sqlite`；不要手动复制其中可能关联授权会话的信息。
 
 ## 关于夸克与 PikPak
 

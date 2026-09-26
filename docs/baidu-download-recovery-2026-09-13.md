@@ -32,7 +32,7 @@
 | `cargo test --quiet --test cloud_baidu` | 38 通过 |
 | `cargo test --quiet --test cloud_session --test cloud_auth_supervisor --test cloud_saved_login` | 44 通过 |
 | `pnpm.cmd run test:run src/App.live.test.tsx src/components/CloudManager.test.tsx --exclude '.worktrees/**' --exclude '.tmp-master-build-*/**'` | 196 通过 |
-| 设置 `ALLDOWNLOADER_LIVE_CLOUD=1` 后 `cargo test --quiet --test live_baidu_tianyi live_baidu_personal_download_bytes -- --ignored --nocapture` | 使用已保存授权，个人文件 HTTP 206，实际收到前 1024 字节 |
+| 设置 `VERSADOWN_LIVE_CLOUD=1` 后 `cargo test --quiet --test live_baidu_tianyi live_baidu_personal_download_bytes -- --ignored --nocapture` | 使用已保存授权，个人文件 HTTP 206，实际收到前 1024 字节 |
 | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1` | 正常 master 构建目录生成可运行 EXE；无安装包 |
 | `git diff --check` | 通过 |
 
@@ -40,13 +40,13 @@
 
 ## 尚未声称通过的验证
 
-- 桌面“重新授权”按钮实机点击：控制 AllDownloader 的权限请求超时，未完成。已有组件/应用集成测试覆盖授权事件和兜底轮询后的任务恢复，但不能替代桌面实测。
+- 桌面“重新授权”按钮实机点击：控制 VersaDown 的权限请求超时，未完成。已有组件/应用集成测试覆盖授权事件和兜底轮询后的任务恢复，但不能替代桌面实测。
 - 用户问题分享链接的实际完整下载：本次未提供可用于该问题的百度分享链接，已验证分享直链、转存、刷新和清理的定向测试，但未声称该分享链接实测通过。
 - 1024 字节只读探测验证下载链路，不等于完整文件下载/校验，也不代表所有账号或风控状态均可用。
 
 ## 二进制
 
-- 路径：`D:\projects\downloader\artifacts\alldownloader.exe`
+- 路径：`D:\projects\downloader\artifacts\versadown.exe`
 - 大小：26,301,952 字节（22:53:49）
 - SHA256：`8169802B018785A08EBB5167594C81C98A1D9365E366217D8DD33C9F82713549`
 - 前端包：`index-BUvbXf7q.js`

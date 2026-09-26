@@ -1,6 +1,6 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     xunlei::{XunleiClient, XunleiClientProfile, XunleiSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
     UploadHttpRequest, UploadHttpResponse,

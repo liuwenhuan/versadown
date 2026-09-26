@@ -119,7 +119,7 @@ git commit -m "feat: resolve aria2 sidecars by platform"
 ```rust
 #[test]
 fn system_store_rejects_unknown_logical_keys_before_keyring_access() {
-    let store = SystemCredentialStore::new("com.alldownloader.desktop");
+    let store = SystemCredentialStore::new("com.versadown.desktop");
     assert!(matches!(store.save("not-a-supported-key", b"secret"), Err(QuarkError::Storage)));
 }
 

@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     commands::{
         cancel_cloud_directory_group_with, cloud_directory_member_retry_options,
         plan_cloud_directory_download, plan_cloud_share_directory_download,
@@ -9,7 +9,7 @@ use alldownloader_lib::cloud::{
     share::{CloudShareDownloadEntry, CloudShareDownloadSelection},
     CloudDirectory, CloudFile, CloudProvider, QuarkError,
 };
-use alldownloader_lib::{
+use versadown_lib::{
     list_queue_tasks_for_scope, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use std::{
@@ -26,8 +26,8 @@ fn directory(id: &str, items: Vec<CloudFile>) -> CloudDirectory {
 
 #[tokio::test]
 async fn scheduler_directory_pause_stops_linked_gidless_resolver_until_resume() {
-    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
-    use alldownloader_lib::DownloadAction;
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use versadown_lib::DownloadAction;
     let temp = tempfile::tempdir().unwrap();
     let store = TaskStore::open_in_memory().unwrap();
     let group_id = cancellation_group(&store, temp.path());
@@ -84,8 +84,8 @@ async fn scheduler_directory_pause_stops_linked_gidless_resolver_until_resume() 
 
 #[tokio::test]
 async fn directory_gidless_resume_retains_overwrite_and_cancel_restores_original_gid() {
-    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
-    use alldownloader_lib::DownloadAction;
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use versadown_lib::DownloadAction;
     let temp = tempfile::tempdir().unwrap();
     let store = TaskStore::open_in_memory().unwrap();
     let group_id = cancellation_group(&store, temp.path());
@@ -199,7 +199,7 @@ async fn paused_directory_stops_pending_submission_and_can_resume_after_reopen()
 
 #[test]
 fn interrupted_preparation_after_restart_is_resumable_without_replaying_a_live_submission() {
-    use alldownloader_lib::cloud::commands::recover_interrupted_directory_preparation;
+    use versadown_lib::cloud::commands::recover_interrupted_directory_preparation;
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("interrupted.db");
     let store = TaskStore::open_path(&path).unwrap();
@@ -323,7 +323,7 @@ async fn authorization_recovery_reopens_directory_leaves_and_retries_each_once()
     .unwrap();
     let group = outcome.task.payload.task.id;
     assert_eq!(
-        alldownloader_lib::cloud::commands::reauthorization_provider(&store, group).unwrap(),
+        versadown_lib::cloud::commands::reauthorization_provider(&store, group).unwrap(),
         CloudProvider::Quark
     );
     store
@@ -380,7 +380,7 @@ async fn authorization_recovery_reopens_directory_leaves_and_retries_each_once()
             .as_deref(),
         Some("network_error")
     );
-    assert!(alldownloader_lib::cloud::commands::reauthorization_provider(&store, group).is_err());
+    assert!(versadown_lib::cloud::commands::reauthorization_provider(&store, group).is_err());
     let linked = remaining.iter().find_map(|item| item.task_id).unwrap();
     store
         .bind_cloud_download_account(linked, CloudProvider::Quark, "alice")
@@ -558,7 +558,7 @@ async fn review_recycling_during_resolution_prevents_atomic_leaf_claim_and_submi
         Ok(directory(id, vec![file("file", id, "一.txt")]))
     })
     .unwrap();
-    let group = alldownloader_lib::cloud::commands::create_cloud_directory_group_for_download(
+    let group = versadown_lib::cloud::commands::create_cloud_directory_group_for_download(
         &store,
         CloudProvider::Quark,
         "root",
@@ -618,7 +618,7 @@ async fn review_late_duplicate_retry_never_erases_the_successful_leaf_link() {
         Ok(directory(id, vec![file("file", id, "一.txt")]))
     })
     .unwrap();
-    let group = alldownloader_lib::cloud::commands::create_cloud_directory_group_for_download(
+    let group = versadown_lib::cloud::commands::create_cloud_directory_group_for_download(
         &store,
         CloudProvider::Quark,
         "root",
@@ -705,7 +705,7 @@ fn cancellation_group_for_provider(
     output: &std::path::Path,
     provider: CloudProvider,
 ) -> uuid::Uuid {
-    use alldownloader_lib::cloud::commands::{
+    use versadown_lib::cloud::commands::{
         create_cloud_directory_group_for_download, CloudDirectoryDownloadPlan, PlannedCloudFile,
     };
     let plan = CloudDirectoryDownloadPlan {
@@ -814,7 +814,7 @@ async fn cancellation_of_mixed_directory_stops_active_members_only() {
         .create(NewTask::direct("https://example.test/completed"))
         .unwrap();
     let completed = store
-        .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+        .apply_transfer_snapshot(versadown_lib::DownloadTask {
             status: TaskStatus::Completed,
             progress: 100,
             completed_length: 100,
@@ -835,7 +835,7 @@ async fn cancellation_of_mixed_directory_stops_active_members_only() {
         assert_eq!(id, active.id);
         std::future::ready(
             store
-                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                .apply_transfer_snapshot(versadown_lib::DownloadTask {
                     status: TaskStatus::Cancelled,
                     ..store.find(id).unwrap()
                 })
@@ -879,7 +879,7 @@ async fn cancellation_failure_does_not_skip_siblings_or_hide_active_members() {
             Err("engine unavailable".to_string())
         } else {
             store
-                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                .apply_transfer_snapshot(versadown_lib::DownloadTask {
                     status: TaskStatus::Cancelled,
                     ..store.find(id).unwrap()
                 })
@@ -950,7 +950,7 @@ async fn cancellation_during_submission_stops_the_inflight_leaf_and_skips_remain
     let cancellation = cancel_cloud_directory_group_with(&store, group_id.get().unwrap(), |id| {
         std::future::ready(
             store
-                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                .apply_transfer_snapshot(versadown_lib::DownloadTask {
                     status: TaskStatus::Cancelled,
                     ..store.find(id).unwrap()
                 })
@@ -978,7 +978,7 @@ async fn cancellation_during_submission_stops_the_inflight_leaf_and_skips_remain
 
 #[tokio::test]
 async fn cancellation_blocks_linked_failed_member_refresh_and_waits_for_existing_refresh() {
-    use alldownloader_lib::cloud::commands::lock_directory_member_submission;
+    use versadown_lib::cloud::commands::lock_directory_member_submission;
     let store = TaskStore::open_in_memory().unwrap();
     let temp = tempfile::tempdir().unwrap();
     let group_id = cancellation_group(&store, temp.path());
@@ -1001,7 +1001,7 @@ async fn cancellation_blocks_linked_failed_member_refresh_and_waits_for_existing
     let cancellation = cancel_cloud_directory_group_with(&store, group_id, |id| {
         std::future::ready(
             store
-                .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+                .apply_transfer_snapshot(versadown_lib::DownloadTask {
                     status: TaskStatus::Cancelled,
                     ..store.find(id).unwrap()
                 })
@@ -1178,7 +1178,7 @@ fn rejects_empty_cycles_duplicate_files_and_pikpak_recycle_bin() {
 
     let recycle_bin = plan_cloud_directory_download(
         CloudProvider::Pikpak,
-        "__all_downloader_pikpak_recycle_bin__",
+        "__versa_down_pikpak_recycle_bin__",
         "回收站",
         |_| panic!("the virtual recycle bin must not be listed"),
     );

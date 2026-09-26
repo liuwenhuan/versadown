@@ -1,6 +1,6 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     parse_quark_download_url, parse_quark_files, CloudHttpRequest, CloudHttpResponse,
     CloudHttpTransport, CloudProvider, CloudUploadTransport, CredentialStore,
     MemoryCredentialStore, ProviderRegistry, QuarkClient, QuarkError, UploadHttpRequest,
@@ -725,7 +725,7 @@ fn quark_recycle_records_restore_and_permanent_delete_use_recycle_record_id() {
     assert_eq!(directory.items[0].id, "recycle-1");
     assert_eq!(
         directory.items[0].parent_id,
-        "__all_downloader_quark_recycle_bin__"
+        "__versa_down_quark_recycle_bin__"
     );
     let requests = http.requests();
     assert!(requests[0].url.contains("file/recycle/list"));
@@ -748,7 +748,7 @@ fn quark_root_directory_exposes_the_synthetic_recycle_bin() {
     let root = client.directory("0").unwrap();
 
     assert!(root.items.iter().any(|file| {
-        file.id == "__all_downloader_quark_recycle_bin__"
+        file.id == "__versa_down_quark_recycle_bin__"
             && file.name == "回收站"
             && file.kind == "folder"
     }));

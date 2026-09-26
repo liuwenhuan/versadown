@@ -103,7 +103,7 @@ impl WorkerAxdlBridge {
 
     fn submit(&mut self, submission: WorkerSubmission) -> Result<u32, ()> {
         #[cfg(test)]
-        if std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_LARGE").is_some() {
+        if std::env::var_os("VERSADOWN_AXDL_REAL_VIP_TEST_LARGE").is_some() {
             if let Some(gcid) = submission.gcid.as_ref() {
                 let _ = LIVE_EXPECTED_GCID.set(gcid.to_ascii_lowercase());
             }
@@ -200,7 +200,7 @@ fn run_stream_with_axdl(
                         .as_ref()
                         .and_then(|bridge| bridge.axdl.query_task_info(task_id));
                     #[cfg(test)]
-                    if std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_LARGE").is_some() {
+                    if std::env::var_os("VERSADOWN_AXDL_REAL_VIP_TEST_LARGE").is_some() {
                         static PRINTED_INDEX_STATE: std::sync::atomic::AtomicBool =
                             std::sync::atomic::AtomicBool::new(false);
                         static PRINTED_CHANNEL_MIB: std::sync::atomic::AtomicU64 =
@@ -594,13 +594,13 @@ mod tests {
     #[ignore = "requires the supported local DEB or Linyaps Xunlei runtime"]
     fn supported_runtime_worker_protocol_writes_direct_link_bytes() {
         const NONCE: &str = "axdl-worker-direct-test";
-        if std::env::var_os("ALLDOWNLOADER_AXDL_WORKER_TEST_CHILD").is_some() {
+        if std::env::var_os("VERSADOWN_AXDL_WORKER_TEST_CHILD").is_some() {
             let output = PathBuf::from(
-                std::env::var_os("ALLDOWNLOADER_AXDL_WORKER_TEST_DATA")
+                std::env::var_os("VERSADOWN_AXDL_WORKER_TEST_DATA")
                     .expect("isolated AXDL output path"),
             );
             let socket = PathBuf::from(
-                std::env::var_os("ALLDOWNLOADER_AXDL_WORKER_TEST_SOCKET")
+                std::env::var_os("VERSADOWN_AXDL_WORKER_TEST_SOCKET")
                     .expect("worker socket path"),
             );
             let state_directory = output.join("state");
@@ -664,9 +664,9 @@ mod tests {
                 "xunlei_native::linux::worker::tests::supported_runtime_worker_protocol_writes_direct_link_bytes",
                 "--ignored",
             ])
-            .env("ALLDOWNLOADER_AXDL_WORKER_TEST_CHILD", "1")
-            .env("ALLDOWNLOADER_AXDL_WORKER_TEST_DATA", output.path())
-            .env("ALLDOWNLOADER_AXDL_WORKER_TEST_SOCKET", &socket)
+            .env("VERSADOWN_AXDL_WORKER_TEST_CHILD", "1")
+            .env("VERSADOWN_AXDL_WORKER_TEST_DATA", output.path())
+            .env("VERSADOWN_AXDL_WORKER_TEST_SOCKET", &socket)
             .spawn()
             .expect("spawn isolated AXDL worker");
         let (mut stream, _) = worker_listener.accept().expect("worker connection");
@@ -746,7 +746,7 @@ mod tests {
     #[ignore = "reads the current user's Xunlei session from the system credential store"]
     fn saved_xunlei_session_has_native_bridge_identity() {
         let root = PathBuf::from(
-            std::env::var_os("ALLDOWNLOADER_LIVE_XUNLEI_SESSION_ROOT")
+            std::env::var_os("VERSADOWN_LIVE_XUNLEI_SESSION_ROOT")
                 .expect("explicit cloud-session directory"),
         );
         let store = SystemCredentialStore::new(root).expect("system credential store");
@@ -809,7 +809,7 @@ mod tests {
             2 * 1024 * 1024
         };
         let root = PathBuf::from(
-            std::env::var_os("ALLDOWNLOADER_LIVE_XUNLEI_SESSION_ROOT")
+            std::env::var_os("VERSADOWN_LIVE_XUNLEI_SESSION_ROOT")
                 .expect("explicit cloud-session directory"),
         );
         let store = SystemCredentialStore::new(root).expect("system credential store");
@@ -833,7 +833,7 @@ mod tests {
         let http = DiagnosticHttp(ReqwestTransport::new().expect("Xunlei HTTP client"));
         let client = XunleiClient::new(session, &http);
         if large {
-            let candidate_size = std::env::var("ALLDOWNLOADER_AXDL_REAL_VIP_CLOUD_SIZE")
+            let candidate_size = std::env::var("VERSADOWN_AXDL_REAL_VIP_CLOUD_SIZE")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok());
             if let Some(candidate_size) = candidate_size {
@@ -855,7 +855,7 @@ mod tests {
             }
         }
         let task_db = PathBuf::from(
-            std::env::var_os("ALLDOWNLOADER_LIVE_XUNLEI_TASK_DB")
+            std::env::var_os("VERSADOWN_LIVE_XUNLEI_TASK_DB")
                 .expect("explicit task database path"),
         );
         let database = rusqlite::Connection::open_with_flags(
@@ -930,13 +930,13 @@ mod tests {
     #[ignore = "downloads a bounded existing Xunlei cloud file through the native Linux worker"]
     fn saved_xunlei_session_downloads_with_native_vip_certificate() {
         const NONCE: &str = "axdl-real-vip-test";
-        if std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_CHILD").is_some() {
+        if std::env::var_os("VERSADOWN_AXDL_REAL_VIP_TEST_CHILD").is_some() {
             let output = PathBuf::from(
-                std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_DATA")
+                std::env::var_os("VERSADOWN_AXDL_REAL_VIP_TEST_DATA")
                     .expect("isolated AXDL output path"),
             );
             let socket = PathBuf::from(
-                std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_SOCKET")
+                std::env::var_os("VERSADOWN_AXDL_REAL_VIP_TEST_SOCKET")
                     .expect("worker socket path"),
             );
             let state_directory = output.join("state");
@@ -959,19 +959,19 @@ mod tests {
             unsafe { super::_exit(0) };
         }
 
-        let large = std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_LARGE").is_some();
-        let full = std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_FULL").is_some();
+        let large = std::env::var_os("VERSADOWN_AXDL_REAL_VIP_TEST_LARGE").is_some();
+        let full = std::env::var_os("VERSADOWN_AXDL_REAL_VIP_FULL").is_some();
         assert!(
             !full || large,
             "full transfer requires a large cloud fixture"
         );
         let without_certificate =
-            std::env::var_os("ALLDOWNLOADER_AXDL_REAL_VIP_WITHOUT_CERT").is_some();
-        let large_probe_bytes = std::env::var("ALLDOWNLOADER_AXDL_REAL_VIP_PROBE_BYTES")
+            std::env::var_os("VERSADOWN_AXDL_REAL_VIP_WITHOUT_CERT").is_some();
+        let large_probe_bytes = std::env::var("VERSADOWN_AXDL_REAL_VIP_PROBE_BYTES")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(8 * 1024 * 1024);
-        let large_probe_seconds = std::env::var("ALLDOWNLOADER_AXDL_REAL_VIP_PROBE_SECONDS")
+        let large_probe_seconds = std::env::var("VERSADOWN_AXDL_REAL_VIP_PROBE_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(90);
@@ -1040,9 +1040,9 @@ mod tests {
                 "--ignored",
                 "--nocapture",
             ])
-            .env("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_CHILD", "1")
-            .env("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_DATA", output.path())
-            .env("ALLDOWNLOADER_AXDL_REAL_VIP_TEST_SOCKET", &socket)
+            .env("VERSADOWN_AXDL_REAL_VIP_TEST_CHILD", "1")
+            .env("VERSADOWN_AXDL_REAL_VIP_TEST_DATA", output.path())
+            .env("VERSADOWN_AXDL_REAL_VIP_TEST_SOCKET", &socket)
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn isolated AXDL worker");

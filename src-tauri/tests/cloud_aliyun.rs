@@ -1,6 +1,6 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     aliyun::{AliyunClient, AliyunSession},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, CredentialStore,
     MemoryCredentialStore, QuarkError, UploadHttpRequest, UploadHttpResponse,
@@ -9,7 +9,7 @@ use std::{collections::VecDeque, io::Write, sync::Mutex};
 
 #[test]
 fn aliyun_refresh_preserves_provider_ttl_for_durable_maintenance() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::session_expiry, CloudProvider, ProviderRegistry,
     };
     let store = MemoryCredentialStore::default();
@@ -262,7 +262,7 @@ fn aliyun_root_exposes_a_reserved_recycle_bin_folder() {
     let root = AliyunClient::new(&store, &http).directory("root").unwrap();
 
     assert!(root.items.iter().any(|item| {
-        item.id == "__all_downloader_aliyun_recycle_bin__"
+        item.id == "__versa_down_aliyun_recycle_bin__"
             && item.parent_id == "root"
             && item.name == "回收站"
             && item.kind == "folder"
@@ -466,15 +466,15 @@ fn aliyun_mkdir_accepts_current_file_name_response_field() {
     let http = RecordingHttp::sequence([
         r#"{"user_id":"u1","nick_name":"alice"}"#,
         r#"{"items":[]}"#,
-        r#"{"file_id":"folder-1","file_name":"AllDownloader-IT-folder","parent_file_id":"root","type":"folder"}"#,
+        r#"{"file_id":"folder-1","file_name":"VersaDown-IT-folder","parent_file_id":"root","type":"folder"}"#,
     ]);
 
     let folder = AliyunClient::new(&store, &http)
-        .mkdir("root", "AllDownloader-IT-folder")
+        .mkdir("root", "VersaDown-IT-folder")
         .expect("the official file_name response must create a usable folder");
 
     assert_eq!(folder.id, "folder-1");
-    assert_eq!(folder.name, "AllDownloader-IT-folder");
+    assert_eq!(folder.name, "VersaDown-IT-folder");
     assert_eq!(folder.kind, "folder");
 }
 

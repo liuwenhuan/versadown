@@ -1,15 +1,15 @@
 param([Parameter(Mandatory=$true)][string]$SessionDirectory,[switch]$Measure)
 $ErrorActionPreference='Stop'
-if (-not ([IO.Path]::GetFullPath($SessionDirectory).StartsWith([IO.Path]::GetFullPath($env:TEMP),[StringComparison]::OrdinalIgnoreCase)) -or (Split-Path $SessionDirectory -Leaf) -notlike 'alldownloader-xunlei-auth-live-*') { throw 'isolated_profile_required' }
+if (-not ([IO.Path]::GetFullPath($SessionDirectory).StartsWith([IO.Path]::GetFullPath($env:TEMP),[StringComparison]::OrdinalIgnoreCase)) -or (Split-Path $SessionDirectory -Leaf) -notlike 'versadown-xunlei-auth-live-*') { throw 'isolated_profile_required' }
 Add-Type -AssemblyName System.Security
 $bytes=[IO.File]::ReadAllBytes((Join-Path $SessionDirectory 'cloud-sessions/xunlei.bin'))
 $plain=[Security.Cryptography.ProtectedData]::Unprotect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
 try {
   $session=[Text.Encoding]::UTF8.GetString($plain)|ConvertFrom-Json
-  $fileId=node -e "const {DatabaseSync}=require('node:sqlite');const p=require('node:path');const d=new DatabaseSync(p.join(process.env.APPDATA,'com.alldownloader.desktop','tasks.sqlite'),{readOnly:true});console.log(d.prepare('select source from tasks where name=? order by updated_at desc limit 1').get('midysj.zip').source.split('/').pop());"
+  $fileId=node -e "const {DatabaseSync}=require('node:sqlite');const p=require('node:path');const d=new DatabaseSync(p.join(process.env.APPDATA,'com.versadown.desktop','tasks.sqlite'),{readOnly:true});console.log(d.prepare('select source from tasks where name=? order by updated_at desc limit 1').get('midysj.zip').source.split('/').pop());"
   $headers=@{Authorization='Bearer '+$session.access_token;'X-Device-Id'=$session.profile.device_id;'X-Client-Id'=$session.profile.client_id;'X-Client-Version'=$session.profile.client_version;Origin='https://pan.xunlei.com';Referer='https://pan.xunlei.com/';'X-Captcha-Token'=$session.web_security.captcha_token}
-  $transportProbe=$env:ALLDOWNLOADER_XUNLEI_TRANSPORT_PROBE -eq '1'
-  $protocolProbe=$env:ALLDOWNLOADER_XUNLEI_PROTOCOL_PROBE -eq '1'
+  $transportProbe=$env:VERSADOWN_XUNLEI_TRANSPORT_PROBE -eq '1'
+  $protocolProbe=$env:VERSADOWN_XUNLEI_PROTOCOL_PROBE -eq '1'
   $usages=if($transportProbe -or $protocolProbe){@('FETCH')}else{@('','DISPLAY','FETCH')}
   foreach($usage in $usages) {
     try {

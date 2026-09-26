@@ -1,4 +1,4 @@
-use alldownloader_lib::{NewTask, TaskStatus, TaskStore};
+use versadown_lib::{NewTask, TaskStatus, TaskStore};
 
 #[test]
 fn direct_task_can_move_from_parsing_to_downloading() {
@@ -41,7 +41,7 @@ fn completing_a_task_records_a_durable_completion_time() {
         .create(NewTask::direct("https://host/completed.iso"))
         .expect("task");
     let completed = store
-        .apply_transfer_snapshot(alldownloader_lib::DownloadTask {
+        .apply_transfer_snapshot(versadown_lib::DownloadTask {
             status: TaskStatus::Completed,
             progress: 100,
             ..task

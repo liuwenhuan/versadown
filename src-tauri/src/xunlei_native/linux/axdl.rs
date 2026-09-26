@@ -368,7 +368,7 @@ impl AxdlRuntime {
             result: Mutex::new(None),
             ready: Condvar::new(),
             #[cfg(test)]
-            exit_process_after_callback: std::env::var_os("ALLDOWNLOADER_AXDL_EXIT_IN_CALLBACK")
+            exit_process_after_callback: std::env::var_os("VERSADOWN_AXDL_EXIT_IN_CALLBACK")
                 .is_some(),
         }));
         unsafe {
@@ -609,10 +609,10 @@ mod tests {
     #[test]
     #[ignore = "initializes the supported local runtime in an isolated temporary directory"]
     fn supported_installed_runtime_initializes_without_a_node_process() {
-        if std::env::var_os("ALLDOWNLOADER_AXDL_INIT_TEST_CHILD").is_some() {
+        if std::env::var_os("VERSADOWN_AXDL_INIT_TEST_CHILD").is_some() {
             let runtime = discover_best_runtime().expect("installed runtime");
             let output = PathBuf::from(
-                std::env::var_os("ALLDOWNLOADER_AXDL_INIT_TEST_DATA")
+                std::env::var_os("VERSADOWN_AXDL_INIT_TEST_DATA")
                     .expect("isolated AXDL output path"),
             );
             let mut axdl = AxdlRuntime::load(&runtime).expect("supported AXDL runtime");
@@ -634,8 +634,8 @@ mod tests {
                 "xunlei_native::linux::axdl::tests::supported_installed_runtime_initializes_without_a_node_process",
                 "--ignored",
             ])
-            .env("ALLDOWNLOADER_AXDL_INIT_TEST_CHILD", "1")
-            .env("ALLDOWNLOADER_AXDL_INIT_TEST_DATA", output.path())
+            .env("VERSADOWN_AXDL_INIT_TEST_CHILD", "1")
+            .env("VERSADOWN_AXDL_INIT_TEST_DATA", output.path())
             .status()
             .expect("spawn isolated AXDL initializer");
         assert!(
@@ -649,9 +649,9 @@ mod tests {
     #[test]
     #[ignore = "creates a real local HTTP task through the supported AXDL runtime"]
     fn supported_installed_runtime_writes_direct_link_bytes() {
-        if std::env::var_os("ALLDOWNLOADER_AXDL_DIRECT_TASK_TEST_CHILD").is_some() {
+        if std::env::var_os("VERSADOWN_AXDL_DIRECT_TASK_TEST_CHILD").is_some() {
             let output = PathBuf::from(
-                std::env::var_os("ALLDOWNLOADER_AXDL_DIRECT_TASK_TEST_DATA")
+                std::env::var_os("VERSADOWN_AXDL_DIRECT_TASK_TEST_DATA")
                     .expect("isolated AXDL output path"),
             );
             let state = output.join("state");
@@ -734,8 +734,8 @@ mod tests {
                 "--ignored",
                 "--nocapture",
             ])
-            .env("ALLDOWNLOADER_AXDL_DIRECT_TASK_TEST_CHILD", "1")
-            .env("ALLDOWNLOADER_AXDL_DIRECT_TASK_TEST_DATA", output.path())
+            .env("VERSADOWN_AXDL_DIRECT_TASK_TEST_CHILD", "1")
+            .env("VERSADOWN_AXDL_DIRECT_TASK_TEST_DATA", output.path())
             .status()
             .expect("spawn isolated AXDL direct-download helper");
         assert!(

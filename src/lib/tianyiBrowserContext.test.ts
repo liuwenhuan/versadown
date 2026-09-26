@@ -13,14 +13,14 @@ it('captures the official Browser-Id without changing its request or reading oth
     xhr.open('GET', '/api/open/user/getUserInfoForPortal.action');
     xhr.setRequestHeader('Browser-Id', '1234567890abcdef1234567890abcdef');
     xhr.setRequestHeader('Authorization', 'must-not-be-captured');
-    const context = dom.window.__alldownloaderTianyiContext;
+    const context = dom.window.__versadownTianyiContext;
     expect(context.browser_id).toBe('1234567890abcdef1234567890abcdef');
     expect(context.user_agent).toBe(dom.window.navigator.userAgent);
     expect(JSON.stringify(context)).not.toContain('must-not-be-captured');
     expect(sent).toEqual([['Browser-Id', '1234567890abcdef1234567890abcdef'], ['Authorization', 'must-not-be-captured']]);
     xhr.open('GET', 'https://example.org/api');
     xhr.setRequestHeader('Browser-Id', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-    expect(dom.window.__alldownloaderTianyiContext.browser_id).toBe('1234567890abcdef1234567890abcdef');
+    expect(dom.window.__versadownTianyiContext.browser_id).toBe('1234567890abcdef1234567890abcdef');
   } finally { dom.window.close(); }
 });
 
@@ -38,15 +38,15 @@ it('is idempotent and ignores invalid IDs and non-API destinations', () => {
     const xhr = new dom.window.XMLHttpRequest();
     xhr.open('GET', '/api/open/user/getUserInfoForPortal.action');
     xhr.setRequestHeader('browser-id', 'not-an-official-id');
-    expect(dom.window.__alldownloaderTianyiContext).toBeUndefined();
+    expect(dom.window.__versadownTianyiContext).toBeUndefined();
     for (const url of ['/web/main', 'http://cloud.189.cn/api/test', 'https://cloud.189.cn:444/api/test']) {
       xhr.open('GET', url);
       xhr.setRequestHeader('browser-id', '1234567890abcdef1234567890abcdef');
-      expect(dom.window.__alldownloaderTianyiContext).toBeUndefined();
+      expect(dom.window.__versadownTianyiContext).toBeUndefined();
     }
     xhr.open('GET', '/api/open/user/getUserInfoForPortal.action');
     xhr.setRequestHeader('browser-id', '1234567890abcdef1234567890abcdef');
-    expect(dom.window.__alldownloaderTianyiContext.browser_id).toBe('1234567890abcdef1234567890abcdef');
+    expect(dom.window.__versadownTianyiContext.browser_id).toBe('1234567890abcdef1234567890abcdef');
     expect(forwarded).toBe(5);
   } finally { dom.window.close(); }
 });
@@ -57,6 +57,6 @@ it('does not install a capture hook on another website', () => {
     const original = dom.window.XMLHttpRequest.prototype.setRequestHeader;
     dom.window.eval(readFileSync('src-tauri/src/cloud/tianyi-browser-context.js', 'utf8'));
     expect(dom.window.XMLHttpRequest.prototype.setRequestHeader).toBe(original);
-    expect(dom.window.__alldownloaderTianyiContext).toBeUndefined();
+    expect(dom.window.__versadownTianyiContext).toBeUndefined();
   } finally { dom.window.close(); }
 });

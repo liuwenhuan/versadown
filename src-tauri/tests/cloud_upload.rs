@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::*;
+use versadown_lib::cloud::*;
 #[path = "support/upload.rs"]
 mod upload_support;
 use std::{collections::BTreeMap, sync::Mutex};
@@ -448,7 +448,7 @@ fn pikpak_upload_rejects_the_virtual_recycle_bin_target_before_network() {
     };
 
     let error = PikPakClient::new(&server, &store)
-        .upload_file("__all_downloader_pikpak_recycle_bin__", &path)
+        .upload_file("__versa_down_pikpak_recycle_bin__", &path)
         .unwrap_err();
 
     assert!(matches!(error, QuarkError::InvalidInput(_)));
@@ -468,7 +468,7 @@ fn logout_during_upload_init_prevents_late_refresh_from_restoring_credentials() 
 
 #[test]
 fn rejected_upload_initialization_renews_session_but_never_replays_the_mutation() {
-    use alldownloader_lib::cloud::commands::CloudState;
+    use versadown_lib::cloud::commands::CloudState;
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct RejectedInit(AtomicUsize);
     impl CloudHttpTransport for RejectedInit {
@@ -507,7 +507,7 @@ fn rejected_upload_initialization_renews_session_but_never_replays_the_mutation(
     assert_eq!(http.0.load(Ordering::SeqCst), 1);
 }
 fn upload_does_not_lock_account(block_init: bool) {
-    use alldownloader_lib::cloud::commands::CloudState;
+    use versadown_lib::cloud::commands::CloudState;
     use std::{
         sync::{mpsc, Arc},
         time::Duration,

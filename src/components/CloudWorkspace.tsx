@@ -13,7 +13,7 @@ export interface CloudWorkspaceProps {
 
 export type CloudWorkspacePage = 'management' | CloudProvider;
 
-const cloudProviderCardOrderStorageKey = 'alldownloader.cloud-provider-card-order';
+const cloudProviderCardOrderStorageKey = 'versadown.cloud-provider-card-order';
 type PendingProviderCardDrag = {
   provider: CloudProvider;
   pointerId: number;

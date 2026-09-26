@@ -21,14 +21,14 @@ async function invoke(page,command,args={}){
   return evaluate(page,`(async()=>{try{return {ok:true,result:await window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)},${JSON.stringify(args)})};}catch(e){return {ok:false,code:e?.code,message:e?.message};}})()`,210000);
 }
 async function main(){
-  const password=process.env.ALLDOWNLOADER_XUNLEI_PASSWORD_LIVE==='1';
-  const primary=path.join(process.env.APPDATA,'com.alldownloader.desktop');
-  const data=fs.mkdtempSync(path.join(os.tmpdir(),'alldownloader-xunlei-auth-live-'));
-  const retain=process.env.ALLDOWNLOADER_XUNLEI_KEEP_TEST_DATA==='1';
+  const password=process.env.VERSADOWN_XUNLEI_PASSWORD_LIVE==='1';
+  const primary=path.join(process.env.APPDATA,'com.versadown.desktop');
+  const data=fs.mkdtempSync(path.join(os.tmpdir(),'versadown-xunlei-auth-live-'));
+  const retain=process.env.VERSADOWN_XUNLEI_KEEP_TEST_DATA==='1';
   let child,manager,spawnError,diagnostic='';
   try{
-    const reuse=process.env.ALLDOWNLOADER_XUNLEI_REUSE_TEST_DATA;
-    if(reuse&&(!path.resolve(reuse).startsWith(path.resolve(os.tmpdir())+path.sep)||!path.basename(reuse).startsWith('alldownloader-xunlei-auth-live-')))throw Error('invalid_test_profile');
+    const reuse=process.env.VERSADOWN_XUNLEI_REUSE_TEST_DATA;
+    if(reuse&&(!path.resolve(reuse).startsWith(path.resolve(os.tmpdir())+path.sep)||!path.basename(reuse).startsWith('versadown-xunlei-auth-live-')))throw Error('invalid_test_profile');
     const filter=file=>!['LOCK','SingletonLock','SingletonCookie','SingletonSocket'].includes(path.basename(file));
     if(!password){
       const source=reuse?path.join(reuse,'webview2'):path.join(primary,'web-auth','xunlei');
@@ -41,19 +41,19 @@ async function main(){
       }
     }
     const port=await availablePort();
-    if(process.env.ALLDOWNLOADER_XUNLEI_DOWNLOAD_LIVE==='1'){
+    if(process.env.VERSADOWN_XUNLEI_DOWNLOAD_LIVE==='1'){
       const enginePort=await availablePort();
       const original=JSON.parse(fs.readFileSync(path.join(primary,'settings.json'),'utf8'));
       fs.writeFileSync(path.join(data,'settings.json'),JSON.stringify({downloadDirectory:path.join(data,'downloads'),proxy:original.proxy,aria2:{...original.aria2,rpcPort:enginePort,rpcToken:require('node:crypto').randomBytes(32).toString('hex')}}));
     }
-    const quickBinary=path.resolve(__dirname,'..','artifacts','quick','alldownloader.exe');
-    const releaseBinary=path.resolve(__dirname,'..','artifacts','alldownloader.exe');
-    const binary=process.env.ALLDOWNLOADER_TEST_BINARY
-      ? path.resolve(process.env.ALLDOWNLOADER_TEST_BINARY)
+    const quickBinary=path.resolve(__dirname,'..','artifacts','quick','versadown.exe');
+    const releaseBinary=path.resolve(__dirname,'..','artifacts','versadown.exe');
+    const binary=process.env.VERSADOWN_TEST_BINARY
+      ? path.resolve(process.env.VERSADOWN_TEST_BINARY)
       : (fs.existsSync(quickBinary)?quickBinary:releaseBinary);
     if(!fs.existsSync(binary))throw Error(`test_binary_missing:${binary}`);
     child=spawn(binary,[],{cwd:path.dirname(binary),windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,
-      ALLDOWNLOADER_BACKGROUND_UI_TEST:'1',ALLDOWNLOADER_TEST_DATA_DIR:data,ALLDOWNLOADER_TEST_DOWNLOAD_DIR:path.join(data,'downloads'),
+      VERSADOWN_BACKGROUND_UI_TEST:'1',VERSADOWN_TEST_DATA_DIR:data,VERSADOWN_TEST_DOWNLOAD_DIR:path.join(data,'downloads'),
       WEBVIEW2_USER_DATA_FOLDER:path.join(data,'webview2'),WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${port} --disable-background-timer-throttling`}});
     child.once('error',error=>{spawnError=error;});
     for(const stream of [child.stdout,child.stderr])stream?.on('data',chunk=>{diagnostic=(diagnostic+String(chunk)).slice(-4096);});
@@ -92,7 +92,7 @@ async function main(){
     }
     if(!ready){
       const official=(await targets(port)).find(p=>/^https:\/\/pan.xunlei.com/.test(p.url));
-      const status=official?await evaluate(official,"window.__alldownloaderXunleiAuth?.status() || {phase:'missing_observer'}"):{};
+      const status=official?await evaluate(official,"window.__versadownXunleiAuth?.status() || {phase:'missing_observer'}"):{};
       throw Error('authorization_timeout:'+JSON.stringify(status));
     }
     const root=await invoke(manager,'cloud_list_directory',{provider:'xunlei',parentId:'0'});
@@ -113,15 +113,15 @@ async function main(){
       if(!capacityVisible)await delay(250);
     }
     if(!capacityVisible)throw Error('capacity_not_visible_on_card');
-    if(process.env.ALLDOWNLOADER_XUNLEI_ACCELERATION_PROBE==='1'){
+    if(process.env.VERSADOWN_XUNLEI_ACCELERATION_PROBE==='1'){
       const result=require('node:child_process').spawnSync('powershell.exe',['-ExecutionPolicy','Bypass','-File',path.join(__dirname,'probe-xunlei-acceleration.ps1'),'-SessionDirectory',data],{encoding:'utf8',windowsHide:true,timeout:45000});
       process.stdout.write(result.stdout||'');if(result.status!==0)throw Error('acceleration_probe_failed');
     }
-    if(process.env.ALLDOWNLOADER_XUNLEI_USAGE_PROBE==='1'){
+    if(process.env.VERSADOWN_XUNLEI_USAGE_PROBE==='1'){
       const result=require('node:child_process').spawnSync('powershell.exe',['-ExecutionPolicy','Bypass','-File',path.join(__dirname,'probe-xunlei-file-usage.ps1'),'-SessionDirectory',data,'-Measure'],{encoding:'utf8',windowsHide:true,timeout:120000});
       process.stdout.write(result.stdout||'');if(result.status!==0)throw Error('usage_probe_failed');
     }
-    if(process.env.ALLDOWNLOADER_XUNLEI_DOWNLOAD_LIVE==='1'){
+    if(process.env.VERSADOWN_XUNLEI_DOWNLOAD_LIVE==='1'){
       await require('./verify-xunlei-download-live.cjs').run(command=>invoke(manager,command.name,command.args),root.result,data,account.result);
     }
     const summary={method:password?'password':'web',rootReadable:true,accountRestorable:true,capacityReadable:true,capacityVisible,authorizationWindowClosed:closed,workspaceMenu:menu};

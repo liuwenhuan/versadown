@@ -1,10 +1,10 @@
 //! Opt-in, destructive-within-fixture live CRUD coverage for Quark and PikPak.
 //!
-//! Every remote object is created below one unique `AllDownloader-E2E-*`
+//! Every remote object is created below one unique `VersaDown-E2E-*`
 //! directory. Cleanup permanently deletes only ids proven to belong to that
 //! directory (or its explicitly created descendants).
 
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     auth_supervisor::{recover_in_order, RecoveryPhase},
     commands::CloudState,
     driver::ProviderDriver,
@@ -48,9 +48,9 @@ fn failure(message: impl Into<String>) -> Box<dyn Error> {
 }
 
 fn require_live_authorization() -> LiveResult<()> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Err(failure(
-            "live cloud regression requires ALLDOWNLOADER_LIVE_CLOUD=1",
+            "live cloud regression requires VERSADOWN_LIVE_CLOUD=1",
         ));
     }
     Ok(())
@@ -60,7 +60,7 @@ fn session_root() -> LiveResult<PathBuf> {
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
     Ok(PathBuf::from(app_data)
-        .join("com.alldownloader.desktop")
+        .join("com.versadown.desktop")
         .join("cloud-sessions"))
 }
 
@@ -69,7 +69,7 @@ fn unique_name(provider: CloudProvider, suffix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("AllDownloader-E2E-{}-{millis}-{suffix}", provider.key())
+    format!("VersaDown-E2E-{}-{millis}-{suffix}", provider.key())
 }
 
 fn error_kind(error: &CloudError) -> &'static str {
@@ -513,7 +513,7 @@ fn cleanup_provider_residuals(provider: CloudProvider) -> LiveResult<()> {
     let state = CloudState::new(session_root()?)?;
     let http = LiveHttp::new()?;
     let descriptor = ProviderRegistry::global().get(provider);
-    let prefix = format!("AllDownloader-E2E-{}-", provider.key());
+    let prefix = format!("VersaDown-E2E-{}-", provider.key());
     let root = read(&state, &http, provider, |driver| {
         driver.list_directory(descriptor.root_directory_id)
     })?;
@@ -552,7 +552,7 @@ fn cleanup_provider_residuals(provider: CloudProvider) -> LiveResult<()> {
         .any(|item| item.name.starts_with(&prefix))
     {
         return Err(failure(
-            "provider still contains an AllDownloader E2E residual",
+            "provider still contains an VersaDown E2E residual",
         ));
     }
     Ok(())
@@ -563,7 +563,7 @@ fn audit_provider_residuals(provider: CloudProvider) -> LiveResult<(usize, usize
     let state = CloudState::new(session_root()?)?;
     let http = LiveHttp::new()?;
     let descriptor = ProviderRegistry::global().get(provider);
-    let prefix = format!("AllDownloader-E2E-{}-", provider.key());
+    let prefix = format!("VersaDown-E2E-{}-", provider.key());
     let active = read(&state, &http, provider, |driver| {
         driver.list_directory(descriptor.root_directory_id)
     })?;
@@ -586,9 +586,9 @@ fn audit_provider_residuals(provider: CloudProvider) -> LiveResult<(usize, usize
 
 fn run_requested_quark_upload() -> LiveResult<()> {
     require_live_authorization()?;
-    let path = std::env::var_os("ALLDOWNLOADER_LIVE_QUARK_UPLOAD_PATH")
+    let path = std::env::var_os("VERSADOWN_LIVE_QUARK_UPLOAD_PATH")
         .map(PathBuf::from)
-        .ok_or_else(|| failure("ALLDOWNLOADER_LIVE_QUARK_UPLOAD_PATH is required"))?;
+        .ok_or_else(|| failure("VERSADOWN_LIVE_QUARK_UPLOAD_PATH is required"))?;
     let metadata = fs::metadata(&path)?;
     let name = path
         .file_name()
@@ -644,37 +644,37 @@ fn run_requested_quark_upload() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's Quark session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's Quark session"]
 fn live_quark_complete_crud() -> LiveResult<()> {
     run_provider(CloudProvider::Quark)
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, ALLDOWNLOADER_LIVE_QUARK_UPLOAD_PATH and the current user's Quark session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1, VERSADOWN_LIVE_QUARK_UPLOAD_PATH and the current user's Quark session"]
 fn live_quark_requested_file_upload() -> LiveResult<()> {
     run_requested_quark_upload()
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's PikPak session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's PikPak session"]
 fn live_pikpak_complete_crud() -> LiveResult<()> {
     run_provider(CloudProvider::Pikpak)
 }
 
 #[test]
-#[ignore = "permanently removes only AllDownloader-E2E-quark-* test roots"]
+#[ignore = "permanently removes only VersaDown-E2E-quark-* test roots"]
 fn live_cleanup_quark_e2e_residuals() -> LiveResult<()> {
     cleanup_provider_residuals(CloudProvider::Quark)
 }
 
 #[test]
-#[ignore = "permanently removes only AllDownloader-E2E-pikpak-* test roots"]
+#[ignore = "permanently removes only VersaDown-E2E-pikpak-* test roots"]
 fn live_cleanup_pikpak_e2e_residuals() -> LiveResult<()> {
     cleanup_provider_residuals(CloudProvider::Pikpak)
 }
 
 #[test]
-#[ignore = "read-only count of AllDownloader-E2E-pikpak-* test roots"]
+#[ignore = "read-only count of VersaDown-E2E-pikpak-* test roots"]
 fn live_audit_pikpak_e2e_residuals() -> LiveResult<()> {
     let (active, recycle) = audit_provider_residuals(CloudProvider::Pikpak)?;
     eprintln!("PikPak E2E residuals: active={active}, recycle={recycle}");

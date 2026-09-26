@@ -50,7 +50,7 @@
 
 Proxy 的更新源 ABI 经本机二进制核对为 `int(task_id, wchar_t* url, uint32_t utf16_length)`，长度不含 NUL。Proxy RVA `0xE683` 写长度、`0xE6B4` 乘 2 序列化；Server RVA `0x8CCB` 自补 NUL，`0x8D23` 调用直接 DLL。直接 DLL 的同名函数仅两参，不能混用。未用 `XL_ContinueTask`：该函数用于 HTML 检查后的继续，不是普通暂停续传。
 
-云盘测试允许通过 `ALLDOWNLOADER_XUNLEI_FILE_ID` 指定用户报告文件（仍校验名称为 `midysj.zip`），避免错误假设文件位于根目录。必须显式提供隔离的 `ALLDOWNLOADER_XUNLEI_SESSION_ROOT`；相同 `ALLDOWNLOADER_XUNLEI_DOWNLOAD_ROOT` 第一次运行验证暂停继续，第二次设置 `ALLDOWNLOADER_XUNLEI_RESTORE=1` 验证新进程完整恢复。最终测试只保存 URL 摘要用于确认地址变化，不保留原 URL 或“强制旧直链”分支。
+云盘测试允许通过 `VERSADOWN_XUNLEI_FILE_ID` 指定用户报告文件（仍校验名称为 `midysj.zip`），避免错误假设文件位于根目录。必须显式提供隔离的 `VERSADOWN_XUNLEI_SESSION_ROOT`；相同 `VERSADOWN_XUNLEI_DOWNLOAD_ROOT` 第一次运行验证暂停继续，第二次设置 `VERSADOWN_XUNLEI_RESTORE=1` 验证新进程完整恢复。最终测试只保存 URL 摘要用于确认地址变化，不保留原 URL 或“强制旧直链”分支。
 
 按开发期规则没有为旧版“临时 URL 身份”断点增加迁移或兼容分支，也没有删除用户旧下载。已验证的是修复后的新建任务及其暂停、跨进程恢复；不能据此保证旧版生成的断点能直接接续。未编译新版应用进行 UI 端到端验证。
 

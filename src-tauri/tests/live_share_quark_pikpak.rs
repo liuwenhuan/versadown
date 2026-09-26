@@ -7,7 +7,7 @@
 //! It never prints sessions, share URLs, access codes, identifiers, request headers, or
 //! direct download URLs.
 
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     commands::{
         apply_cloud_download_policy, parse_stable_cloud_source, resolve_download, restore_account,
     },
@@ -19,7 +19,7 @@ use alldownloader_lib::cloud::{
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, QuarkError,
     ReqwestTransport, SystemCredentialStore,
 };
-use alldownloader_lib::{
+use versadown_lib::{
     aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process},
     Aria2Settings, DownloadAction, DownloadService, NewTask, TaskStore, UriSubmissionOptions,
 };
@@ -232,14 +232,14 @@ fn app_session_store() -> Result<SystemCredentialStore, QuarkError> {
     let app_data = std::env::var_os("APPDATA").ok_or(QuarkError::Storage)?;
     SystemCredentialStore::new(
         PathBuf::from(app_data)
-            .join("com.alldownloader.desktop")
+            .join("com.versadown.desktop")
             .join("cloud-sessions"),
     )
 }
 
 fn supplied_access_code(provider: CloudProvider) -> Option<String> {
     let variable = match provider {
-        CloudProvider::Quark => "ALLDOWNLOADER_LIVE_QUARK_ACCESS_CODE",
+        CloudProvider::Quark => "VERSADOWN_LIVE_QUARK_ACCESS_CODE",
         _ => return None,
     };
     std::env::var(variable)
@@ -272,7 +272,7 @@ fn safe_error(error: &QuarkError) -> &'static str {
 }
 
 fn direct_range_probe(
-    resolved: &alldownloader_lib::cloud::commands::ResolvedCloudDownload,
+    resolved: &versadown_lib::cloud::commands::ResolvedCloudDownload,
 ) -> Result<u16, QuarkError> {
     let mut request = reqwest::blocking::Client::builder()
         .build()
@@ -290,7 +290,7 @@ fn direct_range_probe(
 
 struct IsolatedAria2 {
     process: Aria2Process,
-    client: alldownloader_lib::Aria2RpcClient,
+    client: versadown_lib::Aria2RpcClient,
     downloads: PathBuf,
 }
 
@@ -329,14 +329,14 @@ impl IsolatedAria2 {
 }
 
 async fn wait_for_download(
-    client: &alldownloader_lib::Aria2RpcClient,
+    client: &versadown_lib::Aria2RpcClient,
     service: &DownloadService,
     task_id: uuid::Uuid,
     over_limit: bool,
 ) -> Result<(String, u64, u64), Box<dyn std::error::Error>> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let sample_throughput =
-        std::env::var("ALLDOWNLOADER_LIVE_THROUGHPUT_SAMPLE").as_deref() == Ok("1");
+        std::env::var("VERSADOWN_LIVE_THROUGHPUT_SAMPLE").as_deref() == Ok("1");
     let mut throughput_sample = None;
     let mut max_connections = 0_u32;
     let mut max_speed = 0_u64;
@@ -406,7 +406,7 @@ async fn wait_for_download(
 }
 
 async fn wait_for_first_download_bytes(
-    client: &alldownloader_lib::Aria2RpcClient,
+    client: &versadown_lib::Aria2RpcClient,
     service: &DownloadService,
     task_id: uuid::Uuid,
 ) -> Result<(String, u64, u64), Box<dyn std::error::Error>> {
@@ -448,7 +448,7 @@ async fn wait_for_first_download_bytes(
 const MIN_PERSONAL_QUARK_THROUGHPUT_BYTES: i64 = 8 * 1024 * 1024;
 
 fn personal_quark_probe_connections() -> Result<u8, Box<dyn std::error::Error>> {
-    match std::env::var("ALLDOWNLOADER_LIVE_QUARK_CONNECTIONS") {
+    match std::env::var("VERSADOWN_LIVE_QUARK_CONNECTIONS") {
         Ok(value) => {
             let connections = value.parse::<u8>()?;
             if !(1..=4).contains(&connections) {
@@ -465,7 +465,7 @@ fn personal_quark_probe_connections() -> Result<u8, Box<dyn std::error::Error>> 
 
 fn largest_personal_quark_file_id() -> Result<String, Box<dyn std::error::Error>> {
     let app_data = PathBuf::from(std::env::var_os("APPDATA").ok_or("APPDATA missing")?)
-        .join("com.alldownloader.desktop");
+        .join("com.versadown.desktop");
     let database = app_data.join("tasks.sqlite");
     let database_uri = format!(
         "file:{}?immutable=1",
@@ -494,7 +494,7 @@ fn largest_personal_quark_file_id() -> Result<String, Box<dyn std::error::Error>
 #[ignore = "requires the current user's authorized Quark session and one recorded personal Quark task of at least 8 MiB"]
 fn live_personal_quark_download_samples_configured_connection_throughput(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("ALLDOWNLOADER_LIVE_QUARK_PERSONAL").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_QUARK_PERSONAL").as_deref() != Ok("1") {
         return Ok(());
     }
     let configured_connections = personal_quark_probe_connections()?;
@@ -585,9 +585,9 @@ fn live_personal_quark_download_samples_configured_connection_throughput(
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Quark and PikPak sessions"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's authorized Quark and PikPak sessions"]
 fn live_quark_and_pikpak_samples_report_redacted_inspection_outcomes() -> Result<(), QuarkError> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Ok(());
     }
     let sessions = app_session_store()?;
@@ -650,7 +650,7 @@ fn live_quark_and_pikpak_samples_report_redacted_inspection_outcomes() -> Result
     for (provider, expected, url) in samples {
         let access_code = supplied_access_code(provider);
         let candidate =
-            alldownloader_lib::extract_cloud_share_candidate(url, access_code.as_deref())
+            versadown_lib::extract_cloud_share_candidate(url, access_code.as_deref())
                 .map_err(|_| QuarkError::InvalidInput("sample URL invalid".into()))?
                 .ok_or(QuarkError::InvalidResponse)?;
         assert_eq!(candidate.provider, provider);
@@ -677,11 +677,11 @@ fn live_quark_and_pikpak_samples_report_redacted_inspection_outcomes() -> Result
     Ok(())
 }
 
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and submits valid single files plus one selected file from each directory into an isolated aria2 process"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and submits valid single files plus one selected file from each directory into an isolated aria2 process"]
 #[test]
 fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Ok(());
     }
     let sessions = app_session_store()?;
@@ -693,8 +693,8 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
     // and resolve before entering the async aria2 runtime.
     let mut prepared_downloads = Vec::new();
     let mut preparation_failures = Vec::new();
-    let provider_filter = std::env::var("ALLDOWNLOADER_LIVE_PROVIDER").ok();
-    let sample_filter = std::env::var("ALLDOWNLOADER_LIVE_SAMPLE").ok();
+    let provider_filter = std::env::var("VERSADOWN_LIVE_PROVIDER").ok();
+    let sample_filter = std::env::var("VERSADOWN_LIVE_SAMPLE").ok();
     for (provider, sample, url) in [
         (
             CloudProvider::Quark,
@@ -759,7 +759,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
             }
         }
         let candidate =
-            alldownloader_lib::extract_cloud_share_candidate(url, access_code.as_deref())?
+            versadown_lib::extract_cloud_share_candidate(url, access_code.as_deref())?
                 .ok_or("sample URL was not recognized")?;
         let adapter = provider_share_adapter(provider, &sessions, &transport)?;
         let inspect_before = transport.observation_count();
@@ -841,7 +841,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
         // any ranged request. The real app hands that URL straight to aria2,
         // so keep a range probe as a separate, explicitly requested
         // diagnostic instead of invalidating this submission test's URL.
-        if std::env::var("ALLDOWNLOADER_LIVE_DIRECT_PROBE").as_deref() == Ok("1") {
+        if std::env::var("VERSADOWN_LIVE_DIRECT_PROBE").as_deref() == Ok("1") {
             let probe = direct_range_probe(&resolved)
                 .map(|status| format!("http-{status}"))
                 .unwrap_or_else(|error| safe_error(&error).into());
@@ -873,7 +873,7 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
             })?;
             let over_limit = entry.size.is_some_and(|size| size > 20 * 1024 * 1024);
             let expected_size = entry.size;
-            let submitted = alldownloader_lib::cloud::share::submit_current_share_download(
+            let submitted = versadown_lib::cloud::share::submit_current_share_download(
                 &service,
                 &prepared,
                 resolved,
@@ -917,22 +917,22 @@ fn live_quark_and_pikpak_valid_shares_submit_and_download_or_pause(
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, an authorized Aliyun session, and two reusable current-account transfers from the supplied share"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1, an authorized Aliyun session, and two reusable current-account transfers from the supplied share"]
 fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn std::error::Error>>
 {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Ok(());
     }
-    let url = std::env::var("ALLDOWNLOADER_LIVE_ALIYUN_SHARE")
+    let url = std::env::var("VERSADOWN_LIVE_ALIYUN_SHARE")
         .ok()
         .filter(|url| !url.is_empty())
-        .ok_or("ALLDOWNLOADER_LIVE_ALIYUN_SHARE is required")?;
+        .ok_or("VERSADOWN_LIVE_ALIYUN_SHARE is required")?;
     let temporary = tempfile::tempdir()?;
     let sessions = app_session_store()?;
     let transport = RedactedTransport::new()?;
     restore_account(CloudProvider::Aliyun, &sessions, &transport)?;
     let plans = CloudSharePlanStore::new(app_session_store()?);
-    let candidate = alldownloader_lib::extract_cloud_share_candidate(&url, None)?
+    let candidate = versadown_lib::extract_cloud_share_candidate(&url, None)?
         .ok_or("provided URL was not recognized as an Aliyun share")?;
     if candidate.provider != CloudProvider::Aliyun {
         return Err("provided URL was not recognized as an Aliyun share".into());
@@ -1081,7 +1081,7 @@ fn live_aliyun_share_parses_once_and_two_files_download() -> Result<(), Box<dyn 
                 kind: "cloud".into(),
                 is_private: false,
             })?;
-            let submitted = alldownloader_lib::cloud::share::submit_current_share_download(
+            let submitted = versadown_lib::cloud::share::submit_current_share_download(
                 &service,
                 &prepared,
                 resolved,

@@ -3,7 +3,7 @@ const fs=require('node:fs'),path=require('node:path');
 const {DatabaseSync}=require('node:sqlite');
 const {spawnSync}=require('node:child_process');
 async function main(){
-  const root=path.join(process.env.APPDATA,'com.alldownloader.desktop');
+  const root=path.join(process.env.APPDATA,'com.versadown.desktop');
   const settings=JSON.parse(fs.readFileSync(path.join(root,'settings.json'),'utf8'));
   const db=new DatabaseSync(path.join(root,'tasks.sqlite'),{readOnly:true});
   const tasks=db.prepare('select id,source,status,completed_length,total_length,aria_gid,aria_error_code,failure_code,error,updated_at from tasks where name=? order by updated_at desc limit 3').all('midysj.zip');
@@ -27,7 +27,7 @@ async function main(){
       const uri=status.files?.[0]?.uris?.[0]?.uri;if(!uri)throw Error('uri_missing');
       const url=new URL(uri);
       console.log(JSON.stringify({linkPolicy:Object.fromEntries(['vip','threshold','rl','e','pr'].map(k=>[k,/^[0-9.,-]*$/.test(url.searchParams.get(k)||'')?url.searchParams.get(k):'encoded']))}));
-      const temp=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'alldownloader-xunlei-range-'));
+      const temp=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'versadown-xunlei-range-'));
       if(process.env.XUNLEI_VALIDATOR_PROBE==='1'){
         const state=new DatabaseSync(path.join(root,'aria2-next-state','stream','state.db'),{readOnly:true});
         const saved=state.prepare('select etag,last_modified from downloads where gid=?').get(aria_gid);state.close();

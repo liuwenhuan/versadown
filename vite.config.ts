@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
@@ -11,6 +11,13 @@ export default defineConfig({
     globals: true,
     pool: 'forks',
     maxWorkers: 1,
-    minWorkers: 1
+    minWorkers: 1,
+    exclude: [
+      ...configDefaults.exclude,
+      '**/.worktrees/**',
+      '**/.tools/**',
+      '**/.tmp-*/**',
+      '**/.pnpm-store/**'
+    ]
   }
 });

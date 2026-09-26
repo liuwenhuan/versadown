@@ -33,6 +33,6 @@ cargo test --manifest-path src-tauri/Cargo.toml --test aria2_sync --test aria2_t
 
 `scripts/build-windows.ps1` 成功，前端未变化而复用已构建资源，Rust release 构建成功（已有非阻塞警告）。
 
-测试程序：`artifacts/VersaDown-recovered-names-20260913-134822/alldownloader.exe`，同目录附带 `binaries/aria2-next-x86_64-pc-windows-msvc.exe`。复制后主程序与下载引擎哈希分别与发布源一致。
+测试程序：`artifacts/VersaDown-recovered-names-20260913-134822/versadown.exe`，同目录附带 `binaries/aria2-next-x86_64-pc-windows-msvc.exe`。复制后主程序与下载引擎哈希分别与发布源一致。
 
 主程序 SHA-256：`BEFCA345FE06CD6DED455262586929D7F49EC76C245B7777C1A809D74610A22F`。

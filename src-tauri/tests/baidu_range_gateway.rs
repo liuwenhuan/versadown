@@ -1,10 +1,10 @@
-use alldownloader_lib::aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process};
-use alldownloader_lib::cloud::baidu_range_gateway::BaiduRangeGateway;
-use alldownloader_lib::cloud::{
+use versadown_lib::aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process};
+use versadown_lib::cloud::baidu_range_gateway::BaiduRangeGateway;
+use versadown_lib::cloud::{
     baidu::{BaiduClient, BaiduDownload, BaiduSession},
     CredentialStore, ReqwestTransport, SystemCredentialStore,
 };
-use alldownloader_lib::{
+use versadown_lib::{
     DownloadService, DownloadTask, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
 use axum::{
@@ -377,7 +377,7 @@ async fn bundled_engine_completes_large_baidu_file_through_bounded_gateway() {
     let registration = gateway.register(task.id, upstream, vec![], None).unwrap();
 
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut aria2 = alldownloader_lib::Aria2Settings::default();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
     aria2.rpc_port = reserved.local_addr().unwrap().port();
     aria2.rpc_token = format!("baidu-range-gateway-{}", aria2.rpc_port);
     drop(reserved);
@@ -501,7 +501,7 @@ async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
         .register(task.id, upstream.clone(), vec![], None)
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut aria2 = alldownloader_lib::Aria2Settings::default();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
     aria2.rpc_port = reserved.local_addr().unwrap().port();
     aria2.rpc_token = format!("baidu-rotate-gateway-{}", aria2.rpc_port);
     drop(reserved);
@@ -670,7 +670,7 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
         .register(task.id, upstream.clone(), vec![], None)
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut aria2 = alldownloader_lib::Aria2Settings::default();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
     aria2.rpc_port = reserved.local_addr().unwrap().port();
     aria2.rpc_token = format!("baidu-checkpoint-gateway-{}", aria2.rpc_port);
     drop(reserved);
@@ -833,7 +833,7 @@ async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
         .register(task.id, upstream.clone(), vec![], None)
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut aria2 = alldownloader_lib::Aria2Settings::default();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
     aria2.rpc_port = reserved.local_addr().unwrap().port();
     aria2.rpc_token = format!("baidu-terminal-refresh-{}", aria2.rpc_port);
     drop(reserved);
@@ -945,10 +945,10 @@ async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "read-only Baidu network probe; requires ALLDOWNLOADER_LIVE_CLOUD=1 and BAIDU_LIVE_FILE_NAME"]
+#[ignore = "read-only Baidu network probe; requires VERSADOWN_LIVE_CLOUD=1 and BAIDU_LIVE_FILE_NAME"]
 async fn live_baidu_gateway_reads_three_consecutive_four_mib_chunks() {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
     let filename = std::env::var("BAIDU_LIVE_FILE_NAME").expect("file name required");
@@ -979,10 +979,10 @@ async fn live_baidu_gateway_reads_three_consecutive_four_mib_chunks() {
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "read-only four-way Baidu CDN probe; requires ALLDOWNLOADER_LIVE_CLOUD=1 and BAIDU_LIVE_FILE_NAME"]
+#[ignore = "read-only four-way Baidu CDN probe; requires VERSADOWN_LIVE_CLOUD=1 and BAIDU_LIVE_FILE_NAME"]
 async fn live_baidu_cdn_accepts_four_simultaneous_four_mib_ranges() {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
     let filename = std::env::var("BAIDU_LIVE_FILE_NAME").expect("file name required");
@@ -1060,7 +1060,7 @@ async fn live_baidu_download_metadata(filename: String) -> (BaiduDownload, u64) 
     tokio::task::spawn_blocking(move || {
         let store = SystemCredentialStore::new(
             PathBuf::from(std::env::var_os("APPDATA").unwrap())
-                .join("com.alldownloader.desktop/cloud-sessions"),
+                .join("com.versadown.desktop/cloud-sessions"),
         )
         .unwrap();
         let session: BaiduSession =
@@ -1084,7 +1084,7 @@ async fn live_baidu_medium_download_metadata() -> (BaiduDownload, u64, String) {
     tokio::task::spawn_blocking(|| {
         let store = SystemCredentialStore::new(
             PathBuf::from(std::env::var_os("APPDATA").unwrap())
-                .join("com.alldownloader.desktop/cloud-sessions"),
+                .join("com.versadown.desktop/cloud-sessions"),
         )
         .unwrap();
         let session: BaiduSession =
@@ -1119,7 +1119,7 @@ async fn live_baidu_medium_download_metadata() -> (BaiduDownload, u64, String) {
                     .iter()
                     .filter(|item| {
                         item.kind == "folder"
-                            && item.id != alldownloader_lib::cloud::baidu::BAIDU_RECYCLE_BIN_ID
+                            && item.id != versadown_lib::cloud::baidu::BAIDU_RECYCLE_BIN_ID
                     })
                     .map(|item| item.id.clone()),
             );
@@ -1170,10 +1170,10 @@ async fn independent_baidu_sha256(signed: &BaiduDownload, total: u64) -> Vec<u8>
 
 #[cfg(windows)]
 #[tokio::test]
-#[ignore = "downloads a full 20-100 MiB Baidu file to a temporary directory and verifies SHA-256; requires ALLDOWNLOADER_LIVE_CLOUD=1 and BAIDU_LIVE_FULL_DOWNLOAD=1"]
+#[ignore = "downloads a full 20-100 MiB Baidu file to a temporary directory and verifies SHA-256; requires VERSADOWN_LIVE_CLOUD=1 and BAIDU_LIVE_FULL_DOWNLOAD=1"]
 async fn live_baidu_file_completes_through_bundled_engine_and_gateway() {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
     assert_eq!(
@@ -1205,7 +1205,7 @@ async fn live_baidu_file_completes_through_bundled_engine_and_gateway() {
         )
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut aria2 = alldownloader_lib::Aria2Settings::default();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
     aria2.rpc_port = reserved.local_addr().unwrap().port();
     aria2.rpc_token = format!("baidu-live-gateway-{}", aria2.rpc_port);
     drop(reserved);

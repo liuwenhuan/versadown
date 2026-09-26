@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const projectRoot = path.resolve(__dirname, '..');
-const cargo = process.env.ALLDOWNLOADER_CARGO || 'cargo';
+const cargo = process.env.VERSADOWN_CARGO || 'cargo';
 const manifest = path.join(projectRoot, 'src-tauri', 'Cargo.toml');
 
 if (!fs.existsSync(manifest)) {
@@ -21,7 +21,7 @@ const result = spawnSync(cargo, [
   '--', '--ignored', '--exact'
 ], {
   cwd: projectRoot,
-  env: { ...process.env, ALLDOWNLOADER_LIVE_CLOUD: '1' },
+  env: { ...process.env, VERSADOWN_LIVE_CLOUD: '1' },
   stdio: ['ignore', 'pipe', 'pipe'],
   windowsHide: true
 });

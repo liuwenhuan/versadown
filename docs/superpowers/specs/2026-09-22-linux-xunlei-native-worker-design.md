@@ -2,9 +2,9 @@
 
 ## 目标
 
-在 Linux 上把已安装的官方迅雷运行库接入 AllDownloader，使迅雷云盘解析流程能够像现有 Windows 原生后端一样：使用 AllDownloader 自己保存的迅雷凭据和短期加速 token 创建、控制和观察原生任务，而不经过官方迅雷 UI。
+在 Linux 上把已安装的官方迅雷运行库接入 VersaDown，使迅雷云盘解析流程能够像现有 Windows 原生后端一样：使用 VersaDown 自己保存的迅雷凭据和短期加速 token 创建、控制和观察原生任务，而不经过官方迅雷 UI。
 
-官方迅雷与 AllDownloader 必须能够同时运行。两者复用同一套已安装的官方 SDK 文件，但任务、凭据、任务数据库和控制权完全隔离；AllDownloader 不显示、枚举、接管或修改官方迅雷的任务，官方迅雷也不接管 AllDownloader 的任务。
+官方迅雷与 VersaDown 必须能够同时运行。两者复用同一套已安装的官方 SDK 文件，但任务、凭据、任务数据库和控制权完全隔离；VersaDown 不显示、枚举、接管或修改官方迅雷的任务，官方迅雷也不接管 VersaDown 的任务。
 
 Windows 和 Linux 必须共享下载业务流程、任务状态语义、SVIP 判定和恢复安全规则。仅运行库发现、原生 ABI 和引擎承载方式按平台分离。
 
@@ -21,7 +21,7 @@ Linux SDK 对外导出了 `XLInit`、`XLUnInit`、`XLSetUserId`、`XLSetVipType`
 
 ## 范围与非目标
 
-本设计包括：Linux x86_64 的 DEB/玲珑发现、无界面 Rust worker、从 AllDownloader 凭据派生的身份和加速 token 传递、原生 P2SP 生命周期、进度同步、并行运行隔离，以及真实 SVIP 通道验收。
+本设计包括：Linux x86_64 的 DEB/玲珑发现、无界面 Rust worker、从 VersaDown 凭据派生的身份和加速 token 传递、原生 P2SP 生命周期、进度同步、并行运行隔离，以及真实 SVIP 通道验收。
 
 本设计不包括：读取迅雷的 Cookie、配置、账号、任务数据库或 VIP 证书；调用 Electron/Node UI；让两端显示或控制同一任务；反向修改迅雷安装文件；支持未验证 ABI 的未来 SDK；macOS 迅雷接入；BT、磁力和 ed2k 的 Linux 原生下载。
 
@@ -65,7 +65,7 @@ DEB 候选必须同时满足 DPKG 包存在、`/opt/apps/com.xunlei.download/fil
 
 ### `LinuxWorkerEngine` 与 `xunlei-native-worker`
 
-主 Tauri 进程不直接加载 Linux SDK。每个 AllDownloader 进程至多启动一个 `xunlei-native-worker`，它是随应用发行的 Rust 原生 sidecar，不启动官方 UI，也不启动第二个 `thunder` 客户端。
+主 Tauri 进程不直接加载 Linux SDK。每个 VersaDown 进程至多启动一个 `xunlei-native-worker`，它是随应用发行的 Rust 原生 sidecar，不启动官方 UI，也不启动第二个 `thunder` 客户端。
 
 worker 在自己的工作目录运行，并以 `RTLD_GLOBAL` 先加载选定的 `libxl_stat.so`、后加载 `libxl_thunder_sdk.so`。它不复制、重命名、补丁或写入供应商运行库。所有 SDK 调用固定在 worker 的单一工作线程，避免 SDK 全局状态和 FFI 重入。
 
@@ -75,15 +75,15 @@ worker 的 Linux FFI 仅对已经通过 ABI 验证的 SDK 指纹开放。验证�
 
 父进程创建权限为 `0700` 的临时目录和权限为 `0600` 的 Unix socket。socket 路径和运行库描述可作为非敏感启动参数；一次性随机 nonce 经 worker 的继承标准输入传递，不能出现在进程命令行、环境变量或日志中。
 
-协议命令为 `initialize`、`submit`、`poll`、`pause`、`resume`、`cancel` 和 `shutdown`。`initialize`/`submit` 的敏感字段只在内存消息中出现：AllDownloader 的用户 ID、peer ID、会员类型、签名下载地址、HTTP 请求头和加速 token。worker 返回的进度消息只包含会话绑定的任务句柄、长度、状态、错误码、连接数和通道统计。URL 签名、令牌、用户 ID 和 peer ID 不得进入 `Debug`、错误、持久化配置或可观测日志。
+协议命令为 `initialize`、`submit`、`poll`、`pause`、`resume`、`cancel` 和 `shutdown`。`initialize`/`submit` 的敏感字段只在内存消息中出现：VersaDown 的用户 ID、peer ID、会员类型、签名下载地址、HTTP 请求头和加速 token。worker 返回的进度消息只包含会话绑定的任务句柄、长度、状态、错误码、连接数和通道统计。URL 签名、令牌、用户 ID 和 peer ID 不得进入 `Debug`、错误、持久化配置或可观测日志。
 
 ## 任务生命周期
 
-1. 现有迅雷云盘流程从 AllDownloader 的系统凭据库刷新会话并解析文件，得到短期地址和加速 token。
+1. 现有迅雷云盘流程从 VersaDown 的系统凭据库刷新会话并解析文件，得到短期地址和加速 token。
 2. 公共 `XunleiNativeBackend` 在保留现有输出路径预约规则后，构造 `NativeSubmission` 并提交给当前平台的 `NativeEngine`。
-3. Linux worker 初始化 SDK，设置 AllDownloader 的用户身份和会员信息，设置当前任务的加速 token，创建 P2SP 任务并启动其加速通道；Windows 使用现有等价步骤。
-4. 公共进度监控层轮询 `NativeEngine::poll`，更新任务库、文件进度和前端事件。仅 AllDownloader 创建的会话句柄可被轮询或控制。
-5. 暂停停止该句柄；继续使用 AllDownloader 自己的凭据重新解析短期地址和 token 后恢复；取消停止并释放该句柄。任务完成后也释放 SDK 句柄。
+3. Linux worker 初始化 SDK，设置 VersaDown 的用户身份和会员信息，设置当前任务的加速 token，创建 P2SP 任务并启动其加速通道；Windows 使用现有等价步骤。
+4. 公共进度监控层轮询 `NativeEngine::poll`，更新任务库、文件进度和前端事件。仅 VersaDown 创建的会话句柄可被轮询或控制。
+5. 暂停停止该句柄；继续使用 VersaDown 自己的凭据重新解析短期地址和 token 后恢复；取消停止并释放该句柄。任务完成后也释放 SDK 句柄。
 6. worker 退出、崩溃、SDK 更新或 SDK 返回“未知任务”时，所有属于其会话的任务安全进入暂停态。恢复操作必须创建或重新绑定一个当前会话任务，不能向旧数字 ID 发送控制命令。
 
 提交前发现运行库不可用或 ABI 不兼容时，返回“未选择原生引擎”，让既有 aria2 直链流程继续。原生任务已创建后的失败先释放其句柄并报告失败，不自动再投递到 aria2，避免两个引擎下载同一文件。
@@ -94,7 +94,7 @@ worker 的 Linux FFI 仅对已经通过 ABI 验证的 SDK 指纹开放。验证�
 
 只有满足全部条件时才显示“正在使用迅雷 SVIP 加速”：
 
-1. AllDownloader 自己的迅雷会话为当前任务取得加速 token；
+1. VersaDown 自己的迅雷会话为当前任务取得加速 token；
 2. Linux SDK 已成功接受 token 并报告 DCDN/VIP 通道启用；
 3. 后续至少一次轮询显示 DCDN/VIP 通道累计接收字节增长。
 
@@ -104,7 +104,7 @@ worker 的 Linux FFI 仅对已经通过 ABI 验证的 SDK 指纹开放。验证�
 
 新提示必须使用 i18n 键，并至少提供简体中文与英文。需要覆盖：未安装或无权访问官方运行库、SDK 版本不兼容、原生 worker 意外停止、需要重新解析后继续、SVIP token 不可用、加速已请求但尚未确认，以及实际确认加速。
 
-官方迅雷升级不会中断已加载 worker 的映射库；新 worker 仅在重新发现并完成 ABI 校验后使用新版本。AllDownloader 不干预官方迅雷进程、端口、socket、任务文件或用户数据，因此两个程序的并行运行不依赖官方客户端是否已经启动。
+官方迅雷升级不会中断已加载 worker 的映射库；新 worker 仅在重新发现并完成 ABI 校验后使用新版本。VersaDown 不干预官方迅雷进程、端口、socket、任务文件或用户数据，因此两个程序的并行运行不依赖官方客户端是否已经启动。
 
 ## 验证
 

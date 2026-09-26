@@ -1,10 +1,10 @@
 //! Explicitly enabled destructive-in-scope live regression for the saved Xunlei session.
 //!
 //! The test only creates and operates on one uniquely named
-//! `AllDownloader-E2E-xunlei-*` root. Cleanup moves that root to the recycle
+//! `VersaDown-E2E-xunlei-*` root. Cleanup moves that root to the recycle
 //! bin and permanently deletes it. Existing user objects are never selected.
 
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     commands::{plan_cloud_directory_download, CloudState},
     CloudError, CloudFile, CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
     CloudProvider, CloudUploadTransport, ProviderRegistry, ReqwestTransport, ResolvedCloudDownload,
@@ -120,22 +120,22 @@ fn step<T>(name: &str, operation: impl FnOnce() -> Result<T, CloudError>) -> Liv
 }
 
 fn require_live_authorization() -> LiveResult<()> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Err(failure(
-            "live cloud regression requires ALLDOWNLOADER_LIVE_CLOUD=1",
+            "live cloud regression requires VERSADOWN_LIVE_CLOUD=1",
         ));
     }
     Ok(())
 }
 
 fn session_root() -> LiveResult<PathBuf> {
-    if let Some(data_dir) = std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR") {
+    if let Some(data_dir) = std::env::var_os("VERSADOWN_TEST_DATA_DIR") {
         return Ok(PathBuf::from(data_dir).join("cloud-sessions"));
     }
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
     Ok(PathBuf::from(app_data)
-        .join("com.alldownloader.desktop")
+        .join("com.versadown.desktop")
         .join("cloud-sessions"))
 }
 
@@ -145,7 +145,7 @@ fn unique_name() -> String {
         .unwrap_or_default()
         .as_millis();
     format!(
-        "AllDownloader-E2E-xunlei-{millis}-{:08x}",
+        "VersaDown-E2E-xunlei-{millis}-{:08x}",
         rand::thread_rng().next_u32()
     )
 }
@@ -313,7 +313,7 @@ fn cleanup_test_root(state: &CloudState, http: &AuditedTransport, root_id: &str)
 }
 
 #[test]
-#[ignore = "requires saved Xunlei authorization and mutates only AllDownloader-E2E-xunlei-* test data"]
+#[ignore = "requires saved Xunlei authorization and mutates only VersaDown-E2E-xunlei-* test data"]
 fn live_xunlei_complete_crud_and_transfer_matrix() -> LiveResult<()> {
     require_live_authorization()?;
     let state = CloudState::new(session_root()?)?;
@@ -351,8 +351,8 @@ fn live_xunlei_complete_crud_and_transfer_matrix() -> LiveResult<()> {
 
     let local_root = std::env::temp_dir().join(&root_name);
     fs::create_dir_all(local_root.join("upload-tree/sub"))?;
-    let single_bytes = b"AllDownloader Xunlei E2E single file\n".to_vec();
-    let tree_a_bytes = b"AllDownloader Xunlei E2E tree root\n".to_vec();
+    let single_bytes = b"VersaDown Xunlei E2E single file\n".to_vec();
+    let tree_a_bytes = b"VersaDown Xunlei E2E tree root\n".to_vec();
     let mut tree_b_bytes = vec![0_u8; 32 * 1024];
     rand::thread_rng().fill_bytes(&mut tree_b_bytes);
     fs::write(local_root.join("single.txt"), &single_bytes)?;

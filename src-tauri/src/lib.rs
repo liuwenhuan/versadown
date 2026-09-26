@@ -240,9 +240,9 @@ pub fn run() {
             app.manage(window_icon::TaskbarIconState::default());
             let lifecycle = std::sync::Arc::new(ApplicationLifecycle::new());
             app.manage(std::sync::Arc::clone(&lifecycle));
-            let background_ui_test = std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST").ok();
+            let background_ui_test = std::env::var("VERSADOWN_BACKGROUND_UI_TEST").ok();
             let data_dir = if background_ui_test.as_deref() == Some("1") {
-                std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR")
+                std::env::var_os("VERSADOWN_TEST_DATA_DIR")
                     .map(std::path::PathBuf::from)
                     .ok_or("后台界面测试必须提供隔离的数据目录")?
             } else {
@@ -288,7 +288,7 @@ pub fn run() {
                 })
                 .map_err(std::io::Error::other)?;
             let default_destination = if background_ui_test.as_deref() == Some("1") {
-                std::env::var_os("ALLDOWNLOADER_TEST_DOWNLOAD_DIR")
+                std::env::var_os("VERSADOWN_TEST_DOWNLOAD_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| data_dir.join("downloads"))
             } else {
@@ -595,7 +595,7 @@ pub fn run() {
             window_lifecycle::manager_close_request_count_for_test
         ])
         .build(tauri::generate_context!())
-        .expect("error while building AllDownloader")
+        .expect("error while building VersaDown")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
                 let application_exiting = app

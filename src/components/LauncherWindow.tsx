@@ -195,8 +195,8 @@ export function LauncherWindow() {
     // state transition in React means the displayed menu and X11 input region
     // always come from the same component.
     const openNativeContextMenu = () => openContextMenu();
-    window.addEventListener('alldownloader:launcher-context-menu', openNativeContextMenu);
-    return () => window.removeEventListener('alldownloader:launcher-context-menu', openNativeContextMenu);
+    window.addEventListener('versadown:launcher-context-menu', openNativeContextMenu);
+    return () => window.removeEventListener('versadown:launcher-context-menu', openNativeContextMenu);
   }, []);
 
   function closeContextMenu() {
@@ -305,7 +305,7 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label="AllDownloader 悬浮下载窗口">
+    <main className={`launcher-shell ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label="VersaDown 悬浮下载窗口">
       <FloatingLauncher
         onScan={scanDownloadInputs}
         onDroppedInput={openLauncherNewDownload}

@@ -1580,7 +1580,7 @@ fn isolated_plugin_config(
     let base_directory = plugin_config_path
         .and_then(std::path::Path::parent)
         .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::env::temp_dir().join("alldownloader-plugins"));
+        .unwrap_or_else(|| std::env::temp_dir().join("versadown-plugins"));
     let runtime_root = base_directory.join("xunlei-native-runtime");
     let runtime_directory =
         runtime_root.join(format!("{}-{}", installed.client_version, fingerprint));
@@ -2154,7 +2154,7 @@ mod tests {
             server_pids_before
                 .iter()
                 .any(|pid| process_ids(OFFICIAL_SDK_SERVER_NAME).contains(pid)),
-            "AllDownloader must reuse the running official SDK server without terminating it"
+            "VersaDown must reuse the running official SDK server without terminating it"
         );
         drop(api);
     }
@@ -2194,15 +2194,15 @@ mod tests {
         use std::io::Read as _;
 
         assert_eq!(
-            std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+            std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
             Ok("1")
         );
-        let app_data = std::env::var_os("ALLDOWNLOADER_XUNLEI_SESSION_ROOT")
+        let app_data = std::env::var_os("VERSADOWN_XUNLEI_SESSION_ROOT")
             .map(PathBuf::from)
             .expect("use an explicitly isolated session directory for the live test");
         let session_root = app_data.join("cloud-sessions");
         let load_session = || {
-            if let Ok(json) = std::env::var("ALLDOWNLOADER_XUNLEI_SESSION_JSON") {
+            if let Ok(json) = std::env::var("VERSADOWN_XUNLEI_SESSION_JSON") {
                 serde_json::from_str(&json).expect("in-memory Xunlei session should be valid")
             } else {
                 let credentials =
@@ -2228,7 +2228,7 @@ mod tests {
         refreshed_credentials
             .save("xunlei", &serde_json::to_vec(&client.session()).unwrap())
             .expect("the refreshed live session should be persisted for the download probe");
-        let file_id = std::env::var("ALLDOWNLOADER_XUNLEI_FILE_ID").unwrap_or_else(|_| {
+        let file_id = std::env::var("VERSADOWN_XUNLEI_FILE_ID").unwrap_or_else(|_| {
             root_directory
                 .items
                 .iter()
@@ -2241,7 +2241,7 @@ mod tests {
                 .clone()
         });
         let expected_name =
-            std::env::var("ALLDOWNLOADER_XUNLEI_FILE_NAME").unwrap_or_else(|_| "midysj.zip".into());
+            std::env::var("VERSADOWN_XUNLEI_FILE_NAME").unwrap_or_else(|_| "midysj.zip".into());
         let download = client
             .download_with_acceleration(&file_id)
             .expect("Xunlei should return a fresh cloud download contract");
@@ -2249,7 +2249,7 @@ mod tests {
             download.name, expected_name,
             "only the scoped test file may be downloaded"
         );
-        let root = std::env::var_os("ALLDOWNLOADER_XUNLEI_DOWNLOAD_ROOT")
+        let root = std::env::var_os("VERSADOWN_XUNLEI_DOWNLOAD_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2258,7 +2258,7 @@ mod tests {
                     .join(".tools")
                     .join(format!("xunlei-native-live-{}", uuid::Uuid::new_v4()))
             });
-        let restore = std::env::var("ALLDOWNLOADER_XUNLEI_RESTORE").as_deref() == Ok("1");
+        let restore = std::env::var("VERSADOWN_XUNLEI_RESTORE").as_deref() == Ok("1");
         std::fs::create_dir_all(&root).unwrap();
         let source_hash = format!("{:x}", md5::compute(download.url.as_bytes()));
         if restore {

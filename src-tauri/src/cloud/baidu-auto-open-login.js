@@ -1,6 +1,6 @@
 (() => {
-  if (window.__allDownloaderBaiduLoginTriggerInstalled) return;
-  window.__allDownloaderBaiduLoginTriggerInstalled = true;
+  if (window.__versaDownBaiduLoginTriggerInstalled) return;
+  window.__versaDownBaiduLoginTriggerInstalled = true;
 
   const expectedLabel = "去登录";
   const normalize = (value) => String(value || "").replace(/\s+/g, "").trim();

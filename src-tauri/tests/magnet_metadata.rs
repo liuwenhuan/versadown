@@ -1,4 +1,4 @@
-use alldownloader_lib::{resolve_magnet_metadata, resolve_magnet_torrent, MagnetMetadataSettings};
+use versadown_lib::{resolve_magnet_metadata, resolve_magnet_torrent, MagnetMetadataSettings};
 use axum::{
     extract::Json,
     http::{header::USER_AGENT, HeaderMap, StatusCode},
@@ -59,7 +59,7 @@ async fn resolves_metadata_service_result_to_a_torrent_for_local_aria2() {
 }
 
 #[tokio::test]
-async fn identifies_as_alldownloader_when_requesting_metadata_service() {
+async fn identifies_as_versadown_when_requesting_metadata_service() {
     let observed_user_agent = Arc::new(Mutex::new(None));
     let captured_user_agent = Arc::clone(&observed_user_agent);
     let app = Router::new()
@@ -96,7 +96,7 @@ async fn identifies_as_alldownloader_when_requesting_metadata_service() {
     assert!(result.is_ok());
     assert_eq!(
         observed_user_agent.lock().unwrap().as_deref(),
-        Some("AllDownloader/0.1")
+        Some("VersaDown/0.1")
     );
 }
 

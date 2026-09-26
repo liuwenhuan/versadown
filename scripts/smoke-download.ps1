@@ -33,7 +33,7 @@ try {
         Write-Output 'Real loopback download smoke passed; package checks explicitly skipped.'
     } else {
         $releaseRoot = Join-Path $targetRoot 'release'
-        $application = Get-Item -LiteralPath (Join-Path $releaseRoot 'alldownloader.exe') -ErrorAction Stop
+        $application = Get-Item -LiteralPath (Join-Path $releaseRoot 'versadown.exe') -ErrorAction Stop
         $msi = Get-ChildItem -LiteralPath (Join-Path $releaseRoot 'bundle\msi') -Filter *.msi -File -ErrorAction Stop
         $nsis = Get-ChildItem -LiteralPath (Join-Path $releaseRoot 'bundle\nsis') -Filter *.exe -File -ErrorAction Stop
         if (-not $msi -or -not $nsis) { throw 'Both MSI and NSIS Windows package artifacts are required.' }

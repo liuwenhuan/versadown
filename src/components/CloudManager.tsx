@@ -84,7 +84,7 @@ const expiredAuthorizationStatus = '授权过期请重新登录';
 // the response optimistically to the visible directory.
 const UPLOAD_DIRECTORY_CONFIRMATION_DELAYS_MS = [0, 250, 750, 1_500] as const;
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'share';
-const MY_SHARES_DIRECTORY_ID = '__all_downloader_my_shares__';
+const MY_SHARES_DIRECTORY_ID = '__versa_down_my_shares__';
 
 const authorizationWatchdogMs = 10_000;
 
@@ -799,7 +799,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     try {
       const next = parentId === MY_SHARES_DIRECTORY_ID
         ? { id: MY_SHARES_DIRECTORY_ID, items: (await client.listCloudShares(provider)).map((share) => ({
-          id: `__all_downloader_share__:${share.id}`,
+          id: `__versa_down_share__:${share.id}`,
           parentId: MY_SHARES_DIRECTORY_ID,
           name: share.name,
           kind: share.kind,

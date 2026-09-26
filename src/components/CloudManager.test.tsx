@@ -1774,7 +1774,7 @@ it('restores and permanently deletes non-PikPak recycle records after confirmati
 
 it('limits PikPak recycle-bin items to restore and permanent deletion without folder navigation', async () => {
   const user = userEvent.setup();
-  const recycleBinId = '__all_downloader_pikpak_recycle_bin__';
+  const recycleBinId = '__versa_down_pikpak_recycle_bin__';
   const client = createCloudFake({
     listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === recycleBinId
       ? { id: recycleBinId, items: [
@@ -1827,7 +1827,7 @@ it('limits PikPak recycle-bin items to restore and permanent deletion without fo
 
 it('excludes the PikPak recycle-bin virtual folder from move destinations', async () => {
   const user = userEvent.setup();
-  const recycleBinId = '__all_downloader_pikpak_recycle_bin__';
+  const recycleBinId = '__versa_down_pikpak_recycle_bin__';
   const client = createCloudFake({
     listCloudDirectory: vi.fn().mockResolvedValue({ id: '0', items: [
       { id: recycleBinId, parentId: '0', name: '回收站', kind: 'folder' },
@@ -1848,7 +1848,7 @@ it('excludes the PikPak recycle-bin virtual folder from move destinations', asyn
 
 it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
   const user = userEvent.setup();
-  const recycleBinId = '__all_downloader_pikpak_recycle_bin__';
+  const recycleBinId = '__versa_down_pikpak_recycle_bin__';
   const client = createCloudFake({
     listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === recycleBinId
       ? { id: recycleBinId, items: [] }

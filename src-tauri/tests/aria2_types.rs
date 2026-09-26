@@ -1,5 +1,5 @@
-use alldownloader_lib::aria2::types::*;
-use alldownloader_lib::TaskStatus;
+use versadown_lib::aria2::types::*;
+use versadown_lib::TaskStatus;
 use serde_json::json;
 
 fn raw() -> serde_json::Value {

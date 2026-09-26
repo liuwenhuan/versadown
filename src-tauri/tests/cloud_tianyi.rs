@@ -1,6 +1,6 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     tianyi::{parse_tianyi_web_session, TianyiClient, TianyiSession, TIANYI_RECYCLE_BIN_ID},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
     UploadHttpRequest, UploadHttpResponse,
@@ -17,7 +17,7 @@ const TIANYI_LOGIN_RSA_KEY: &str = concat!(
 
 #[test]
 fn tianyi_supervisor_refreshes_app_session_without_reentering_password_login() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         CloudProvider, CredentialStore, MemoryCredentialStore, ProviderRegistry,
     };
     let store = MemoryCredentialStore::default();
@@ -48,7 +48,7 @@ fn tianyi_supervisor_refreshes_app_session_without_reentering_password_login() {
 
 #[test]
 fn tianyi_rejected_or_wrong_account_app_refresh_keeps_original_credentials() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         CloudProvider, CredentialStore, MemoryCredentialStore, ProviderRegistry,
     };
     for reply in [
@@ -226,7 +226,7 @@ fn tianyi_browser_identity_reaches_account_directory_and_download_requests() {
 
 #[test]
 fn tianyi_download_owner_uses_the_live_profile_instead_of_the_generic_card_identity() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         CloudProvider, CredentialStore, MemoryCredentialStore, ProviderRegistry,
     };
 
@@ -767,7 +767,7 @@ fn tianyi_password_login_prefers_the_signed_desktop_session_without_a_web_cookie
     let session = login.unwrap();
     assert_eq!(
         session.auth_method,
-        alldownloader_lib::cloud::CloudAuthMethod::Password
+        versadown_lib::cloud::CloudAuthMethod::Password
     );
     let restored: TianyiSession =
         serde_json::from_slice(&serde_json::to_vec(&session).expect("serialize App session"))

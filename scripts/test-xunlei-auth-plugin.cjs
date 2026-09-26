@@ -12,7 +12,7 @@ function fixture(origin='https://pan.xunlei.com') {
   const window={PAN_VERSION:'future-version',addEventListener(type,callback){this.message=callback;},fetch:(...args)=>{calls.push(args);return Promise.resolve(replies.shift());}};
   const context=vm.createContext({window,location:{origin,href:origin+'/'},navigator:{userAgent:'Browser'},Headers,URL,XMLHttpRequest:Xhr,atob});
   vm.runInContext(source,context);
-  return {window,calls,replies,Xhr,snapshot:()=>JSON.parse(JSON.stringify(window.__alldownloaderXunleiAuth.snapshot())),
+  return {window,calls,replies,Xhr,snapshot:()=>JSON.parse(JSON.stringify(window.__versadownXunleiAuth.snapshot())),
     async request(url,headers=h(),status=200,value={files:[]},method='GET',body){
       const response={status,clone:()=>({json:()=>Promise.resolve(value)})};replies.push(response);
       assert.equal(await window.fetch(url,{headers,method,body}),response);
@@ -41,7 +41,7 @@ test('captures only matching official captcha metadata',async()=>{
   assert.equal(f.calls.length,3);
 });
 test('does not install on a foreign or non-HTTPS origin',()=>{
-  for(const origin of ['http://pan.xunlei.com','https://i.xunlei.com','https://pan.xunlei.com.evil.test'])assert.equal(fixture(origin).window.__alldownloaderXunleiAuth,undefined);
+  for(const origin of ['http://pan.xunlei.com','https://i.xunlei.com','https://pan.xunlei.com.evil.test'])assert.equal(fixture(origin).window.__versadownXunleiAuth,undefined);
 });
 test('observes XMLHttpRequest root responses used by the official page',()=>{
   const f=fixture(),xhr=new f.Xhr();xhr.open('GET',root);
@@ -56,8 +56,8 @@ test('retains a matching OAuth refresh token captured before the first authentic
 });
 test('reports incompatible password form only from the trusted official iframe',()=>{
   const f=fixture();
-  f.window.message({origin:'https://i.xunlei.com.evil.test',data:{type:'alldownloader-xunlei-password',error:'plugin_update_required'}});
+  f.window.message({origin:'https://i.xunlei.com.evil.test',data:{type:'versadown-xunlei-password',error:'plugin_update_required'}});
   assert.equal(f.snapshot().pending,true);
-  f.window.message({origin:'https://i.xunlei.com',data:{type:'alldownloader-xunlei-password',error:'plugin_update_required'}});
+  f.window.message({origin:'https://i.xunlei.com',data:{type:'versadown-xunlei-password',error:'plugin_update_required'}});
   assert.equal(f.snapshot().authorization_error,'plugin_update_required');
 });

@@ -1,6 +1,6 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     xunlei::{
         XunleiClient, XunleiClientProfile, XunleiResumableUpload, XunleiSession, XunleiWebContext,
     },
@@ -447,7 +447,7 @@ fn modern_web_captcha_action_tracks_mutations_without_reusing_a_read_action() {
 
 #[test]
 fn supervised_xunlei_keeps_action_ticket_preflight_but_never_replays_a_rejected_mutation() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::SessionSnapshot, CloudProvider, CredentialStore, MemoryCredentialStore,
         ProviderRegistry,
     };
@@ -1069,7 +1069,7 @@ fn xunlei_directory_requests_and_maps_only_complete_downloadable_files() {
 
     assert!(directory.items.iter().any(|item| item.id == "ready"));
     assert!(directory.items.iter().any(|item| {
-        item.id == "__all_downloader_xunlei_recycle_bin__"
+        item.id == "__versa_down_xunlei_recycle_bin__"
             && item.parent_id == "0"
             && item.name == "回收站"
             && item.kind == "folder"

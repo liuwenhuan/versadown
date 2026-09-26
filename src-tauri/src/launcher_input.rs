@@ -212,7 +212,7 @@ pub async fn launcher_input_hit_test_for_test(
     points: Vec<(i32, i32)>,
 ) -> Result<serde_json::Value, String> {
     if window.label() != "launcher"
-        || std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST").as_deref() != Ok("1")
+        || std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() != Ok("1")
     {
         return Err("输入命中观测仅在悬浮窗后台测试模式可用".to_string());
     }
@@ -311,7 +311,7 @@ mod platform {
                 webview.connect_context_menu(|webview, _, _, _| {
                     #[allow(deprecated)]
                     webview.run_javascript(
-                        "window.dispatchEvent(new Event('alldownloader:launcher-context-menu'))",
+                        "window.dispatchEvent(new Event('versadown:launcher-context-menu'))",
                         None::<&webkit2gtk::gio::Cancellable>,
                         |_| {},
                     );

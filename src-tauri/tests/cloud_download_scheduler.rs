@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     download_scheduler::{AdmissionOutcome, CloudDownloadScheduler},
     CloudProvider,
 };

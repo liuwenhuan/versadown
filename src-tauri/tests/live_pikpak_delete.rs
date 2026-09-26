@@ -1,13 +1,13 @@
 //! Opt-in diagnosis for one user-selected recycle-bin fixture. Mutation is
 //! blocked unless the exact fixture name is explicitly confirmed separately.
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, PikPakClient,
     ProviderRegistry, QuarkError, ReqwestTransport, SystemCredentialStore,
 };
 use serde_json::Value;
 use std::{path::PathBuf, sync::Mutex};
 
-const TARGET: &str = "AllDownloader-IT-pikpak-cache-1788958358211-root";
+const TARGET: &str = "VersaDown-IT-pikpak-cache-1788958358211-root";
 struct Probe {
     http: ReqwestTransport,
     allowed_id: Mutex<Option<String>>,
@@ -32,7 +32,7 @@ impl CloudHttpTransport for Probe {
                 .to_owned();
             body["device_id"] = serde_json::json!(device);
             body["meta"]["captcha_sign"] =
-                serde_json::json!(alldownloader_lib::cloud::pikpak_captcha_sign(
+                serde_json::json!(versadown_lib::cloud::pikpak_captcha_sign(
                     body["client_id"].as_str().unwrap(),
                     &device,
                     body["meta"]["timestamp"].as_str().unwrap()
@@ -112,18 +112,18 @@ impl CloudHttpTransport for Probe {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; deletion blocked unless exact target confirmed"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1; deletion blocked unless exact target confirmed"]
 fn live_pikpak_selected_recycle_delete() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
     let store = SystemCredentialStore::new(
-        std::env::var_os("ALLDOWNLOADER_TEST_CLOUD_SESSIONS")
+        std::env::var_os("VERSADOWN_TEST_CLOUD_SESSIONS")
             .map(PathBuf::from)
             .unwrap_or(
                 PathBuf::from(std::env::var_os("APPDATA").ok_or("APPDATA missing")?)
-                    .join("com.alldownloader.desktop/cloud-sessions"),
+                    .join("com.versadown.desktop/cloud-sessions"),
             ),
     )?;
     let http = Probe {

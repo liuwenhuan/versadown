@@ -43,5 +43,5 @@ it('authorizes the native minimum-size operation used by DPI sizing', () => {
 it('passes a frontend signature to the Linux quick build so Tauri re-embeds changed assets', () => {
   const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
 
-  expect(packageJson.scripts['build:linux:quick']).toContain('ALLDOWNLOADER_FRONTEND_SIGNATURE');
+  expect(packageJson.scripts['build:linux:quick']).toContain('VERSADOWN_FRONTEND_SIGNATURE');
 });

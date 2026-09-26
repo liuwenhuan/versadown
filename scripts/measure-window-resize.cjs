@@ -40,11 +40,11 @@ async function run() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
   await new Promise((resolve) => server.close(resolve));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-resize-'));
-  const executable = path.resolve(process.argv[2] || 'artifacts/window-resize-test/alldownloader.exe');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'versadown-resize-'));
+  const executable = path.resolve(process.argv[2] || 'artifacts/window-resize-test/versadown.exe');
   const child = spawn(executable, [], { windowsHide: true, stdio: 'ignore', env: {
-    ...process.env, ALLDOWNLOADER_BACKGROUND_UI_TEST: '1',
-    ALLDOWNLOADER_TEST_DATA_DIR: root, ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(root, 'downloads'),
+    ...process.env, VERSADOWN_BACKGROUND_UI_TEST: '1',
+    VERSADOWN_TEST_DATA_DIR: root, VERSADOWN_TEST_DOWNLOAD_DIR: path.join(root, 'downloads'),
     WEBVIEW2_USER_DATA_FOLDER: path.join(root, 'webview2'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
   } });

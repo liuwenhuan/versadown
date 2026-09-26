@@ -673,7 +673,7 @@ Expected: TypeScript and Vite build exit 0.
 
 Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
 
-Expected: release build exits 0 and publishes `artifacts/alldownloader.exe` with its required sidecar.
+Expected: release build exits 0 and publishes `artifacts/versadown.exe` with its required sidecar.
 
 - [ ] **Step 7: Commit verification contracts**
 

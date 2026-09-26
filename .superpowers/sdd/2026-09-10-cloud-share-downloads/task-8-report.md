@@ -12,7 +12,7 @@
 - GREEN: the specified three component files passed `25/25`; `src/lib/api.test.ts` passed `5/5`.
 - `pnpm exec tsc -b` passed.
 - `pnpm exec vite build` passed. Vite reported the pre-existing warning that Tauri's window module is both dynamically and statically imported; it did not fail the build.
-- `C:\Users\deepin\.cargo\bin\cargo.exe check --manifest-path src-tauri/Cargo.toml -p alldownloader` passed. The temporary target directory remains untracked because the environment rejected its removal.
+- `C:\Users\deepin\.cargo\bin\cargo.exe check --manifest-path src-tauri/Cargo.toml -p versadown` passed. The temporary target directory remains untracked because the environment rejected its removal.
 
 ## Scope
 

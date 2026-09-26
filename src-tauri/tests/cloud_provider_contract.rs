@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     baidu::BaiduSession,
     commands::{logout_provider, restore_account},
     load_password_credential, parse_stable_cloud_source, provider_capabilities,
@@ -18,7 +18,7 @@ use std::{
 // ceiling, an accidental zero ceiling, or a camelCase DTO regression.
 #[test]
 fn provider_download_concurrency_matches_the_literal_safety_matrix() {
-    use alldownloader_lib::cloud::ProviderRegistry;
+    use versadown_lib::cloud::ProviderRegistry;
 
     let rows = [
         (CloudProvider::Quark, 4, 4),
@@ -51,7 +51,7 @@ fn provider_download_concurrency_matches_the_literal_safety_matrix() {
 // cookie keepalive. Expectations are literal compatibility fixtures.
 #[test]
 fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::{recover_in_order, AuthSupervisor},
         driver::ProviderAuth,
         saved_cloud_credential_info, select_password_credential_account,
@@ -169,7 +169,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
         );
         assert_eq!(registry.by_key(key).unwrap().provider, provider);
         assert_eq!(descriptor.root_directory_id, root);
-        let recycle = format!("__all_downloader_{key}_recycle_bin__");
+        let recycle = format!("__versa_down_{key}_recycle_bin__");
         assert_eq!(descriptor.recycle_bin_directory_id, recycle);
         assert_eq!(descriptor.authorization.password_login_mode, password_mode);
         assert!(descriptor.authorization.web);
@@ -322,7 +322,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
 
 #[test]
 fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before_io() {
-    use alldownloader_lib::cloud::{share::*, ProviderRegistry};
+    use versadown_lib::cloud::{share::*, ProviderRegistry};
     struct NoIo;
     impl CloudHttpTransport for NoIo {
         fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
@@ -332,7 +332,7 @@ fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before
     let credentials = MemoryCredentialStore::default();
     let directory = tempfile::tempdir().unwrap();
     let plans = CloudSharePlanStore::new(
-        alldownloader_lib::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
+        versadown_lib::cloud::SystemCredentialStore::new(directory.path().into()).unwrap(),
     );
     for (provider, transfer) in [
         (CloudProvider::Quark, true),
@@ -388,8 +388,8 @@ fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before
 // A wrong provider selection, dropped argument, or capability bypass must be observable here.
 #[test]
 fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
-    use alldownloader_lib::cloud::driver::*;
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::driver::*;
+    use versadown_lib::cloud::{
         CloudAccount, CloudAuthMethod, CloudDirectory, CloudError, CloudFile, ProviderRegistry,
     };
     use std::sync::Arc;
@@ -428,9 +428,9 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
         fn resolve_download(
             &mut self,
             file: &str,
-        ) -> Result<alldownloader_lib::cloud::commands::ResolvedCloudDownload, CloudError> {
+        ) -> Result<versadown_lib::cloud::commands::ResolvedCloudDownload, CloudError> {
             self.0.lock().unwrap().push(format!("download:{file}"));
-            Ok(alldownloader_lib::cloud::commands::ResolvedCloudDownload {
+            Ok(versadown_lib::cloud::commands::ResolvedCloudDownload {
                 url: "https://download.example/file".into(),
                 name: file.into(),
                 headers: vec![],
@@ -461,7 +461,7 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
     impl UploadOps for RecordingDriver {
         fn upload(
             &mut self,
-            _state: &alldownloader_lib::cloud::commands::CloudState,
+            _state: &versadown_lib::cloud::commands::CloudState,
             _http: &dyn UploadHttp,
             parent: &str,
             path: &std::path::Path,
@@ -531,8 +531,8 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
     ));
     let upload_root = tempfile::tempdir().unwrap();
     let state =
-        alldownloader_lib::cloud::commands::CloudState::new(upload_root.path().into()).unwrap();
-    let upload_http = alldownloader_lib::cloud::ReqwestTransport::new().unwrap();
+        versadown_lib::cloud::commands::CloudState::new(upload_root.path().into()).unwrap();
+    let upload_http = versadown_lib::cloud::ReqwestTransport::new().unwrap();
     assert_eq!(
         facade
             .upload(
@@ -581,7 +581,7 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
 
 #[test]
 fn public_command_exports_keep_all_provider_codes_and_file_kind_json() {
-    use alldownloader_lib::cloud::{commands, CloudFileKind};
+    use versadown_lib::cloud::{commands, CloudFileKind};
     let store = MemoryCredentialStore::default();
     for provider in CloudProvider::ALL {
         let capability =
@@ -612,7 +612,7 @@ fn public_command_exports_keep_all_provider_codes_and_file_kind_json() {
 
 #[test]
 fn native_capability_drivers_work_in_a_consumer_without_a_tauri_host() {
-    use alldownloader_lib::cloud::{CloudError, ProviderRegistry};
+    use versadown_lib::cloud::{CloudError, ProviderRegistry};
     struct NoNetwork;
     impl CloudHttpTransport for NoNetwork {
         fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
@@ -648,7 +648,7 @@ fn native_capability_drivers_work_in_a_consumer_without_a_tauri_host() {
 
 #[test]
 fn native_password_auth_outcome_is_usable_without_a_tauri_host() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         driver::NativeLoginOutcome, set_browser_password_login_preferred, ProviderRegistry,
     };
     let store = MemoryCredentialStore::default();
@@ -668,7 +668,7 @@ fn native_password_auth_outcome_is_usable_without_a_tauri_host() {
 
 #[test]
 fn browser_account_replacement_fails_closed_and_attempts_all_owner_cleanup() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         baidu_browser_profile_username, select_password_credential_account,
         set_baidu_browser_profile_username,
     };
@@ -720,7 +720,7 @@ fn browser_account_replacement_fails_closed_and_attempts_all_owner_cleanup() {
 
 #[test]
 fn saved_credential_metadata_only_exists_for_catalog_direct_password_providers() {
-    use alldownloader_lib::cloud::{saved_cloud_credential_info, ProviderRegistry};
+    use versadown_lib::cloud::{saved_cloud_credential_info, ProviderRegistry};
     let store = MemoryCredentialStore::default();
     for descriptor in ProviderRegistry::global().catalog() {
         if descriptor.authorization.password_login_mode == PasswordLoginMode::RustDirect {
@@ -749,7 +749,7 @@ fn saved_credential_metadata_only_exists_for_catalog_direct_password_providers()
 
 #[test]
 fn registry_catalog_is_complete_unique_and_routes_each_share() {
-    use alldownloader_lib::cloud::ProviderRegistry;
+    use versadown_lib::cloud::ProviderRegistry;
     use std::collections::HashSet;
     let registry = ProviderRegistry::global();
     let descriptors = registry.all();
@@ -818,7 +818,7 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
 
 #[test]
 fn registry_only_advertises_implemented_share_transfer_capabilities() {
-    use alldownloader_lib::cloud::ProviderRegistry;
+    use versadown_lib::cloud::ProviderRegistry;
     for (provider, supports_transfer) in [
         (CloudProvider::Quark, true),
         (CloudProvider::Baidu, true),
@@ -843,7 +843,7 @@ fn registry_only_advertises_implemented_share_transfer_capabilities() {
 
 #[test]
 fn registry_keeps_password_browser_hosts_https_and_provider_scoped() {
-    use alldownloader_lib::cloud::ProviderRegistry;
+    use versadown_lib::cloud::ProviderRegistry;
     let baidu = ProviderRegistry::global().get(CloudProvider::Baidu);
     assert!(baidu
         .accepts_password_login_url(&url::Url::parse("https://passport.baidu.com/login").unwrap()));

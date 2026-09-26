@@ -391,7 +391,7 @@ it('follows the pointer with a provider card preview and saves its calculated in
   const originalPointerEvent = window.PointerEvent;
   Object.defineProperty(window, 'PointerEvent', { configurable: true, value: TestPointerEvent });
   const originalElementFromPoint = document.elementFromPoint;
-  const storageKey = 'alldownloader.cloud-provider-card-order';
+  const storageKey = 'versadown.cloud-provider-card-order';
   window.localStorage.removeItem(storageKey);
   const client = createClient();
   client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0], cloudCatalog[1], cloudCatalog[2]]);

@@ -1,4 +1,4 @@
-use alldownloader_lib::{CloudConnector, MockConnector, Provider};
+use versadown_lib::{CloudConnector, MockConnector, Provider};
 
 #[test]
 fn mock_quark_account_lists_root_after_connection() {

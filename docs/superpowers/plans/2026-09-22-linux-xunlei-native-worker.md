@@ -254,7 +254,7 @@
 
 - [ ] **Step 1: Add an opt-in real runtime smoke test.**
 
-  Gate it behind `ALLDOWNLOADER_XUNLEI_LIVE_TEST=1`. It may discover and load the local runtime inside worker mode, prove fingerprint/symbol readiness, create no production task by default, and always release/shut down. Without the environment flag or runtime, it is skipped rather than failing CI.
+  Gate it behind `VERSADOWN_XUNLEI_LIVE_TEST=1`. It may discover and load the local runtime inside worker mode, prove fingerprint/symbol readiness, create no production task by default, and always release/shut down. Without the environment flag or runtime, it is skipped rather than failing CI.
 
 - [ ] **Step 2: Run all changed targeted Rust tests.**
 
@@ -264,7 +264,7 @@
 
 - [ ] **Step 3: Run the opt-in local SDK smoke test after its ABI gate is present.**
 
-  Run: `ALLDOWNLOADER_XUNLEI_LIVE_TEST=1 cargo test --manifest-path src-tauri/Cargo.toml xunlei_native_linux_worker::live_runtime -- --ignored --nocapture`
+  Run: `VERSADOWN_XUNLEI_LIVE_TEST=1 cargo test --manifest-path src-tauri/Cargo.toml xunlei_native_linux_worker::live_runtime -- --ignored --nocapture`
 
   Expected: PASS only when the installed SDK matches the recorded, verified fingerprint. A mismatch is reported as unavailable, not worked around.
 
@@ -272,11 +272,11 @@
 
   Run: `pnpm run build:linux:quick`
 
-  Expected: PASS and emit the runnable debug binary at `/home/deepin/codework/alldownloader/.worktrees/cross-platform-desktop/src-tauri/target/debug/alldownloader`. This is a quick/debug build, not a release build or package.
+  Expected: PASS and emit the runnable debug binary at `/home/deepin/codework/versadown/.worktrees/cross-platform-desktop/src-tauri/target/debug/versadown`. This is a quick/debug build, not a release build or package.
 
 - [ ] **Step 5: Hand off credential and SVIP validation.**
 
-  Give the user that exact binary path. They log in through AllDownloader's normal Xunlei flow so credentials enter its system keyring, then choose a user-authorized legal cloud file in a disposable output directory. With the user's explicit test-resource authorization, validate nonzero progress, pause, re-resolve-and-resume, cancel/cleanup, and that SVIP is displayed as confirmed only after the token, DCDN enablement, and DCDN/VIP byte growth evidence are all observed.
+  Give the user that exact binary path. They log in through VersaDown's normal Xunlei flow so credentials enter its system keyring, then choose a user-authorized legal cloud file in a disposable output directory. With the user's explicit test-resource authorization, validate nonzero progress, pause, re-resolve-and-resume, cancel/cleanup, and that SVIP is displayed as confirmed only after the token, DCDN enablement, and DCDN/VIP byte growth evidence are all observed.
 
 - [ ] **Step 6: Commit build/test wiring only if source changed.**
 

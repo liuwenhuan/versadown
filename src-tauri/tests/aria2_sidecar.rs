@@ -1,4 +1,4 @@
-use alldownloader_lib::aria2_binary_name;
+use versadown_lib::aria2_binary_name;
 use sha2::{Digest, Sha256};
 
 #[test]

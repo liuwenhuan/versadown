@@ -29,7 +29,7 @@ try {
         if ($owner -ne $AppProcessId) { return $true }
         $title = [System.Text.StringBuilder]::new(256)
         [void][ResizeMinimumProbe]::GetWindowText($windowHandle, $title, 256)
-        if ($title.ToString() -ne 'AllDownloader') { return $true }
+        if ($title.ToString() -ne 'VersaDown') { return $true }
         $info = New-Object ResizeMinimumProbe+MinMaxInfo
         $resultValue = [IntPtr]::Zero
         if ([ResizeMinimumProbe]::SendMessageTimeout($windowHandle, 0x24, [IntPtr]::Zero, [ref]$info, 2, 2000, [ref]$resultValue) -eq [IntPtr]::Zero) { return $true }

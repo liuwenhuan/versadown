@@ -197,7 +197,7 @@ Expected: PASS. No real password, Cookie, token or authorization URL appears in 
 
 Run: `npm run build` followed by `scripts/build-windows.ps1`
 
-Expected: both complete successfully and `artifacts/alldownloader.exe` is refreshed without producing an installer.
+Expected: both complete successfully and `artifacts/versadown.exe` is refreshed without producing an installer.
 
 - [ ] **Step 4: Manual WebView smoke test when a user is available**
 

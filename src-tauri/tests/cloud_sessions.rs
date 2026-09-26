@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     credential_key_is_supported, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
     CredentialStore, MemoryCredentialStore, PikPakClient, QuarkError, SystemCredentialStore,
 };
@@ -7,7 +7,7 @@ use std::sync::Mutex;
 // A session that leaves and returns to identical bytes still has a new lineage.
 #[test]
 fn snapshot_rotation_cannot_write_back_after_unversioned_account_round_trip() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
     };
     let supervisor = AuthSupervisor::new(|| 1000, || 30);
@@ -39,7 +39,7 @@ fn snapshot_rotation_cannot_write_back_after_unversioned_account_round_trip() {
 
 #[test]
 fn failed_transfer_does_not_commit_its_private_session_rotation() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
     };
     for message in ["share polling cancelled", "share polling timed out"] {
@@ -72,7 +72,7 @@ fn failed_transfer_does_not_commit_its_private_session_rotation() {
 
 #[test]
 fn ordinary_provider_failure_keeps_a_successfully_rotated_session() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
     };
     let supervisor = AuthSupervisor::new(|| 1000, || 30);
@@ -94,7 +94,7 @@ fn ordinary_provider_failure_keeps_a_successfully_rotated_session() {
 
 #[test]
 fn action_ticket_rotation_does_not_hide_a_failed_mutations_auth_recovery() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::AuthSupervisor, CloudProvider, SessionWorkKind,
     };
     let supervisor = AuthSupervisor::new(|| 1000, || 30);
@@ -166,7 +166,7 @@ fn legacy_pikpak_password_session_recovers_its_login_method() {
     let account = PikPakClient::new(&http, &store).account().unwrap();
     assert_eq!(
         account.auth_method,
-        alldownloader_lib::cloud::CloudAuthMethod::Password
+        versadown_lib::cloud::CloudAuthMethod::Password
     );
 }
 
@@ -193,7 +193,7 @@ struct Sequence(Mutex<(Vec<CloudHttpResponse>, Vec<CloudHttpRequest>)>);
 
 #[test]
 fn saved_password_recovery_reuses_the_provider_account_device() {
-    use alldownloader_lib::cloud::{CloudPasswordCredential, CloudProvider, ProviderRegistry};
+    use versadown_lib::cloud::{CloudPasswordCredential, CloudProvider, ProviderRegistry};
     let store = MemoryCredentialStore::default();
     store.save("pikpak", br#"{"access_token":"old","refresh_token":"old-refresh","expires_at":0,"device_id":"stable-account-device","user_id":"account"}"#).unwrap();
     let http = Sequence::new(&[
@@ -219,7 +219,7 @@ fn saved_password_recovery_reuses_the_provider_account_device() {
 
 #[test]
 fn browser_token_capture_preserves_a_known_absolute_expiry() {
-    use alldownloader_lib::cloud::commands::parse_web_tokens;
+    use versadown_lib::cloud::commands::parse_web_tokens;
     let session = parse_web_tokens(
         r#"{"access_token":"access","refresh_token":"refresh","expires_at":2000000000}"#,
     )
@@ -230,7 +230,7 @@ fn browser_token_capture_preserves_a_known_absolute_expiry() {
 #[test]
 fn risk_limited_refreshes_action_captcha_once_and_persists_it() {
     assert_eq!(
-        alldownloader_lib::cloud::pikpak_captcha_sign(
+        versadown_lib::cloud::pikpak_captcha_sign(
             "YNxT9w7GMdWvEOKa",
             "device",
             "1700000000000"
@@ -248,7 +248,7 @@ fn risk_limited_refreshes_action_captcha_once_and_persists_it() {
     assert_eq!(directory.items.len(), 1);
     assert_eq!(
         directory.items[0].id,
-        "__all_downloader_pikpak_recycle_bin__"
+        "__versa_down_pikpak_recycle_bin__"
     );
     let requests = &http.0.lock().unwrap().1;
     assert_eq!(requests.len(), 3);
@@ -454,7 +454,7 @@ fn pikpak_rejects_the_virtual_recycle_bin_as_a_source_before_network() {
     let store = MemoryCredentialStore::default();
     store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
     let client = PikPakClient::new(&NoNetwork, &store);
-    let recycle = "__all_downloader_pikpak_recycle_bin__";
+    let recycle = "__versa_down_pikpak_recycle_bin__";
 
     assert!(matches!(
         client.rename(recycle, "name"),
@@ -493,7 +493,7 @@ fn pikpak_root_includes_the_virtual_recycle_bin() {
     let directory = PikPakClient::new(&http, &store).list("0").unwrap();
 
     assert!(directory.items.iter().any(|file| {
-        file.id == "__all_downloader_pikpak_recycle_bin__"
+        file.id == "__versa_down_pikpak_recycle_bin__"
             && file.name == "回收站"
             && file.kind == "folder"
             && file.parent_id == "0"
@@ -510,15 +510,15 @@ fn pikpak_virtual_recycle_bin_lists_all_trashed_pages() {
     ]);
 
     let directory = PikPakClient::new(&http, &store)
-        .list("__all_downloader_pikpak_recycle_bin__")
+        .list("__versa_down_pikpak_recycle_bin__")
         .unwrap();
 
-    assert_eq!(directory.id, "__all_downloader_pikpak_recycle_bin__");
+    assert_eq!(directory.id, "__versa_down_pikpak_recycle_bin__");
     assert_eq!(directory.items.len(), 2);
     assert!(directory
         .items
         .iter()
-        .all(|file| { file.parent_id == "__all_downloader_pikpak_recycle_bin__" }));
+        .all(|file| { file.parent_id == "__versa_down_pikpak_recycle_bin__" }));
     let requests = &http.0.lock().unwrap().1;
     assert_eq!(requests.len(), 2);
     assert!(requests[0]
@@ -539,7 +539,7 @@ fn pikpak_rejects_the_virtual_recycle_bin_as_a_write_target() {
     let store = MemoryCredentialStore::default();
     store.save("pikpak", br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap"}"#).unwrap();
     let client = PikPakClient::new(&NoNetwork, &store);
-    let recycle = "__all_downloader_pikpak_recycle_bin__";
+    let recycle = "__versa_down_pikpak_recycle_bin__";
 
     assert!(matches!(
         client.mkdir(recycle, "new"),
@@ -683,7 +683,7 @@ fn pikpak_web_delete_challenge_stops_before_deletion_and_preserves_verification_
 
 #[test]
 fn pikpak_operation_verification_rejects_other_accounts_and_unsafe_destinations() {
-    use alldownloader_lib::cloud::allows_pikpak_operation_verification_url;
+    use versadown_lib::cloud::allows_pikpak_operation_verification_url;
     for url in [
         "http://user.mypikpak.com/check",
         "https://user.mypikpak.com.evil.test/check",
@@ -934,7 +934,7 @@ fn pikpak_lists_all_pages_and_rotates_expired_refresh_token() {
 
 #[test]
 fn cloud_enqueue_returns_real_task_and_records_engine_failure() {
-    use alldownloader_lib::{cloud::commands::enqueue_cloud_download, TaskStatus, TaskStore};
+    use versadown_lib::{cloud::commands::enqueue_cloud_download, TaskStatus, TaskStore};
     let store = TaskStore::open_in_memory().unwrap();
     let task = enqueue_cloud_download(
         &store,
@@ -963,7 +963,7 @@ fn cloud_enqueue_returns_real_task_and_records_engine_failure() {
 
 #[test]
 fn web_tokens_are_required_and_password_fields_are_discarded() {
-    use alldownloader_lib::cloud::commands::parse_web_tokens;
+    use versadown_lib::cloud::commands::parse_web_tokens;
     let s = parse_web_tokens(
         r#"{"access_token":"access","refresh_token":"refresh","password":"must-not-persist"}"#,
     )
@@ -981,7 +981,7 @@ fn web_tokens_are_required_and_password_fields_are_discarded() {
 
 #[test]
 fn web_refresh_keeps_public_web_client_instead_of_android_client() {
-    use alldownloader_lib::cloud::commands::parse_web_tokens;
+    use versadown_lib::cloud::commands::parse_web_tokens;
     let s = parse_web_tokens(
         r#"{"access_token":"web-access","refresh_token":"web-refresh","client_id":"web-client"}"#,
     )
@@ -991,10 +991,10 @@ fn web_refresh_keeps_public_web_client_instead_of_android_client() {
 
 #[test]
 fn anonymous_web_cookie_keeps_authorization_pending() {
-    use alldownloader_lib::cloud::commands::authorization_result;
+    use versadown_lib::cloud::commands::authorization_result;
     let http = Sequence::new(&[r#"{"status":401,"code":31001}"#]);
     let error = authorization_result(
-        alldownloader_lib::cloud::QuarkClient::new("anonymous=1".into(), &http).account(),
+        versadown_lib::cloud::QuarkClient::new("anonymous=1".into(), &http).account(),
     )
     .err()
     .unwrap();
@@ -1025,6 +1025,6 @@ fn pikpak_copy_uses_the_native_batch_copy_endpoint_and_destination() {
 
 #[test]
 fn cloud_module_is_available_without_a_second_aria2_engine() {
-    let provider = alldownloader_lib::cloud::CloudProvider::Quark;
+    let provider = versadown_lib::cloud::CloudProvider::Quark;
     assert_eq!(provider.key(), "quark");
 }

@@ -46,7 +46,7 @@
 - [ ] **Step 1: Write the failing contract test**
 
 ~~~
-use alldownloader_lib::cloud::{parse_stable_cloud_source, provider_capabilities, CloudProvider};
+use versadown_lib::cloud::{parse_stable_cloud_source, provider_capabilities, CloudProvider};
 
 #[test]
 fn new_providers_have_stable_sources_and_declared_login_methods() {
@@ -378,7 +378,7 @@ Expected: all pass and no output contains credentials or signed URLs.
 
 Run: pnpm tauri build --no-bundle
 
-Expected: src-tauri/target/release/alldownloader.exe exists; no MSI or NSIS file is produced.
+Expected: src-tauri/target/release/versadown.exe exists; no MSI or NSIS file is produced.
 
 - [ ] **Step 4: Review and commit exact intended files**
 

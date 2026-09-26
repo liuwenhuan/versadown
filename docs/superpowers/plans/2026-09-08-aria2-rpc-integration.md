@@ -584,7 +584,7 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
 git diff --check
 ```
 
-Expected: all tests pass; real loopback transfer/pause/resume/session shutdown passes; EXE/MSI/NSIS exist; hidden UI smoke leaves no AllDownloader or owned aria2 process.
+Expected: all tests pass; real loopback transfer/pause/resume/session shutdown passes; EXE/MSI/NSIS exist; hidden UI smoke leaves no VersaDown or owned aria2 process.
 
 - [ ] **Step 5: Commit live verification**
 

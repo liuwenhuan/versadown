@@ -159,7 +159,7 @@ Run: `git diff --check` and the Task 1–3 commands.
 
 Run: `scripts/build-windows.ps1`
 
-Expected: publishes `artifacts/alldownloader.exe` without creating an installer.
+Expected: publishes `artifacts/versadown.exe` without creating an installer.
 
 - [x] **Step 3: Perform safe local smoke checks**
 

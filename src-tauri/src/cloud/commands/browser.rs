@@ -31,12 +31,12 @@ pub(crate) fn password_webview_data_directory(
     app: &AppHandle,
     provider: CloudProvider,
 ) -> Result<PathBuf, QuarkError> {
-    let root = if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+    let root = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
         .ok()
         .as_deref()
         == Some("1")
     {
-        std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR")
+        std::env::var_os("VERSADOWN_TEST_DATA_DIR")
             .map(PathBuf::from)
             .ok_or(QuarkError::Storage)?
     } else {
@@ -125,7 +125,7 @@ pub(crate) fn tianyi_browser_request_script(
     Ok(format!(
         r#"(() => {{
           if (location.origin !== {origin}) return {{done:false}};
-          const key = '__alldownloader_tianyi_request';
+          const key = '__versadown_tianyi_request';
           const current = window[key];
           if (current?.done) {{
             delete window[key];
@@ -238,12 +238,12 @@ pub(crate) fn authorization_profile_directory(
     if browser_login::supports_browser_password(provider) {
         return password_webview_data_directory(app, provider);
     }
-    let root = if std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+    let root = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
         .ok()
         .as_deref()
         == Some("1")
     {
-        std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR")
+        std::env::var_os("VERSADOWN_TEST_DATA_DIR")
             .map(PathBuf::from)
             .ok_or(CloudError::Storage)?
     } else {
@@ -388,7 +388,7 @@ fn capture_persistent_authorization(
 /// across concurrent downloads: later readers see the newly saved session.
 pub(crate) fn browser_auth_diagnostic_script(stage: &str, reason: &str) -> String {
     let payload = serde_json::json!({ "stage": stage, "reason": reason });
-    format!("window.__alldownloaderAuthDiagnostic = {payload};")
+    format!("window.__versadownAuthDiagnostic = {payload};")
 }
 
 pub(crate) fn validate_tianyi_browser_request(
@@ -433,7 +433,7 @@ pub(crate) fn browser_password_login(
     let script = Arc::new(browser_login::password_script(
         provider, username, password,
     )?);
-    let background_ui_test = std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST")
+    let background_ui_test = std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
         .ok()
         .as_deref()
         == Some("1");
@@ -441,7 +441,7 @@ pub(crate) fn browser_password_login(
     // render target when a provider's own verification SDK rejects hidden
     // documents. This is test-only and never changes production windows.
     let background_ui_test_visible = background_ui_test
-        && std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST_VISIBLE")
+        && std::env::var("VERSADOWN_BACKGROUND_UI_TEST_VISIBLE")
             .ok()
             .as_deref()
             == Some("1");
@@ -619,7 +619,7 @@ pub(crate) fn browser_password_login(
                     let notice = format!("自动登录 · {validation_stage}：{reason}");
                     if notice != last_notice {
                         let _ = window.set_title(&notice);
-                        if std::env::var_os("ALLDOWNLOADER_BACKGROUND_UI_TEST").is_some() {
+                        if std::env::var_os("VERSADOWN_BACKGROUND_UI_TEST").is_some() {
                             let _ = window
                                 .eval(&browser_auth_diagnostic_script(validation_stage, reason));
                         }

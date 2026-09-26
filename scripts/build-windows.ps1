@@ -32,7 +32,7 @@ $publishedDir = if ($Mode -eq 'Quick') {
 } else {
     Join-Path $projectRoot 'artifacts'
 }
-$publishedBinary = Join-Path $publishedDir 'alldownloader.exe'
+$publishedBinary = Join-Path $publishedDir 'versadown.exe'
 $publishedSidecarDir = Join-Path $publishedDir 'binaries'
 $sidecarName = 'aria2-next-x86_64-pc-windows-msvc.exe'
 $sidecarSource = Join-Path $projectRoot "src-tauri\binaries\$sidecarName"
@@ -306,7 +306,7 @@ function Assert-PublishedBinaryAvailable {
         [Parameter(Mandatory)]
         [string]$PublishedBinary,
 
-        [object[]]$Processes = @(Get-Process -Name 'alldownloader' -ErrorAction SilentlyContinue)
+        [object[]]$Processes = @(Get-Process -Name 'versadown' -ErrorAction SilentlyContinue)
     )
 
     $destination = [System.IO.Path]::GetFullPath($PublishedBinary)
@@ -373,7 +373,7 @@ if ($DryRun) {
     Write-Host "Published executable: $publishedBinary"
     if ($Mode -eq 'Quick') {
         Write-Host 'Frontend: rebuild only when its source signature changes.'
-        Write-Host 'Rust: recompile the alldownloader package when its source signature changes.'
+        Write-Host 'Rust: recompile the versadown package when its source signature changes.'
     } elseif ($Installer) {
         Write-Host 'Frontend: Tauri executes the production beforeBuildCommand.'
     } else {
@@ -382,7 +382,7 @@ if ($DryRun) {
     exit 0
 }
 
-$buildTools = Get-AllDownloaderBuildTools -ProjectRoot $projectRoot
+$buildTools = Get-VersaDownBuildTools -ProjectRoot $projectRoot
 $pnpmCommand = $buildTools.Pnpm
 $cargoCommand = $buildTools.Cargo
 $env:Path = "$(Split-Path -Parent $pnpmCommand);$(Split-Path -Parent $cargoCommand);$env:Path"
@@ -414,5 +414,5 @@ if ($Installer) {
     }
 }
 
-$builtBinary = Join-Path $targetRoot "$profile\alldownloader.exe"
+$builtBinary = Join-Path $targetRoot "$profile\versadown.exe"
 Publish-BuildOutput -BuiltBinary $builtBinary -PublishedBinary $publishedBinary -SidecarSource $sidecarSource -PublishedSidecar $publishedSidecar -RetiredXunleiHelper $retiredXunleiHelper -LegacyPublishedSidecar $legacyPublishedSidecar

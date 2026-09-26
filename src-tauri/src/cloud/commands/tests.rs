@@ -1784,7 +1784,7 @@ fn browser_auth_diagnostic_contains_only_safe_status_fields() {
         "网盘请求失败：天翼云盘拒绝请求（错误码 InvalidDeviceStatus）",
     );
 
-    assert!(script.contains("__alldownloaderAuthDiagnostic"));
+    assert!(script.contains("__versadownAuthDiagnostic"));
     assert!(script.contains("账号信息校验"));
     assert!(script.contains("InvalidDeviceStatus"));
     assert!(!script.contains("username"));
@@ -1878,7 +1878,7 @@ fn tianyi_browser_context_capture_observes_fetch_as_well_as_xhr() {
     assert!(script.contains("XMLHttpRequest.prototype"));
     assert!(script.contains("window.fetch"));
     assert!(script.contains("headers.get('browser-id')"));
-    assert!(script.contains("window.__alldownloaderTianyiContext"));
+    assert!(script.contains("window.__versadownTianyiContext"));
 }
 
 #[test]

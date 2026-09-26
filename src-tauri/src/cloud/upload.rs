@@ -53,7 +53,7 @@ pub(crate) fn multipart_file(
     {
         return Err(QuarkError::InvalidInput("文件名无效".into()));
     }
-    let boundary = format!("----AllDownloader{}", uuid::Uuid::new_v4().simple());
+    let boundary = format!("----VersaDown{}", uuid::Uuid::new_v4().simple());
     let mut body = Vec::new();
     for (name, value) in fields {
         body.extend_from_slice(

@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     load_password_credential, remove_password_credential, run_with_session_recovery,
     save_password_credential, select_password_credential_account, CloudPasswordCredential,
     CloudProvider, CredentialStore, MemoryCredentialStore, QuarkError, SessionWorkKind,
@@ -10,7 +10,7 @@ use std::{
 
 #[tokio::test]
 async fn authorization_recovery_discovers_only_durable_matching_account_failures() {
-    use alldownloader_lib::{NewTask, TaskStatus, TaskStore};
+    use versadown_lib::{NewTask, TaskStatus, TaskStore};
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("tasks.db");
     let store = TaskStore::open_path(&path).unwrap();
@@ -48,7 +48,7 @@ async fn authorization_recovery_discovers_only_durable_matching_account_failures
     drop(store); // No CloudState or pending set survives this boundary.
     let store = std::sync::Arc::new(TaskStore::open_path(&path).unwrap());
     let engine = std::sync::Arc::new(AuthorizationRetryEngine::default());
-    let service = alldownloader_lib::DownloadService::new(engine.clone(), store.clone());
+    let service = versadown_lib::DownloadService::new(engine.clone(), store.clone());
     let (tasks, leaves) = store
         .reauthorized_cloud_downloads(CloudProvider::Quark, "alice")
         .unwrap();
@@ -57,12 +57,12 @@ async fn authorization_recovery_discovers_only_durable_matching_account_failures
     for task in tasks {
         assert!(eligible.contains(&task.id));
         for attempt in 0..2 {
-            let resolved = alldownloader_lib::cloud::ResolvedCloudDownload {
+            let resolved = versadown_lib::cloud::ResolvedCloudDownload {
                 url: "https://download.example/file".into(),
                 name: "file.txt".into(),
                 headers: Default::default(),
             };
-            let submitted = alldownloader_lib::cloud::share::resubmit_current_cloud_download(
+            let submitted = versadown_lib::cloud::share::resubmit_current_cloud_download(
                 &service,
                 &task,
                 resolved,
@@ -101,7 +101,7 @@ struct AuthorizationRetryEngine(AtomicUsize);
 
 #[test]
 fn authorization_watchdog_recovers_completion_after_window_closes_but_not_after_new_attempt() {
-    use alldownloader_lib::cloud::{commands::CloudState, CloudAccount, CloudAuthMethod};
+    use versadown_lib::cloud::{commands::CloudState, CloudAccount, CloudAuthMethod};
     let root = tempfile::tempdir().unwrap();
     let state = CloudState::new(root.path().to_owned()).unwrap();
     state.store.save("quark", b"credential-secret").unwrap();
@@ -150,7 +150,7 @@ fn authorization_watchdog_recovers_completion_after_window_closes_but_not_after_
 
 #[test]
 fn authorization_event_requires_persisted_credentials_and_committed_supervisor() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         auth_supervisor::AuthSupervisor, commands::authorization_completion_event, CloudAccount,
         CloudAuthMethod,
     };
@@ -188,27 +188,27 @@ fn authorization_event_requires_persisted_credentials_and_committed_supervisor()
     assert!(authorization_completion_event(&supervisor, &store, &other).is_err());
 }
 #[async_trait::async_trait]
-impl alldownloader_lib::aria2::Aria2Api for AuthorizationRetryEngine {
+impl versadown_lib::aria2::Aria2Api for AuthorizationRetryEngine {
     async fn add_uri(
         &self,
         _: Vec<String>,
-        _: alldownloader_lib::aria2::Aria2Options,
-    ) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        _: versadown_lib::aria2::Aria2Options,
+    ) -> Result<String, versadown_lib::aria2::Aria2Error> {
         Ok(format!("gid-{}", self.0.fetch_add(1, Ordering::SeqCst)))
     }
     async fn add_torrent(
         &self,
         _: String,
         _: Vec<String>,
-        _: alldownloader_lib::aria2::Aria2Options,
-    ) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        _: versadown_lib::aria2::Aria2Options,
+    ) -> Result<String, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
     async fn tell_status(
         &self,
         gid: &str,
-    ) -> Result<alldownloader_lib::aria2::Aria2Status, alldownloader_lib::aria2::Aria2Error> {
-        Ok(alldownloader_lib::aria2::Aria2Status {
+    ) -> Result<versadown_lib::aria2::Aria2Status, versadown_lib::aria2::Aria2Error> {
+        Ok(versadown_lib::aria2::Aria2Status {
             gid: gid.into(),
             status: "active".into(),
             total_length: "10".into(),
@@ -225,7 +225,7 @@ impl alldownloader_lib::aria2::Aria2Api for AuthorizationRetryEngine {
     }
     async fn tell_active(
         &self,
-    ) -> Result<Vec<alldownloader_lib::aria2::Aria2Status>, alldownloader_lib::aria2::Aria2Error>
+    ) -> Result<Vec<versadown_lib::aria2::Aria2Status>, versadown_lib::aria2::Aria2Error>
     {
         unreachable!()
     }
@@ -233,7 +233,7 @@ impl alldownloader_lib::aria2::Aria2Api for AuthorizationRetryEngine {
         &self,
         _: i64,
         _: u32,
-    ) -> Result<Vec<alldownloader_lib::aria2::Aria2Status>, alldownloader_lib::aria2::Aria2Error>
+    ) -> Result<Vec<versadown_lib::aria2::Aria2Status>, versadown_lib::aria2::Aria2Error>
     {
         unreachable!()
     }
@@ -241,61 +241,61 @@ impl alldownloader_lib::aria2::Aria2Api for AuthorizationRetryEngine {
         &self,
         _: i64,
         _: u32,
-    ) -> Result<Vec<alldownloader_lib::aria2::Aria2Status>, alldownloader_lib::aria2::Aria2Error>
+    ) -> Result<Vec<versadown_lib::aria2::Aria2Status>, versadown_lib::aria2::Aria2Error>
     {
         unreachable!()
     }
     async fn get_global_stat(
         &self,
-    ) -> Result<alldownloader_lib::aria2::Aria2GlobalStat, alldownloader_lib::aria2::Aria2Error>
+    ) -> Result<versadown_lib::aria2::Aria2GlobalStat, versadown_lib::aria2::Aria2Error>
     {
         unreachable!()
     }
     async fn multicall(
         &self,
-        _: Vec<alldownloader_lib::aria2::RpcCall>,
+        _: Vec<versadown_lib::aria2::RpcCall>,
     ) -> Result<
-        Vec<Result<serde_json::Value, alldownloader_lib::aria2::RpcFault>>,
-        alldownloader_lib::aria2::Aria2Error,
+        Vec<Result<serde_json::Value, versadown_lib::aria2::RpcFault>>,
+        versadown_lib::aria2::Aria2Error,
     > {
         unreachable!()
     }
-    async fn pause(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+    async fn pause(&self, _: &str) -> Result<String, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
-    async fn unpause(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+    async fn unpause(&self, _: &str) -> Result<String, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
-    async fn remove(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+    async fn remove(&self, _: &str) -> Result<String, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
-    async fn force_remove(&self, _: &str) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+    async fn force_remove(&self, _: &str) -> Result<String, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
     async fn change_option(
         &self,
         _: &str,
-        _: alldownloader_lib::aria2::Aria2Options,
-    ) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+        _: versadown_lib::aria2::Aria2Options,
+    ) -> Result<String, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
     async fn get_option(
         &self,
         _: &str,
-    ) -> Result<alldownloader_lib::aria2::Aria2Options, alldownloader_lib::aria2::Aria2Error> {
+    ) -> Result<versadown_lib::aria2::Aria2Options, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
-    async fn save_session(&self) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+    async fn save_session(&self) -> Result<String, versadown_lib::aria2::Aria2Error> {
         Ok("OK".into())
     }
-    async fn shutdown(&self) -> Result<String, alldownloader_lib::aria2::Aria2Error> {
+    async fn shutdown(&self) -> Result<String, versadown_lib::aria2::Aria2Error> {
         unreachable!()
     }
 }
 
 #[test]
 fn saved_credential_response_never_serializes_the_saved_password() {
-    use alldownloader_lib::cloud::saved_cloud_credential_info;
+    use versadown_lib::cloud::saved_cloud_credential_info;
     let store = MemoryCredentialStore::default();
     save_password_credential(
         &store,
@@ -314,7 +314,7 @@ fn saved_credential_response_never_serializes_the_saved_password() {
 
 #[test]
 fn replacing_browser_account_clears_previous_session_password_and_profile_owner() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         baidu_browser_profile_username, set_baidu_browser_profile_username,
     };
     let store = MemoryCredentialStore::default();
@@ -335,7 +335,7 @@ fn replacing_browser_account_clears_previous_session_password_and_profile_owner(
 
 #[test]
 fn saved_password_handle_is_bound_to_username_and_rejects_ambiguous_inputs() {
-    use alldownloader_lib::cloud::{resolve_password_login, PasswordLoginRequest};
+    use versadown_lib::cloud::{resolve_password_login, PasswordLoginRequest};
     let store = MemoryCredentialStore::default();
     save_password_credential(
         &store,
@@ -423,7 +423,7 @@ fn replacement_removes_old_session_even_when_password_persistence_fails() {
 
 #[test]
 fn password_replacement_isolates_the_old_session_but_keeps_validated_login() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         baidu_browser_profile_username, prepare_password_account_login, save_password_login_draft,
         saved_cloud_credential_info, set_baidu_browser_profile_username,
     };
@@ -488,7 +488,7 @@ fn unreadable_old_credentials_abort_persistence_and_clear_the_session() {
 
 #[test]
 fn replacing_pikpak_keeps_credentials_without_requesting_an_unsupported_browser_profile() {
-    use alldownloader_lib::cloud::prepare_password_account_login;
+    use versadown_lib::cloud::prepare_password_account_login;
     let store = MemoryCredentialStore::default();
     save_password_credential(
         &store,
@@ -515,7 +515,7 @@ struct LoadRecordingStore {
 }
 
 fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         prepare_password_account_login, reset_password_profile_if_required, SystemCredentialStore,
     };
     let root = tempfile::tempdir().unwrap();
@@ -566,7 +566,7 @@ fn failed_password_profile_reset_survives_restart_for_baidu() {
 
 #[test]
 fn failed_profile_marker_removal_keeps_reset_mandatory_and_blocks_login() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         prepare_password_account_login, reset_password_profile_if_required,
     };
     struct RemovalFailure {
@@ -597,7 +597,7 @@ fn failed_profile_marker_removal_keeps_reset_mandatory_and_blocks_login() {
 
 #[test]
 fn failed_profile_marker_write_preserves_old_owner_and_never_starts_reset() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         prepare_password_account_login, reset_password_profile_if_required,
     };
     struct MarkerWriteFailure {

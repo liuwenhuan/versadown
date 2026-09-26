@@ -35,7 +35,7 @@ if ($functionsStart -lt 0 -or $functionsEnd -lt 0) {
 }
 Invoke-Expression $scriptSource.Substring($functionsStart, $functionsEnd - $functionsStart)
 
-$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("alldownloader-build-test-" + [guid]::NewGuid())
+$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("versadown-build-test-" + [guid]::NewGuid())
 try {
     foreach ($relativePath in @(
         'index.html',
@@ -71,9 +71,9 @@ try {
 
     $blocked = $false
     try {
-        Assert-PublishedBinaryAvailable -PublishedBinary (Join-Path $testRoot 'artifacts/quick/alldownloader.exe') -Processes @([pscustomobject]@{
+        Assert-PublishedBinaryAvailable -PublishedBinary (Join-Path $testRoot 'artifacts/quick/versadown.exe') -Processes @([pscustomobject]@{
             Id = 77
-            Path = (Join-Path $testRoot 'artifacts/quick/alldownloader.exe')
+            Path = (Join-Path $testRoot 'artifacts/quick/versadown.exe')
         })
     } catch {
         $blocked = $_.Exception.Message -match 'PID 77'

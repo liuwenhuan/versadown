@@ -2,11 +2,11 @@
 //! provider drivers.
 //!
 //! Every mutation is contained below one freshly generated
-//! `AllDownloader-E2E-*` directory. Existing user items are never selected or
+//! `VersaDown-E2E-*` directory. Existing user items are never selected or
 //! mutated. Credential bytes, cookies and signed download URLs are never
 //! printed.
 
-use alldownloader_lib::{
+use versadown_lib::{
     aria2::{Aria2LaunchConfig, Aria2Process},
     cloud::{
         commands::{parse_stable_cloud_source, CloudState},
@@ -313,9 +313,9 @@ fn error_kind(error: &CloudError) -> &'static str {
 }
 
 fn require_live_authorization() -> LiveResult<()> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Err(failure(
-            "live cloud regression requires ALLDOWNLOADER_LIVE_CLOUD=1",
+            "live cloud regression requires VERSADOWN_LIVE_CLOUD=1",
         ));
     }
     Ok(())
@@ -325,7 +325,7 @@ fn session_root() -> LiveResult<PathBuf> {
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
     Ok(PathBuf::from(app_data)
-        .join("com.alldownloader.desktop")
+        .join("com.versadown.desktop")
         .join("cloud-sessions"))
 }
 
@@ -335,7 +335,7 @@ fn test_root_name(provider: CloudProvider) -> String {
         .unwrap_or_default()
         .as_millis();
     format!(
-        "AllDownloader-E2E-{}-{millis}-{}",
+        "VersaDown-E2E-{}-{millis}-{}",
         provider.key(),
         uuid::Uuid::new_v4().simple()
     )
@@ -465,7 +465,7 @@ fn cleanup_abandoned_uc_e2e_shares(state: &CloudState, http: &LiveTransport) -> 
         })?;
     let ids = shares
         .into_iter()
-        .filter(|share| share.name.starts_with("AllDownloader-E2E-uc-"))
+        .filter(|share| share.name.starts_with("VersaDown-E2E-uc-"))
         .map(|share| share.id)
         .collect::<Vec<_>>();
     for (index, share_id) in ids.into_iter().enumerate() {
@@ -631,10 +631,10 @@ fn write_local_fixture(
     provider: CloudProvider,
 ) -> LiveResult<(tempfile::TempDir, PathBuf, Vec<u8>, PathBuf, Vec<u8>)> {
     let root = tempfile::Builder::new()
-        .prefix(&format!("AllDownloader-E2E-{}-", provider.key()))
+        .prefix(&format!("VersaDown-E2E-{}-", provider.key()))
         .tempdir()?;
     let single_bytes = format!(
-        "AllDownloader {} single-file live fixture\n",
+        "VersaDown {} single-file live fixture\n",
         provider.key()
     )
     .into_bytes();
@@ -643,7 +643,7 @@ fn write_local_fixture(
     let nested_dir = root.path().join("upload-directory").join("child");
     fs::create_dir_all(&nested_dir)?;
     let nested_bytes =
-        format!("AllDownloader {} nested live fixture\n", provider.key()).into_bytes();
+        format!("VersaDown {} nested live fixture\n", provider.key()).into_bytes();
     let nested = nested_dir.join("nested.txt");
     fs::write(&nested, &nested_bytes)?;
     Ok((root, single, single_bytes, nested, nested_bytes))
@@ -983,9 +983,9 @@ fn run_uc_folder_matrix() -> LiveResult<()> {
 
 fn run_uc_requested_upload() -> LiveResult<()> {
     require_live_authorization()?;
-    let path = std::env::var_os("ALLDOWNLOADER_LIVE_UC_UPLOAD_PATH")
+    let path = std::env::var_os("VERSADOWN_LIVE_UC_UPLOAD_PATH")
         .map(PathBuf::from)
-        .ok_or_else(|| failure("ALLDOWNLOADER_LIVE_UC_UPLOAD_PATH is required"))?;
+        .ok_or_else(|| failure("VERSADOWN_LIVE_UC_UPLOAD_PATH is required"))?;
     let metadata = fs::metadata(&path)?;
     let name = path
         .file_name()
@@ -1193,13 +1193,13 @@ fn run_uc_personal_share_lifecycle() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
 fn live_aliyun_complete_crud_and_transfer_matrix() -> LiveResult<()> {
     run_provider(CloudProvider::Aliyun)
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session; read-only personal-share listing"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's authorized Aliyun session; read-only personal-share listing"]
 fn live_aliyun_personal_share_list() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Aliyun;
@@ -1220,7 +1220,7 @@ fn live_aliyun_personal_share_list() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing file in the current user's Aliyun root directory; read-only download URL resolution"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and an existing file in the current user's Aliyun root directory; read-only download URL resolution"]
 fn live_aliyun_existing_file_download_resolution() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Aliyun;
@@ -1249,7 +1249,7 @@ fn live_aliyun_existing_file_download_resolution() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing file in the current user's Aliyun root directory; creates then cancels one temporary personal share"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and an existing file in the current user's Aliyun root directory; creates then cancels one temporary personal share"]
 fn live_aliyun_existing_file_personal_share_lifecycle() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Aliyun;
@@ -1269,7 +1269,7 @@ fn live_aliyun_existing_file_personal_share_lifecycle() -> LiveResult<()> {
         .find(|item| item.kind == CloudFileKind::File)
         .ok_or_else(|| failure("Aliyun root has no file available for temporary share testing"))?;
     let share_name = format!(
-        "AllDownloader temporary verification {}",
+        "VersaDown temporary verification {}",
         uuid::Uuid::new_v4()
     );
     let mut created_share_id = None;
@@ -1350,7 +1350,7 @@ fn live_aliyun_existing_file_personal_share_lifecycle() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's authorized Aliyun session"]
 fn live_aliyun_trash_already_absent_file_is_idempotent() -> LiveResult<()> {
     require_live_authorization()?;
     let state = CloudState::new(session_root()?)?;
@@ -1371,13 +1371,13 @@ fn live_aliyun_trash_already_absent_file_is_idempotent() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized UC session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's authorized UC session"]
 fn live_uc_complete_crud_and_transfer_matrix() -> LiveResult<()> {
     run_provider(CloudProvider::Uc)
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing file in the current user's UC root directory; read-only direct-download verification"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and an existing file in the current user's UC root directory; read-only direct-download verification"]
 fn live_uc_existing_file_download() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
@@ -1434,7 +1434,7 @@ fn live_uc_existing_file_download() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; read-only check that pending UC downloads are bound to the currently authorized account"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1; read-only check that pending UC downloads are bound to the currently authorized account"]
 fn live_uc_pending_download_account_binding() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
@@ -1467,7 +1467,7 @@ fn live_uc_pending_download_account_binding() -> LiveResult<()> {
     let app_data = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| failure("APPDATA is required for the task store"))?
-        .join("com.alldownloader.desktop");
+        .join("com.versadown.desktop");
     let connection = Connection::open_with_flags(
         app_data.join("tasks.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1498,7 +1498,7 @@ fn live_uc_pending_download_account_binding() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and a pending UC task; compares only redacted account/session relationships"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and a pending UC task; compares only redacted account/session relationships"]
 fn live_uc_current_session_and_pending_task_owners_are_consistent() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
@@ -1532,7 +1532,7 @@ fn live_uc_current_session_and_pending_task_owners_are_consistent() -> LiveResul
     let app_data = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| failure("APPDATA is required for the task store"))?
-        .join("com.alldownloader.desktop");
+        .join("com.versadown.desktop");
     let connection = Connection::open_with_flags(
         app_data.join("tasks.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1587,7 +1587,7 @@ fn live_uc_current_session_and_pending_task_owners_are_consistent() -> LiveResul
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; reconciles only the saved UC account metadata with the current authenticated browser session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1; reconciles only the saved UC account metadata with the current authenticated browser session"]
 fn live_uc_reconciles_saved_account_with_the_current_browser_user() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
@@ -1643,7 +1643,7 @@ fn live_uc_reconciles_saved_account_with_the_current_browser_user() -> LiveResul
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1; read-only check that UC exposes a stable member identity"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1; read-only check that UC exposes a stable member identity"]
 fn live_uc_member_identity_is_not_a_rotating_browser_marker() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
@@ -1681,14 +1681,14 @@ fn live_uc_member_identity_is_not_a_rotating_browser_marker() -> LiveResult<()> 
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and a legacy pending UC task; read-only classification before recovery"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and a legacy pending UC task; read-only classification before recovery"]
 fn live_uc_legacy_pending_download_sources_are_classified_by_current_session() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
     let app_data = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| failure("APPDATA is required for the task store"))?
-        .join("com.alldownloader.desktop");
+        .join("com.versadown.desktop");
     let connection = Connection::open_with_flags(
         app_data.join("tasks.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1757,12 +1757,12 @@ fn live_uc_legacy_pending_download_sources_are_classified_by_current_session() -
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and ALLDOWNLOADER_LIVE_UC_FILE_NAME; read-only comparison of the current root object and a paused task source"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and VERSADOWN_LIVE_UC_FILE_NAME; read-only comparison of the current root object and a paused task source"]
 fn live_uc_named_root_file_and_pending_task_identity() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
-    let file_name = std::env::var("ALLDOWNLOADER_LIVE_UC_FILE_NAME")
-        .map_err(|_| failure("ALLDOWNLOADER_LIVE_UC_FILE_NAME is required"))?;
+    let file_name = std::env::var("VERSADOWN_LIVE_UC_FILE_NAME")
+        .map_err(|_| failure("VERSADOWN_LIVE_UC_FILE_NAME is required"))?;
     let state = CloudState::new(session_root()?).map_err(|error| {
         failure(format!(
             "UC state initialization failed: {}",
@@ -1792,7 +1792,7 @@ fn live_uc_named_root_file_and_pending_task_identity() -> LiveResult<()> {
     let app_data = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| failure("APPDATA is required for the task store"))?
-        .join("com.alldownloader.desktop");
+        .join("com.versadown.desktop");
     let connection = Connection::open_with_flags(
         app_data.join("tasks.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -1847,7 +1847,7 @@ fn live_uc_named_root_file_and_pending_task_identity() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and an existing small UC file; verifies the production aria2 handoff without retaining a signed URL or file"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and an existing small UC file; verifies the production aria2 handoff without retaining a signed URL or file"]
 fn live_uc_existing_file_aria2_download() -> LiveResult<()> {
     require_live_authorization()?;
     let provider = CloudProvider::Uc;
@@ -1990,19 +1990,19 @@ fn live_uc_folder_operations_matrix() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1, ALLDOWNLOADER_LIVE_UC_UPLOAD_PATH and an authorized UC session"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1, VERSADOWN_LIVE_UC_UPLOAD_PATH and an authorized UC session"]
 fn live_uc_requested_file_upload() -> LiveResult<()> {
     run_uc_requested_upload()
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_CLOUD=1 and the current user's authorized UC session; creates, cancels, and cleans up one isolated personal share"]
+#[ignore = "requires VERSADOWN_LIVE_CLOUD=1 and the current user's authorized UC session; creates, cancels, and cleans up one isolated personal share"]
 fn live_uc_personal_share_lifecycle() -> LiveResult<()> {
     run_uc_personal_share_lifecycle()
 }
 
 #[test]
-#[ignore = "read-only cleanup audit for AllDownloader-E2E Aliyun and UC test roots"]
+#[ignore = "read-only cleanup audit for VersaDown-E2E Aliyun and UC test roots"]
 fn live_no_aliyun_or_uc_e2e_artifacts_remain() -> LiveResult<()> {
     require_live_authorization()?;
     let state = CloudState::new(session_root()?)?;
@@ -2021,7 +2021,7 @@ fn live_no_aliyun_or_uc_e2e_artifacts_remain() -> LiveResult<()> {
                     .into_iter()
                     .filter(|item| {
                         item.name
-                            .starts_with(&format!("AllDownloader-E2E-{}-", provider.key()))
+                            .starts_with(&format!("VersaDown-E2E-{}-", provider.key()))
                     })
                     .map(|item| format!("{}:{}", provider.key(), item.name)),
             );

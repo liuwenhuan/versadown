@@ -16,7 +16,7 @@ const CLOUD: &str = "https://cloud.189.cn";
 const CLOUD_HOST: &str = "cloud.189.cn";
 pub(crate) const BROWSER_ORIGIN: &str = CLOUD;
 pub(crate) const BROWSER_CONTEXT_READER_JS: &str =
-    "location.origin === 'https://cloud.189.cn' ? (window.__alldownloaderTianyiContext || {}) : {}";
+    "location.origin === 'https://cloud.189.cn' ? (window.__versadownTianyiContext || {}) : {}";
 
 pub(crate) fn accepts_browser_api_request(raw_url: &str) -> bool {
     validate_browser_api_request("GET", raw_url).is_ok()
@@ -49,7 +49,7 @@ pub(crate) fn validate_browser_api_request(
     }
     Ok(url)
 }
-pub const TIANYI_RECYCLE_BIN_ID: &str = "__all_downloader_tianyi_recycle_bin__";
+pub const TIANYI_RECYCLE_BIN_ID: &str = "__versa_down_tianyi_recycle_bin__";
 const TIANYI_RECYCLE_BIN_NAME: &str = "回收站";
 
 #[cfg(test)]

@@ -1,11 +1,11 @@
 //! Explicitly enabled live regressions for the two browser-authorized drives.
 //!
-//! They only ever create one uniquely named `AllDownloader-IT-*` directory,
+//! They only ever create one uniquely named `VersaDown-IT-*` directory,
 //! operate on descendants of that directory, and finally move that directory
 //! to the provider's recycle bin.  They are ignored by default because they
 //! use the current Windows user's encrypted provider sessions.
 
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     xunlei::{XunleiClient, XunleiSession},
     CloudFile, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport,
     CredentialStore, PikPakClient, PikPakSession, QuarkError, ReqwestTransport,
@@ -212,9 +212,9 @@ fn failure(message: impl Into<String>) -> Box<dyn Error> {
 }
 
 fn require_live_authorization() -> LiveResult<()> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Err(failure(
-            "live cloud regression requires ALLDOWNLOADER_LIVE_CLOUD=1",
+            "live cloud regression requires VERSADOWN_LIVE_CLOUD=1",
         ));
     }
     Ok(())
@@ -223,7 +223,7 @@ fn require_live_authorization() -> LiveResult<()> {
 fn session_store() -> LiveResult<SystemCredentialStore> {
     // An isolated test app can authorize without replacing the user's normal
     // account store. This is an explicit opt-in test-data path, not APPDATA.
-    if let Some(data_dir) = std::env::var_os("ALLDOWNLOADER_TEST_DATA_DIR") {
+    if let Some(data_dir) = std::env::var_os("VERSADOWN_TEST_DATA_DIR") {
         return Ok(SystemCredentialStore::new(
             PathBuf::from(data_dir).join("cloud-sessions"),
         )?);
@@ -232,7 +232,7 @@ fn session_store() -> LiveResult<SystemCredentialStore> {
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
     Ok(SystemCredentialStore::new(
         PathBuf::from(app_data)
-            .join("com.alldownloader.desktop")
+            .join("com.versadown.desktop")
             .join("cloud-sessions"),
     )?)
 }
@@ -242,14 +242,14 @@ fn test_name(provider: &str, suffix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("AllDownloader-IT-{provider}-{millis}-{suffix}")
+    format!("VersaDown-IT-{provider}-{millis}-{suffix}")
 }
 
 fn local_artifact(provider: &str) -> LiveResult<(PathBuf, PathBuf, Vec<u8>)> {
     let root = std::env::temp_dir().join(test_name(provider, "local"));
     fs::create_dir_all(&root)?;
     let contents = format!(
-        "AllDownloader live integration regression for {provider}.\nNo user content is used.\n"
+        "VersaDown live integration regression for {provider}.\nNo user content is used.\n"
     )
     .into_bytes();
     let file = root.join("payload.txt");
@@ -274,7 +274,7 @@ fn download_bytes(url: &str) -> LiveResult<Vec<u8>> {
 }
 
 fn download_bytes_with_native_engine(url: &str) -> LiveResult<Vec<u8>> {
-    use alldownloader_lib::{
+    use versadown_lib::{
         Aria2Api, Aria2LaunchConfig, Aria2Options, Aria2Process, Aria2Settings,
     };
     let local = tempfile::tempdir()?;
@@ -418,7 +418,7 @@ fn xunlei_browser_root_probe(
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized PikPak account and creates only AllDownloader-IT-* test data"]
+#[ignore = "requires an explicitly authorized PikPak account and creates only VersaDown-IT-* test data"]
 fn live_pikpak_unique_upload_download_roundtrip() -> LiveResult<()> {
     use sha2::{Digest, Sha256};
     require_live_authorization()?;
@@ -518,12 +518,12 @@ fn live_pikpak_unique_upload_download_roundtrip() -> LiveResult<()> {
 #[test]
 #[ignore = "requires explicit existing PikPak task ID; reads remote file without modifying tasks or user files"]
 fn live_pikpak_existing_task_native_download() -> LiveResult<()> {
-    use alldownloader_lib::cloud::commands::parse_stable_cloud_source;
+    use versadown_lib::cloud::commands::parse_stable_cloud_source;
     use rusqlite::{Connection, OpenFlags};
     use sha2::{Digest, Sha256};
     require_live_authorization()?;
-    let task_id = std::env::var("ALLDOWNLOADER_TEST_TASK_ID")?;
-    let data = PathBuf::from(std::env::var("APPDATA")?).join("com.alldownloader.desktop");
+    let task_id = std::env::var("VERSADOWN_TEST_TASK_ID")?;
+    let data = PathBuf::from(std::env::var("APPDATA")?).join("com.versadown.desktop");
     let db =
         Connection::open_with_flags(data.join("tasks.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let (source, expected): (String, u64) = db.query_row(
@@ -553,7 +553,7 @@ fn live_pikpak_existing_task_native_download() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized PikPak account and creates only AllDownloader-IT-* test data"]
+#[ignore = "requires an explicitly authorized PikPak account and creates only VersaDown-IT-* test data"]
 fn live_pikpak_directory_upload_rename_move_download_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;
@@ -645,7 +645,7 @@ fn live_pikpak_directory_upload_rename_move_download_and_trash() -> LiveResult<(
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized PikPak account and creates only AllDownloader-IT-* test data"]
+#[ignore = "requires an explicitly authorized PikPak account and creates only VersaDown-IT-* test data"]
 fn live_pikpak_cache_downloads_uploaded_bytes_and_trashes_only_its_directory() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;
@@ -692,7 +692,7 @@ fn live_pikpak_cache_downloads_uploaded_bytes_and_trashes_only_its_directory() -
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized Xunlei account and creates only AllDownloader-IT-* test data"]
+#[ignore = "requires an explicitly authorized Xunlei account and creates only VersaDown-IT-* test data"]
 fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;
@@ -703,7 +703,7 @@ fn live_xunlei_directory_upload_rename_move_download_and_trash() -> LiveResult<(
     )?;
     eprintln!(
         "Xunlei live session: web_auth={}, user_id_present={}, browser_client={}, browser_device={}, browser_version={}, browser_package={}, browser_user_agent={}, captcha_present={}",
-        matches!(session.auth_method, alldownloader_lib::cloud::CloudAuthMethod::Web),
+        matches!(session.auth_method, versadown_lib::cloud::CloudAuthMethod::Web),
         !session.user_id.is_empty(),
         !session.profile.client_id.is_empty(),
         !session.profile.device_id.is_empty(),

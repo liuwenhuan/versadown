@@ -39,4 +39,4 @@
 ## Task 9：集成和标准 release
 
 1. 运行目录 Rust 测试、commands 测试、App/CloudManager/DownloadQueue Vitest 及生产前端构建。
-2. 仅在工作区干净时按 MSVC x64 构建 `src-tauri/target/release/alldownloader.exe`；不生成 installer。仅停止该精确路径的旧进程，再启动同一 EXE。
+2. 仅在工作区干净时按 MSVC x64 构建 `src-tauri/target/release/versadown.exe`；不生成 installer。仅停止该精确路径的旧进程，再启动同一 EXE。

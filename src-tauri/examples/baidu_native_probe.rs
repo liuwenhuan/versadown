@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     baidu::BaiduClient, load_saved_password_login, CloudProvider, ReqwestTransport,
     SystemCredentialStore,
 };
@@ -20,7 +20,7 @@ fn probe() -> Result<(String, usize), String> {
     let credential_root = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .map(|path| {
-            path.join("com.alldownloader.desktop")
+            path.join("com.versadown.desktop")
                 .join("cloud-sessions")
         })
         .ok_or_else(|| "无法定位应用凭据目录".to_owned())?;

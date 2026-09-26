@@ -12,8 +12,8 @@ const targetRoot = process.env.CARGO_TARGET_DIR
   ? path.resolve(projectRoot, process.env.CARGO_TARGET_DIR)
   : null;
 const executable = targetRoot
-  ? path.join(targetRoot, 'release', 'alldownloader.exe')
-  : path.join(projectRoot, 'artifacts', 'alldownloader.exe');
+  ? path.join(targetRoot, 'release', 'versadown.exe')
+  : path.join(projectRoot, 'artifacts', 'versadown.exe');
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 // DOMRect values from fractional Windows DPI can differ by a few float ULPs.
@@ -345,7 +345,7 @@ async function startSlowDownloadFixture() {
 
 async function run() {
   const port = await availablePort();
-  const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-ui-smoke-'));
+  const testDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'versadown-ui-smoke-'));
   const downloadFixture = await startSlowDownloadFixture();
   let ownedSidecarPids = [];
   let completedQuitFlow = false;
@@ -355,9 +355,9 @@ async function run() {
     stdio: 'ignore',
     env: {
       ...process.env,
-      ALLDOWNLOADER_BACKGROUND_UI_TEST: '1',
-      ALLDOWNLOADER_TEST_DATA_DIR: testDataDir,
-      ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(testDataDir, 'downloads'),
+      VERSADOWN_BACKGROUND_UI_TEST: '1',
+      VERSADOWN_TEST_DATA_DIR: testDataDir,
+      VERSADOWN_TEST_DOWNLOAD_DIR: path.join(testDataDir, 'downloads'),
       WEBVIEW2_USER_DATA_FOLDER: path.join(testDataDir, 'webview2'),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`
     }

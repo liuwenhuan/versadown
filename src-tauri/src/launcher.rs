@@ -206,7 +206,7 @@ pub fn set_tray_manager_visibility(app: &AppHandle, manager_visible: bool) {
 }
 
 fn background_ui_test_enabled() -> bool {
-    std::env::var("ALLDOWNLOADER_BACKGROUND_UI_TEST").as_deref() == Ok("1")
+    std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() == Ok("1")
 }
 
 fn require_background_ui_test() -> Result<(), String> {

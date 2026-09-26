@@ -1,4 +1,4 @@
-use alldownloader_lib::{
+use versadown_lib::{
     manager_close_disposition, should_prevent_implicit_exit, ApplicationLifecycle,
     ManagerCloseDisposition,
 };

@@ -6,7 +6,7 @@ pub(crate) const INITIALIZE: &str = include_str!("xunlei_auth/observer.js");
 pub(crate) const PASSWORD: &str = include_str!("xunlei_auth/password.js");
 pub(crate) const SNAPSHOT: &str = r#"(() => {
   if (location.origin !== 'https://pan.xunlei.com') return {pending:true};
-  return window.__alldownloaderXunleiAuth?.snapshot() || {authorization_error:'plugin_update_required'};
+  return window.__versadownXunleiAuth?.snapshot() || {authorization_error:'plugin_update_required'};
 })()"#;
 
 pub(super) fn complete(

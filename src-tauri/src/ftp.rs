@@ -26,7 +26,7 @@ use crate::{
     reserve_unique_output_path, DownloadTask, StoreError, TaskStatus, TaskStore,
 };
 
-const ANONYMOUS_PASSWORD: &str = "anonymous@alldownloader.local";
+const ANONYMOUS_PASSWORD: &str = "anonymous@versadown.local";
 const MIN_SEGMENT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_LIMIT_RETRIES_PER_SEGMENT: u8 = 3;
 const SESSION_LIMIT_RETRY_DELAY: Duration = Duration::from_millis(250);

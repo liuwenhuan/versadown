@@ -15,7 +15,7 @@
 - Work directly on the user-approved `master` checkout; do not create a temporary worktree.
 - Preserve the existing uncommitted build-tool changes in `package.json`, `scripts/build-windows.ps1`, `scripts/build-tools.ps1`, `scripts/build-tools.tests.ps1`, and `src-tauri/tauri.conf.json`.
 - Pin Aria2 Next to `2.7.5` and verify the official Windows x86_64 SHA-256 before replacing the bundled sidecar.
-- Do not build an installer; publish only `artifacts/alldownloader.exe` with `scripts/build-windows.ps1`.
+- Do not build an installer; publish only `artifacts/versadown.exe` with `scripts/build-windows.ps1`.
 - Do not run full test suites unless targeted tests reveal cross-module risk.
 
 ---
@@ -114,7 +114,7 @@
 
 **Interfaces:**
 - Consumes: all contracts produced by Tasks 1-4.
-- Produces: a verified Windows application binary at `artifacts/alldownloader.exe`.
+- Produces: a verified Windows application binary at `artifacts/versadown.exe`.
 
 - [ ] Add a failing real-sidecar test proving direct manifest submission is insufficient: output must match the fixture media payload rather than the `.m3u8`/`.mpd` text.
 - [ ] Implement the in-process HLS/DASH manifest orchestrator, ordered segment transfer/merge, pause/cancel/recovery and one-task progress projection.

@@ -3,7 +3,7 @@
 (function (provider, allowed, username, password, attemptId) {
   if (!Array.isArray(allowed) || !allowed.every(host => typeof host === 'string' && host)) return;
   if (location.protocol !== 'https:' || (location.port && location.port !== '443') || !allowed.includes(location.hostname)) return;
-  const submittedKey = 'alldownloader-login-' + attemptId;
+  const submittedKey = 'versadown-login-' + attemptId;
   // This contains only progress flags, never credential values. It lets the
   // native host distinguish a page that is still loading from an official
   // security challenge without inspecting the login form's private contents.
@@ -11,10 +11,10 @@
     formReady: false, valuesApplied: false, agreementAccepted: false,
     challengeRequired: false, submitted: false, officialResult: 'pending',
   };
-  window.__alldownloaderPasswordLoginStatus = status;
+  window.__versadownPasswordLoginStatus = status;
   const report = () => {
     if (document.documentElement) {
-      document.documentElement.setAttribute('data-alldownloader-password-login', JSON.stringify(status));
+      document.documentElement.setAttribute('data-versadown-password-login', JSON.stringify(status));
     }
   };
   try {

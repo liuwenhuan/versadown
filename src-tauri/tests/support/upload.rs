@@ -1,4 +1,4 @@
-use alldownloader_lib::cloud::{QuarkError, UploadBody, UploadControl, UploadHttpRequest};
+use versadown_lib::cloud::{QuarkError, UploadBody, UploadControl, UploadHttpRequest};
 use std::io::Read;
 
 // Test transports consume tiny protocol fixtures while the source still exists.

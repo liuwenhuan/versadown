@@ -1,7 +1,7 @@
 #[path = "aria2_sync.rs"]
 mod fixture;
 
-use alldownloader_lib::{DownloadService, NewTask, TaskStatus, TaskStore};
+use versadown_lib::{DownloadService, NewTask, TaskStatus, TaskStore};
 use serde_json::json;
 use std::{
     sync::{
@@ -14,7 +14,7 @@ use std::{
 async fn slow_server(
     delay: Duration,
 ) -> (
-    alldownloader_lib::aria2::Aria2RpcClient,
+    versadown_lib::aria2::Aria2RpcClient,
     tokio::task::JoinHandle<()>,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -30,9 +30,9 @@ async fn slow_server(
     );
     let worker = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (
-        alldownloader_lib::aria2::Aria2RpcClient::new(
+        versadown_lib::aria2::Aria2RpcClient::new(
             endpoint,
-            alldownloader_lib::aria2::RpcSecret::from_bytes([1; 32]),
+            versadown_lib::aria2::RpcSecret::from_bytes([1; 32]),
         )
         .unwrap(),
         worker,

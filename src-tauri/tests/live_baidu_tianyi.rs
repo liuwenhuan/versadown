@@ -2,11 +2,11 @@
 //! Tianyi drives.
 //!
 //! The tests deliberately create only one freshly generated
-//! `AllDownloader-E2E-*` directory per provider.  It is the sole remote item
+//! `VersaDown-E2E-*` directory per provider.  It is the sole remote item
 //! moved to the provider recycle bin during cleanup.  Session bytes, cookies,
 //! signed URLs and account details are never printed.
 
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     auth_supervisor::{recover_in_order, AuthSupervisor},
     baidu::{BaiduClient, BaiduSession},
     share::{
@@ -17,7 +17,7 @@ use alldownloader_lib::cloud::{
     CloudUploadTransport, CredentialStore, ProviderRegistry, QuarkError, ReqwestTransport,
     SessionWorkKind, SystemCredentialStore, UploadHttpRequest, UploadHttpResponse,
 };
-use alldownloader_lib::extract_cloud_share_candidate;
+use versadown_lib::extract_cloud_share_candidate;
 use std::{
     error::Error,
     fs, io,
@@ -279,9 +279,9 @@ fn provider_step<T>(
 }
 
 fn require_live_authorization() -> LiveResult<()> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Err(failure(
-            "live cloud regression requires ALLDOWNLOADER_LIVE_CLOUD=1",
+            "live cloud regression requires VERSADOWN_LIVE_CLOUD=1",
         ));
     }
     Ok(())
@@ -292,7 +292,7 @@ fn session_store() -> LiveResult<SystemCredentialStore> {
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
     Ok(SystemCredentialStore::new(
         PathBuf::from(app_data)
-            .join("com.alldownloader.desktop")
+            .join("com.versadown.desktop")
             .join("cloud-sessions"),
     )?)
 }
@@ -375,14 +375,14 @@ fn test_name(provider: &str, suffix: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    format!("AllDownloader-E2E-{provider}-{millis}-{suffix}")
+    format!("VersaDown-E2E-{provider}-{millis}-{suffix}")
 }
 
 fn local_artifact(provider: &str) -> LiveResult<(PathBuf, PathBuf, Vec<u8>)> {
     let root = std::env::temp_dir().join(test_name(provider, "local"));
     fs::create_dir_all(&root)?;
     let contents = format!(
-        "AllDownloader live integration regression for {provider}.\nNo user content is used.\n"
+        "VersaDown live integration regression for {provider}.\nNo user content is used.\n"
     )
     .into_bytes();
     let file = root.join("payload.txt");
@@ -484,9 +484,9 @@ fn probe_direct_download(
 }
 
 fn require_live_share_samples() -> LiveResult<()> {
-    if std::env::var("ALLDOWNLOADER_LIVE_SHARE_SAMPLES").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_SHARE_SAMPLES").as_deref() != Ok("1") {
         return Err(failure(
-            "live share-sample regression requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1",
+            "live share-sample regression requires VERSADOWN_LIVE_SHARE_SAMPLES=1",
         ));
     }
     Ok(())
@@ -497,14 +497,14 @@ fn app_session_store() -> LiveResult<SystemCredentialStore> {
         .ok_or_else(|| failure("APPDATA is required for the encrypted session store"))?;
     Ok(SystemCredentialStore::new(
         PathBuf::from(app_data)
-            .join("com.alldownloader.desktop")
+            .join("com.versadown.desktop")
             .join("cloud-sessions"),
     )?)
 }
 
 fn supplied_access_code(provider: &str, category: &str) -> Option<String> {
     let variable = match (provider, category) {
-        ("百度", "目录（不提供访问码）") => "ALLDOWNLOADER_LIVE_BAIDU_ACCESS_CODE",
+        ("百度", "目录（不提供访问码）") => "VERSADOWN_LIVE_BAIDU_ACCESS_CODE",
         _ => return None,
     };
     std::env::var(variable)
@@ -685,7 +685,7 @@ fn probe_baidu_share_header_profiles(
 }
 
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1 and an existing local Baidu session"]
+#[ignore = "requires VERSADOWN_LIVE_SHARE_SAMPLES=1 and an existing local Baidu session"]
 fn live_baidu_share_header_profile_probe() -> LiveResult<()> {
     require_live_share_samples()?;
     let credentials = app_session_store()?;
@@ -696,14 +696,14 @@ fn live_baidu_share_header_profile_probe() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "diagnostic: requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1 and an existing local Baidu session"]
+#[ignore = "diagnostic: requires VERSADOWN_LIVE_SHARE_SAMPLES=1 and an existing local Baidu session"]
 fn live_baidu_single_download_response_probe() -> LiveResult<()> {
     require_live_share_samples()?;
     let credentials = app_session_store()?;
     let http = LiveTransport::new()?;
     let candidate = extract_cloud_share_candidate("https://pan.baidu.com/s/1dG1NCeH", None)?
         .ok_or_else(|| failure("百度单文件样本未被识别"))?;
-    let adapter = alldownloader_lib::cloud::share::provider_share_adapter(
+    let adapter = versadown_lib::cloud::share::provider_share_adapter(
         candidate.provider,
         &credentials,
         &http,
@@ -837,7 +837,7 @@ fn live_baidu_single_download_response_probe() -> LiveResult<()> {
 /// submits an aria2 task, copies share content to a personal cloud drive, or
 /// guesses a password. This keeps the user's task list and cloud data intact.
 #[test]
-#[ignore = "requires ALLDOWNLOADER_LIVE_SHARE_SAMPLES=1 and the current local Baidu/Tianyi sessions"]
+#[ignore = "requires VERSADOWN_LIVE_SHARE_SAMPLES=1 and the current local Baidu/Tianyi sessions"]
 fn live_baidu_and_tianyi_share_samples() -> LiveResult<()> {
     require_live_share_samples()?;
     let credentials = app_session_store()?;
@@ -928,8 +928,8 @@ fn live_baidu_and_tianyi_share_samples() -> LiveResult<()> {
     ];
 
     let mut failures = Vec::new();
-    let provider_filter = std::env::var("ALLDOWNLOADER_LIVE_PROVIDER").ok();
-    let sample_filter = std::env::var("ALLDOWNLOADER_LIVE_SAMPLE").ok();
+    let provider_filter = std::env::var("VERSADOWN_LIVE_PROVIDER").ok();
+    let sample_filter = std::env::var("VERSADOWN_LIVE_SAMPLE").ok();
     for (provider, category, url, expect_access_code, probe_download) in samples {
         if provider_filter
             .as_deref()
@@ -952,7 +952,7 @@ fn live_baidu_and_tianyi_share_samples() -> LiveResult<()> {
                     "{provider} {category}: parser did not recognize URL"
                 ))
             })?;
-        let adapter = alldownloader_lib::cloud::share::provider_share_adapter(
+        let adapter = versadown_lib::cloud::share::provider_share_adapter(
             candidate.provider,
             &credentials,
             &http,
@@ -974,10 +974,10 @@ fn live_baidu_and_tianyi_share_samples() -> LiveResult<()> {
             }
             Ok(ShareInspection::Plan(plan)) => {
                 let root = match &plan.root_kind {
-                    alldownloader_lib::cloud::share::CloudShareRootKind::File { .. } => "file",
-                    alldownloader_lib::cloud::share::CloudShareRootKind::Directory => "directory",
-                    alldownloader_lib::cloud::share::CloudShareRootKind::Collection => "collection",
-                    alldownloader_lib::cloud::share::CloudShareRootKind::Unknown => "unknown",
+                    versadown_lib::cloud::share::CloudShareRootKind::File { .. } => "file",
+                    versadown_lib::cloud::share::CloudShareRootKind::Directory => "directory",
+                    versadown_lib::cloud::share::CloudShareRootKind::Collection => "collection",
+                    versadown_lib::cloud::share::CloudShareRootKind::Unknown => "unknown",
                 };
                 eprintln!(
                     "LIVE-SHARE {provider} {category}: inspected root={root}, entries={}",
@@ -1126,7 +1126,7 @@ fn live_baidu_bfess_compatibility_probe() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized Baidu account and creates only AllDownloader-E2E-* test data"]
+#[ignore = "requires an explicitly authorized Baidu account and creates only VersaDown-E2E-* test data"]
 fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;
@@ -1139,7 +1139,7 @@ fn live_baidu_directory_upload_rename_move_download_and_trash() -> LiveResult<()
         "Baidu live session: web_auth={}, cookie_present={}, cookie_names={}",
         matches!(
             session.auth_method,
-            alldownloader_lib::cloud::CloudAuthMethod::Web
+            versadown_lib::cloud::CloudAuthMethod::Web
         ),
         !session.cookie.is_empty(),
         cookie_names(&session.cookie),
@@ -1255,7 +1255,7 @@ fn live_tianyi_production_supervised_session_recovery() -> LiveResult<()> {
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized Tianyi account and creates only AllDownloader-E2E-* test data"]
+#[ignore = "requires an explicitly authorized Tianyi account and creates only VersaDown-E2E-* test data"]
 fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;
@@ -1268,7 +1268,7 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
         "Tianyi live session: web_auth={}, cookie_present={}, browser_context={}, cookie_names={}",
         matches!(
             session.auth_method,
-            alldownloader_lib::cloud::CloudAuthMethod::Web
+            versadown_lib::cloud::CloudAuthMethod::Web
         ),
         !session.cookie.is_empty(),
         session.has_browser_context(),
@@ -1379,7 +1379,7 @@ fn live_tianyi_directory_upload_rename_move_download_and_trash() -> LiveResult<(
 }
 
 fn wait_for_named(
-    mut directory: impl FnMut() -> Result<alldownloader_lib::cloud::CloudDirectory, QuarkError>,
+    mut directory: impl FnMut() -> Result<versadown_lib::cloud::CloudDirectory, QuarkError>,
     name: &str,
     kind: &str,
 ) -> LiveResult<CloudFile> {
@@ -1398,7 +1398,7 @@ fn wait_for_named(
 }
 
 #[test]
-#[ignore = "requires an explicitly authorized Tianyi account and creates only AllDownloader-E2E-* test data"]
+#[ignore = "requires an explicitly authorized Tianyi account and creates only VersaDown-E2E-* test data"]
 fn live_tianyi_folder_rename_move_and_trash() -> LiveResult<()> {
     require_live_authorization()?;
     let store = session_store()?;

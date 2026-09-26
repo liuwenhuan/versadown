@@ -36,7 +36,7 @@
 | `rustfmt --edition 2021 --config skip_children=true`（本项变更 Rust 文件） | 退出 0 |
 | `git diff --check` | 最终退出 0 |
 
-发布路径：本工作树 `artifacts/alldownloader.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。输出保留已有 dead-code、linker/canonicalize 和 CRLF 提示，没有新增构建失败。没有执行全量测试、前端 Vitest 或独立前端构建。
+发布路径：本工作树 `artifacts/versadown.exe` 与 `artifacts/binaries/aria2-next-x86_64-pc-windows-msvc.exe`。输出保留已有 dead-code、linker/canonicalize 和 CRLF 提示，没有新增构建失败。没有执行全量测试、前端 Vitest 或独立前端构建。
 
 ## 自审与边界
 

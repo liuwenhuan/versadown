@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use alldownloader_lib::{
+use versadown_lib::{
     list_queue_tasks_for_scope, parse_ftp_url, Aria2GlobalStat, DownloadTask, EventSink,
     FtpDownloadEngine, FtpSegment, NewTask, TaskStatus, TaskStore, UriSubmissionOptions,
 };
@@ -39,7 +39,7 @@ fn ftp_url_defaults_to_anonymous_and_rejects_a_directory_only_target() {
     let target = parse_ftp_url("ftp://example.test/pub/archive.zip").expect("valid FTP URL");
     assert_eq!(target.port(), 21);
     assert_eq!(target.username(), "anonymous");
-    assert_eq!(target.password(), "anonymous@alldownloader.local");
+    assert_eq!(target.password(), "anonymous@versadown.local");
 
     let error = parse_ftp_url("ftp://example.test/pub/").expect_err("directory is not a file");
     assert!(error.to_string().contains("文件路径"));
@@ -728,7 +728,7 @@ async fn paused_parallel_ftp_transfer_resumes_without_holes() {
     .expect("multiple FTP ranges make durable progress");
 
     let paused = engine
-        .control(task.id, alldownloader_lib::DownloadAction::Pause)
+        .control(task.id, versadown_lib::DownloadAction::Pause)
         .await
         .unwrap();
     assert_eq!(paused.status, TaskStatus::Paused);
@@ -744,7 +744,7 @@ async fn paused_parallel_ftp_transfer_resumes_without_holes() {
     assert_eq!(store.ftp_segments(task.id).unwrap(), saved);
 
     engine
-        .control(task.id, alldownloader_lib::DownloadAction::Resume)
+        .control(task.id, versadown_lib::DownloadAction::Resume)
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -957,7 +957,7 @@ async fn ftp_engine_pauses_and_resumes_the_same_durable_task() {
     .await
     .unwrap();
     let paused = engine
-        .control(task.id, alldownloader_lib::DownloadAction::Pause)
+        .control(task.id, versadown_lib::DownloadAction::Pause)
         .await
         .unwrap();
     assert_eq!(paused.status, TaskStatus::Paused);
@@ -973,7 +973,7 @@ async fn ftp_engine_pauses_and_resumes_the_same_durable_task() {
     );
 
     engine
-        .control(task.id, alldownloader_lib::DownloadAction::Resume)
+        .control(task.id, versadown_lib::DownloadAction::Resume)
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {

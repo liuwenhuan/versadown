@@ -1,6 +1,6 @@
 //! Explicit opt-in: uploads a harmless new fixture and publicly shares only that file.
 //! Leaves the fixture and one-day share available for manual verification.
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     CloudShareOptions, PikPakClient, ReqwestTransport, SystemCredentialStore,
 };
 use serde_json::{json, Value};
@@ -10,11 +10,11 @@ use std::{error::Error, path::PathBuf, time::Duration};
 #[ignore = "read-only inspection of live share-list schema, no private values logged"]
 fn inspect_own_share_list_schema() -> Result<(), Box<dyn Error>> {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
     let credentials = SystemCredentialStore::new(PathBuf::from(std::env::var(
-        "ALLDOWNLOADER_LIVE_SESSION_ROOT",
+        "VERSADOWN_LIVE_SESSION_ROOT",
     )?))?;
     let transport = ReqwestTransport::new()?;
     let value = PikPakClient::new(&transport, &credentials).request("GET",
@@ -33,7 +33,7 @@ fn inspect_own_share_list_schema() -> Result<(), Box<dyn Error>> {
     for item in value["data"].as_array().into_iter().flatten() {
         if item["title"]
             .as_str()
-            .is_some_and(|name| name.starts_with("AllDownloader-share-update-test-"))
+            .is_some_and(|name| name.starts_with("VersaDown-share-update-test-"))
         {
             println!(
                 "[own-fixture-readback] name={} share_id={} code={}",
@@ -48,14 +48,14 @@ fn inspect_own_share_list_schema() -> Result<(), Box<dyn Error>> {
 #[ignore = "only operates on an explicitly named harmless fixture created by this test suite"]
 fn verify_existing_update_fixture() -> Result<(), Box<dyn Error>> {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
-    let id = std::env::var("ALLDOWNLOADER_UPDATE_FIXTURE_ID")?;
-    let name = std::env::var("ALLDOWNLOADER_UPDATE_FIXTURE_NAME")?;
-    assert!(name.starts_with("AllDownloader-share-update-test-") && name.ends_with(".txt"));
+    let id = std::env::var("VERSADOWN_UPDATE_FIXTURE_ID")?;
+    let name = std::env::var("VERSADOWN_UPDATE_FIXTURE_NAME")?;
+    assert!(name.starts_with("VersaDown-share-update-test-") && name.ends_with(".txt"));
     let credentials = SystemCredentialStore::new(PathBuf::from(std::env::var(
-        "ALLDOWNLOADER_LIVE_SESSION_ROOT",
+        "VERSADOWN_LIVE_SESSION_ROOT",
     )?))?;
     let transport = ReqwestTransport::new()?;
     let client = PikPakClient::new(&transport, &credentials);
@@ -87,16 +87,16 @@ fn verify_existing_update_fixture() -> Result<(), Box<dyn Error>> {
 #[ignore = "uploads a harmless fixture; creates, edits and revokes only its own share"]
 fn own_file_share_update_roundtrip() -> Result<(), Box<dyn Error>> {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
     let credentials = SystemCredentialStore::new(PathBuf::from(std::env::var(
-        "ALLDOWNLOADER_LIVE_SESSION_ROOT",
+        "VERSADOWN_LIVE_SESSION_ROOT",
     )?))?;
     let transport = ReqwestTransport::new()?;
     let client = PikPakClient::new(&transport, &credentials);
     let name = format!(
-        "AllDownloader-share-update-test-{}.txt",
+        "VersaDown-share-update-test-{}.txt",
         uuid::Uuid::new_v4()
     );
     let content = format!("Harmless outbound share update test.\n{name}\n");
@@ -173,16 +173,16 @@ fn own_file_share_update_roundtrip() -> Result<(), Box<dyn Error>> {
 #[ignore = "creates a real one-day public share of a newly uploaded test file"]
 fn own_file_creates_public_share_visible_without_login() -> Result<(), Box<dyn Error>> {
     assert_eq!(
-        std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref(),
+        std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
         Ok("1")
     );
-    if let Ok(share_id) = std::env::var("ALLDOWNLOADER_VERIFY_EXISTING_TEST_SHARE") {
-        let name = std::env::var("ALLDOWNLOADER_VERIFY_TEST_NAME")?;
-        assert!(name.starts_with("AllDownloader-public-share-test-"));
-        let contents = format!("Harmless AllDownloader outbound sharing test.\n{name}\n");
+    if let Ok(share_id) = std::env::var("VERSADOWN_VERIFY_EXISTING_TEST_SHARE") {
+        let name = std::env::var("VERSADOWN_VERIFY_TEST_NAME")?;
+        assert!(name.starts_with("VersaDown-public-share-test-"));
+        let contents = format!("Harmless VersaDown outbound sharing test.\n{name}\n");
         return verify_anonymous(&share_id, &name, contents.len());
     }
-    let root = PathBuf::from(std::env::var("ALLDOWNLOADER_LIVE_SESSION_ROOT")?);
+    let root = PathBuf::from(std::env::var("VERSADOWN_LIVE_SESSION_ROOT")?);
     assert!(root.is_dir(), "explicit real session directory must exist");
     let credentials = SystemCredentialStore::new(root)?;
     let transport = ReqwestTransport::new()?;
@@ -191,10 +191,10 @@ fn own_file_creates_public_share_visible_without_login() -> Result<(), Box<dyn E
     println!("[outbound-share] saved-session-ready");
 
     let name = format!(
-        "AllDownloader-public-share-test-{}.txt",
+        "VersaDown-public-share-test-{}.txt",
         uuid::Uuid::new_v4()
     );
-    let contents = format!("Harmless AllDownloader outbound sharing test.\n{name}\n");
+    let contents = format!("Harmless VersaDown outbound sharing test.\n{name}\n");
     let local = tempfile::tempdir()?;
     let path = local.path().join(&name);
     std::fs::write(&path, contents.as_bytes())?;

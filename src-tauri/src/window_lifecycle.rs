@@ -12,7 +12,7 @@ extern "system" {
     fn ShowWindow(window: *mut std::ffi::c_void, command: i32) -> i32;
 }
 
-const BACKGROUND_UI_TEST: &str = "ALLDOWNLOADER_BACKGROUND_UI_TEST";
+const BACKGROUND_UI_TEST: &str = "VERSADOWN_BACKGROUND_UI_TEST";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManagerCloseDisposition {

@@ -316,7 +316,7 @@ impl Drop for SocketWorkerTransport {
 }
 
 fn create_runtime_directory() -> Result<PathBuf, NativeEngineError> {
-    let directory = std::env::temp_dir().join(format!("alldownloader-xunlei-{}", random_nonce()));
+    let directory = std::env::temp_dir().join(format!("versadown-xunlei-{}", random_nonce()));
     fs::create_dir(&directory).map_err(|_| NativeEngineError::Unavailable)?;
     set_mode(&directory, 0o700)?;
     Ok(directory)

@@ -30,7 +30,7 @@ const UC_UPLOAD_PROFILE: CloudDriveUploadProfile = CloudDriveUploadProfile {
     object_host: "pds.uc.cn",
     object_store_user_agent: "aliyun-sdk-js/6.6.1",
 };
-pub(crate) const UC_RECYCLE_BIN_ID: &str = "__all_downloader_uc_recycle_bin__";
+pub(crate) const UC_RECYCLE_BIN_ID: &str = "__versa_down_uc_recycle_bin__";
 const UC_RECYCLE_BIN_NAME: &str = "回收站";
 
 pub const UC_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =

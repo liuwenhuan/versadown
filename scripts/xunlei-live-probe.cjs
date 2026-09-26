@@ -27,15 +27,15 @@ async function targets(port) {
 }
 
 async function start() {
-  const binary = process.env.ALLDOWNLOADER_TEST_BINARY || path.resolve(__dirname, '../artifacts/AllDownloader.exe');
+  const binary = process.env.VERSADOWN_TEST_BINARY || path.resolve(__dirname, '../artifacts/VersaDown.exe');
   if (!fs.existsSync(binary)) throw new Error('binary_not_found');
   const port = await new Promise(resolve => {
     const server = net.createServer(); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); });
   });
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alldownloader-xunlei-live-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'versadown-xunlei-live-'));
   const child = spawn(binary, [], { cwd: path.dirname(binary), windowsHide: true, stdio: 'ignore', detached: true, env: {
-    ...process.env, ALLDOWNLOADER_BACKGROUND_UI_TEST: '1', ALLDOWNLOADER_TEST_DATA_DIR: dataDir,
-    ALLDOWNLOADER_TEST_DOWNLOAD_DIR: path.join(dataDir, 'downloads'),
+    ...process.env, VERSADOWN_BACKGROUND_UI_TEST: '1', VERSADOWN_TEST_DATA_DIR: dataDir,
+    VERSADOWN_TEST_DOWNLOAD_DIR: path.join(dataDir, 'downloads'),
     WEBVIEW2_USER_DATA_FOLDER: path.join(dataDir, 'webview2'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
   }});

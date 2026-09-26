@@ -1,6 +1,6 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     baidu::{parse_baidu_web_session, BaiduClient, BaiduSession, BAIDU_RECYCLE_BIN_ID},
     CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudUploadTransport, QuarkError,
     ReqwestTransport, UploadHttpRequest, UploadHttpResponse,

@@ -1,6 +1,6 @@
 (() => {
-  if (location.origin !== 'https://cloud.189.cn' || window.__alldownloaderTianyiCapture) return;
-  window.__alldownloaderTianyiCapture = true;
+  if (location.origin !== 'https://cloud.189.cn' || window.__versadownTianyiCapture) return;
+  window.__versadownTianyiCapture = true;
   // Observe only the identity produced by the official site's own requests.
   // Do not generate a fingerprint, inspect credentials or alter any request.
   const destinations = new WeakMap();
@@ -19,7 +19,7 @@
     if (url?.origin === 'https://cloud.189.cn' && url.pathname.startsWith('/api/') &&
         typeof name === 'string' && name.toLowerCase() === 'browser-id' &&
         typeof value === 'string' && /^[a-f0-9]{32}$/i.test(value)) {
-      window.__alldownloaderTianyiContext = { browser_id: value, user_agent: navigator.userAgent };
+      window.__versadownTianyiContext = { browser_id: value, user_agent: navigator.userAgent };
     }
     return result;
   };
@@ -36,7 +36,7 @@
       const browserId = headers.get('browser-id');
       if (requestUrl.origin === 'https://cloud.189.cn' && requestUrl.pathname.startsWith('/api/') &&
           typeof browserId === 'string' && /^[a-f0-9]{32}$/i.test(browserId)) {
-        window.__alldownloaderTianyiContext = { browser_id: browserId, user_agent: navigator.userAgent };
+        window.__versadownTianyiContext = { browser_id: browserId, user_agent: navigator.userAgent };
       }
     } catch (_) {}
     return originalFetch.apply(this, arguments);

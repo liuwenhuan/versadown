@@ -1,4 +1,4 @@
-# AllDownloader Windows Beta Implementation Plan
+# VersaDown Windows Beta Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Tauri 2, Rust 2021, Tokio, SQLx/SQLite, Serde, Reqwest, React 18, TypeScript, Vite, Vitest, Zustand, aria2 JSON-RPC sidecar.
 
-**Spec:** `docs/superpowers/specs/2026-09-07-alldownloader-windows-beta-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-07-versadown-windows-beta-design.md`
 
 ## Global Constraints
 
@@ -60,7 +60,7 @@
 
 ```tsx
 // src/App.test.tsx
-it('renders the AllDownloader shell', () => {
+it('renders the VersaDown shell', () => {
   render(<App />);
   expect(screen.getByRole('heading', { name: '下载管理' })).toBeVisible();
 });
@@ -70,7 +70,7 @@ it('renders the AllDownloader shell', () => {
 // src-tauri/tests/app_boot.rs
 #[test]
 fn application_name_is_stable() {
-    assert_eq!(alldownloader_lib::app_version(), env!("CARGO_PKG_VERSION"));
+    assert_eq!(versadown_lib::app_version(), env!("CARGO_PKG_VERSION"));
 }
 ```
 

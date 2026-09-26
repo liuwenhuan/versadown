@@ -1,4 +1,4 @@
-use alldownloader_lib::{
+use versadown_lib::{
     classify_input, extract_candidates, validate_processing, CandidateKind, ProcessStep,
 };
 

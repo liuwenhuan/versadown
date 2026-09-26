@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make AllDownloader build and run on Windows, Linux, and macOS without a
+Make VersaDown build and run on Windows, Linux, and macOS without a
 Windows-only business dependency. Download scheduling, task persistence, cloud
 access, and the frontend must use the same contracts on all three platforms.
 

@@ -1,13 +1,13 @@
 $scriptPath = Join-Path $PSScriptRoot 'build-tools.ps1'
 . $scriptPath
 
-Describe 'Resolve-AllDownloaderBuildTool' {
+Describe 'Resolve-VersaDownBuildTool' {
     It 'skips a zero-byte Cargo placeholder and selects the usable Cargo executable' {
         $placeholder = Join-Path $TestDrive 'cargo-placeholder.exe'
         [System.IO.File]::WriteAllBytes($placeholder, [byte[]]@())
         $usableCargo = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe'
 
-        $resolved = Resolve-AllDownloaderBuildTool -ToolName 'Cargo' -Candidates @($placeholder, $usableCargo)
+        $resolved = Resolve-VersaDownBuildTool -ToolName 'Cargo' -Candidates @($placeholder, $usableCargo)
 
         $resolved | Should Be (Get-Item -LiteralPath $usableCargo).FullName
     }
@@ -15,7 +15,7 @@ Describe 'Resolve-AllDownloaderBuildTool' {
     It 'selects the configured pnpm command when it can execute' {
         $pnpm = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd'
 
-        $resolved = Resolve-AllDownloaderBuildTool -ToolName 'pnpm' -Candidates @($pnpm)
+        $resolved = Resolve-VersaDownBuildTool -ToolName 'pnpm' -Candidates @($pnpm)
 
         $resolved | Should Be (Get-Item -LiteralPath $pnpm).FullName
     }
@@ -25,7 +25,7 @@ Describe 'Resolve-AllDownloaderBuildTool' {
         $didThrow = $false
 
         try {
-            Resolve-AllDownloaderBuildTool -ToolName 'Cargo' -Candidates @($missingTool)
+            Resolve-VersaDownBuildTool -ToolName 'Cargo' -Candidates @($missingTool)
         } catch {
             $didThrow = $true
         }
@@ -34,11 +34,11 @@ Describe 'Resolve-AllDownloaderBuildTool' {
     }
 }
 
-Describe 'Get-AllDownloaderBuildTools' {
+Describe 'Get-VersaDownBuildTools' {
     It 'uses the verified Cargo and pnpm locations for this workspace' {
         $projectRoot = Split-Path -Parent $PSScriptRoot
 
-        $tools = Get-AllDownloaderBuildTools -ProjectRoot $projectRoot
+        $tools = Get-VersaDownBuildTools -ProjectRoot $projectRoot
 
         $tools.Cargo | Should Be (Get-Item -LiteralPath (Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe')).FullName
         $tools.Pnpm | Should Be (Get-Item -LiteralPath (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd')).FullName

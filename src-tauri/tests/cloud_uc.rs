@@ -1,6 +1,6 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     uc::{parse_uc_web_session, UcClient, UcSession, UC_DESKTOP_USER_AGENT},
     CloudFileKind, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider,
     CloudUploadTransport, CredentialStore, MemoryCredentialStore, ProviderRegistry, QuarkError,
@@ -200,7 +200,7 @@ fn uc_server_session_cookie_alone_can_read_the_root_directory() {
 
     let root = client.directory("0").unwrap();
     assert_eq!(root.items.len(), 1);
-    assert_eq!(root.items[0].id, "__all_downloader_uc_recycle_bin__");
+    assert_eq!(root.items[0].id, "__versa_down_uc_recycle_bin__");
     assert_eq!(http.requests()[0].headers["Cookie"], "__puus=session");
 }
 
@@ -527,7 +527,7 @@ fn uc_root_directory_exposes_the_synthetic_recycle_bin() {
     let root = client.directory("0").unwrap();
 
     assert!(root.items.iter().any(|file| {
-        file.id == "__all_downloader_uc_recycle_bin__"
+        file.id == "__versa_down_uc_recycle_bin__"
             && file.name == "回收站"
             && file.kind == "folder"
     }));

@@ -1,4 +1,4 @@
-use alldownloader_lib::{
+use versadown_lib::{
     aria2::{process, rpc, types},
     Aria2Settings,
 };

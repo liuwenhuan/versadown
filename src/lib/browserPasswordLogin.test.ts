@@ -102,7 +102,7 @@ it('waits for Tianyi initialization before consuming its only automatic submit a
     p.run('tianyi'); p.tick(); p.tick();
     expect(p.submissions()).toBe(0);
     expect((form.querySelector('[type="password"]') as HTMLInputElement).value).toBe('');
-    expect(p.dom.window.sessionStorage.getItem('alldownloader-login-attempt-1')).toBeNull();
+    expect(p.dom.window.sessionStorage.getItem('versadown-login-attempt-1')).toBeNull();
 
     form.style.display = 'none';
     form.insertAdjacentHTML('beforebegin', '<li id="tab-pw">账号登录</li>');
@@ -121,7 +121,7 @@ it('does not submit Tianyi credentials until the official agreement click actual
     const agreement = p.dom.window.document.querySelector('#j-agreement-box') as HTMLElement;
     p.run('tianyi'); p.tick();
     expect(p.submissions()).toBe(0);
-    expect(p.dom.window.sessionStorage.getItem('alldownloader-login-attempt-1')).toBeNull();
+    expect(p.dom.window.sessionStorage.getItem('versadown-login-attempt-1')).toBeNull();
     // Only the official page owns this state; merely issuing click is not
     // proof that its handler accepted the agreement.
     agreement.addEventListener('click', () => { agreement.classList.toggle('checkbox-icon2'); });

@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use alldownloader_lib::{
+use versadown_lib::{
     aria2::{Aria2GlobalStat, Aria2RpcClient, EventSink, RpcSecret},
     DownloadTask, EngineAvailability, EngineRuntime, EngineStateSink, NewTask, TaskStatus,
     TaskStore,
@@ -27,13 +27,13 @@ impl EngineStateSink for Events {
     }
 }
 
-fn launch_config(root: &std::path::Path, binary: PathBuf) -> alldownloader_lib::Aria2LaunchConfig {
+fn launch_config(root: &std::path::Path, binary: PathBuf) -> versadown_lib::Aria2LaunchConfig {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut aria2 = alldownloader_lib::Aria2Settings::default();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
     aria2.rpc_port = listener.local_addr().unwrap().port();
     aria2.rpc_token = format!("engine-runtime-test-{}", aria2.rpc_port);
     drop(listener);
-    alldownloader_lib::Aria2LaunchConfig {
+    versadown_lib::Aria2LaunchConfig {
         binary,
         data_dir: root.join("data"),
         download_dir: root.join("downloads"),

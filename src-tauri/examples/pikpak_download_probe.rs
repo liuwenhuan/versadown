@@ -1,5 +1,5 @@
 //! Opt-in, read-only download diagnostics. Never prints signed URLs or credentials.
-use alldownloader_lib::cloud::{
+use versadown_lib::cloud::{
     commands::parse_stable_cloud_source, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
     PikPakClient, QuarkError, ReqwestTransport, SystemCredentialStore,
 };
@@ -67,11 +67,11 @@ fn probe(label: &str, uri: &str) {
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("ALLDOWNLOADER_LIVE_CLOUD").as_deref() != Ok("1") {
+    if std::env::var("VERSADOWN_LIVE_CLOUD").as_deref() != Ok("1") {
         return Err("Explicit live-test opt-in required".into());
     }
     let task_id = std::env::args().nth(1).ok_or("Task ID required")?;
-    let root = PathBuf::from(std::env::var("APPDATA")?).join("com.alldownloader.desktop");
+    let root = PathBuf::from(std::env::var("APPDATA")?).join("com.versadown.desktop");
     let db =
         Connection::open_with_flags(root.join("tasks.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let (source, gid): (String, String) = db.query_row(

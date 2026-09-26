@@ -245,7 +245,7 @@ For each enabled provider with an authenticated account and a file large enough 
 
 - [ ] **Step 2: Run the diagnostic through the configured proxy**
 
-Run: `$env:ALLDOWNLOADER_LIVE_CLOUD_CONCURRENCY='1'; cargo test --manifest-path src-tauri/Cargo.toml --test live_cloud_download_concurrency -- --ignored --nocapture`
+Run: `$env:VERSADOWN_LIVE_CLOUD_CONCURRENCY='1'; cargo test --manifest-path src-tauri/Cargo.toml --test live_cloud_download_concurrency -- --ignored --nocapture`
 
 Expected: each test reports PASS, SKIP with a concrete non-secret reason, or FAIL without printing credentials. Xunlei's policy remains 1 regardless of a transient four-range success because the supplied large-file reproduction is authoritative.
 

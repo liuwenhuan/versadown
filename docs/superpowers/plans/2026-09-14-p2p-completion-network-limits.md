@@ -70,7 +70,7 @@ fn migration_defaults_p2p_sharing_to_false() {
 
 - [ ] **Step 2: Run the tests to verify failure**
 
-Run: `cargo test -p alldownloader default_network_speed_settings_are_unlimited_download_and_auto_p2p_upload migration_defaults_p2p_sharing_to_false`
+Run: `cargo test -p versadown default_network_speed_settings_are_unlimited_download_and_auto_p2p_upload migration_defaults_p2p_sharing_to_false`
 
 Expected: compile failure because the new network settings and `p2p_sharing` field do not exist.
 
@@ -93,7 +93,7 @@ Validate custom settings as positive bounded bytes/s. Add `network` to `AppSetti
 
 - [ ] **Step 4: Run targeted Rust tests**
 
-Run: `cargo test -p alldownloader models::tests store::tests`
+Run: `cargo test -p versadown models::tests store::tests`
 
 Expected: PASS, including defaults, validation, migration and task row round-trips.
 
@@ -137,7 +137,7 @@ async fn terminal_torrent_completion_clears_p2p_sharing() {
 
 - [ ] **Step 2: Run the tests to verify failure**
 
-Run: `cargo test -p alldownloader full_active_torrent_is_completed_but_remains_marked_as_p2p_sharing terminal_torrent_completion_clears_p2p_sharing`
+Run: `cargo test -p versadown full_active_torrent_is_completed_but_remains_marked_as_p2p_sharing terminal_torrent_completion_clears_p2p_sharing`
 
 Expected: FAIL because active aria2 snapshots are currently persisted as `Downloading`.
 
@@ -158,7 +158,7 @@ Clear the flag for aria2 terminal/error/removed and user pause paths. Reconcile 
 
 - [ ] **Step 4: Run targeted aria2 tests**
 
-Run: `cargo test -p alldownloader --test aria2_bt -- full_active_torrent_is_completed_but_remains_marked_as_p2p_sharing terminal_torrent_completion_clears_p2p_sharing`
+Run: `cargo test -p versadown --test aria2_bt -- full_active_torrent_is_completed_but_remains_marked_as_p2p_sharing terminal_torrent_completion_clears_p2p_sharing`
 
 Expected: PASS.
 
@@ -203,7 +203,7 @@ async fn cloud_upload_pauses_only_sharing_p2p_gids() {
 
 - [ ] **Step 2: Run the tests to verify failure**
 
-Run: `cargo test -p alldownloader successful_measurement_sets_half_as_the_global_p2p_cap cloud_upload_pauses_only_sharing_p2p_gids`
+Run: `cargo test -p versadown successful_measurement_sets_half_as_the_global_p2p_cap cloud_upload_pauses_only_sharing_p2p_gids`
 
 Expected: compile failure because the controller and global RPC method do not exist.
 
@@ -221,7 +221,7 @@ On every reconcile, read `UploadRegistry::has_active_uploads()`. A true result f
 
 - [ ] **Step 4: Run focused Rust verification**
 
-Run: `cargo test -p alldownloader p2p_share rpc::tests upload_control_tests`
+Run: `cargo test -p versadown p2p_share rpc::tests upload_control_tests`
 
 Expected: PASS for successful/failed/history measurements, startup/hourly gating, custom/unlimited modes, exact RPC wire method, cloud yielding, and user-pause protection.
 
@@ -296,7 +296,7 @@ git commit -m "feat: show p2p sharing and configure speed limits"
 
 - [ ] **Step 1: Run final focused Rust verification**
 
-Run: `cargo test -p alldownloader --test aria2_bt && cargo test -p alldownloader p2p_share && cargo test -p alldownloader upload_control_tests`
+Run: `cargo test -p versadown --test aria2_bt && cargo test -p versadown p2p_share && cargo test -p versadown upload_control_tests`
 
 Expected: PASS; no unrelated Rust suite runs.
 
@@ -310,7 +310,7 @@ Expected: PASS.
 
 Run: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1`
 
-Expected: PASS and updates `artifacts/alldownloader.exe`.
+Expected: PASS and updates `artifacts/versadown.exe`.
 
 - [ ] **Step 4: Review and commit repairs**
 

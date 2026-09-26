@@ -35,7 +35,7 @@
 ```rust
 #[test]
 fn cloud_module_does_not_expose_or_require_the_legacy_aria2_engine() {
-    let _provider = alldownloader::cloud::CloudProvider::Quark;
+    let _provider = versadown::cloud::CloudProvider::Quark;
     assert_eq!(_provider.key(), "quark");
 }
 ```
@@ -44,7 +44,7 @@ fn cloud_module_does_not_expose_or_require_the_legacy_aria2_engine() {
 
 Run: `cargo test --test cloud_sessions cloud_module_does_not_expose_or_require_the_legacy_aria2_engine`
 
-Expected: compilation error stating that `alldownloader::cloud` is unavailable.
+Expected: compilation error stating that `versadown::cloud` is unavailable.
 
 - [ ] **Step 3: Add only the cloud provider, credential, HTTP, Quark, PikPak, upload, and command modules**
 
@@ -300,7 +300,7 @@ git commit -m "feat: add cloud workspace and duplicate resolution UI"
 
 **Interfaces:**
 - Consumes: the completed cloud, duplicate, and aria2 service contracts.
-- Produces: a verified `target/release/alldownloader.exe` and no installer package.
+- Produces: a verified `target/release/versadown.exe` and no installer package.
 
 - [ ] **Step 1: Run format and static checks**
 
@@ -318,7 +318,7 @@ Expected: all test result lines report `0 failed`.
 
 Run: `tauri build --no-bundle`.
 
-Expected: exit code 0 and `src-tauri/target/release/alldownloader.exe` exists; no `.msi`, `.exe` installer, or bundle artifact is requested.
+Expected: exit code 0 and `src-tauri/target/release/versadown.exe` exists; no `.msi`, `.exe` installer, or bundle artifact is requested.
 
 - [ ] **Step 4: Inspect the final change set and commit only integration files**
 

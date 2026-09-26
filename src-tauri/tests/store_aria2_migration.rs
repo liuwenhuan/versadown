@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use alldownloader_lib::{DownloadTask, TaskStatus, TaskStore};
+use versadown_lib::{DownloadTask, TaskStatus, TaskStore};
 use rusqlite::Connection;
 use uuid::Uuid;
 
 fn temporary_database_path() -> PathBuf {
     std::env::temp_dir().join(format!(
-        "alldownloader-store-migration-{}.sqlite",
+        "versadown-store-migration-{}.sqlite",
         Uuid::new_v4()
     ))
 }
@@ -101,7 +101,7 @@ fn version_ten_database_adds_discovered_nodes_when_the_column_is_missing() {
 
     let store = TaskStore::open_path(&path).expect("repair version ten database");
     let task = store
-        .create(alldownloader_lib::NewTask::direct(
+        .create(versadown_lib::NewTask::direct(
             "https://example.test/current.zip",
         ))
         .expect("create task after migration");
@@ -168,7 +168,7 @@ fn current_database_persists_a_machine_readable_cloud_failure_code() {
     let path = temporary_database_path();
     let store = TaskStore::open_path(&path).expect("open database");
     let task = store
-        .create(alldownloader_lib::NewTask::direct(
+        .create(versadown_lib::NewTask::direct(
             "cloud://baidu/blocked-file",
         ))
         .expect("create cloud task");
@@ -251,7 +251,7 @@ fn version_three_database_backfills_creation_time_from_the_existing_timestamp() 
 fn replacing_a_gid_keeps_the_same_local_task() {
     let store = TaskStore::open_in_memory().expect("memory store");
     let task = store
-        .create(alldownloader_lib::NewTask::direct(
+        .create(versadown_lib::NewTask::direct(
             "https://example.test/file.iso",
         ))
         .expect("create task");
@@ -275,7 +275,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
     let path = temporary_database_path();
     let store = TaskStore::open_path(&path).expect("open store");
     let task = store
-        .create(alldownloader_lib::NewTask::direct(
+        .create(versadown_lib::NewTask::direct(
             "https://example.test/archive.zip",
         ))
         .expect("create task");

@@ -28,7 +28,7 @@ export const cloudCatalog: ProviderDescriptor[] = cloudCatalogRows.map(([
   uploadDisplayName: displayName,
   shareDirectoryName: displayName + '分享目录',
   passwordLoginHosts: [],
-  recycleBinDirectoryId: `__all_downloader_${provider}_recycle_bin__`,
+  recycleBinDirectoryId: `__versa_down_${provider}_recycle_bin__`,
   authorizationUrl: 'https://example.test', shareHosts: ['example.test'], sharePatterns: ['/s/'],
   authorization: { provider: provider as CloudProvider, web: true, password: passwordLoginMode === 'rustDirect' || provider === 'xunlei', passwordLoginMode: passwordLoginMode as ProviderDescriptor['authorization']['passwordLoginMode'] },
   capabilities: { list: true, createDirectory: true, rename: true, move: true, copy: true, trash: true, delete: true, restore: true, download: true, upload: true, shareInspect: true, shareTransfer: true, recordedTransferResolve: true, shareCreate: true, shareList: true, shareCancel: true },

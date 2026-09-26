@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use alldownloader_lib::{
+use versadown_lib::{
     aria2::{
         Aria2Api, Aria2Error, Aria2File, Aria2GlobalStat, Aria2Options, Aria2Status, Aria2Uri,
         RpcCall, RpcFault,
@@ -588,7 +588,7 @@ async fn native_resume_rejects_disappeared_checkpoint_without_submitting_or_touc
 
 #[tokio::test]
 async fn native_resume_identity_survives_cloud_admission_pause() {
-    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
     let (_root, store, task) = native_resume_fixture();
     let dispatch = CloudDownloadDispatch::default();
     dispatch
@@ -742,7 +742,7 @@ async fn cloud_download_policy_sends_capped_connections_and_spaced_bounded_retri
 
 #[tokio::test]
 async fn scheduler_shared_personal_share_defers_resolver_and_other_provider_is_independent() {
-    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dispatch = CloudDownloadDispatch::default();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
@@ -763,7 +763,7 @@ async fn scheduler_shared_personal_share_defers_resolver_and_other_provider_is_i
         let source = if index % 2 == 0 {
             format!("cloud://{}/file-{index}", provider.key())
         } else {
-            alldownloader_lib::cloud::share::stable_share_source(
+            versadown_lib::cloud::share::stable_share_source(
                 provider,
                 "plan",
                 &format!("entry-{index}"),
@@ -818,7 +818,7 @@ async fn scheduler_shared_personal_share_defers_resolver_and_other_provider_is_i
 
 #[tokio::test]
 async fn scheduler_gidless_pause_cancel_resume_never_dispatches_stale_work() {
-    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let dispatch = CloudDownloadDispatch::default();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
@@ -889,7 +889,7 @@ async fn scheduler_gidless_pause_cancel_resume_never_dispatches_stale_work() {
 
 #[tokio::test]
 async fn scheduler_paused_refresh_retains_checkpoint_and_confirmed_overwrite_intent() {
-    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
     let dispatch = CloudDownloadDispatch::default();
     let store = TaskStore::open_in_memory().unwrap();
     let task = prepared_cloud_share_task(&store, "cloud://quark/file", "file.bin");
@@ -925,7 +925,7 @@ async fn scheduler_paused_refresh_retains_checkpoint_and_confirmed_overwrite_int
 
 #[tokio::test]
 async fn failed_share_resume_dispatch_restores_original_gid_and_resume_eligibility() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         download_dispatch::CloudDownloadDispatch, share::stable_share_source,
     };
     let root = tempfile::tempdir().unwrap();
@@ -960,7 +960,7 @@ async fn failed_share_resume_dispatch_restores_original_gid_and_resume_eligibili
             failed.id,
             version,
             || async {
-                Err::<(), _>(alldownloader_lib::cloud::QuarkError::Transport(
+                Err::<(), _>(versadown_lib::cloud::QuarkError::Transport(
                     "temporary resolver failure".into(),
                 ))
             },
@@ -971,14 +971,14 @@ async fn failed_share_resume_dispatch_restores_original_gid_and_resume_eligibili
     let failed_again = store.find(failed.id).unwrap();
     assert_eq!(failed_again.aria_gid.as_deref(), Some("resume-gid"));
     assert_eq!(
-        alldownloader_lib::duplicate_state(&store, &failed_again).unwrap(),
-        alldownloader_lib::DuplicateDownloadState::ResumeAvailable
+        versadown_lib::duplicate_state(&store, &failed_again).unwrap(),
+        versadown_lib::DuplicateDownloadState::ResumeAvailable
     );
 }
 
 #[tokio::test]
 async fn scheduler_pause_during_resolution_releases_slot_and_resume_uses_a_fresh_resolver() {
-    use alldownloader_lib::cloud::download_dispatch::CloudDownloadDispatch;
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
     let dispatch = CloudDownloadDispatch::default();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = prepared_cloud_share_task(&store, "cloud://xunlei/file", "file.bin");
@@ -994,7 +994,7 @@ async fn scheduler_pause_during_resolution_releases_slot_and_resume_uses_a_fresh
                 version,
                 || async {
                     started.send(()).unwrap();
-                    std::future::pending::<Result<(), alldownloader_lib::cloud::QuarkError>>().await
+                    std::future::pending::<Result<(), versadown_lib::cloud::QuarkError>>().await
                 },
                 |_| async { panic!("paused resolver must not submit") },
             )
@@ -1036,7 +1036,7 @@ async fn scheduler_pause_during_resolution_releases_slot_and_resume_uses_a_fresh
                         ),
                     )
                     .await
-                    .map_err(|_| alldownloader_lib::cloud::QuarkError::Storage)
+                    .map_err(|_| versadown_lib::cloud::QuarkError::Storage)
             },
         )
         .await;
@@ -1057,7 +1057,7 @@ async fn scheduler_pause_during_resolution_releases_slot_and_resume_uses_a_fresh
 
 #[tokio::test]
 async fn scheduler_failure_releases_slot_redacts_error_and_accepted_rpc_retains_slot() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         download_dispatch::CloudDownloadDispatch, download_scheduler::AdmissionOutcome, QuarkError,
     };
     let dispatch = CloudDownloadDispatch::default();
@@ -1124,7 +1124,7 @@ async fn scheduler_failure_releases_slot_redacts_error_and_accepted_rpc_retains_
 
 #[tokio::test]
 async fn scheduler_queued_share_task_can_submit_after_admission() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{stable_share_source, submit_current_share_download},
     };
@@ -1175,7 +1175,7 @@ fn scheduler_queued_resolution_failure_is_retryable() {
 
 #[tokio::test]
 async fn cloud_share_submission_keeps_signed_url_and_headers_out_of_task_store() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{stable_share_source, submit_current_share_download},
         CloudProvider,
@@ -1304,7 +1304,7 @@ async fn legacy_cloud_share_page_never_reaches_aria2_as_a_direct_file() {
 
 #[tokio::test]
 async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{stable_share_source, submit_current_share_download},
         CloudProvider,
@@ -1332,7 +1332,7 @@ async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2
 
 #[tokio::test]
 async fn cloud_share_aria_failure_redacts_signed_urls_but_retains_http_error_code() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{stable_share_source, submit_current_share_download},
         CloudProvider,
@@ -1369,7 +1369,7 @@ async fn cloud_share_aria_failure_redacts_signed_urls_but_retains_http_error_cod
 
 #[tokio::test]
 async fn cloud_share_completion_discards_a_stale_failure_message() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{stable_share_source, submit_current_share_download},
         CloudProvider,
@@ -1403,7 +1403,7 @@ async fn cloud_share_completion_discards_a_stale_failure_message() {
 
 #[tokio::test]
 async fn cloud_share_cancel_after_outer_check_prevents_waiting_refresh_submission() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{
             resubmit_current_share_download, stable_share_source, submit_current_share_download,
@@ -1456,7 +1456,7 @@ async fn cloud_share_cancel_after_outer_check_prevents_waiting_refresh_submissio
 
 #[tokio::test]
 async fn password_cloud_refresh_uses_new_credentials_and_honors_cancellation() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload, share::resubmit_current_cloud_download,
     };
     for provider in ["baidu", "tianyi"] {
@@ -1514,7 +1514,7 @@ async fn password_cloud_refresh_uses_new_credentials_and_honors_cancellation() {
 
 #[tokio::test]
 async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{
             resubmit_current_share_download, stable_share_source, submit_current_share_download,
@@ -1577,7 +1577,7 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
 
 #[tokio::test]
 async fn cloud_share_stale_gid_is_skipped_even_when_task_is_failed_again() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{
             resubmit_current_share_download, stable_share_source, submit_current_share_download,
@@ -1619,7 +1619,7 @@ async fn cloud_share_stale_gid_is_skipped_even_when_task_is_failed_again() {
 
 #[tokio::test]
 async fn cloud_share_manual_retry_can_restart_an_explicitly_cancelled_snapshot() {
-    use alldownloader_lib::cloud::{
+    use versadown_lib::cloud::{
         commands::ResolvedCloudDownload,
         share::{
             resubmit_current_share_download, stable_share_source, submit_current_share_download,

@@ -17,12 +17,12 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib window_interaction::tests 
 cargo test --manifest-path src-tauri/Cargo.toml --test window_config --test window_lifecycle --offline
 cargo test --manifest-path src-tauri/vendor/tao/Cargo.toml --lib modern_invalid_window_dpi --offline
 ./scripts/build-windows.ps1
-node scripts/measure-window-resize.cjs artifacts/window-native-interaction/alldownloader.exe --verify-minimum --interaction-smoke
+node scripts/measure-window-resize.cjs artifacts/window-native-interaction/versadown.exe --verify-minimum --interaction-smoke
 ```
 
 前端 75 项通过；DPI 回归 1 项通过；窗口配置与关闭生命周期 5 项通过；原生交互模块 2 项通过。最终发布构建与发布文件烟测均退出 0。构建保留原有的混合导入及未使用函数警告，没有执行全量前端或 Rust 测试。独立只读审查提出的启动状态遗漏与旧 WebView2 兼容性问题均已补测修复。
 
-交付：`artifacts/window-native-interaction/alldownloader.exe`，引擎在同目录 `binaries`。SHA-256：`AE681C2F80E23150C6DFE9E0B504CB472765774008B0CDDDEEC43CE8925EDECB`。175% DPI 下最小跟踪尺寸 1680×1120，除以 1.75 后为 960×640。真实 WebView2 的四处 caption 样式均为 `drag`，搜索框和三个控制按钮均为 `no-drag`，JavaScript 拖动调用计数为 0；原生快照与开始/保持/结束状态验证通过。
+交付：`artifacts/window-native-interaction/versadown.exe`，引擎在同目录 `binaries`。SHA-256：`AE681C2F80E23150C6DFE9E0B504CB472765774008B0CDDDEEC43CE8925EDECB`。175% DPI 下最小跟踪尺寸 1680×1120，除以 1.75 后为 960×640。真实 WebView2 的四处 caption 样式均为 `drag`，搜索框和三个控制按钮均为 `no-drag`，JavaScript 拖动调用计数为 0；原生快照与开始/保持/结束状态验证通过。
 
 烟测使用隔离数据库和 WebView2 数据目录，检查真实计算样式、没有重复 JavaScript 拖动调用、原生开始/保持/结束事件和原生最小跟踪尺寸。它通过测试消息验证生命周期，**不是实际鼠标拖动性能基准**。人工验收应从托盘完全退出旧版，再检查冷启动首次移动、图标/标题拖动、四边四角连续缩放、按住静止后继续拖动、双击最大化/还原，以及搜索框和窗口按钮。
 
@@ -36,7 +36,7 @@ node scripts/measure-window-resize.cjs artifacts/window-native-interaction/alldo
 
 960×640 入库验证：`cargo test --manifest-path D:\projects\downloader\src-tauri\Cargo.toml --test window_config`，2 项通过。定向运行 `src/App.test.tsx`、`src/App.live.test.tsx`、`src/components/DownloadQueue.test.tsx` 和 `src/lib/windowResizePerformance.test.ts`（两个历史目录均已排除）；主页面模拟缺失新隐私接口及新增参数断言，补齐后单独重跑 `src/App.live.test.tsx` 的 52 项通过，其余 49 项此前在同轮已通过。未修改隐私下载业务逻辑。
 
-`scripts/build-windows.ps1` 完成前端与 Rust release 编译，默认输出仍被旧进程锁定。新的 960×640 二进制已复制并校验到 `artifacts/window-resize-960x640/alldownloader.exe`，SHA-256 为 `458412FBAF6B36D99249599ED24A77B18D9662F3E9F5C40ACAC9B321D32298A5`。本轮未重跑性能基准；上述最小尺寸诊断断言已同步到新约定。
+`scripts/build-windows.ps1` 完成前端与 Rust release 编译，默认输出仍被旧进程锁定。新的 960×640 二进制已复制并校验到 `artifacts/window-resize-960x640/versadown.exe`，SHA-256 为 `458412FBAF6B36D99249599ED24A77B18D9662F3E9F5C40ACAC9B321D32298A5`。本轮未重跑性能基准；上述最小尺寸诊断断言已同步到新约定。
 
 ## 前一版实现与测量
 
@@ -84,14 +84,14 @@ cargo test --manifest-path D:\projects\downloader\src-tauri\Cargo.toml --test wi
 前端类型检查、生产打包和 Rust release 编译完成。脚本最终复制步骤因用户旧版正在运行而失败；将新生成的程序复制到独立目录并核对 SHA-256，未覆盖或关闭用户旧版。
 
 ```text
-node scripts/measure-window-resize.cjs artifacts/window-resize-v2/alldownloader.exe --verify-minimum
+node scripts/measure-window-resize.cjs artifacts/window-resize-v2/versadown.exe --verify-minimum
 ```
 
 退出码 0，原生鼠标最小尺寸与性能对比均完成。Windows 的程序化 `set_size` 能绕过交互最小值，因此最小尺寸验证读取 `WM_GETMINMAXINFO`，不以程序化缩小为判据。
 
 ## 测试程序
 
-`artifacts/window-resize-v2/alldownloader.exe`，配套引擎在同目录的 `binaries` 子目录。
+`artifacts/window-resize-v2/versadown.exe`，配套引擎在同目录的 `binaries` 子目录。
 
 SHA-256：`89F12496165807173B7C242E87A9651D0291847AF279304B5537F811F6B706DD`
 

@@ -47,7 +47,7 @@ test('Xunlei password login accepts the official agreement before submitting', a
     assert.equal(inputs[1].value, 'probe-password');
     assert.equal(agreement.checked, true);
     assert.equal(submits, 1);
-    assert.equal(window.__alldownloaderXunleiPassword.submitted, true);
+    assert.equal(window.__versadownXunleiPassword.submitted, true);
     window.eval(`${source}('xunlei',[], 'other-user', 'other-password', 'second-attempt');`);
     await new Promise(resolve => setTimeout(resolve, 400));
     assert.equal(submits, 1);

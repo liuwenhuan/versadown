@@ -13,8 +13,8 @@ use std::{
 };
 use zeroize::Zeroize;
 
-const SYSTEM_CREDENTIAL_SERVICE_PREFIX: &str = "com.alldownloader.desktop";
-const SHARE_PROTECTOR_SERVICE: &str = "com.alldownloader.desktop.share-storage";
+const SYSTEM_CREDENTIAL_SERVICE_PREFIX: &str = "com.versadown.desktop";
+const SHARE_PROTECTOR_SERVICE: &str = "com.versadown.desktop.share-storage";
 const SHARE_PROTECTOR_KEY: &str = "share-storage-key-v1";
 const PROTECTED_BLOB_MAGIC: &[u8] = b"ADSC1";
 pub trait CredentialStore: Send + Sync {

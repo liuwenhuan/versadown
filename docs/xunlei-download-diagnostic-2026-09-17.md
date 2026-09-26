@@ -19,7 +19,7 @@
 ## 官方客户端对照及补充实测
 
 - 用户补充官方客户端同文件截图：461.4 KB/s，已下载13.5MB，显示SVIP下载特权；用户说明速度仍在增长。不能再用账号无会员权限解释低速，但截图本身不能定位协议差异。
-- `ALLDOWNLOADER_TEST_BINARY=artifacts/xunlei-download-fix/alldownloader.exe ALLDOWNLOADER_XUNLEI_PASSWORD_LIVE=1 ALLDOWNLOADER_XUNLEI_USAGE_PROBE=1 node scripts/verify-xunlei-auth-live.cjs`（PowerShell分别设置环境变量）完成隐藏隔离授权检查：登录、容量、关闭授权窗和网盘菜单通过。新增下载探测仅输出诊断，脚本退出0不代表下载成功。
+- `VERSADOWN_TEST_BINARY=artifacts/xunlei-download-fix/versadown.exe VERSADOWN_XUNLEI_PASSWORD_LIVE=1 VERSADOWN_XUNLEI_USAGE_PROBE=1 node scripts/verify-xunlei-auth-live.cjs`（PowerShell分别设置环境变量）完成隐藏隔离授权检查：登录、容量、关闭授权窗和网盘菜单通过。新增下载探测仅输出诊断，脚本退出0不代表下载成功。
 - 同会话文件详情默认请求及`space=&usage=FETCH`均返回HTTP200、SVIP直链；1MiB Range探测均curl52空响应，未获取数据。`usage=DISPLAY`无下载链接。未修改生产请求参数。
 - `links['application/octet-stream'].url`与`web_content_link`相同，不存在被忽略的另一条URL。但links对象有非空`token`及`token_type=TOKEN_TYPE_ACCELERATION`，令牌不同于账户access_token且不在URL中。当前插件未消费此令牌；其用法、与低速的因果关系尚未证实，不应直接当作HTTP Authorization发送。
 - 官网公开脚本`102.a73ab5f326ac0106b25c.js`中的下载处理调用`callClientRetrieve`，传文件ID、种类、大小等给官方客户端，而非直接用网页直链下载。还不能据此声称必须使用官方客户端才能获得高速。
@@ -56,6 +56,6 @@
 
 ### 本轮验证范围
 
-无生产代码变更，仅诊断脚本与本文档。运行隐藏隔离授权+定向传输探测（`verify-xunlei-auth-live.cjs`配合`ALLDOWNLOADER_XUNLEI_TRANSPORT_PROBE=1`或`ALLDOWNLOADER_XUNLEI_PROTOCOL_PROBE=1`），并做脚本语法检查。不运行无关单元测试、全量回归或发布构建。
+无生产代码变更，仅诊断脚本与本文档。运行隐藏隔离授权+定向传输探测（`verify-xunlei-auth-live.cjs`配合`VERSADOWN_XUNLEI_TRANSPORT_PROBE=1`或`VERSADOWN_XUNLEI_PROTOCOL_PROBE=1`），并做脚本语法检查。不运行无关单元测试、全量回归或发布构建。
 
 下一步应分开处理：HTTP断连后的有界重试与可靠接续；若要求接近官方客户端吞吐，则另行评估P2P/离线加速通道接入，不能以伪造会员标识、盲目增并发或未经证实的token请求头代替。

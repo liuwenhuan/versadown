@@ -26,7 +26,7 @@
 
 `scripts/verify-xunlei-auth-live.cjs` 在隔离临时数据目录与隐藏窗口中点击实际界面按钮，断言根目录可读、账号可恢复、授权页关闭和迅雷菜单出现。网页模式复用隔离的已登录官方配置；密码模式仅复制本机已有的 DPAPI 加密密码，使用全新浏览器配置。不会输出密码、令牌、Cookie 或文件名，不改动用户原配置，不关闭前台实例。
 
-密码模式：设置 `ALLDOWNLOADER_XUNLEI_PASSWORD_LIVE=1` 后执行脚本。网页模式可设置 `ALLDOWNLOADER_XUNLEI_REUSE_TEST_DATA` 指向既有隔离测试目录，不将其视为可提交的测试夹具。
+密码模式：设置 `VERSADOWN_XUNLEI_PASSWORD_LIVE=1` 后执行脚本。网页模式可设置 `VERSADOWN_XUNLEI_REUSE_TEST_DATA` 指向既有隔离测试目录，不将其视为可提交的测试夹具。
 
 ## 本次执行结果（2026-09-17）
 
@@ -34,4 +34,4 @@
 
 最终发布二进制再次执行真实验收，两种模式均退出码 0，返回 `rootReadable=true`、`accountRestorable=true`、`authorizationWindowClosed=true`、`workspaceMenu=true`。网页验收使用已登录官方配置，密码验收使用全新浏览器配置与本机已有加密密码；不声称已覆盖所有账号、安全挑战和未来官方版本。
 
-产物：工作树下 `artifacts/alldownloader.exe`。未替换或重启用户的前台实例。
+产物：工作树下 `artifacts/versadown.exe`。未替换或重启用户的前台实例。

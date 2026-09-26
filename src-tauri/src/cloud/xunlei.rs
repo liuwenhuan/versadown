@@ -1835,7 +1835,7 @@ fn now() -> u64 {
         .as_secs()
 }
 
-pub(crate) const XUNLEI_RECYCLE_BIN_ID: &str = "__all_downloader_xunlei_recycle_bin__";
+pub(crate) const XUNLEI_RECYCLE_BIN_ID: &str = "__versa_down_xunlei_recycle_bin__";
 const XUNLEI_RECYCLE_BIN_NAME: &str = "回收站";
 
 /// A blocking client whose refreshed session can be persisted by the command

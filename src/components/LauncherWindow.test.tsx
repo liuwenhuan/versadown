@@ -169,7 +169,7 @@ it('keeps the hexagon compact on one click, activates tasks on double click, and
 it('opens the self-drawn menu when WebKitGTK forwards a native context-menu signal', async () => {
   render(<LauncherWindow />);
 
-  window.dispatchEvent(new Event('alldownloader:launcher-context-menu'));
+  window.dispatchEvent(new Event('versadown:launcher-context-menu'));
 
   expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
   expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);

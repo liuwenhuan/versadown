@@ -42,7 +42,7 @@ pub(crate) const ALIYUN_WEB_TOKENS_JS: &str = r#"(() => {
  for (const storage of [localStorage, sessionStorage]) for (let i = 0; i < storage.length; i++) inspect({[storage.key(i)]: storage.getItem(storage.key(i))}, 0);
  return out.access_token && out.refresh_token && out.default_drive_id ? out : null;
 })()"#;
-pub(crate) const ALIYUN_RECYCLE_BIN_ID: &str = "__all_downloader_aliyun_recycle_bin__";
+pub(crate) const ALIYUN_RECYCLE_BIN_ID: &str = "__versa_down_aliyun_recycle_bin__";
 const ALIYUN_RECYCLE_BIN_NAME: &str = "回收站";
 pub const ALIYUN_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
     CloudSharePassCodeConstraint {

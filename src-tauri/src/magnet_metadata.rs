@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{downloader::load_torrent_base64, DownloadError, MagnetMetadataSettings};
 
 const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-const METADATA_USER_AGENT: &str = "AllDownloader/0.1";
+const METADATA_USER_AGENT: &str = "VersaDown/0.1";
 const METADATA_REQUEST_ATTEMPTS: usize = 3;
 const METADATA_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
