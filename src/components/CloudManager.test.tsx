@@ -1846,6 +1846,33 @@ it('excludes the PikPak recycle-bin virtual folder from move destinations', asyn
   expect(screen.queryByRole('button', { name: '打开 回收站' })).not.toBeInTheDocument();
 });
 
+it('refreshes the current directory when a completed move is indexed after the first listing', async () => {
+  const user = userEvent.setup();
+  const sourceFile = { id: 'move-source', parentId: '0', name: '待移动文件.txt', kind: 'file' as const };
+  const destination = { id: 'archive', parentId: '0', name: '归档', kind: 'folder' as const };
+  let moveCompleted = false;
+  let sourceReadsAfterMove = 0;
+  const listCloudDirectory = vi.fn(async (_provider: string, parentId = '0') => {
+    if (parentId === destination.id) return { id: destination.id, items: [] };
+    const items = moveCompleted && sourceReadsAfterMove++ > 0 ? [destination] : [sourceFile, destination];
+    return { id: '0', items };
+  });
+  const client = createCloudFake({
+    listCloudDirectory,
+    moveCloudFiles: vi.fn().mockImplementation(async () => { moveCompleted = true; })
+  });
+  render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await screen.findByText(sourceFile.name);
+  await user.click(screen.getByText(sourceFile.name));
+  await user.click(screen.getByRole('button', { name: '更多文件操作' }));
+  await user.click(screen.getByRole('menuitem', { name: '移动' }));
+  await user.click(await screen.findByRole('button', { name: `打开 ${destination.name}` }));
+  await user.click(screen.getByRole('button', { name: '移动到此处' }));
+
+  await waitFor(() => expect(screen.queryByText(sourceFile.name)).not.toBeInTheDocument());
+});
+
 it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
   const user = userEvent.setup();
   const recycleBinId = '__versa_down_pikpak_recycle_bin__';

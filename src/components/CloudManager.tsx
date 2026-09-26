@@ -73,6 +73,7 @@ type DirectoryState = 'idle' | 'loading' | 'ready' | 'empty' | 'error' | 'expire
 type Editor = 'create' | 'rename' | null;
 type DestinationAction = 'move' | 'copy';
 type OperationState = { kind: 'working' | 'success' | 'error' | 'cancelled'; message: string; operationVerification?: boolean; verificationOpened?: boolean; uploadProgress?: CloudUploadProgress } | null;
+type DirectoryRefreshConfirmation = (directory: CloudDirectory) => boolean;
 type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'share' | 'copyShareLink' | 'updateSharePassCode' | 'cancelShare' | 'delete' | 'create' | 'upload' | 'refresh';
@@ -83,7 +84,7 @@ const expiredAuthorizationStatus = '授权过期请重新登录';
 // drives index the file into the directory listing asynchronously. Always use
 // fresh server listings and retry a bounded number of times instead of adding
 // the response optimistically to the visible directory.
-const UPLOAD_DIRECTORY_CONFIRMATION_DELAYS_MS = [0, 250, 750, 1_500] as const;
+const DIRECTORY_INDEX_CONFIRMATION_DELAYS_MS = [0, 250, 750, 1_500] as const;
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'share';
 const MY_SHARES_DIRECTORY_ID = '__versa_down_my_shares__';
 
@@ -918,7 +919,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           : [{ id: rootId, name: '根目录' }, { id: targetId, name: destinationName }];
       parentId = targetId;
     }
-    for (const delay of UPLOAD_DIRECTORY_CONFIRMATION_DELAYS_MS) {
+    for (const delay of DIRECTORY_INDEX_CONFIRMATION_DELAYS_MS) {
       if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
       const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs);
       if (!refreshed) return { loaded: false, confirmed: false };
@@ -939,6 +940,21 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       }
     }
     return { loaded: true, confirmed: false, destinationName };
+  }
+
+  async function refreshDirectoryUntil(
+    account: CloudAccount,
+    parentId: string,
+    nextBreadcrumbs: readonly Breadcrumb[],
+    confirmation: DirectoryRefreshConfirmation
+  ) {
+    for (const delay of DIRECTORY_INDEX_CONFIRMATION_DELAYS_MS) {
+      if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+      const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs);
+      if (!refreshed) return { loaded: false, confirmed: false };
+      if (confirmation(refreshed)) return { loaded: true, confirmed: true };
+    }
+    return { loaded: true, confirmed: false };
   }
 
   useEffect(() => {
@@ -1139,7 +1155,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     };
   }, [client, provider, waitingForWebAuthorization]);
 
-  async function runOperation(name: string, action: () => Promise<unknown>, refresh = true, retryUploadFailures?: (failures: CloudUploadOutcome['failures']) => () => Promise<void>) {
+  async function runOperation(name: string, action: () => Promise<unknown>, refresh = true, retryUploadFailures?: (failures: CloudUploadOutcome['failures']) => () => Promise<void>, confirmDirectoryRefresh?: DirectoryRefreshConfirmation) {
     if (!activeAccount || operationInFlight.current) return;
     operationInFlight.current = true;
     setOperationRunning(true);
@@ -1180,7 +1196,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
           if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
             const authorizationFailures = result.failures.filter(failure => failure.code === 'web_auth_required' || (failure.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web));
-            queueAuthorizationContinuation(name, retryUploadFailures?.(authorizationFailures) ?? (() => runOperation(name, action, refresh, retryUploadFailures)), `${name}需要网页验证。${first.message ? ` ${first.message}` : ''}`);
+            queueAuthorizationContinuation(name, retryUploadFailures?.(authorizationFailures) ?? (() => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh)), `${name}需要网页验证。${first.message ? ` ${first.message}` : ''}`);
             return;
           }
           if (first.code === 'credentials_expired') {
@@ -1201,13 +1217,18 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         setEditorValue('');
         return;
       }
-      if (refresh && !await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs)) return;
+      const directoryRefresh = refresh
+        ? confirmDirectoryRefresh
+          ? await refreshDirectoryUntil(activeAccount, currentDirectoryId, breadcrumbs, confirmDirectoryRefresh)
+          : { loaded: Boolean(await loadDirectory(activeAccount, currentDirectoryId, breadcrumbs)), confirmed: true }
+        : { loaded: true, confirmed: true };
+      if (!directoryRefresh.loaded) return;
       const message = name === '下载'
         ? '已经提交下载任务'
         : name === '上传' && Array.isArray(result)
           ? `已上传 ${result.length} 个文件`
           : `${name}成功`;
-      setOperation({ kind: 'success', message });
+      setOperation({ kind: 'success', message: `${message}${directoryRefresh.confirmed ? '' : '；服务端目录尚未同步，请稍后刷新确认'}` });
       setEditor(null);
       setEditorValue('');
     } catch (error) {
@@ -1219,7 +1240,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         // only opens the WebView; the saved session is replaced later, after
         // a successful `cloud_complete_authorization` validation.
         const detail = errorMessage(error, '');
-        queueAuthorizationContinuation(name, () => runOperation(name, action, refresh), `${name}需要网页验证。${detail ? ` ${detail}` : ''}`);
+        queueAuthorizationContinuation(name, () => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh), `${name}需要网页验证。${detail ? ` ${detail}` : ''}`);
       } else if (isCredentialExpired(error)) {
         setDirectory(null);
         setDirectoryState('expired');
@@ -1662,7 +1683,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualDirectory={contextMenu.kind === 'selection' && isVirtualDirectoryItem(contextMenu.item)} myShares={isMyShares} canUpdateSharePassCode={Boolean(descriptor.capabilities.shareUpdatePassCode)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
     {shareItems && <CloudShareDialog provider={provider} items={shareItems} share={createdShare} busy={operationBusy} sharePassCodeConstraint={descriptor.sharePassCodeConstraint} onUpdatePassCode={descriptor.capabilities.shareUpdatePassCode ? updateSharePassCode : undefined} onCreate={submitCloudShare} onCopy={copyShareLink} onClose={() => { setShareItems(null); setCreatedShare(null); }} />}
-    {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { const action = destinationAction; setDestinationAction(null); queueAuthorizationContinuation(`选择${action === 'copy' ? '复制' : '移动'}目标`, async () => { setDestinationAction(action); }, errorMessage(error, `读取${action === 'copy' ? '复制' : '移动'}目标目录需要网页验证。`)); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, selectedIds.slice(), targetParentId)); else void runOperation('复制', () => client.copyCloudFiles(provider, selectedIds.slice(), targetParentId)); }} />}
+    {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { const action = destinationAction; setDestinationAction(null); queueAuthorizationContinuation(`选择${action === 'copy' ? '复制' : '移动'}目标`, async () => { setDestinationAction(action); }, errorMessage(error, `读取${action === 'copy' ? '复制' : '移动'}目标目录需要网页验证。`)); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; const sourceIds = selectedIds.slice(); setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, sourceIds, targetParentId), true, undefined, (directory) => sourceIds.every((id) => !directory.items.some((item) => item.id === id))); else void runOperation('复制', () => client.copyCloudFiles(provider, sourceIds, targetParentId)); }} />}
   </section>;
 }
 
