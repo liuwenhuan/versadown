@@ -1,3 +1,4 @@
+mod ed2k_state_migration;
 pub(crate) mod native_resume;
 pub mod process;
 pub mod recovery;
@@ -7,6 +8,10 @@ pub mod sync;
 pub mod types;
 
 pub use process::{Aria2LaunchConfig, Aria2Process};
+pub use ed2k_state_migration::{
+    migrate_legacy_ed2k_discovery_state, Ed2kDiscoveryMigrationError,
+    Ed2kDiscoveryMigrationReport,
+};
 pub use rpc::{Aria2Api, Aria2Options, Aria2RpcClient, RpcCall};
 pub use service::{DownloadAction, DownloadService, DownloadServiceError, UriSubmissionOptions};
 pub use sync::{EventSink, TransferSynchronizer};

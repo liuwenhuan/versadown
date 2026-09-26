@@ -249,6 +249,9 @@ pub fn run() {
                 app.path().app_data_dir()?
             };
             std::fs::create_dir_all(&data_dir)?;
+            if let Err(error) = aria2::migrate_legacy_ed2k_discovery_state(&data_dir) {
+                eprintln!("Unable to migrate legacy eD2K discovery state: {error}");
+            }
             let store = std::sync::Arc::new(TaskStore::open_path(&data_dir.join("tasks.sqlite"))?);
             let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
                 data_dir.join("cloud-sessions"),
