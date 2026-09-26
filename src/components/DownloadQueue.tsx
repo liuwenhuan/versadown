@@ -398,7 +398,7 @@ function TaskContextMenu({ state, privacyEnabled, onClose, onCommand }: { state:
   const isBatch = state.tasks.length > 1;
   const commands = isBatch ? batchContextCommands(state.tasks, privacyEnabled) : contextCommands(state.tasks[0], privacyEnabled);
   const menuTitle = isBatch ? `已选择 ${state.tasks.length} 个任务` : displayTaskName(state.tasks[0]);
-  const [menuSize, setMenuSize] = useState({ width: 224, height: commands.length * 38 + 64 });
+  const [menuSize, setMenuSize] = useState({ width: 224, height: commands.length * 38 + (isBatch ? 64 : 14) });
   const { left, top } = taskContextMenuPosition({
     x: state.x,
     y: state.y,
@@ -446,7 +446,7 @@ function TaskContextMenu({ state, privacyEnabled, onClose, onCommand }: { state:
   }
 
   return createPortal(<div ref={menuRef} className="task-context-menu" role="menu" aria-label={`${menuTitle} 任务菜单`} style={{ left, top }} onKeyDown={moveFocus}>
-    <header><b title={menuTitle}>{menuTitle}</b></header>
+    {isBatch && <header><b>{menuTitle}</b></header>}
     {commands.map((item) => <div key={item.command} className={item.separated ? 'menu-separated' : undefined}><button role="menuitem" className={item.danger ? 'danger' : undefined} onClick={() => onCommand(item.command)}><MenuIcon command={item.command} /><span>{item.label}</span></button></div>)}
   </div>, document.body);
 }

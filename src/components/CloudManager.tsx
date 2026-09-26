@@ -322,7 +322,7 @@ function CloudContextMenu({ state, selectedCount, recycleBin, virtualDirectory, 
       : recycleBin
       ? [{ action: 'restore', label: '恢复' }, { action: 'delete', label: '永久删除', danger: true, separated: true }]
       : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, { action: 'share', label: '分享', separated: true }, { action: 'delete', label: '删除', danger: true, separated: true }];
-  const [menuSize, setMenuSize] = useState({ width: 210, height: items.length * 38 + 24 });
+  const [menuSize, setMenuSize] = useState({ width: 210, height: items.length * 38 + (state.kind === 'selection' && selectedCount > 1 ? 24 : 14) });
   const left = Math.max(8, Math.min(state.x, window.innerWidth - menuSize.width - 8));
   const top = Math.max(8, Math.min(state.y, window.innerHeight - menuSize.height - 8));
 
@@ -364,7 +364,7 @@ function CloudContextMenu({ state, selectedCount, recycleBin, virtualDirectory, 
 
   const title = state.kind === 'background' ? '文件区菜单' : `${state.item.name} 文件菜单`;
   return createPortal(<div ref={menuRef} className="cloud-context-menu" role="menu" aria-label={title} style={{ left, top }} onKeyDown={moveFocus}>
-    {state.kind === 'selection' && <header><b>{state.item.name}</b>{selectedCount > 1 && <small>已选择 {selectedCount} 项</small>}</header>}
+    {state.kind === 'selection' && selectedCount > 1 && <header><small>已选择 {selectedCount} 项</small></header>}
     {items.map((item) => <div key={item.action} className={item.separated ? 'menu-separated' : undefined}><button role="menuitem" className={item.danger ? 'danger' : undefined} onClick={() => onAction(item.action)}><CloudActionIcon action={item.action} /><span>{item.label}</span></button></div>)}
   </div>, document.body);
 }

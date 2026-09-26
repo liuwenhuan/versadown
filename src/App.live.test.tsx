@@ -915,6 +915,52 @@ it('uses the shared line icon and input treatment when unlocking private tasks',
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
 
+it('places the privacy unlock modal above the global search surface', async () => {
+  state.privacyVisibility.mockResolvedValue({ enabled: true, unlocked: false });
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const user = userEvent.setup();
+    await act(async () => { render(<App />); });
+
+    await user.click(await screen.findByRole('button', { name: '解锁隐私任务' }));
+    const dialog = await screen.findByRole('dialog', { name: '输入隐私密码解锁' });
+    const backdrop = dialog.parentElement;
+    const searchSurface = screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }).closest('.header-input-shell');
+
+    expect(backdrop).toHaveClass('modal-backdrop');
+    expect(searchSurface).not.toBeNull();
+    expect(Number(getComputedStyle(backdrop!).zIndex)).toBeGreaterThan(Number(getComputedStyle(searchSurface!).zIndex));
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('places every application modal backdrop above the global search surface', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  const modalBackdrops = ['modal-backdrop new-download-backdrop', 'cloud-confirm-backdrop'].map((className) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = className;
+    document.body.appendChild(backdrop);
+    return backdrop;
+  });
+  try {
+    await act(async () => { render(<App />); });
+    const searchSurface = screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }).closest('.header-input-shell');
+
+    expect(searchSurface).not.toBeNull();
+    for (const backdrop of modalBackdrops) {
+      expect(Number(getComputedStyle(backdrop).zIndex)).toBeGreaterThan(Number(getComputedStyle(searchSurface!).zIndex));
+    }
+  } finally {
+    modalBackdrops.forEach((backdrop) => backdrop.remove());
+    stylesheet.remove();
+  }
+});
+
 it('does not expose a page-wide start action when paused tasks exist', async () => {
   const pausedTask: QueueTask = { ...oldTask, id: 'paused-task', status: 'paused' };
   const downloadingTask: QueueTask = { ...oldTask, id: 'downloading-task', status: 'downloading' };
