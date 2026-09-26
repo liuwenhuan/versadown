@@ -748,6 +748,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   useEffect(() => {
     if (workspaceVisible) return;
+    // Cached provider workspaces stay mounted. Discard settled notices when
+    // leaving one, but keep an active upload and its controls until it finishes.
+    if (!operationInFlight.current) {
+      setOperation(null);
+      setUploadResult(null);
+    }
     setContextMenu(null);
     setSelectionMenuAnchor(null);
     setDestinationAction(null);
@@ -873,6 +879,15 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setAuthorizationStatus(errorMessage(error, '无法读取此目录'));
       return null;
     }
+  }
+
+  function navigateToDirectory(parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
+    if (!activeAccount || operationBusy) return;
+    // Operation-driven refreshes call loadDirectory directly, so they retain
+    // the result until the user actually leaves the current directory.
+    setOperation(null);
+    setUploadResult(null);
+    void loadDirectory(activeAccount, parentId, nextBreadcrumbs);
   }
 
   async function completeOperationVerification() {
@@ -1294,7 +1309,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   function openFolder(item: CloudFile) {
     if (!activeAccount || isRecycleBin || isMyShares || item.kind !== 'folder' || operationBusy) return;
-    void loadDirectory(activeAccount, item.id, [...breadcrumbs, { id: item.id, name: item.name }]);
+    navigateToDirectory(item.id, [...breadcrumbs, { id: item.id, name: item.name }]);
   }
 
   function changeSort(column: CloudSortColumn) {
@@ -1615,7 +1630,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const canNavigateToParent = Boolean(parent);
   const navigateToParent = () => {
     if (!parent || operationBusy) return;
-    void loadDirectory(activeAccount, parent.id, breadcrumbs.slice(0, -1));
+    navigateToDirectory(parent.id, breadcrumbs.slice(0, -1));
   };
   return <section className="cloud-manager cloud-file-manager" aria-label={`${label}文件管理器`}>
     {showSessionActions && <div className="cloud-file-sessionbar">
@@ -1625,7 +1640,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     <div className="cloud-filebar">
       <button className="cloud-icon-button cloud-refresh-button" aria-label="刷新" title="刷新" disabled={operationBusy} onClick={refreshDirectory}><CloudActionIcon action="refresh" /></button>
       <div className="cloud-pathbar">
-        <div className="cloud-breadcrumbs" role="navigation" aria-label="当前目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1} onClick={() => void loadDirectory(activeAccount, crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
+        <div className="cloud-breadcrumbs" role="navigation" aria-label="当前目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1 || operationBusy} onClick={() => navigateToDirectory(crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label="文件操作">
         {!isRecycleBin && !isMyShares && <button aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传</button>}

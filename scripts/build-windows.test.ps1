@@ -80,12 +80,15 @@ try {
     }
     Assert-True -Condition $blocked -Message 'The build must stop before compiling when its published executable is running.'
 
+    $alternatePublish = & (Join-Path $PSScriptRoot 'build-windows.ps1') -Mode Quick -QuickPublishName quick-next -DryRun 6>&1
+    Assert-True -Condition (($alternatePublish -join "`n") -match 'artifacts[\\/]quick-next[\\/]versadown\.exe') -Message 'A quick build must be able to publish beside a running executable.'
+
     $projectRoot = $testRoot
     $vcvars = Join-Path $testRoot 'vcvars64.bat'
     $compileMarker = Join-Path $testRoot 'frontend-signature.txt'
     $compileCargo = Join-Path $testRoot 'compile-cargo.cmd'
     Write-TestFile -Path $vcvars -Content '@echo off'
-    Write-TestFile -Path $compileCargo -Content "@echo off`r`necho %ALDOWNLOADER_FRONTEND_SIGNATURE% > `"$compileMarker`"`r`nexit /b 0"
+    Write-TestFile -Path $compileCargo -Content "@echo off`r`necho %VERSADOWN_FRONTEND_SIGNATURE% > `"$compileMarker`"`r`nexit /b 0"
 
     Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $compileCargo -PnpmCommand 'pnpm' -TargetRoot $targetRoot -Profile quick -FrontendSignature $changedFrontendSignature
 

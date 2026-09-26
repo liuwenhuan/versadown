@@ -72,9 +72,11 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [rateLimitStatus, setRateLimitStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModels, setAiModels] = useState<string[]>([]);
+  const [aiModelError, setAiModelError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const aiModelRequestInFlight = useRef(false);
+  const aiModelSelect = useRef<HTMLSelectElement>(null);
   const [saved, setSaved] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
@@ -137,12 +139,17 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     if (aiModelRequestInFlight.current) return;
     const configuration = currentAiInput();
     setAiStatus(null);
+    setAiModelError(null);
+    const showModelError = (message: string) => {
+      aiModelSelect.current?.blur();
+      setAiModelError(message);
+    };
     if (!configuration.baseUrl) {
-      notifyAi({ kind: 'error', message: '无法获取模型列表：请先填写服务地址。' });
+      showModelError('无法获取模型列表：请先填写服务地址。');
       return;
     }
     if (!configuration.apiKey && !ai.apiKeyConfigured) {
-      notifyAi({ kind: 'error', message: '无法获取模型列表：请先填写 API Key。' });
+      showModelError('无法获取模型列表：请先填写 API Key。');
       return;
     }
     aiModelRequestInFlight.current = true;
@@ -153,7 +160,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
       setAiModels(models);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      notifyAi({ kind: 'error', message: `无法获取模型列表，可能是服务地址或 API Key 不正确：${detail}` });
+      showModelError(`无法获取模型列表，可能是服务地址或 API Key 不正确：${detail}`);
     } finally {
       aiModelRequestInFlight.current = false;
       setAiBusy(false);
@@ -161,6 +168,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   }
 
   async function selectAiModel(model: string) {
+    setAiModelError(null);
     if (!model) {
       setAi((current) => ({ ...current, model }));
       return;
@@ -398,11 +406,11 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           {privacyStatus && <div className="settings-actions"><span role="status" className={privacyStatus.kind}>{privacyStatus.message}</span></div>}
         </form>
         <section className="ai-settings">
-          <label className="setting-row"><span><b>启用 AI 智能分析</b></span><input aria-label="启用 AI 智能分析" type="checkbox" checked={ai.enabled} onChange={(event) => setAi((current) => ({ ...current, enabled: event.target.checked }))} /></label>
+          <label className="setting-row"><span className="ai-settings-toggle-label"><b>启用 AI 智能分析</b>{aiModelError && <span role="status" className="error ai-model-error">{aiModelError}</span>}</span><input aria-label="启用 AI 智能分析" type="checkbox" checked={ai.enabled} onChange={(event) => setAi((current) => ({ ...current, enabled: event.target.checked }))} /></label>
           <fieldset aria-busy={aiBusy}>
             <label><span>服务地址</span><input aria-label="AI 服务地址" required placeholder="https://api.openai.com/v1" value={ai.baseUrl} onChange={(event) => setAi((current) => ({ ...current, baseUrl: event.target.value }))} /></label>
             <label><span>API Key</span><input aria-label="AI API Key" type="password" autoComplete="new-password" placeholder={ai.apiKeyConfigured ? '已配置；留空则保持不变' : '输入服务 API Key'} value={aiApiKey} onChange={(event) => setAiApiKey(event.target.value)} /></label>
-            <label><span>模型</span><select aria-label="AI 模型" required value={ai.model} onPointerDown={() => void reloadAiModels()} onFocus={() => void reloadAiModels()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') void reloadAiModels(); }} onChange={(event) => void selectAiModel(event.target.value)}><option value="">选择模型</option>{ai.model && !aiModels.includes(ai.model) && <option value={ai.model}>{ai.model}</option>}{aiModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            <label><span>模型</span><select ref={aiModelSelect} aria-label="AI 模型" required value={ai.model} onPointerDown={() => void reloadAiModels()} onFocus={() => void reloadAiModels()} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') void reloadAiModels(); }} onChange={(event) => void selectAiModel(event.target.value)}><option value="">选择模型</option>{ai.model && !aiModels.includes(ai.model) && <option value={ai.model}>{ai.model}</option>}{aiModels.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
           </fieldset>
           {!onNotice && aiStatus && <div className="settings-actions"><span role="status" className={aiStatus.kind}>{aiStatus.message}</span></div>}
         </section>

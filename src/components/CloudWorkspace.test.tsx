@@ -14,15 +14,20 @@ function CloudWorkspace(props: Omit<CloudWorkspaceProps, 'activePage' | 'onPageC
 }
 import { cloudCatalog } from '../test/cloudCatalog';
 
-it.each(['success', 'failure'] as const)('retains upload state and its %s result across providers and hidden application views', async (outcome) => {
+it.each(['success', 'failure'] as const)('retains in-progress uploads across providers but clears the %s result on a later provider switch', async (outcome) => {
   const user = userEvent.setup();
   let finish!: (value: any) => void;
+  let uploaded = false;
   const client = {
     ...createClient({
       quark: { id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' },
       pikpak: { id: 'p', displayName: 'bob', provider: 'pikpak', authMethod: 'web' },
     }),
     listLocalUploadEntries: vi.fn().mockResolvedValue({ path: 'C:/Uploads', parentPath: 'C:/', roots: [], entries: [{ path: 'C:/Uploads/a.txt', name: 'a.txt', kind: 'file', size: 1024 }] }),
+    listCloudDirectory: vi.fn((provider: string, parentId = '0') => Promise.resolve({ id: parentId, items: [
+      { id: `${provider}-file`, parentId, name: `${provider}-文件.txt`, kind: 'file', size: 10, modifiedAt: '刚刚' },
+      ...(uploaded && provider === 'quark' ? [{ id: 'new-file', parentId, name: 'a.txt', kind: 'file' }] : []),
+    ] })),
     uploadCloudFiles: vi.fn(() => new Promise<any>(resolve => { finish = resolve; })),
   };
   const view = render(<div><CloudWorkspace client={client} /></div>);
@@ -40,17 +45,19 @@ it.each(['success', 'failure'] as const)('retains upload state and its %s result
   expect(await screen.findByText('正在准备上传…')).toBeVisible();
   expect(screen.getByRole('button', { name: '上传', exact: true })).toBeDisabled();
   view.rerender(<div hidden><CloudWorkspace client={client} /></div>);
+  uploaded = outcome === 'success';
   await act(async () => { finish(outcome === 'success'
     ? { uploaded: [{ id: 'new-file', name: 'a.txt', kind: 'file', parentId: '0' }], failures: [] }
     : { uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code: 'network_error', message: '网络中断' }] }); });
   view.rerender(<div><CloudWorkspace client={client} /></div>);
   const message = outcome === 'success' ? '已上传 1 项' : '上传完成：成功 0 项，失败 1 项：a.txt：网络中断';
   expect(await screen.findByText(message)).toBeVisible();
+  await waitFor(() => expect(screen.getByRole('button', { name: '刷新' })).toBeEnabled());
   await user.click(screen.getByRole('button', { name: 'PikPak网盘' }));
   await user.click(screen.getByRole('button', { name: '夸克网盘' }));
-  expect(screen.getByText(message)).toBeVisible();
+  await waitFor(() => expect(screen.queryByText(message)).not.toBeInTheDocument());
   await user.click(screen.getByRole('button', { name: '刷新' }));
-  expect(screen.getByText(message)).toBeVisible();
+  expect(screen.queryByText(message)).not.toBeInTheDocument();
   expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
   await user.click(screen.getByRole('button', { name: '我的网盘' }));
   const card = screen.getByRole('region', { name: '夸克账号授权' });

@@ -7,6 +7,10 @@ param(
     # runnable local candidates, never installer artifacts.
     [switch]$Installer,
 
+    # Publish a quick build beside an executable that is currently running.
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
+    [string]$QuickPublishName,
+
     # Lets CI and contributors verify the selected layout without invoking a
     # frontend, Rust, or WiX build.
     [switch]$DryRun
@@ -16,6 +20,9 @@ $ErrorActionPreference = 'Stop'
 
 if ($Installer -and $Mode -ne 'Release') {
     throw 'Installer packaging is only available for the Release build mode.'
+}
+if ($QuickPublishName -and $Mode -ne 'Quick') {
+    throw 'An alternate publish name is only available for the Quick build mode.'
 }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -28,7 +35,7 @@ $targetRoot = if ($Mode -eq 'Quick') {
     Join-Path $projectRoot '.tools\release-target'
 }
 $publishedDir = if ($Mode -eq 'Quick') {
-    Join-Path $projectRoot 'artifacts\quick'
+    Join-Path $projectRoot ("artifacts\{0}" -f $(if ($QuickPublishName) { $QuickPublishName } else { 'quick' }))
 } else {
     Join-Path $projectRoot 'artifacts'
 }
@@ -279,13 +286,13 @@ function Invoke-MsvcBuild {
 
     $incremental = if ($Profile -eq 'quick') { '1' } else { '0' }
     if ($Installer) {
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && call "{4}" exec tauri build --bundles nsis --runner "{5}"' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $PnpmCommand, $CargoCommand
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "VERSADOWN_FRONTEND_SIGNATURE={3}" && call "{4}" exec tauri build --bundles nsis --runner "{5}"' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $PnpmCommand, $CargoCommand
     } elseif ($Profile -eq 'quick') {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --profile quick --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "VERSADOWN_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --profile quick --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
     } else {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "VERSADOWN_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
     }
 
     # Start-Process -Wait follows the whole descendant process tree on Windows.

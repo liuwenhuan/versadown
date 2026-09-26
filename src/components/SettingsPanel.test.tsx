@@ -196,14 +196,21 @@ it('refreshes models when its selector is opened and saves the complete AI confi
 
 it('shows the returned model-list error when the selector cannot load models', async () => {
   const user = userEvent.setup();
-  render(<SettingsPanel initial={initial} onChange={() => {}} loadAiModels={vi.fn().mockRejectedValue(new Error('AI 服务返回 HTTP 401：invalid api key'))} />);
+  const onNotice = vi.fn();
+  render(<SettingsPanel initial={initial} onChange={() => {}} loadAiModels={vi.fn().mockRejectedValue(new Error('AI 服务返回 HTTP 401：invalid api key'))} onNotice={onNotice} />);
 
   await user.click(screen.getByRole('tab', { name: '高级' }));
   await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
   await user.type(screen.getByLabelText('AI API Key'), 'bad-key');
-  fireEvent.pointerDown(screen.getByRole('combobox', { name: 'AI 模型' }));
+  const model = screen.getByRole('combobox', { name: 'AI 模型' });
+  await user.click(model);
 
-  expect(await screen.findByRole('status')).toHaveTextContent('无法获取模型列表，可能是服务地址或 API Key 不正确：AI 服务返回 HTTP 401：invalid api key');
+  const error = await screen.findByRole('status');
+  expect(error).toHaveTextContent('无法获取模型列表，可能是服务地址或 API Key 不正确：AI 服务返回 HTTP 401：invalid api key');
+  expect(error.closest('.ai-settings')).not.toBeNull();
+  expect(error.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(model).not.toHaveFocus();
+  expect(onNotice).not.toHaveBeenCalled();
 });
 
 it('enables cleanup for application-created transfer files by default', () => {

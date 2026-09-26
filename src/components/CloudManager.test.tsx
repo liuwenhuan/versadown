@@ -1532,6 +1532,8 @@ it('copies selected files through a browsable destination picker', async () => {
 
   expect(client.copyCloudFiles).toHaveBeenCalledWith('quark', ['file-1'], '0');
   expect(await screen.findByRole('status')).toHaveTextContent('复制成功');
+  await user.dblClick(screen.getByText('归档'));
+  await waitFor(() => expect(screen.queryByText('复制成功')).not.toBeInTheDocument());
 });
 
 it('retries the destination directory that actually failed to load', async () => {
@@ -1871,6 +1873,9 @@ it('refreshes the current directory when a completed move is indexed after the f
   await user.click(screen.getByRole('button', { name: '移动到此处' }));
 
   await waitFor(() => expect(screen.queryByText(sourceFile.name)).not.toBeInTheDocument());
+  expect(await screen.findByRole('status')).toHaveTextContent('移动成功');
+  await user.dblClick(screen.getByText(destination.name));
+  await waitFor(() => expect(screen.queryByText('移动成功')).not.toBeInTheDocument());
 });
 
 it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
