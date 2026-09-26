@@ -21,12 +21,17 @@ marker="$(mktemp)"
 trap 'rm -f "$marker"' EXIT
 
 cd "$repo_root"
-pnpm exec tauri build --bundles deb,appimage --ci
+pnpm exec tauri build --bundles deb,rpm,appimage --ci
 
 mapfile -d '' deb_files < <(find "$bundle_dir/deb" -maxdepth 1 -type f -name '*.deb' -newer "$marker" -print0)
+mapfile -d '' rpm_files < <(find "$bundle_dir/rpm" -maxdepth 1 -type f -name '*.rpm' -newer "$marker" -print0)
 mapfile -d '' appimage_files < <(find "$bundle_dir/appimage" -maxdepth 1 -type f -name '*.AppImage' -newer "$marker" -print0)
 if (( ${#deb_files[@]} != 1 )); then
   echo "Expected exactly one newly built .deb in $bundle_dir/deb; found ${#deb_files[@]}." >&2
+  exit 1
+fi
+if (( ${#rpm_files[@]} != 1 )); then
+  echo "Expected exactly one newly built .rpm in $bundle_dir/rpm; found ${#rpm_files[@]}." >&2
   exit 1
 fi
 if (( ${#appimage_files[@]} != 1 )); then
@@ -35,12 +40,13 @@ if (( ${#appimage_files[@]} != 1 )); then
 fi
 
 mkdir -p "$output_dir"
-cp "${deb_files[0]}" "${appimage_files[0]}" "$output_dir/"
+cp "${deb_files[0]}" "${rpm_files[0]}" "${appimage_files[0]}" "$output_dir/"
 deb_name="$(basename "${deb_files[0]}")"
+rpm_name="$(basename "${rpm_files[0]}")"
 appimage_name="$(basename "${appimage_files[0]}")"
 (
   cd "$output_dir"
-  sha256sum "$deb_name" "$appimage_name" > SHA256SUMS
+  sha256sum "$deb_name" "$rpm_name" "$appimage_name" > SHA256SUMS
   sha256sum --check SHA256SUMS
 )
 echo "Linux release packages: $output_dir"

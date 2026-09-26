@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          assets=(artifacts/linux/*.deb artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS)
+          assets=(artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS)
           for asset in "${assets[@]}"; do
             test -f "$asset"
           done

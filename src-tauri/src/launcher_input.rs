@@ -197,7 +197,7 @@ pub async fn set_launcher_input_regions(
         interaction.record_input_region_update();
         Ok(())
     }
-    #[cfg(any(target_os = "macos", not(unix)))]
+    #[cfg(any(target_os = "macos", all(not(unix), not(windows))))]
     {
         let _ = (window, regions, interaction);
         Err("当前平台尚未安装悬浮窗输入区域适配器".to_string())

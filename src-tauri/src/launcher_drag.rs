@@ -61,7 +61,7 @@ pub async fn drag_launcher_window(
         // icon to its large transparent canvas at the screen edge.
         Ok(false)
     }
-    #[cfg(any(target_os = "macos", not(unix)))]
+    #[cfg(any(target_os = "macos", all(not(unix), not(windows))))]
     {
         Ok(false)
     }

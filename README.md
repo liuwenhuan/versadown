@@ -42,7 +42,7 @@ pnpm install --frozen-lockfile
 pnpm run build:linux:release
 ```
 
-脚本使用 Tauri 生成 `.deb` 和 `.AppImage`，只打包 Linux 版 aria2-next，并把安装包及 `SHA256SUMS` 放在 `artifacts/linux/`。该命令是完整 Release 编译，不是日常调试入口。GitHub Actions 的 `Linux release` 工作流可手动运行并下载产物；推送 `v*` 标签后，它会把同样的产物添加到**草稿** GitHub Release，仍需人工检查后发布。
+脚本使用 Tauri 生成 `.deb`、`.rpm` 和 `.AppImage`，只打包 Linux 版 aria2-next，并把安装包及 `SHA256SUMS` 放在 `artifacts/linux/`。该命令是完整 Release 编译，不是日常调试入口。GitHub Actions 的 `Linux release` 工作流可手动运行并下载产物；推送 `v*` 标签后，它会把同样的产物添加到**草稿** GitHub Release，仍需人工检查后发布。
 
 ### Windows
 
