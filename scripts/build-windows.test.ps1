@@ -91,6 +91,12 @@ try {
 
     Assert-True -Condition ((Get-Content -LiteralPath $compileMarker -Raw).Trim() -eq $changedFrontendSignature) -Message 'The quick Cargo build must receive the current frontend signature.'
 
+    $installerMarker = Join-Path $testRoot 'installer-args.txt'
+    $fakePnpm = Join-Path $testRoot 'fake-pnpm.cmd'
+    Write-TestFile -Path $fakePnpm -Content "@echo off`r`necho %* > `"$installerMarker`"`r`nexit /b 0"
+    Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $compileCargo -PnpmCommand $fakePnpm -TargetRoot $targetRoot -Profile release -FrontendSignature $changedFrontendSignature -Installer
+    Assert-True -Condition ((Get-Content -LiteralPath $installerMarker -Raw) -match 'exec tauri build --bundles nsis --runner') -Message 'The EXE installer build must package NSIS without running the MSI bundler.'
+
     # Cargo/linker helpers may leave a descendant alive after the build command
     # itself exits. The build script must wait for that direct command, not the
     # entire descendant tree, or a completed build can hang before publishing.

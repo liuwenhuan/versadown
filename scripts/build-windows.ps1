@@ -279,7 +279,7 @@ function Invoke-MsvcBuild {
 
     $incremental = if ($Profile -eq 'quick') { '1' } else { '0' }
     if ($Installer) {
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && call "{4}" exec tauri build --runner "{5}"' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $PnpmCommand, $CargoCommand
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && call "{4}" exec tauri build --bundles nsis --runner "{5}"' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $PnpmCommand, $CargoCommand
     } elseif ($Profile -eq 'quick') {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
         $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "ALDOWNLOADER_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --profile quick --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
