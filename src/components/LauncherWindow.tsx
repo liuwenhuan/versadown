@@ -8,10 +8,12 @@ import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs,
 import { runNativeLauncherDrag } from '../lib/launcherWindow';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
 import type { DownloadGlobalStat, LauncherVisibility } from '../lib/types';
+import { useTranslation } from '../i18n';
 
 export type LauncherSurfaceMode = 'compact' | 'context-menu';
 
 export function LauncherWindow() {
+  const { t } = useTranslation();
   const [activeCount, setActiveCount] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [mode, setMode] = useState<LauncherSurfaceMode>('compact');
@@ -305,7 +307,7 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label="VersaDown 悬浮下载窗口">
+    <main className={`launcher-shell ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label={t('launcher.windowLabel')}>
       <FloatingLauncher
         onScan={scanDownloadInputs}
         onDroppedInput={openLauncherNewDownload}

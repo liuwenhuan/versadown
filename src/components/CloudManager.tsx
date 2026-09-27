@@ -6,6 +6,8 @@ import { CloudCapacityController, formatCloudCapacity, type CloudCapacityViewSta
 import type { CloudUploadAction, CloudUploadProgress } from '../lib/cloudTypes';
 import type { CloudAuthorizationStateEvent, CloudCapacityInvalidated } from '../lib/cloudTypes';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareOptions, CloudUploadOutcome, SharePassCodeConstraint } from '../lib/cloudTypes';
+import { t, useTranslation } from '../i18n';
+import { cloudProviderLabel } from '../i18n/cloudProviderLabel';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
@@ -78,8 +80,8 @@ type PendingAuthorizationAction = { accountId: string; name: string; resume: () 
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'share' | 'copyShareLink' | 'updateSharePassCode' | 'cancelShare' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
-const initialAuthorizationStatus = '未授权。请登录或在网页授权窗口中完成验证。';
-const expiredAuthorizationStatus = '授权过期请重新登录';
+const initialAuthorizationStatus = t('cloud.authorization.notAuthorized');
+const expiredAuthorizationStatus = t('cloud.authorization.expired');
 // The upload response confirms that the provider accepted the file, but some
 // drives index the file into the directory listing asynchronously. Always use
 // fresh server listings and retry a bounded number of times instead of adding
@@ -148,29 +150,16 @@ function requiresBaiduOperationVerification(error: unknown) {
     && error.code === 'baidu_operation_verification_required';
 }
 
-const baiduOperationVerificationText = {
-  'zh-CN': {
-    required: '百度网盘需要安全验证。请打开官方回收站完成验证，然后返回应用重试永久删除。',
-    open: '打开百度网盘官方回收站验证',
-    opened: '请在百度网盘官方页面完成安全验证，返回后点击“我已完成验证”。不会自动永久删除文件。',
-    complete: '我已完成验证',
-    completed: '已同步官方页面的账号会话。请刷新回收站；若文件仍在，再次确认永久删除。是否通过安全验证以重试结果为准。',
-    completeFailed: '无法同步官方页面的账号会话。请在官方页面完成验证后再试。',
-    accountMismatch: '验证账号与当前会话不一致。请使用原账号完成验证。',
-  },
-  en: {
-    required: 'Baidu Netdisk requires security verification. Open the official recycle bin, complete verification, then return and retry permanent deletion.',
-    open: 'Open Baidu recycle bin for verification',
-    opened: 'Complete verification on Baidu Netdisk, then return and select “I have verified”. Files will not be permanently deleted automatically.',
-    complete: 'I have verified',
-    completed: 'The official account session was synced. Refresh the recycle bin; if the file remains, confirm permanent deletion again. The retry will show whether verification succeeded.',
-    completeFailed: 'Could not sync the official account session. Complete verification on the official page and try again.',
-    accountMismatch: 'The verified account does not match the current session. Verify with the original account.',
-  },
-} as const;
-
 function baiduVerificationText() {
-  return baiduOperationVerificationText[document.documentElement.lang.toLowerCase().startsWith('en') ? 'en' : 'zh-CN'];
+  return {
+    required: t('cloud.verification.baidu.required'),
+    open: t('cloud.verification.baidu.open'),
+    opened: t('cloud.verification.baidu.opened'),
+    complete: t('cloud.verification.baidu.complete'),
+    completed: t('cloud.verification.baidu.completed'),
+    completeFailed: t('cloud.verification.baidu.completeFailed'),
+    accountMismatch: t('cloud.verification.baidu.accountMismatch'),
+  };
 }
 
 function isSessionRenewedRetryOperation(error: unknown) {
@@ -312,16 +301,17 @@ function CloudActionIcon({ action }: { action: CloudActionIconType }) {
 }
 
 function CloudContextMenu({ state, selectedCount, recycleBin, virtualDirectory, myShares, canUpdateSharePassCode, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualDirectory: boolean; myShares: boolean; canUpdateSharePassCode: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
+  const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
-  const items: Array<{ action: CloudMenuAction; label: string; danger?: boolean; separated?: boolean }> = state.kind === 'background'
-    ? recycleBin || myShares ? [{ action: 'refresh', label: '刷新' }] : [{ action: 'create', label: '新建目录' }, { action: 'upload', label: '上传' }, { action: 'refresh', label: '刷新', separated: true }]
+  const items: Array<{ action: CloudMenuAction; label: Parameters<typeof t>[0]; danger?: boolean; separated?: boolean }> = state.kind === 'background'
+    ? recycleBin || myShares ? [{ action: 'refresh', label: 'cloud.action.refresh' as const }] : [{ action: 'create', label: 'cloud.action.newFolder' as const }, { action: 'upload', label: 'cloud.action.upload' as const }, { action: 'refresh', label: 'cloud.action.refresh' as const, separated: true }]
     : virtualDirectory
-      ? [{ action: 'open', label: '打开' }]
+      ? [{ action: 'open', label: 'cloud.action.open' as const }]
       : myShares
-      ? [{ action: 'copyShareLink', label: '复制分享链接' }, ...(canUpdateSharePassCode && selectedCount === 1 ? [{ action: 'updateSharePassCode' as const, label: '修改提取码' }] : []), { action: 'cancelShare', label: '取消分享', danger: true, separated: true }]
+      ? [{ action: 'copyShareLink', label: 'cloud.action.copyShareLink' as const }, ...(canUpdateSharePassCode && selectedCount === 1 ? [{ action: 'updateSharePassCode' as const, label: 'cloud.share.changePassCode' as const }] : []), { action: 'cancelShare', label: 'cloud.action.cancelShare' as const, danger: true, separated: true }]
       : recycleBin
-      ? [{ action: 'restore', label: '恢复' }, { action: 'delete', label: '永久删除', danger: true, separated: true }]
-      : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: '打开' }] : []), { action: 'download', label: '下载' }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: '重命名', separated: true }] : []), { action: 'move', label: '移动', separated: selectedCount > 1 }, { action: 'copy', label: '复制到' }, { action: 'share', label: '分享', separated: true }, { action: 'delete', label: '删除', danger: true, separated: true }];
+      ? [{ action: 'restore', label: 'cloud.action.restore' as const }, { action: 'delete', label: 'cloud.action.permanentDelete' as const, danger: true, separated: true }]
+      : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: 'cloud.action.open' as const }] : []), { action: 'download', label: 'download.action.download' as const }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: 'cloud.action.rename' as const, separated: true }] : []), { action: 'move', label: 'cloud.action.move' as const, separated: selectedCount > 1 }, { action: 'copy', label: 'cloud.action.copyTo' as const }, { action: 'share', label: 'cloud.action.share' as const, separated: true }, { action: 'delete', label: 'download.action.delete' as const, danger: true, separated: true }];
   const [menuSize, setMenuSize] = useState({ width: 210, height: items.length * 38 + (state.kind === 'selection' && selectedCount > 1 ? 24 : 14) });
   const left = Math.max(8, Math.min(state.x, window.innerWidth - menuSize.width - 8));
   const top = Math.max(8, Math.min(state.y, window.innerHeight - menuSize.height - 8));
@@ -362,23 +352,24 @@ function CloudContextMenu({ state, selectedCount, recycleBin, virtualDirectory, 
     buttons[next]?.focus();
   }
 
-  const title = state.kind === 'background' ? '文件区菜单' : `${state.item.name} 文件菜单`;
+  const title = state.kind === 'background' ? t('cloud.fileAreaMenu') : t('cloud.fileMenu', { name: state.item.name });
   return createPortal(<div ref={menuRef} className="cloud-context-menu" role="menu" aria-label={title} style={{ left, top }} onKeyDown={moveFocus}>
-    {state.kind === 'selection' && selectedCount > 1 && <header><small>已选择 {selectedCount} 项</small></header>}
-    {items.map((item) => <div key={item.action} className={item.separated ? 'menu-separated' : undefined}><button role="menuitem" className={item.danger ? 'danger' : undefined} onClick={() => onAction(item.action)}><CloudActionIcon action={item.action} /><span>{item.label}</span></button></div>)}
+    {state.kind === 'selection' && selectedCount > 1 && <header><small>{t('cloud.itemsSelected', { count: selectedCount })}</small></header>}
+    {items.map((item) => <div key={item.action} className={item.separated ? 'menu-separated' : undefined}><button role="menuitem" className={item.danger ? 'danger' : undefined} onClick={() => onAction(item.action)}><CloudActionIcon action={item.action} /><span>{t(item.label)}</span></button></div>)}
   </div>, document.body);
 }
 
 function CloudSelectionOverflowMenu({ anchor, singleSelection, recycleBin, disabled, onAction, onClose }: { anchor: { x: number; y: number }; singleSelection: boolean; recycleBin: boolean; disabled: boolean; onAction(action: CloudHeaderMenuAction): void; onClose(): void }) {
+  const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
-  const items: Array<{ action: CloudHeaderMenuAction; label: string; separated?: boolean }> = [
+  const items: Array<{ action: CloudHeaderMenuAction; label: Parameters<typeof t>[0]; separated?: boolean }> = [
     ...(recycleBin
       ? []
       : [
-        ...(singleSelection ? [{ action: 'rename' as const, label: '重命名' }] : []),
-        { action: 'move' as const, label: '移动', separated: singleSelection },
-        { action: 'copy' as const, label: '复制到' },
-        { action: 'share' as const, label: '分享', separated: true }
+        ...(singleSelection ? [{ action: 'rename' as const, label: 'cloud.action.rename' as const }] : []),
+        { action: 'move' as const, label: 'cloud.action.move' as const, separated: singleSelection },
+        { action: 'copy' as const, label: 'cloud.action.copyTo' as const },
+        { action: 'share' as const, label: 'cloud.action.share' as const, separated: true }
       ])
   ];
   const width = 180;
@@ -404,8 +395,8 @@ function CloudSelectionOverflowMenu({ anchor, singleSelection, recycleBin, disab
     };
   }, [onClose]);
 
-  return createPortal(<div ref={menuRef} className="cloud-context-menu cloud-selection-overflow-menu" role="menu" aria-label="更多文件操作" style={{ left, top }}>
-    {items.map((item) => <div key={item.action} className={item.separated ? 'menu-separated' : undefined}><button role="menuitem" disabled={disabled} onClick={() => onAction(item.action)}><CloudActionIcon action={item.action} /><span>{item.label}</span></button></div>)}
+  return createPortal(<div ref={menuRef} className="cloud-context-menu cloud-selection-overflow-menu" role="menu" aria-label={t('cloud.moreFileActions')} style={{ left, top }}>
+    {items.map((item) => <div key={item.action} className={item.separated ? 'menu-separated' : undefined}><button role="menuitem" disabled={disabled} onClick={() => onAction(item.action)}><CloudActionIcon action={item.action} /><span>{t(item.label)}</span></button></div>)}
   </div>, document.body);
 }
 
@@ -459,6 +450,7 @@ function sharePassCodeError(passCode: string, constraint?: SharePassCodeConstrai
 }
 
 function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstraint, onCreate, onCopy, onClose, onUpdatePassCode }: { provider: CloudProvider; items: readonly CloudFile[]; share: CloudShare | null; busy: boolean; sharePassCodeConstraint?: SharePassCodeConstraint; onCreate(options: CloudShareOptions): void; onCopy(value: string): void; onClose(): void; onUpdatePassCode?(passCode: string): Promise<void> }) {
+  const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
   const initialFocusRef = useRef<HTMLInputElement>(null);
   const [passCode, setPassCode] = useState('');
@@ -477,15 +469,15 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
     setUpdateNotice(null);
     try {
       await onUpdatePassCode(updatedPassCode.trim());
-      setUpdateNotice({ error: false, message: '提取码已更新' });
+      setUpdateNotice({ error: false, message: t('cloud.share.passCodeUpdated') });
     } catch (error) {
-      setUpdateNotice({ error: true, message: `修改提取码失败：${errorMessage(error, '请重试。')}` });
+      setUpdateNotice({ error: true, message: t('cloud.share.updatePassCodeFailed', { detail: errorMessage(error, t('common.retry')) }) });
     } finally { setSavingPassCode(false); }
   };
-  const title = items.length === 1 ? items[0]?.name ?? '分享文件' : `${items[0]?.name ?? '文件'} 等 ${items.length} 项`;
+  const title = items.length === 1 ? items[0]?.name ?? t('cloud.share.file') : t('cloud.share.multipleItems', { name: items[0]?.name ?? t('cloud.file'), count: items.length });
   const serverGeneratedPassCode = provider === 'pikpak' || provider === 'xunlei';
   const alwaysGeneratedPassCode = provider === 'tianyi';
-  const expiryOptions = alwaysGeneratedPassCode ? [['', '永久有效'], ['1', '1 天'], ['7', '7 天']] : [['', '永久有效'], ['1', '1 天'], ['7', '7 天'], ['30', '30 天']];
+  const expiryOptions = alwaysGeneratedPassCode ? [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })]] : [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })], ['30', t('cloud.share.days', { count: 30 })]];
   const passCodeError = sharePassCodeError(passCode, sharePassCodeConstraint);
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -493,31 +485,31 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
     onCreate({ name: title, ...(serverGeneratedPassCode ? (generatePassCode ? { generatePassCode: true } : {}) : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
   };
   return createPortal(<div className="cloud-confirm-backdrop">
-    <section ref={dialogRef} className="cloud-share-dialog" role="dialog" aria-modal="true" aria-label={share ? '分享链接已创建' : '创建分享链接'}>
+    <section ref={dialogRef} className="cloud-share-dialog" role="dialog" aria-modal="true" aria-label={share ? t('cloud.share.created') : t('cloud.share.create')}>
       {share ? <>
-        <h3>分享链接已创建</h3>
+        <h3>{t('cloud.share.created')}</h3>
         <p>{share.name}</p>
-        <form className="cloud-operation-editor"><label>分享链接<input aria-label="分享链接" readOnly value={share.url} /></label></form>
-        {share.passCode && <p>提取码：<b>{share.passCode}</b></p>}
+        <form className="cloud-operation-editor"><label>{t('cloud.share.link')}<input aria-label={t('cloud.share.link')} readOnly value={share.url} /></label></form>
+        {share.passCode && <p>{t('cloud.share.passCodeLabel')}：<b>{share.passCode}</b></p>}
         {onUpdatePassCode && <form className="cloud-operation-editor cloud-share-passcode-editor" onSubmit={updatePassCode}>
-          <label>修改提取码<input aria-label="新提取码" aria-invalid={Boolean(updatedPassCodeError)} disabled={savingPassCode || busy} value={updatedPassCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => { setUpdatedPassCode(event.target.value); setUpdateNotice(null); }} /></label>
-          <button type="submit" className="secondary" disabled={savingPassCode || busy || !updatedPassCode.trim() || Boolean(updatedPassCodeError) || updatedPassCode.trim() === share.passCode}>{savingPassCode ? '正在保存…' : '保存提取码'}</button>
+          <label>{t('cloud.share.changePassCode')}<input aria-label={t('cloud.share.newPassCode')} aria-invalid={Boolean(updatedPassCodeError)} disabled={savingPassCode || busy} value={updatedPassCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => { setUpdatedPassCode(event.target.value); setUpdateNotice(null); }} /></label>
+          <button type="submit" className="secondary" disabled={savingPassCode || busy || !updatedPassCode.trim() || Boolean(updatedPassCodeError) || updatedPassCode.trim() === share.passCode}>{savingPassCode ? t('common.saving') : t('cloud.share.savePassCode')}</button>
           {updatedPassCodeError && <p role="alert">{updatedPassCodeError}</p>}
           {updateNotice && <p role={updateNotice.error ? 'alert' : 'status'}>{updateNotice.message}</p>}
         </form>}
-        <button className="secondary" onClick={() => onCopy(share.url)}>复制分享链接</button><button className="primary" disabled={savingPassCode} onClick={onClose}>完成</button>
+        <button className="secondary" onClick={() => onCopy(share.url)}>{t('cloud.share.copyLink')}</button><button className="primary" disabled={savingPassCode} onClick={onClose}>{t('common.done')}</button>
       </> : <form onSubmit={submit}>
-        <h3>创建分享链接</h3>
-        <p>将分享 {title}。{sharePassCodeConstraint ? `可选设置提取码和有效期，${sharePassCodeConstraint.hint}` : '可选设置提取码和有效期。'}</p>
-        {serverGeneratedPassCode && onUpdatePassCode && <p>提取码先由网盘随机生成，分享创建后可修改。</p>}
+        <h3>{t('cloud.share.create')}</h3>
+        <p>{t('cloud.share.description', { name: title, options: sharePassCodeConstraint ? t('cloud.share.optionsWithHint', { hint: sharePassCodeConstraint.hint }) : t('cloud.share.options') })}</p>
+        {serverGeneratedPassCode && onUpdatePassCode && <p>{t('cloud.share.generatedThenChangeable')}</p>}
         <div className="cloud-share-options">
-          {alwaysGeneratedPassCode ? <label>提取码由天翼云盘自动生成</label> : serverGeneratedPassCode ? <div className="cloud-share-code-field">
-            <span>提取码</span>
-            <label className="cloud-share-checkbox"><input ref={initialFocusRef} aria-label="自动生成" type="checkbox" checked={generatePassCode} onChange={(event) => setGeneratePassCode(event.target.checked)} /><span>自动生成</span></label>
-          </div> : <label>提取码（可选）<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label="提取码" disabled={busy} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}
-          <label>有效期<select aria-label="分享有效期" value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)}>{expiryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          {alwaysGeneratedPassCode ? <label>{t('cloud.share.passCodeGeneratedByProvider')}</label> : serverGeneratedPassCode ? <div className="cloud-share-code-field">
+            <span>{t('cloud.share.passCodeLabel')}</span>
+            <label className="cloud-share-checkbox"><input ref={initialFocusRef} aria-label={t('cloud.share.autoGenerate')} type="checkbox" checked={generatePassCode} onChange={(event) => setGeneratePassCode(event.target.checked)} /><span>{t('cloud.share.autoGenerate')}</span></label>
+          </div> : <label>{t('cloud.share.optionalPassCode')}<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label={t('cloud.share.passCodeLabel')} disabled={busy} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}
+          <label>{t('cloud.share.expiration')}<select aria-label={t('cloud.share.expiration')} value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)}>{expiryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         </div>
-        <button type="button" className="secondary" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy || Boolean(passCodeError)} type="submit">{busy ? '正在创建…' : '创建分享链接'}</button>
+        <button type="button" className="secondary" disabled={busy} onClick={onClose}>{t('dialog.cancel')}</button><button className="primary" disabled={busy || Boolean(passCodeError)} type="submit">{busy ? t('cloud.share.creating') : t('cloud.share.create')}</button>
       </form>}
     </section>
   </div>, document.body);
@@ -535,30 +527,32 @@ async function openCloudInformationLink(url: string) {
 }
 
 function CloudProviderInfo({ provider, label, officialUrl }: { provider: CloudProvider; label: string; officialUrl: string }) {
+  const { t } = useTranslation();
   const externalLink = (url: string) => (event: ReactMouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     void openCloudInformationLink(url);
   };
 
-  return <section className="cloud-provider-info" role="region" aria-label={`${label}网盘信息`}>
-      <dl>
-        <div><dt>官方网站</dt><dd><a href={officialUrl} target="_blank" rel="noreferrer" aria-label={`${label}网盘官方网站`} onClick={externalLink(officialUrl)}>{officialUrl}</a></dd></div>
-        <div><dt>插件制作者</dt><dd><a href="https://versadown.aigutta.com" target="_blank" rel="noreferrer" aria-label="插件制作者 aigutta" onClick={externalLink('https://versadown.aigutta.com')}>aigutta</a></dd></div>
+  return <section className="cloud-provider-info" role="region" aria-label={t('cloud.providerInfo', { name: label })}>
+    <dl>
+      <div><dt>{t('cloud.officialWebsite')}</dt><dd><a href={officialUrl} target="_blank" rel="noreferrer" aria-label={t('cloud.providerWebsite', { name: label })} onClick={externalLink(officialUrl)}>{officialUrl}</a></dd></div>
+      <div><dt>{t('cloud.pluginAuthor')}</dt><dd><a href="https://versadown.aigutta.com" target="_blank" rel="noreferrer" aria-label={t('cloud.pluginAuthorName')} onClick={externalLink('https://versadown.aigutta.com')}>aigutta</a></dd></div>
       </dl>
-      {provider === 'pikpak' && <p className="cloud-provider-info-notice">此网盘中国大陆无法直接访问</p>}
-      {provider === 'xunlei' && <p className="cloud-provider-info-notice">安装迅雷官方客户端后方可使用SVIP下载通道。</p>}
-      {provider === 'tianyi' && <p className="cloud-provider-info-notice">如果通过账号和密码登录，推荐登录门户网址<a href="https://e.dlife.cn" target="_blank" rel="noreferrer" aria-label="天翼账号登录门户" onClick={externalLink('https://e.dlife.cn')}>e.dlife.cn</a>，点击“账号安全”，关闭“设备锁”，这样无需每次登录做短信认证。</p>}
+      {provider === 'pikpak' && <p className="cloud-provider-info-notice">{t('cloud.info.pikpakAccess')}</p>}
+      {provider === 'xunlei' && <p className="cloud-provider-info-notice">{t('cloud.info.xunleiSvip')}</p>}
+      {provider === 'tianyi' && <p className="cloud-provider-info-notice">{t('cloud.info.tianyiPortal')} <a href="https://e.dlife.cn" target="_blank" rel="noreferrer" aria-label={t('cloud.info.tianyiLoginPortal')} onClick={externalLink('https://e.dlife.cn')}>e.dlife.cn</a> {t('cloud.info.tianyiDeviceLock')}</p>}
     </section>;
 }
 
 function CloudDestinationPicker({ action, provider, descriptor, client, excludedIds, onChoose, onOfficialWebAuthorizationRequired, onClose }: { action: DestinationAction; provider: CloudProvider; descriptor: ProviderDescriptor; client: CloudManagerClient; excludedIds: readonly string[]; onChoose(parentId: string): void; onOfficialWebAuthorizationRequired(error: unknown): void; onClose(): void }) {
+  const { t } = useTranslation();
   const rootId = descriptor.rootDirectoryId;
   const [directory, setDirectory] = useState<CloudDirectory | null>(null);
-  const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
+  const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: t('cloud.root') }]);
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [message, setMessage] = useState('');
-  const actionLabel = action === 'copy' ? '复制' : '移动';
-  const current = breadcrumbs.at(-1) ?? { id: rootId, name: '根目录' };
+  const actionLabel = action === 'copy' ? t('cloud.action.copy') : t('cloud.action.move');
+  const current = breadcrumbs.at(-1) ?? { id: rootId, name: t('cloud.root') };
   const parent = breadcrumbs.at(-2);
   const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -582,36 +576,37 @@ function CloudDestinationPicker({ action, provider, descriptor, client, excluded
         onOfficialWebAuthorizationRequired(error);
         return;
       }
-      setMessage(errorMessage(error, '无法读取目录'));
+      setMessage(errorMessage(error, t('cloud.error.readDirectoryShort')));
       setState('error');
     }
   }
 
   useEffect(() => {
-    void load(rootId, [{ id: rootId, name: '根目录' }]);
+    void load(rootId, [{ id: rootId, name: t('cloud.root') }]);
     return () => { requestSequence.current += 1; };
   }, [client, provider]);
   const recycleBinId = descriptor.recycleBinDirectoryId;
   const folders = directory?.items.filter((item) => item.kind === 'folder' && !excludedIds.includes(item.id) && item.id !== recycleBinId) ?? [];
   return createPortal(<div className="cloud-confirm-backdrop">
-    <section ref={dialogRef} className="cloud-destination-picker" role="dialog" aria-modal="true" aria-label={`选择${actionLabel}位置`}>
-      <header><div><h3>选择{actionLabel}位置</h3><small>当前目录：{current.name}</small></div><button ref={closeRef} aria-label={`关闭${actionLabel}位置选择`} onClick={onClose}>×</button></header>
+    <section ref={dialogRef} className="cloud-destination-picker" role="dialog" aria-modal="true" aria-label={t('cloud.destination.title', { action: actionLabel })}>
+      <header><div><h3>{t('cloud.destination.title', { action: actionLabel })}</h3><small>{t('cloud.currentDirectory', { name: current.name })}</small></div><button ref={closeRef} aria-label={t('cloud.destination.close', { action: actionLabel })} onClick={onClose}>×</button></header>
       <div className="cloud-destination-path">
-        {parent && <button className="cloud-icon-button" aria-label={`返回${parent.name}`} disabled={state === 'loading'} onClick={() => void load(parent.id, breadcrumbs.slice(0, -1))}><CloudActionIcon action="back" /></button>}
-        <nav role="navigation" aria-label="目标目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button disabled={state === 'loading' || index === breadcrumbs.length - 1} onClick={() => void load(crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i>›</i>}</span>)}</nav>
+        {parent && <button className="cloud-icon-button" aria-label={t('cloud.destination.backTo', { name: parent.name })} disabled={state === 'loading'} onClick={() => void load(parent.id, breadcrumbs.slice(0, -1))}><CloudActionIcon action="back" /></button>}
+        <nav role="navigation" aria-label={t('cloud.destination.folder')} >{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button disabled={state === 'loading' || index === breadcrumbs.length - 1} onClick={() => void load(crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i>›</i>}</span>)}</nav>
       </div>
       <div className="cloud-destination-list">
-        {state === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>正在读取目录…</span></div>}
-        {state === 'error' && <div className="cloud-state cloud-error" role="alert"><span>{message}</span><button className="secondary" onClick={() => void load(current.id, breadcrumbs)}>重试</button></div>}
-        {state === 'ready' && (folders.length ? folders.map((folder) => <button key={folder.id} aria-label={`打开 ${folder.name}`} onClick={() => void load(folder.id, [...breadcrumbs, { id: folder.id, name: folder.name }])}><span><CloudFileIcon kind="folder" /></span><b>{folder.name}</b><i>›</i></button>) : <p>此目录没有子文件夹</p>)}
+        {state === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>{t('cloud.loadingDirectory')}</span></div>}
+        {state === 'error' && <div className="cloud-state cloud-error" role="alert"><span>{message}</span><button className="secondary" onClick={() => void load(current.id, breadcrumbs)}>{t('common.retryAction')}</button></div>}
+        {state === 'ready' && (folders.length ? folders.map((folder) => <button key={folder.id} aria-label={t('cloud.openNamed', { name: folder.name })} onClick={() => void load(folder.id, [...breadcrumbs, { id: folder.id, name: folder.name }])}><span><CloudFileIcon kind="folder" /></span><b>{folder.name}</b><i>›</i></button>) : <p>{t('cloud.noSubfolders')}</p>)}
       </div>
-      <footer><button className="secondary" onClick={onClose}>取消</button><button className="primary" disabled={state !== 'ready'} onClick={() => onChoose(current.id)}>{actionLabel}到此处</button></footer>
+      <footer><button className="secondary" onClick={onClose}>{t('dialog.cancel')}</button><button className="primary" disabled={state !== 'ready'} onClick={() => onChoose(current.id)}>{t('cloud.destination.chooseHere', { action: actionLabel })}</button></footer>
     </section>
   </div>, document.body);
 }
 
 export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryFailed = false, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, authorizationCardDrag, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
-  const label = descriptor.displayName;
+  const { t } = useTranslation();
+  const label = cloudProviderLabel(provider, t);
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
   const [accountCapacity, setAccountCapacity] = useState<CloudCapacityViewState>();
@@ -620,7 +615,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const capacityController = capacityControllerRef.current;
   const [directory, setDirectory] = useState<CloudDirectory | null>(null);
   const [directoryState, setDirectoryState] = useState<DirectoryState>('idle');
-  const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: '根目录' }]);
+  const [breadcrumbs, setBreadcrumbs] = useState<readonly Breadcrumb[]>([{ id: rootId, name: t('cloud.root') }]);
   const [selectedIds, setSelectedIds] = useState<readonly string[]>([]);
   const [sort, setSort] = useState<CloudSort | null>(null);
   const [username, setUsername] = useState('');
@@ -684,8 +679,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const selectableItems = sortedItems.filter((item) => !isVirtualDirectoryItem(item));
   const operationBusy = operationRunning || operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
-  const authorizedLabel = passwordSession ? '已经登录' : '已经完成授权';
-  const logoutLabel = passwordSession ? '退出登录' : '退出授权';
+  const authorizedLabel = passwordSession ? t('cloud.loggedIn') : t('cloud.authorized');
+  const logoutLabel = passwordSession ? t('cloud.logout') : t('cloud.revokeAuthorization');
   const allSelected = Boolean(selectableItems.length) && selected.length === selectableItems.length;
 
   useLayoutEffect(() => {
@@ -721,7 +716,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     pendingAuthorizationAction.current = null;
     setPendingAuthorizationName(null);
     setReauthorizationRequired(false);
-    setOperation({ kind: 'error', message: requiresBaiduOperationVerification(error) ? baiduVerificationText().required : errorMessage(error, '请完成 PikPak 官方操作验证后重试。'), operationVerification: true });
+    setOperation({ kind: 'error', message: requiresBaiduOperationVerification(error) ? baiduVerificationText().required : errorMessage(error, t('cloud.verification.pikpak.required')), operationVerification: true });
   }
 
   async function openOperationVerification() {
@@ -730,9 +725,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     try {
       if (provider === 'baidu') await client.openCloudOperationVerification(provider, activeAccount.id, document.documentElement.lang);
       else await client.openCloudOperationVerification(provider, activeAccount.id);
-      setOperation({ kind: 'error', operationVerification: true, verificationOpened: true, message: provider === 'baidu' ? baiduVerificationText().opened : '请在官方页面完成操作验证；返回后重新执行原操作。不会自动永久删除文件。' });
+      setOperation({ kind: 'error', operationVerification: true, verificationOpened: true, message: provider === 'baidu' ? baiduVerificationText().opened : t('cloud.verification.pikpak.opened') });
     } catch (error) {
-      setOperation({ kind: 'error', operationVerification: true, message: errorMessage(error, '无法打开官方操作验证页面，请稍后重试。') });
+      setOperation({ kind: 'error', operationVerification: true, message: errorMessage(error, t('cloud.verification.openFailed')) });
     } finally {
       setOpeningOperationVerification(false);
     }
@@ -775,7 +770,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     // workspace is cached. Consume its pending action through the same guarded
     // path as authorization completed in this workspace.
     void acceptAccount(initialAccount).catch(error => {
-      setOperation({ kind: 'error', message: errorMessage(error, '恢复网盘操作失败，请重试。') });
+      setOperation({ kind: 'error', message: errorMessage(error, t('cloud.operation.recoveryFailed')) });
     });
   }, [initialAccount, operationBusy]);
 
@@ -852,8 +847,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       const rootItems = parentId === rootId
         ? [
           ...next.items,
-          ...(next.items.some((item) => item.id === recycleBinId) ? [] : [{ id: recycleBinId, parentId: rootId, name: '回收站', kind: 'folder' as const }]),
-          ...(next.items.some((item) => item.id === MY_SHARES_DIRECTORY_ID) ? [] : [{ id: MY_SHARES_DIRECTORY_ID, parentId: rootId, name: '我的分享', kind: 'folder' as const }]),
+      ...(next.items.some((item) => item.id === recycleBinId) ? [] : [{ id: recycleBinId, parentId: rootId, name: t('cloud.recycleBin'), kind: 'folder' as const }]),
+      ...(next.items.some((item) => item.id === MY_SHARES_DIRECTORY_ID) ? [] : [{ id: MY_SHARES_DIRECTORY_ID, parentId: rootId, name: t('cloud.myShares'), kind: 'folder' as const }]),
         ]
         : next.items;
       const items = rootItems;
@@ -866,17 +861,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       if (requiresPikpakOperationVerification(error)) {
         showOperationVerification(error);
         setDirectoryState('error');
-        setAuthorizationStatus(errorMessage(error, '请完成官方操作验证后重试。'));
+        setAuthorizationStatus(errorMessage(error, t('cloud.authorization.completeOfficialVerification')));
       } else if (needsInPlaceWebAuthorization(error)) {
         const detail = errorMessage(error, '');
-        const message = `读取目录需要网页验证。${detail ? ` ${detail}` : ''}`;
-        queueAuthorizationContinuation('加载目录', async () => { await loadDirectory(account, parentId, nextBreadcrumbs); }, message, Boolean(directory), account.id);
+        const message = t('cloud.authorization.directoryRequiresWeb', { detail: detail ? ` ${detail}` : '' });
+        queueAuthorizationContinuation(t('cloud.action.loadDirectory'), async () => { await loadDirectory(account, parentId, nextBreadcrumbs); }, message, Boolean(directory), account.id);
         setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
         return null;
       }
       setDirectory(null);
       setDirectoryState(isCredentialExpired(error) ? 'expired' : 'error');
-      setAuthorizationStatus(errorMessage(error, '无法读取此目录'));
+      setAuthorizationStatus(errorMessage(error, t('cloud.error.readDirectory')));
       return null;
     }
   }
@@ -926,12 +921,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       if (!original) return { loaded: false, confirmed: false };
       const targetId = destinations[0];
       const target = original.items.find((file) => file.id === targetId && file.kind === 'folder');
-      destinationName = target?.name ?? (targetId === rootId ? '根目录' : '实际上传目录');
+      destinationName = target?.name ?? (targetId === rootId ? t('cloud.root') : t('cloud.upload.actualDestination'));
       nextBreadcrumbs = target
         ? [...nextBreadcrumbs, { id: targetId, name: target.name }]
         : targetId === rootId
-          ? [{ id: rootId, name: '根目录' }]
-          : [{ id: rootId, name: '根目录' }, { id: targetId, name: destinationName }];
+          ? [{ id: rootId, name: t('cloud.root') }]
+          : [{ id: rootId, name: t('cloud.root') }, { id: targetId, name: destinationName }];
       parentId = targetId;
     }
     for (const delay of DIRECTORY_INDEX_CONFIRMATION_DELAYS_MS) {
@@ -973,7 +968,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   useEffect(() => {
-    if (!authorizationOnly && activeAccount && directoryState === 'idle') void loadDirectory(activeAccount, rootId, [{ id: rootId, name: '根目录' }]);
+    if (!authorizationOnly && activeAccount && directoryState === 'idle') void loadDirectory(activeAccount, rootId, [{ id: rootId, name: t('cloud.root') }]);
   }, [activeAccount, authorizationOnly, directoryState]);
 
   useEffect(() => {
@@ -984,14 +979,14 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       ensureProviderAccount(account);
       setActiveAccount(account);
     }).catch((error) => {
-      if (active && !isUnauthorized(error)) setAuthorizationStatus(errorMessage(error, '无法恢复网盘会话。'));
+      if (active && !isUnauthorized(error)) setAuthorizationStatus(errorMessage(error, t('cloud.authorization.restoreSessionFailed')));
     });
     return () => { active = false; };
   }, [authorizationOnly, client, provider, restoreOnMount]);
 
   function ensureProviderAccount(account: CloudAccount): CloudAccount {
     if (account.provider !== provider) {
-      throw { code: 'invalid_response', message: '授权返回的服务商不匹配，请重新授权。' };
+      throw { code: 'invalid_response', message: t('cloud.authorization.providerMismatch') };
     }
     return account;
   }
@@ -1003,7 +998,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       || pending.accountId === account.id
       || (provider === 'tianyi' && (pending.accountId === 'tianyi-web' || account.id === 'tianyi-web'));
     if (pending && !sameAccount) {
-      const message = '授权账号与当前会话不一致，已停止继续原操作。请使用原账号重新授权。';
+      const message = t('cloud.authorization.accountMismatch');
       webAuthorizationActive.current = false;
       setWebAuthorization(null);
       setReauthorizationRequired(true);
@@ -1019,17 +1014,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (pending) setOperation(null);
     onAccountAuthorized?.(account);
     if (pending) await pending.resume();
-    else if (!authorizationOnly) await loadDirectory(account, rootId, [{ id: rootId, name: '根目录' }]);
+    else if (!authorizationOnly) await loadDirectory(account, rootId, [{ id: rootId, name: t('cloud.root') }]);
     return true;
   }
 
   async function addAccount(authorize: () => Promise<CloudAccount>) {
-    setAuthorizationStatus('正在等待授权结果…');
+    setAuthorizationStatus(t('cloud.authorization.waitingResult'));
     try {
       await acceptAccount(await authorize());
     } catch (error) {
       if (requiresOfficialWebAuthorization(error)) setReauthorizationRequired(true);
-      setAuthorizationStatus(errorMessage(error, '授权失败，请重试。'));
+      setAuthorizationStatus(errorMessage(error, t('cloud.authorization.failedRetry')));
     }
   }
 
@@ -1037,7 +1032,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     event.preventDefault();
     if (!supportsPasswordLogin || passwordLoginInFlight.current) return;
     if (!username.trim() || (!password && !useSavedPassword)) {
-      setAuthorizationStatus('请输入账号和密码后再登录。');
+      setAuthorizationStatus(t('cloud.authorization.enterCredentials'));
       return;
     }
     const credentials: CloudCredentials = useSavedPassword
@@ -1069,7 +1064,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     authorizationRegistered.current = false;
     authorizationWakePending.current = false;
     setWebAuthorization({ provider, windowLabel: '', instructions: '' });
-    setAuthorizationStatus('正在准备网页授权窗口…');
+    setAuthorizationStatus(t('cloud.authorization.preparingWindow'));
     try {
       const authorization = await client.beginCloudAuthorization(provider);
       if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
@@ -1081,7 +1076,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       if (generation !== authorizationGeneration.current) return;
       webAuthorizationActive.current = false;
       setWebAuthorization(null);
-      setAuthorizationStatus(errorMessage(error, '无法打开授权窗口。'));
+      setAuthorizationStatus(errorMessage(error, t('cloud.authorization.openWindowFailed')));
     }
   }
 
@@ -1098,10 +1093,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     } catch (error) {
       if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
       if (isAuthorizationPending(error)) {
-        setAuthorizationStatus('正在等待你在授权窗口中完成登录…');
+        setAuthorizationStatus(t('cloud.authorization.waitingLogin'));
         return;
       }
-      const message = errorMessage(error, '网页授权未完成。');
+      const message = errorMessage(error, t('cloud.authorization.webNotCompleted'));
       setAuthorizationStatus(message);
       if (effectiveAuthorizationCapabilities?.passwordLoginMode === 'officialWebView' && isTerminalWebAuthorizationError(error)) {
         // A rejected verification must not automatically start another captcha.
@@ -1172,9 +1167,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   async function runOperation(name: string, action: () => Promise<unknown>, refresh = true, retryUploadFailures?: (failures: CloudUploadOutcome['failures']) => () => Promise<void>, confirmDirectoryRefresh?: DirectoryRefreshConfirmation) {
     if (!activeAccount || operationInFlight.current) return;
+    const operationLabel = t(({ '下载': 'download.action.download', '上传': 'cloud.action.upload', '新建目录': 'cloud.action.newFolder', '重命名': 'cloud.action.rename', '恢复': 'cloud.action.restore', '永久删除': 'cloud.action.permanentDelete', '删除': 'download.action.delete', '创建分享': 'cloud.share.create', '取消分享': 'cloud.action.cancelShare', '移动': 'cloud.action.move', '复制': 'cloud.action.copy', '退出登录': 'cloud.logout', '退出授权': 'cloud.revokeAuthorization' } as Record<string, Parameters<typeof t>[0]>)[name] ?? 'cloud.action.inProgress');
     operationInFlight.current = true;
     setOperationRunning(true);
-    setOperation({ kind: 'working', message: `${name}进行中…` });
+    setOperation({ kind: 'working', message: t('cloud.operation.working', { name: operationLabel }) });
     try {
       const result = await action();
       if (name.startsWith('上传') && isCloudUploadOutcome(result)) {
@@ -1183,12 +1179,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           return;
         }
         const listedFailures = result.failures.slice(0, 3).map(failure => `${failure.itemName}：${failure.message}`).join('；');
-        const remainingFailures = result.failures.length > 3 ? `；另 ${result.failures.length - 3} 项` : '';
+        const remainingFailures = result.failures.length > 3 ? t('cloud.upload.remainingFailures', { count: result.failures.length - 3 }) : '';
         const report: NonNullable<OperationState> = result.cancelled
-          ? { kind: 'cancelled', message: `上传已取消，已保留 ${result.uploaded.length} 项上传结果${result.failures.some(failure => failure.code !== 'upload_cancelled') ? `；${result.failures.filter(failure => failure.code !== 'upload_cancelled').map(failure => `${failure.itemName}：${failure.message}`).slice(0, 3).join('；')}` : ''}` }
+          ? { kind: 'cancelled', message: t('cloud.upload.cancelledWithResults', { count: result.uploaded.length, failures: result.failures.some(failure => failure.code !== 'upload_cancelled') ? result.failures.filter(failure => failure.code !== 'upload_cancelled').map(failure => `${failure.itemName}: ${failure.message}`).slice(0, 3).join('; ') : '' }) }
           : result.failures.length
-          ? { kind: 'error', message: `${name}完成：成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项：${listedFailures}${remainingFailures}` }
-          : { kind: 'success', message: `已上传 ${result.uploaded.length} 项` };
+          ? { kind: 'error', message: t('cloud.upload.results', { name: operationLabel, succeeded: result.uploaded.length, failed: result.failures.length, failures: listedFailures, remaining: remainingFailures }) }
+          : { kind: 'success', message: t('cloud.upload.itemsCompleted', { count: result.uploaded.length }) };
         // The upload result is authoritative even when the follow-up listing fails.
         setUploadResult(report);
         setOperation(report);
@@ -1197,10 +1193,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           : { loaded: true, confirmed: true, destinationName: undefined };
         if (!directoryRefresh.loaded) return;
         const destinationMessage = directoryRefresh.destinationName
-          ? `；已转到上传目录：${directoryRefresh.destinationName}` : '';
+          ? t('cloud.upload.destination', { name: directoryRefresh.destinationName }) : '';
         const finalReport = {
           ...report,
-          message: `${report.message}${destinationMessage}${directoryRefresh.confirmed ? '' : '；服务端目录尚未同步，请稍后刷新确认'}`,
+          message: `${report.message}${destinationMessage}${directoryRefresh.confirmed ? '' : t('cloud.directoryNotSynced')}`,
         };
         setUploadResult(finalReport);
         if (result.cancelled) {
@@ -1211,17 +1207,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
           if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
             const authorizationFailures = result.failures.filter(failure => failure.code === 'web_auth_required' || (failure.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web));
-            queueAuthorizationContinuation(name, retryUploadFailures?.(authorizationFailures) ?? (() => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh)), `${name}需要网页验证。${first.message ? ` ${first.message}` : ''}`);
+            queueAuthorizationContinuation(name, retryUploadFailures?.(authorizationFailures) ?? (() => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh)), t('cloud.webVerificationRequired', { name: operationLabel, detail: first.message ? ` ${first.message}` : '' }));
             return;
           }
           if (first.code === 'credentials_expired') {
             setDirectory(null);
             setDirectoryState('expired');
-            setAuthorizationStatus(first.message || '登录凭据已过期。');
+            setAuthorizationStatus(first.message || t('cloud.credentialsExpiredWithPeriod'));
             return;
           }
           if (first.code === 'session_renewed_retry_operation') {
-            setOperation({ kind: 'error', message: `已自动恢复登录；成功 ${result.uploaded.length} 项，失败 ${result.failures.length} 项，请重试失败项目` });
+            setOperation({ kind: 'error', message: t('cloud.upload.recoveredRetryFailures', { succeeded: result.uploaded.length, failed: result.failures.length }) });
             return;
           }
           setOperation(finalReport);
@@ -1239,11 +1235,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         : { loaded: true, confirmed: true };
       if (!directoryRefresh.loaded) return;
       const message = name === '下载'
-        ? '已经提交下载任务'
+        ? t('cloud.download.submitted')
         : name === '上传' && Array.isArray(result)
-          ? `已上传 ${result.length} 个文件`
-          : `${name}成功`;
-      setOperation({ kind: 'success', message: `${message}${directoryRefresh.confirmed ? '' : '；服务端目录尚未同步，请稍后刷新确认'}` });
+          ? t('cloud.upload.filesCompleted', { count: result.length })
+          : t('cloud.operation.succeeded', { name: operationLabel });
+      setOperation({ kind: 'success', message: `${message}${directoryRefresh.confirmed ? '' : t('cloud.directoryNotSynced')}` });
       setEditor(null);
       setEditorValue('');
     } catch (error) {
@@ -1255,21 +1251,21 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         // only opens the WebView; the saved session is replaced later, after
         // a successful `cloud_complete_authorization` validation.
         const detail = errorMessage(error, '');
-        queueAuthorizationContinuation(name, () => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh), `${name}需要网页验证。${detail ? ` ${detail}` : ''}`);
+        queueAuthorizationContinuation(name, () => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh), t('cloud.webVerificationRequired', { name: operationLabel, detail: detail ? ` ${detail}` : '' }));
       } else if (isCredentialExpired(error)) {
         setDirectory(null);
         setDirectoryState('expired');
-        setAuthorizationStatus(errorMessage(error, '登录凭据已过期。'));
+        setAuthorizationStatus(errorMessage(error, t('cloud.credentialsExpiredWithPeriod')));
       } else if (isSessionRenewedRetryOperation(error)) {
-        setOperation({ kind: 'error', message: '已自动恢复登录，请重新执行本次操作' });
+        setOperation({ kind: 'error', message: t('cloud.operation.recoveredRetry', { name: operationLabel }) });
       } else {
-        setOperation({ kind: 'error', message: `${name}失败：${errorMessage(error, '请重试。')}` });
+        setOperation({ kind: 'error', message: t('cloud.operation.failed', { name: operationLabel, detail: errorMessage(error, t('common.retry')) }) });
       }
     } finally {
       operationInFlight.current = false;
       setOperationRunning(false);
       setOperation(current => current?.kind === 'working'
-        ? { kind: 'error', message: `${name}已执行，但列表刷新失败；请刷新列表确认结果。` }
+        ? { kind: 'error', message: t('cloud.operation.listRefreshFailed', { name: operationLabel }) }
         : current);
     }
   }
@@ -1319,8 +1315,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function sortDescription(column: CloudSortColumn) {
-    if (sort?.column !== column) return '未排序';
-    return `当前为${sort.direction === 'ascending' ? '升序' : '降序'}`;
+    if (sort?.column !== column) return t('cloud.sort.unsorted');
+    return t('cloud.sort.currentDirection', { direction: t(sort.direction === 'ascending' ? 'cloud.sort.ascending' : 'cloud.sort.descending') });
   }
 
   function submitDownload(items: readonly CloudFile[], privateDownload?: boolean) {
@@ -1414,7 +1410,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   async function updateSharePassCode(passCode: string) {
     const share = createdShare;
-    if (!share || !descriptor.capabilities.shareUpdatePassCode || !client.updateCloudSharePassCode) throw new Error('此网盘暂不支持修改提取码');
+    if (!share || !descriptor.capabilities.shareUpdatePassCode || !client.updateCloudSharePassCode) throw new Error(t('cloud.share.passCodeChangeUnsupported'));
     await client.updateCloudSharePassCode(provider, share.id, passCode);
     setCreatedShare((current) => current?.id === share.id ? { ...current, passCode } : current);
     setDirectory((current) => current ? { ...current, items: current.items.map(item => item.shareId === share.id ? { ...item, sharePassCode: passCode } : item) } : current);
@@ -1437,7 +1433,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function copyShareLink(value: string) {
-    void copyCloudShareLink(value).then(() => setOperation({ kind: 'success', message: '分享链接已复制' })).catch((error) => setOperation({ kind: 'error', message: `复制分享链接失败：${errorMessage(error, '请重试。')}` }));
+    void copyCloudShareLink(value).then(() => setOperation({ kind: 'success', message: t('cloud.share.linkCopied') })).catch((error) => setOperation({ kind: 'error', message: t('cloud.share.copyLinkFailed', { detail: errorMessage(error, t('common.retry')) }) }));
   }
 
   function runContextAction(action: CloudMenuAction) {
@@ -1514,38 +1510,43 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (editor === 'rename' && selected[0]) void runOperation('重命名', () => client.renameCloudFile(provider, selected[0].id, editorValue.trim()));
   }
 
+  const displayedAuthorizationStatus = authorizationStatus === initialAuthorizationStatus
+    ? t('cloud.authorization.notAuthorized')
+    : authorizationStatus === expiredAuthorizationStatus
+      ? t('cloud.authorization.expired')
+      : authorizationStatus;
   function authorizationView(expired = false) {
     const showAuthorizationFeedback = authorizationStatus !== initialAuthorizationStatus;
     const showAuthorizationError = expired || authorizationStatus === expiredAuthorizationStatus;
-    return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{label}网盘</h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+    return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={t('cloud.accountAuthorization', { name: label })}>
+      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{t('cloud.providerDrive', { name: label })}</h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? t('cloud.closeProviderInfo', { name: label }) : t('cloud.viewProviderInfo', { name: label })} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <><form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsPasswordLogin && <>
-          <input aria-label="账号" placeholder="账号" autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
-          <input aria-label="密码" placeholder={useSavedPassword ? "******" : "密码"} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
-          <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? '正在自动登录…' : '登录'}</button>
+          <input aria-label={t('cloud.username')} placeholder={t('cloud.username')} autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
+          <input aria-label={t('cloud.password')} placeholder={useSavedPassword ? "******" : t('cloud.password')} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
+          <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? t('cloud.autoLogin') : t('cloud.login')}</button>
         </>}
-        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>使用网页授权</button>}
-        {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization()}>我已完成授权</button>}
+        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>{t('cloud.webAuthorization')}</button>}
+        {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization()}>{t('cloud.authorizationCompleted')}</button>}
       </form>
-      {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${showAuthorizationError ? ' error' : ''}`} role="status">{expired && <b>凭据已过期</b>}<span>{authorizationStatus}</span></p>}</>}
+      {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${showAuthorizationError ? ' error' : ''}`} role="status">{expired && <b>{t('cloud.credentialsExpired')}</b>}<span>{displayedAuthorizationStatus}</span></p>}</>}
     </section>;
   }
 
   function authorizationContinuationButton() {
     if (operation?.operationVerification && client.openCloudOperationVerification) {
-      return <><button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void openOperationVerification()}>{provider === 'baidu' ? baiduVerificationText().open : '打开 PikPak 操作验证'}</button>{provider === 'baidu' && operation.verificationOpened && client.completeCloudOperationVerification && <button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void completeOperationVerification()}>{baiduVerificationText().complete}</button>}</>;
+      return <><button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void openOperationVerification()}>{provider === 'baidu' ? baiduVerificationText().open : t('cloud.verification.pikpak.open')}</button>{provider === 'baidu' && operation.verificationOpened && client.completeCloudOperationVerification && <button className="secondary cloud-authorization-continuation" disabled={openingOperationVerification || operationBusy} onClick={() => void completeOperationVerification()}>{baiduVerificationText().complete}</button>}</>;
     }
     if (!pendingAuthorizationName || !effectiveAuthorizationCapabilities.web) return null;
-    return <button className="secondary cloud-authorization-continuation" disabled={operationBusy || webAuthorization !== null} onClick={() => void beginWebAuthorization()}>打开 {label} 授权并继续{pendingAuthorizationName}</button>;
+    return <button className="secondary cloud-authorization-continuation" disabled={operationBusy || webAuthorization !== null} onClick={() => void beginWebAuthorization()}>{t('cloud.authorization.openAndContinue', { name: label, action: pendingAuthorizationName })}</button>;
   }
 
   function sessionActions() {
-    return <div className="cloud-session-actions"><button className="cloud-auth-state" disabled>{authorizedLabel}</button>{reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}<button className="secondary" disabled={operationBusy} onClick={() => setPendingLogout(true)}>{logoutLabel}</button></div>;
+    return <div className="cloud-session-actions"><button className="cloud-auth-state" disabled>{authorizedLabel}</button>{reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>{t('cloud.reauthorizeWeb')}</button>}<button className="secondary" disabled={operationBusy} onClick={() => setPendingLogout(true)}>{logoutLabel}</button></div>;
   }
 
   function logoutConfirmation() {
-    return pendingLogout && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={`确认${logoutLabel}`}><h3>确认{logoutLabel}</h3><p>这只会清除本机授权会话，不会删除网盘中的任何文件。</p><button className="secondary" onClick={() => setPendingLogout(false)}>取消</button><button className="danger-button" onClick={() => { setPendingLogout(false); void runOperation(logoutLabel, async () => {
+    return pendingLogout && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={t('cloud.confirmAction', { action: logoutLabel })}><h3>{t('cloud.confirmAction', { action: logoutLabel })}</h3><p>{t('cloud.logoutWarning')}</p><button className="secondary" onClick={() => setPendingLogout(false)}>{t('dialog.cancel')}</button><button className="danger-button" onClick={() => { setPendingLogout(false); void runOperation(logoutLabel, async () => {
       await client.logoutCloud(provider);
       passwordFieldsEdited.current = false;
       passwordInputVersion.current += 1;
@@ -1557,16 +1558,16 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setDirectoryState('idle');
       setAuthorizationStatus(initialAuthorizationStatus);
       onAccountLoggedOut?.(provider);
-    }, false); }}>确认{logoutLabel}</button></section></div>;
+    }, false); }}>{t('cloud.confirmAction', { action: logoutLabel })}</button></section></div>;
   }
 
   function accountManagementView() {
     const capacityText = accountCapacity?.value
       ? formatCloudCapacity(accountCapacity.value.capacity)
-      : accountCapacity?.loading || !accountCapacity ? '容量获取中…' : '容量暂不可用';
-    return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={`${label}账号授权`}>
-      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{label}网盘 <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? `关闭${label}网盘信息` : `查看${label}网盘信息`} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
-      {!providerInfoOpen && <p className="cloud-account-capacity" aria-live="polite">{capacityText}{accountCapacity?.value && accountCapacity.refreshFailed && <span> · 更新失败</span>}</p>}
+      : accountCapacity?.loading || !accountCapacity ? t('cloud.capacityLoading') : t('cloud.capacityUnavailable');
+    return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={t('cloud.accountAuthorization', { name: label })}>
+      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{t('cloud.providerDrive', { name: label })} <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? t('cloud.closeProviderInfo', { name: label }) : t('cloud.viewProviderInfo', { name: label })} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+      {!providerInfoOpen && <p className="cloud-account-capacity" aria-live="polite">{capacityText}{accountCapacity?.value && accountCapacity.refreshFailed && <span> · {t('cloud.capacityRefreshFailed')}</span>}</p>}
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{sessionActions()}{logoutConfirmation()}{operationStatus()}</>}
     </section>;
   }
@@ -1587,7 +1588,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setOperation(current => current?.uploadProgress?.uploadId === progress.uploadId ? { ...current, uploadProgress: next } : current);
     } catch (error) {
       const latest = latestUploadProgress.current;
-      if (latest?.uploadId === progress.uploadId && !['completed', 'failed', 'cancelled', 'cancelling'].includes(latest.phase)) setUploadControlError(errorMessage(error, '上传控制失败，请重试。'));
+      if (latest?.uploadId === progress.uploadId && !['completed', 'failed', 'cancelled', 'cancelling'].includes(latest.phase)) setUploadControlError(errorMessage(error, t('cloud.upload.controlFailed')));
     } finally {
       uploadControlInFlight.current = false;
       setUploadControlBusy(false);
@@ -1598,20 +1599,20 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const notice = operation ?? uploadResult;
     if (!notice) return null;
     const progress = operation?.uploadProgress;
-    const phaseLabels = { preparing: '正在准备文件', uploading: '正在上传', finalizing: '等待网盘确认', paused: '上传已暂停', cancelling: '正在取消上传', cancelled: '上传已取消', completed: '上传已完成', failed: '上传已结束' };
+    const phaseLabels = { preparing: t('cloud.upload.preparing'), uploading: t('cloud.upload.uploading'), finalizing: t('cloud.upload.finalizing'), paused: t('cloud.upload.paused'), cancelling: t('cloud.upload.cancelling'), cancelled: t('cloud.upload.cancelled'), completed: t('cloud.upload.completed'), failed: t('cloud.upload.failed') };
     const controllable = progress && !['completed', 'failed', 'cancelled'].includes(progress.phase) && client.controlCloudUpload && progress.uploadId;
     return <div className={`cloud-operation-status ${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>
       <div className="cloud-upload-status-content">
-        {!progress && <span>{notice.message === '上传进行中…' ? '正在准备上传…' : notice.message}</span>}
+        {!progress && <span>{notice.message === '上传进行中…' ? t('cloud.upload.preparing') : notice.message}</span>}
         {uploadResult && uploadResult.message !== notice.message && <p>{uploadResult.message}</p>}
         {progress && <>
           <div>{phaseLabels[progress.phase]}{progress.currentFiles.length > 0 && `：${progress.currentFiles.join('、')}`}</div>
-          <div className="cloud-upload-stats"><span>{progress.progress.toFixed(1).replace(/\.0$/, '')}% · {readableSize(progress.uploadedBytes)} / {readableSize(progress.totalBytes)} · {readableSize(Math.round(progress.speedBytesPerSecond))}/s</span><span>已完成 {progress.completedFiles} / {progress.totalFiles} 个文件，失败 {progress.failedItems} 项</span></div>
+          <div className="cloud-upload-stats"><span>{progress.progress.toFixed(1).replace(/\.0$/, '')}% · {readableSize(progress.uploadedBytes)} / {readableSize(progress.totalBytes)} · {readableSize(Math.round(progress.speedBytesPerSecond))}/s</span><span>{t('cloud.upload.stats', { completed: progress.completedFiles, total: progress.totalFiles, failed: progress.failedItems })}</span></div>
           <div className="cloud-upload-track-row">
-            <div className="progress-track" role="progressbar" aria-label="上传总进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}><i style={{ width: `${progress.progress}%` }} /></div>
+            <div className="progress-track" role="progressbar" aria-label={t('cloud.upload.totalProgress')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}><i style={{ width: `${progress.progress}%` }} /></div>
             {controllable && <>
-              <button type="button" className="cloud-upload-control-button" aria-label={progress.phase === 'paused' ? '继续上传' : '暂停上传'} title={progress.phase === 'paused' ? '继续上传' : '暂停上传'} disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload(progress.phase === 'paused' ? 'resume' : 'pause')}><CloudActionIcon action={progress.phase === 'paused' ? 'resume' : 'pause'} /></button>
-              <button type="button" className="cloud-upload-control-button" aria-label={progress.phase === 'cancelling' ? '正在取消…' : '取消上传'} title={progress.phase === 'cancelling' ? '正在取消上传' : '取消上传'} disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload('cancel')}><CloudActionIcon action="cancel" /></button>
+              <button type="button" className="cloud-upload-control-button" aria-label={progress.phase === 'paused' ? t('cloud.upload.resume') : t('cloud.upload.pause')} title={progress.phase === 'paused' ? t('cloud.upload.resume') : t('cloud.upload.pause')} disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload(progress.phase === 'paused' ? 'resume' : 'pause')}><CloudActionIcon action={progress.phase === 'paused' ? 'resume' : 'pause'} /></button>
+              <button type="button" className="cloud-upload-control-button" aria-label={progress.phase === 'cancelling' ? t('cloud.upload.cancelling') : t('cloud.upload.cancel')} title={progress.phase === 'cancelling' ? t('cloud.upload.cancelling') : t('cloud.upload.cancel')} disabled={uploadControlBusy || progress.phase === 'cancelling'} onClick={() => void controlUpload('cancel')}><CloudActionIcon action="cancel" /></button>
             </>}
           </div>
           {uploadControlError && <p className="cloud-error" role="alert">{uploadControlError}</p>}
@@ -1623,7 +1624,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   if (authorizationOnly && activeAccount) return accountManagementView();
   if (authorizationOnly || !activeAccount) return authorizationView();
-  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={`${label}文件管理器`}><header className="cloud-heading"><h2>{label}网盘</h2></header>{operationStatus()}<div className="cloud-state cloud-error" role="alert"><span>登录凭据已过期。</span>{authorizationContinuationButton()}</div></section>;
+  if (directoryState === 'expired' && !showSessionActions) return <section className="cloud-manager" aria-label={t('cloud.fileManager', { name: label })}><header className="cloud-heading"><h2>{t('cloud.providerDrive', { name: label })}</h2></header>{operationStatus()}<div className="cloud-state cloud-error" role="alert"><span>{t('cloud.credentialsExpired')}.</span>{authorizationContinuationButton()}</div></section>;
   if (directoryState === 'expired') return authorizationView(true);
 
   const parent = breadcrumbs.at(-2);
@@ -1632,47 +1633,47 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (!parent || operationBusy) return;
     navigateToDirectory(parent.id, breadcrumbs.slice(0, -1));
   };
-  return <section className="cloud-manager cloud-file-manager" aria-label={`${label}文件管理器`}>
+  return <section className="cloud-manager cloud-file-manager" aria-label={t('cloud.fileManager', { name: label })}>
     {showSessionActions && <div className="cloud-file-sessionbar">
       {showSessionActions && sessionActions()}
     </div>}
 
     <div className="cloud-filebar">
-      <button className="cloud-icon-button cloud-refresh-button" aria-label="刷新" title="刷新" disabled={operationBusy} onClick={refreshDirectory}><CloudActionIcon action="refresh" /></button>
+      <button className="cloud-icon-button cloud-refresh-button" aria-label={t('cloud.action.refresh')} title={t('cloud.action.refresh')} disabled={operationBusy} onClick={refreshDirectory}><CloudActionIcon action="refresh" /></button>
       <div className="cloud-pathbar">
-        <div className="cloud-breadcrumbs" role="navigation" aria-label="当前目录">{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1 || operationBusy} onClick={() => navigateToDirectory(crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
+        <div className="cloud-breadcrumbs" role="navigation" aria-label={t('cloud.currentDirectory', { name: breadcrumbs.at(-1)?.name ?? '' })}>{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1 || operationBusy} onClick={() => navigateToDirectory(crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
-      <div className="cloud-toolbar cloud-toolbar--single-line" aria-label="文件操作">
-        {!isRecycleBin && !isMyShares && <button aria-label="上传" disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />上传</button>}
-        {!isRecycleBin && !isMyShares && <button aria-label="新建目录" disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />新建文件夹</button>}
-        {isMyShares && descriptor.capabilities.shareUpdatePassCode && selected.length === 1 && <button disabled={operationBusy} onClick={() => openSharePassCodeEditor()}><CloudActionIcon action="updateSharePassCode" />修改提取码</button>}
+      <div className="cloud-toolbar cloud-toolbar--single-line" aria-label={t('cloud.fileActions')}>
+        {!isRecycleBin && !isMyShares && <button aria-label={t('cloud.action.upload')} disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />{t('cloud.action.upload')}</button>}
+        {!isRecycleBin && !isMyShares && <button aria-label={t('cloud.action.newFolder')} disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />{t('cloud.action.newFolder')}</button>}
+        {isMyShares && descriptor.capabilities.shareUpdatePassCode && selected.length === 1 && <button disabled={operationBusy} onClick={() => openSharePassCodeEditor()}><CloudActionIcon action="updateSharePassCode" />{t('cloud.share.changePassCode')}</button>}
       </div>
     </div>
 
-    {editor && <form className="cloud-operation-editor" onSubmit={submitEditor} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setEditor(null); } }}><label>{editor === 'create' ? '目录名称' : '新名称'}<input aria-label={editor === 'create' ? '目录名称' : '新名称'} value={editorValue} onChange={(event) => setEditorValue(event.target.value)} autoFocus /></label><button className="primary" type="submit" disabled={operationBusy}>{editor === 'create' ? '确认新建目录' : '确认重命名'}</button><button type="button" className="secondary" disabled={operationBusy} onClick={() => setEditor(null)}>取消</button></form>}
-    {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={isRecycleBin ? '确认永久删除' : '确认移入回收站'}><h3>{isRecycleBin ? '确认永久删除' : '确认移入回收站'}</h3><p>{isRecycleBin ? `所选 ${selected.length} 个项目将被永久删除，不可恢复。` : `所选 ${selected.length} 个项目将移入回收站，不会永久删除。`}</p><button className="secondary" onClick={() => setPendingTrash(false)}>取消</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation(isRecycleBin ? '永久删除' : '删除', () => isRecycleBin ? client.deleteCloudFiles(provider, selectedIds.slice()) : client.trashCloudFiles(provider, selectedIds.slice())); }}>{isRecycleBin ? '永久删除' : '移入回收站'}</button></section></div>}
-    {pendingDownload && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label="确认下载"><h3>确认下载</h3><p>所选 {pendingDownload.length} 个项目可作为普通任务或隐私任务加入下载队列。</p><button className="secondary" onClick={() => setPendingDownload(null)}>取消</button><button className="primary" onClick={() => confirmPendingDownload(false)}>立即下载</button><button className="secondary" onClick={() => confirmPendingDownload(true)}>隐私下载</button></section></div>}
+    {editor && <form className="cloud-operation-editor" onSubmit={submitEditor} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); setEditor(null); } }}><label>{editor === 'create' ? t('cloud.folderName') : t('cloud.newName')}<input aria-label={editor === 'create' ? t('cloud.folderName') : t('cloud.newName')} value={editorValue} onChange={(event) => setEditorValue(event.target.value)} autoFocus /></label><button className="primary" type="submit" disabled={operationBusy}>{editor === 'create' ? t('cloud.confirmCreateFolder') : t('cloud.confirmRename')}</button><button type="button" className="secondary" disabled={operationBusy} onClick={() => setEditor(null)}>{t('dialog.cancel')}</button></form>}
+    {pendingTrash && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={isRecycleBin ? t('cloud.confirmPermanentlyDelete') : t('cloud.confirmMoveToRecycleBin')}><h3>{isRecycleBin ? t('cloud.confirmPermanentlyDelete') : t('cloud.confirmMoveToRecycleBin')}</h3><p>{isRecycleBin ? t('cloud.permanentDeleteWarning', { count: selected.length }) : t('cloud.moveToRecycleBinWarning', { count: selected.length })}</p><button className="secondary" onClick={() => setPendingTrash(false)}>{t('dialog.cancel')}</button><button className="danger-button" onClick={() => { setPendingTrash(false); void runOperation(isRecycleBin ? t('cloud.action.permanentDelete') : t('download.action.delete'), () => isRecycleBin ? client.deleteCloudFiles(provider, selectedIds.slice()) : client.trashCloudFiles(provider, selectedIds.slice())); }}>{isRecycleBin ? t('cloud.action.permanentDelete') : t('cloud.moveToRecycleBin')}</button></section></div>}
+    {pendingDownload && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={t('download.confirmContent')}><h3>{t('download.confirmContent')}</h3><p>{t('cloud.downloadSelectionPrompt', { count: pendingDownload.length })}</p><button className="secondary" onClick={() => setPendingDownload(null)}>{t('dialog.cancel')}</button><button className="primary" onClick={() => confirmPendingDownload(false)}>{t('download.downloadNow')}</button><button className="secondary" onClick={() => confirmPendingDownload(true)}>{t('download.privateDownload')}</button></section></div>}
     {showSessionActions && logoutConfirmation()}
     {operationStatus()}
-    {!showSessionActions && reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>重新网页授权</button>}
-    {directoryState === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>正在加载文件…</span></div>}
-    {directoryState === 'error' && <div className="cloud-state cloud-error" role="alert"><b>加载失败</b><span>{authorizationStatus}</span>{authorizationContinuationButton()}<button className="secondary" onClick={refreshDirectory}>重试</button></div>}
+    {!showSessionActions && reauthorizationRequired && effectiveAuthorizationCapabilities?.web && <button className="secondary" disabled={operationBusy} onClick={() => void beginWebAuthorization()}>{t('cloud.reauthorizeWeb')}</button>}
+    {directoryState === 'loading' && <div className="cloud-loading-state" role="status"><i /><span>{t('cloud.loadingFiles')}</span></div>}
+    {directoryState === 'error' && <div className="cloud-state cloud-error" role="alert"><b>{t('cloud.loadingFailed')}</b><span>{displayedAuthorizationStatus}</span>{authorizationContinuationButton()}<button className="secondary" onClick={refreshDirectory}>{t('common.retryAction')}</button></div>}
     {(directoryState === 'ready' || directoryState === 'empty') && <div
       className="cloud-list"
       ref={fileListRef}
       role="tree"
-      aria-label={`${label}网盘文件`}
+      aria-label={t('cloud.driveFiles', { name: label })}
       tabIndex={0}
       onKeyDown={handleFileListKeyDown}
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
-      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label="全选当前目录" checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={`已选择 ${selected.length} 项的文件操作`}><b>已选择 {selected.length} 项</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">特殊文件夹仅可打开</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation('恢复', () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />恢复</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />永久删除</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl)}><CloudActionIcon action="copyShareLink" />复制链接</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />取消分享</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />下载</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />删除</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label="更多文件操作" aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label="取消选择" title="取消选择" onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label="按名称排序" aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>名称<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label="按大小排序" aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>大小<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label="按修改时间排序" aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>修改时间<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
-      {canNavigateToParent && <div className="cloud-row cloud-file-row cloud-parent-directory-row" role="treeitem" aria-label="返回上一级目录" tabIndex={0} onClick={navigateToParent} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); navigateToParent(); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
-        <span className="cloud-check-cell"><input type="checkbox" aria-label="选择 返回上级目录" disabled /></span>
-        <span className="cloud-file-name"><i className="folder"><CloudFileIcon kind="folder" /></i><b title="返回上级目录">返回上级目录</b></span>
+      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label={t('cloud.selectCurrentDirectory')} checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={t('cloud.selectedFileActions', { count: selected.length })}><b>{t('cloud.itemsSelected', { count: selected.length })}</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">{t('cloud.specialFolderOpenOnly')}</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation(t('cloud.action.restore'), () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />{t('cloud.action.restore')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('cloud.action.permanentDelete')}</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl)}><CloudActionIcon action="copyShareLink" />{t('cloud.action.copyLink')}</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />{t('cloud.action.cancelShare')}</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />{t('download.action.download')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('download.action.delete')}</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label={t('cloud.moreFileActions')} aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label={t('cloud.clearSelection')} title={t('cloud.clearSelection')} onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByName')} aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>{t('download.sort.name')}<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortBySize')} aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>{t('download.sort.size')}<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByModifiedAt')} aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>{t('download.sort.time')}<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
+      {canNavigateToParent && <div className="cloud-row cloud-file-row cloud-parent-directory-row" role="treeitem" aria-label={t('cloud.parentDirectory')} tabIndex={0} onClick={navigateToParent} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); navigateToParent(); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
+        <span className="cloud-check-cell"><input type="checkbox" aria-label={t('cloud.selectNamed', { name: t('cloud.parentDirectory') })} disabled /></span>
+        <span className="cloud-file-name"><i className="folder"><CloudFileIcon kind="folder" /></i><b title={t('cloud.parentDirectory')}>{t('cloud.parentDirectory')}</b></span>
         <span>—</span><span>—</span>
       </div>}
-      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? '回收站为空' : isMyShares ? '暂无分享文件' : '此目录为空'}</b><span>{isRecycleBin ? '没有可恢复或永久删除的项目' : isMyShares ? '在文件或目录的右键菜单中创建分享链接' : '可在这里上传文件或新建目录'}</span></div> : sortedItems.map((item, index) => {
+      {directoryState === 'empty' ? <div className="cloud-empty"><CloudFileIcon kind="folder" /><b>{isRecycleBin ? t('cloud.empty.recycleBin.title') : isMyShares ? t('cloud.empty.myShares.title') : t('cloud.empty.directory.title')}</b><span>{isRecycleBin ? t('cloud.empty.recycleBin.body') : isMyShares ? t('cloud.empty.myShares.body') : t('cloud.empty.directory.body')}</span></div> : sortedItems.map((item, index) => {
         const isSelected = selectedIds.includes(item.id);
         const isVirtualDirectory = isVirtualDirectoryItem(item);
         const iconKind: CloudFileIconKind = isVirtualRecycleBinItem(item) ? 'recycle-bin' : isVirtualMySharesItem(item) ? 'my-shares' : item.kind;
@@ -1687,7 +1688,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           onDoubleClick={(event) => { event.preventDefault(); openFolder(item); }}
           onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); if (isVirtualDirectory) { setSelectedIds([]); selectionAnchor.current = null; } else { if (!isSelected) setSelectedIds([item.id]); selectionAnchor.current = item.id; } setContextMenu({ kind: 'selection', item, x: event.clientX, y: event.clientY }); }}
         >
-          <span className="cloud-check-cell"><input type="checkbox" aria-label={`选择 ${item.name}`} disabled={isVirtualDirectory} checked={isSelected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelection(item)} /></span>
+          <span className="cloud-check-cell"><input type="checkbox" aria-label={t('cloud.selectNamed', { name: item.name })} disabled={isVirtualDirectory} checked={isSelected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelection(item)} /></span>
           <span className="cloud-file-name"><i className={iconKind}><CloudFileIcon kind={iconKind} /></i><b title={item.name}>{item.name}</b></span>
           <span>{item.kind === 'folder' ? '—' : readableSize(item.size)}</span>
           <span>{formatCloudModifiedAt(item.modifiedAt)}</span>

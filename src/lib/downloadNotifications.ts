@@ -1,10 +1,11 @@
 import type { QueueTask, TaskStatus } from './types';
+import { t } from '../i18n';
 import { isPrivateTask } from './queueTask';
 
 let permissionPromise: Promise<boolean> | undefined;
 
 export interface DownloadNotification {
-  title: '下载完成' | '下载失败';
+  title: string;
   body: string;
 }
 
@@ -17,9 +18,9 @@ export function notificationForTask(task: QueueTask): DownloadNotification | nul
     return null;
   }
   const name = task.name.trim() || '下载任务';
-  if (task.status === 'completed') return { title: '下载完成', body: name };
+  if (task.status === 'completed') return { title: t('download.status.completed'), body: name };
   const error = task.error?.trim();
-  return { title: '下载失败', body: error ? `${name}：${error}` : name };
+  return { title: t('download.status.failed'), body: error ? t('download.notification.failed', { name, error }) : name };
 }
 
 export function shouldNotifyTask(task: QueueTask, previousStatus: TaskStatus | undefined): boolean {

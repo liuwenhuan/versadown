@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from '../i18n';
 
 const deleteFilesPreferenceKey = 'remove-task-delete-files';
 
@@ -19,10 +20,11 @@ function saveDeleteFilesPreference(value: boolean) {
 }
 
 export function RemoveTaskDialog({ taskNames, onConfirm, onClose }: { taskNames: readonly string[]; onConfirm(deleteFiles: boolean): void; onClose(): void }) {
+  const { t } = useTranslation();
   const cancelRef = useRef<HTMLButtonElement>(null);
   const [deleteFiles, setDeleteFiles] = useState(savedDeleteFilesPreference);
   const isBatch = taskNames.length > 1;
-  const subject = isBatch ? `${taskNames.length} 个任务` : `“${taskNames[0] ?? '未命名任务'}”`;
+  const subject = isBatch ? t('removeTasks.count', { count: taskNames.length }) : `“${taskNames[0] ?? t('removeTasks.unnamed')}”`;
   useEffect(() => {
     cancelRef.current?.focus();
     const closeForEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
@@ -32,8 +34,8 @@ export function RemoveTaskDialog({ taskNames, onConfirm, onClose }: { taskNames:
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) event.preventDefault(); }}>
     <section className="remove-task-dialog" role="dialog" aria-modal="true" aria-labelledby="remove-task-title">
       <div className="dialog-warning" aria-hidden="true">!</div>
-      <div><h2 id="remove-task-title">彻底删除任务</h2><p>确定彻底删除{subject}吗？</p><label className="delete-files-option"><input aria-label="同时删除下载文件" type="checkbox" checked={deleteFiles} onChange={(event) => { setDeleteFiles(event.target.checked); saveDeleteFilesPreference(event.target.checked); }} /> <span>同时删除下载文件</span></label><small>任务将被永久删除；勾选后会一并删除记录中的本地下载文件。</small></div>
-      <footer><button ref={cancelRef} onClick={onClose}>取消</button><button className="danger-button" onClick={() => onConfirm(deleteFiles)}>彻底删除</button></footer>
+      <div><h2 id="remove-task-title">{t('removeTasks.title')}</h2><p>{t('removeTasks.confirm', { subject })}</p><label className="delete-files-option"><input aria-label={t('removeTasks.deleteFiles')} type="checkbox" checked={deleteFiles} onChange={(event) => { setDeleteFiles(event.target.checked); saveDeleteFilesPreference(event.target.checked); }} /> <span>{t('removeTasks.deleteFiles')}</span></label><small>{t('removeTasks.description')}</small></div>
+      <footer><button ref={cancelRef} onClick={onClose}>{t('dialog.cancel')}</button><button className="danger-button" onClick={() => onConfirm(deleteFiles)}>{t('removeTasks.title')}</button></footer>
     </section>
   </div>;
 }

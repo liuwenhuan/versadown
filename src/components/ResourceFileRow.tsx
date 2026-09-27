@@ -1,5 +1,6 @@
 import { formatBytes } from '../lib/downloadEvents';
 import { ConfirmResource } from '../lib/types';
+import { t } from '../i18n';
 
 const videoExtension = /\.(?:3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|rmvb|ts|webm|wmv)$/i;
 
@@ -34,7 +35,7 @@ export function ResourceFileRow({ resource, displayName = resource.name, disable
   onToggle(): void;
 }) {
   return <label className={`resource${resource.selected ? ' selected' : ''}${compact ? ' batch-resource-row' : ''}`}>
-    <input type="checkbox" aria-label={`选择 ${displayName}`} checked={resource.selected} disabled={disabled} onChange={onToggle} />
+    <input type="checkbox" aria-label={t('batch.selectNamed', { name: displayName })} checked={resource.selected} disabled={disabled} onChange={onToggle} />
     <ResourceFileIcon resource={resource} />
     <span title={resource.name}>{displayName}</span>
     {showExtension && <small className="resource-extension">{resourceExtension(displayName)}</small>}

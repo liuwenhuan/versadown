@@ -3,6 +3,7 @@ import darkMintIcon from '../assets/launcher/dark_mint.svg';
 import mintWhiteIcon from '../assets/launcher/mint_white.svg';
 import { getResolvedTheme, subscribeTheme } from '../lib/theme';
 import type { ScanDownloadResult } from '../lib/types';
+import { t } from '../i18n';
 
 export type LauncherPointerPosition = { x: number; y: number };
 
@@ -196,7 +197,7 @@ export function FloatingLauncher({ onScan, onActivateTaskList, onDroppedInput, o
           onContextMenu?.();
         }}
       >
-        <button className="launcher-trigger" data-size="64" data-icon-variant={resolvedTheme} aria-label="打开下载输入">
+        <button className="launcher-trigger" data-size="64" data-icon-variant={resolvedTheme} aria-label={t('launcher.openDownloadInput')}>
           <LauncherMark theme={resolvedTheme} />
         </button>
       </div>

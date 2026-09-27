@@ -1,24 +1,26 @@
 import type { DownloadEngineState } from '../lib/types';
+import { useTranslation } from '../i18n';
 
 export function EngineStatusToast({ state, onRetry }: {
   state: DownloadEngineState;
   onRetry: () => void;
 }) {
+  const { t } = useTranslation();
   if (state.available) return null;
   const retrying = state.retrying;
   return (
     <section className={`task-toast engine-status-toast ${retrying ? 'engine-starting' : 'error'}`} role="status" aria-live="polite">
       <div>
-        <b>{retrying ? '正在启动下载引擎…' : '下载引擎不可用'}</b>
-        <span>{state.error ?? (retrying ? '主界面仍可使用，请稍候。' : '下载操作暂不可用，可手动重试。')}</span>
+        <b>{retrying ? t('engine.starting') : t('engine.unavailable')}</b>
+        <span>{state.error ?? (retrying ? t('engine.mainWindowAvailable') : t('engine.retryHint'))}</span>
       </div>
       <button
         type="button"
         disabled={retrying}
-        aria-label={retrying ? '正在重试下载引擎' : '重试下载引擎'}
+        aria-label={retrying ? t('engine.retrying') : t('engine.retry')}
         onClick={onRetry}
       >
-        {retrying ? '重试中…' : '重新启动'}
+        {retrying ? t('engine.retryingShort') : t('engine.restart')}
       </button>
     </section>
   );

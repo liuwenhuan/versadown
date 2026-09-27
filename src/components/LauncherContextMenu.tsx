@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LauncherVisibility } from '../lib/types';
+import { t, useTranslation } from '../i18n';
 
 export type LauncherMenuAction = 'hide_manager' | 'new_download' | 'start_all' | 'pause_all' | 'quit';
 
@@ -29,13 +30,14 @@ function LauncherMenuIcon({ action }: { action: LauncherMenuAction | 'settings' 
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
 
-const visibilityOptions: Array<{ value: LauncherVisibility; label: string; icon: 'always' | 'downloading' | 'hidden' }> = [
-  { value: 'always', label: '总是显示', icon: 'always' },
-  { value: 'downloading', label: '仅下载时显示', icon: 'downloading' },
-  { value: 'hidden', label: '关闭显示', icon: 'hidden' },
+const visibilityOptions: Array<{ value: LauncherVisibility; label: Parameters<typeof t>[0]; icon: 'always' | 'downloading' | 'hidden' }> = [
+  { value: 'always', label: 'launcher.visibility.always', icon: 'always' },
+  { value: 'downloading', label: 'launcher.visibility.downloading', icon: 'downloading' },
+  { value: 'hidden', label: 'launcher.visibility.hidden', icon: 'hidden' },
 ];
 
 export function LauncherContextMenu({ downloadSpeed, managerVisible, visibility, onAction, onVisibilityChange, onClose, onElement }: LauncherContextMenuProps) {
+  const { t: translate } = useTranslation();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const captureMenu = useCallback((element: HTMLDivElement | null) => {
@@ -71,18 +73,18 @@ export function LauncherContextMenu({ downloadSpeed, managerVisible, visibility,
   };
 
   return <div className="launcher-menu-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div ref={captureMenu} className="task-context-menu launcher-context-menu" role="menu" aria-label={settingsOpen ? '悬浮球显示设置' : '悬浮球菜单'} onKeyDown={moveFocus}>
+    <div ref={captureMenu} className="task-context-menu launcher-context-menu" role="menu" aria-label={settingsOpen ? translate('launcher.visibility.settings') : translate('launcher.menu')} onKeyDown={moveFocus}>
       {settingsOpen ? <>
-        <header><b>悬浮球显示</b><button type="button" aria-label="返回悬浮球菜单" onClick={() => setSettingsOpen(false)}><LauncherMenuIcon action="back" /></button></header>
-        {visibilityOptions.map((option) => <div key={option.value}><button role="menuitemradio" aria-checked={visibility === option.value} className={visibility === option.value ? 'selected' : undefined} onClick={() => { onVisibilityChange(option.value); onClose(); }}><LauncherMenuIcon action={option.icon} /><span>{option.label}</span>{visibility === option.value && <i aria-hidden="true">✓</i>}</button></div>)}
+        <header><b>{translate('launcher.visibility.title')}</b><button type="button" aria-label={translate('launcher.backToMenu')} onClick={() => setSettingsOpen(false)}><LauncherMenuIcon action="back" /></button></header>
+        {visibilityOptions.map((option) => <div key={option.value}><button role="menuitemradio" aria-checked={visibility === option.value} className={visibility === option.value ? 'selected' : undefined} onClick={() => { onVisibilityChange(option.value); onClose(); }}><LauncherMenuIcon action={option.icon} /><span>{translate(option.label)}</span>{visibility === option.value && <i aria-hidden="true">✓</i>}</button></div>)}
       </> : <>
-        <div className="launcher-menu-speed" aria-label="当前整体下载速度"><span>当前下载速度</span><strong>{downloadSpeed}</strong></div>
-        <div><button role="menuitem" onClick={() => runAction('hide_manager')}><LauncherMenuIcon action="hide_manager" /><span>{managerVisible ? '隐藏主界面' : '显示主界面'}</span></button></div>
-        <div><button role="menuitem" onClick={() => runAction('new_download')}><LauncherMenuIcon action="new_download" /><span>新建下载</span></button></div>
-        <div><button role="menuitem" onClick={() => runAction('start_all')}><LauncherMenuIcon action="start_all" /><span>开始全部任务</span></button></div>
-        <div><button role="menuitem" onClick={() => runAction('pause_all')}><LauncherMenuIcon action="pause_all" /><span>暂停全部任务</span></button></div>
-        <div className="menu-separated"><button role="menuitem" aria-haspopup="menu" onClick={() => setSettingsOpen(true)}><LauncherMenuIcon action="settings" /><span>悬浮球显示</span><i aria-hidden="true">›</i></button></div>
-        <div className="menu-separated"><button role="menuitem" className="danger" onClick={() => runAction('quit')}><LauncherMenuIcon action="quit" /><span>退出万能下载</span></button></div>
+        <div className="launcher-menu-speed" aria-label={translate('launcher.currentOverallSpeed')}><span>{translate('launcher.currentSpeed')}</span><strong>{downloadSpeed}</strong></div>
+        <div><button role="menuitem" onClick={() => runAction('hide_manager')}><LauncherMenuIcon action="hide_manager" /><span>{managerVisible ? translate('launcher.hideMainWindow') : translate('launcher.showMainWindow')}</span></button></div>
+        <div><button role="menuitem" onClick={() => runAction('new_download')}><LauncherMenuIcon action="new_download" /><span>{translate('launcher.newDownload')}</span></button></div>
+        <div><button role="menuitem" onClick={() => runAction('start_all')}><LauncherMenuIcon action="start_all" /><span>{translate('launcher.startAll')}</span></button></div>
+        <div><button role="menuitem" onClick={() => runAction('pause_all')}><LauncherMenuIcon action="pause_all" /><span>{translate('launcher.pauseAll')}</span></button></div>
+        <div className="menu-separated"><button role="menuitem" aria-haspopup="menu" onClick={() => setSettingsOpen(true)}><LauncherMenuIcon action="settings" /><span>{translate('launcher.visibility.title')}</span><i aria-hidden="true">›</i></button></div>
+        <div className="menu-separated"><button role="menuitem" className="danger" onClick={() => runAction('quit')}><LauncherMenuIcon action="quit" /><span>{translate('launcher.quit')}</span></button></div>
       </>}
     </div>
   </div>;

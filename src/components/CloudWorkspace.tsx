@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction } from 'react';
 import type { CloudAccount, CloudProvider, ProviderDescriptor } from '../lib/cloudTypes';
 import { CloudManager, CloudManagerClient } from './CloudManager';
+import { useTranslation } from '../i18n';
+import { cloudProviderLabel } from '../i18n/cloudProviderLabel';
 
 export interface CloudWorkspaceProps {
   client: CloudManagerClient;
@@ -72,6 +74,7 @@ function errorMessage(error: unknown, fallback: string) {
 }
 
 export function CloudWorkspace({ client, activePage, onPageChange, onProvidersChange, onDownloadTask, privacyDownloadEnabled = false }: CloudWorkspaceProps) {
+  const { t } = useTranslation();
   const [accounts, setAccounts] = useState<readonly CloudAccount[]>([]);
   const [catalog, setCatalog] = useState<readonly ProviderDescriptor[]>([]);
   const [pendingProviders, setPendingProviders] = useState<readonly CloudProvider[]>([]);
@@ -131,7 +134,7 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
         void client.getCloudAccount(provider).then(account => {
           if (active && account.provider === provider) acceptAccount(account);
         }).catch(error => {
-          if (active && !isUnauthorized(error)) setAccountErrors(current => ({ ...current, [provider]: errorMessage(error, '无法恢复网盘会话。') }));
+          if (active && !isUnauthorized(error)) setAccountErrors(current => ({ ...current, [provider]: errorMessage(error, t('cloud.authorization.restoreSessionFailed')) }));
         }).finally(() => {
           if (active) setPendingProviders(current => current.filter(item => item !== provider));
         });
@@ -139,7 +142,7 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
     }).catch(error => {
       if (active) {
         setLoadingCatalog(false);
-        setRecoveryError(errorMessage(error, '无法读取网盘目录。'));
+        setRecoveryError(errorMessage(error, t('cloud.error.readDirectory')));
       }
     });
     return () => { active = false; };
@@ -247,13 +250,14 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
     if (pending && pending.pointerId === event.pointerId) clearProviderCardDrag(pending);
   }
 
-  return <section className={`cloud-workspace${activePage === 'management' ? '' : ' cloud-workspace--files'}`} aria-label="我的网盘工作区">
-    {activePage === 'management' && <section className="cloud-management-panel" aria-label="网盘管理">
-      {recoveringAccounts && <div className="cloud-account-recovery" role="status" aria-label="正在读取网盘账号状态"><i aria-hidden="true" /><span>正在读取网盘账号状态…</span></div>}
-      {recoveryError && <p className="cloud-operation-status error" role="alert">恢复账号失败：{recoveryError}</p>}
+  return <section className={`cloud-workspace${activePage === 'management' ? '' : ' cloud-workspace--files'}`} aria-label={t('cloud.workspace')}>
+    {activePage === 'management' && <section className="cloud-management-panel" aria-label={t('cloud.management')}>
+      {recoveringAccounts && <div className="cloud-account-recovery" role="status" aria-label={t('cloud.readingAccountStatus')}><i aria-hidden="true" /><span>{t('cloud.readingAccountStatus')}…</span></div>}
+      {recoveryError && <p className="cloud-operation-status error" role="alert">{t('cloud.recoveryFailed', { detail: recoveryError })}</p>}
       <div className="cloud-provider-auths" onPointerMove={updateProviderCardDrag} onPointerUp={finishProviderCardDrag} onPointerCancel={cancelProviderCardDrag}>{managementCatalog.map((descriptor) => {
-        const { provider, displayName } = descriptor;
-        if (pendingProviders.includes(provider)) return <section key={provider} className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={`${displayName}账号恢复`}><header className="cloud-heading"><h2>{displayName}网盘</h2></header><p role="status">正在读取账号状态…</p></section>;
+        const { provider } = descriptor;
+        const providerName = cloudProviderLabel(provider, t);
+        if (pendingProviders.includes(provider)) return <section key={provider} className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={t('cloud.accountRecovery', { name: providerName })}><header className="cloud-heading"><h2>{t('cloud.providerDrive', { name: providerName })}</h2></header><p role="status">{t('cloud.readingAccountStatus')}…</p></section>;
         const account = accounts.find((item) => item.provider === provider);
         return <CloudManager
           key={`${provider}:${account?.id ?? 'unauthorized'}`}

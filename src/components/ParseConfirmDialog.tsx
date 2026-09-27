@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ConfirmResource, ParseResult } from '../lib/types';
 import { ResourceFileRow, resourceFileCategory } from './ResourceFileRow';
+import { t, useTranslation } from '../i18n';
 
 interface ParseConfirmDialogProps {
   result: ParseResult;
@@ -54,10 +55,11 @@ function SelectAllCheckbox({ checked, indeterminate, onChange }: { checked: bool
   useEffect(() => {
     if (input.current) input.current.indeterminate = indeterminate;
   }, [indeterminate]);
-  return <input ref={input} type="checkbox" aria-label="全选文件" checked={checked} onChange={onChange} />;
+  return <input ref={input} type="checkbox" aria-label={t('batch.selectAllFiles')} checked={checked} onChange={onChange} />;
 }
 
 export function ParseConfirmDialog({ result, placement = 'modal', downloadDirectory, browseDirectory, privacyEnabled = false, onConfirm, onSelectionChange, onClose }: ParseConfirmDialogProps) {
+  const { t } = useTranslation();
   const resources = result.resources;
   const [showPassword, setShowPassword] = useState(false);
   const [showProcessing, setShowProcessing] = useState(false);
@@ -78,7 +80,7 @@ export function ParseConfirmDialog({ result, placement = 'modal', downloadDirect
     setShowProcessing(false);
     setShowPassword(false);
   }, [result.taskId]);
-  const taskTitle = root || (result.title && !result.title.startsWith('magnet:') ? result.title : (result.isBitTorrent ? 'BT 下载任务' : '下载内容'));
+  const taskTitle = root || (result.title && !result.title.startsWith('magnet:') ? result.title : (result.isBitTorrent ? t('download.kind.torrentTask') : t('download.content')));
   const changeSelection = (resourceId: string) => {
     onSelectionChange(resources.map((item) => item.id === resourceId ? { ...item, selected: !item.selected } : item).filter((item) => item.selected).map((item) => item.id));
   };
@@ -87,22 +89,22 @@ export function ParseConfirmDialog({ result, placement = 'modal', downloadDirect
     const selectedDirectory = await browseDirectory?.(destination || downloadDirectory || '');
     if (selectedDirectory) setDestinationOverride(selectedDirectory === downloadDirectory ? undefined : selectedDirectory);
   };
-  const dialog = <section className={`confirm-dialog${placement === 'header' ? ' header-confirm-dialog' : ''}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label="确认下载内容">
-    <header><div className="confirm-dialog-title"><span aria-hidden="true">↓</span><h2>新建任务</h2></div><button aria-label="关闭确认窗口" onClick={onClose}>×</button></header>
-    {!providerKey && <div className="parse-task-summary"><span className={`parse-task-icon${result.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{result.isBitTorrent ? 'BT' : '↓'}</span><div><strong title={taskTitle}>{taskTitle}</strong><p>{resources.length ? `已选 ${selected.length} / ${resources.length} 个文件` : result.isBitTorrent ? '正在连接元数据服务…' : '将作为单个文件下载'}</p></div></div>}
+  const dialog = <section className={`confirm-dialog${placement === 'header' ? ' header-confirm-dialog' : ''}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label={t('download.confirmContent')}>
+    <header><div className="confirm-dialog-title"><span aria-hidden="true">↓</span><h2>{t('download.newTask')}</h2></div><button aria-label={t('download.closeConfirm')} onClick={onClose}>×</button></header>
+    {!providerKey && <div className="parse-task-summary"><span className={`parse-task-icon${result.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{result.isBitTorrent ? 'BT' : '↓'}</span><div><strong title={taskTitle}>{taskTitle}</strong><p>{resources.length ? t('batch.selectedFiles', { selected: selected.length, total: resources.length }) : result.isBitTorrent ? t('download.connectingMetadata') : t('download.singleFile')}</p></div></div>}
     <div className="parse-resource-card">
       {resources.length > 0 && <div className="parse-resource-toolbar">
-        <label className="parse-select-all"><SelectAllCheckbox checked={allSelected} indeterminate={selected.length > 0 && !allSelected} onChange={toggleAll} /><span>全选</span></label>
-        <b>已选 {selected.length} / {resources.length} 个文件</b>
-        <div className="parse-resource-filters" role="group" aria-label="文件类型筛选">
-          {(['all', 'video', 'other'] as ResourceFilter[]).map((option) => <button key={option} type="button" className={filter === option ? 'active' : ''} onClick={() => setFilter(option)}>{option === 'all' ? '全部' : option === 'video' ? '视频' : '其他'}</button>)}
+        <label className="parse-select-all"><SelectAllCheckbox checked={allSelected} indeterminate={selected.length > 0 && !allSelected} onChange={toggleAll} /><span>{t('batch.selectAll')}</span></label>
+        <b>{t('batch.selectedFiles', { selected: selected.length, total: resources.length })}</b>
+        <div className="parse-resource-filters" role="group" aria-label={t('batch.filter.types')}>
+          {(['all', 'video', 'other'] as ResourceFilter[]).map((option) => <button key={option} type="button" className={filter === option ? 'active' : ''} onClick={() => setFilter(option)}>{t(`batch.filter.${option}` as Parameters<typeof t>[0])}</button>)}
         </div>
       </div>}
-      <div className="resource-list">{resources.length ? visibleResources.map((resource) => <ResourceFileRow key={resource.id} resource={resource} displayName={displayResourceName(resource, root, downloadDirectory)} onToggle={() => changeSelection(resource.id)} />) : <p className="resource-loading">正在获取文件信息…</p>}</div>
+      <div className="resource-list">{resources.length ? visibleResources.map((resource) => <ResourceFileRow key={resource.id} resource={resource} displayName={displayResourceName(resource, root, downloadDirectory)} onToggle={() => changeSelection(resource.id)} />) : <p className="resource-loading">{t('download.retrievingFileInfo')}</p>}</div>
     </div>
-    {hasProcessing && <button className="disclosure" onClick={() => setShowProcessing(!showProcessing)}>{showProcessing ? '收起' : '查看'}后处理与密码 {showProcessing ? '⌃' : '⌄'}</button>}
-    {hasProcessing && showProcessing && <div className="processing-summary"><ul>{processing.map((step) => <li key={step}>{step}</li>)}</ul>{hasPassword && <p>解压密码：<code>{showPassword ? result.discoveredPassword : '••••••••'}</code><button onClick={() => setShowPassword(!showPassword)}>{showPassword ? '隐藏密码' : '显示密码'}</button></p>}</div>}
-    <footer><button type="button" className="parse-destination" aria-label="选择下载目录" onClick={() => void chooseDestination()}><span>下载到</span><strong title={destination || '本机下载目录'}>{destination || '本机下载目录'}</strong><i aria-hidden="true">更改</i></button><div><button onClick={onClose}>返回</button>{privacyEnabled && <button className="secondary" disabled={!canConfirm} onClick={() => onConfirm(selected, destinationOverride, true)}>隐私下载 <span>{selected.length}</span></button>}<button className="primary" disabled={!canConfirm} onClick={() => onConfirm(selected, destinationOverride)}>立即下载 <span>{selected.length}</span></button></div></footer>
+    {hasProcessing && <button className="disclosure" onClick={() => setShowProcessing(!showProcessing)}>{showProcessing ? t('common.collapse') : t('common.view')} {t('download.postProcessingAndPassword')} {showProcessing ? '⌃' : '⌄'}</button>}
+    {hasProcessing && showProcessing && <div className="processing-summary"><ul>{processing.map((step) => <li key={step}>{step}</li>)}</ul>{hasPassword && <p>{t('download.archivePassword')}：<code>{showPassword ? result.discoveredPassword : '••••••••'}</code><button onClick={() => setShowPassword(!showPassword)}>{showPassword ? t('common.hide') : t('common.show')}</button></p>}</div>}
+    <footer><button type="button" className="parse-destination" aria-label={t('settings.directory.choose')} onClick={() => void chooseDestination()}><span>{t('download.to')}</span><strong title={destination || t('download.localDirectory')}>{destination || t('download.localDirectory')}</strong><i aria-hidden="true">{t('settings.directory.change')}</i></button><div><button onClick={onClose}>{t('common.back')}</button>{privacyEnabled && <button className="secondary" disabled={!canConfirm} onClick={() => onConfirm(selected, destinationOverride, true)}>{t('download.privateDownload')} <span>{selected.length}</span></button>}<button className="primary" disabled={!canConfirm} onClick={() => onConfirm(selected, destinationOverride)}>{t('download.downloadNow')} <span>{selected.length}</span></button></div></footer>
   </section>;
   return placement === 'header' ? dialog : <div className="modal-backdrop" role="presentation">{dialog}</div>;
 }

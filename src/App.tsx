@@ -30,6 +30,7 @@ import { installWindowResizePerformanceMode } from './lib/windowResizePerformanc
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
 import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
 import { applyMainWindowDpiSizing } from './lib/mainWindow';
+import { t, useTranslation } from './i18n';
 
 type TaskListTab = 'all' | 'active' | 'completed' | 'failed';
 type TaskSortMode = 'manual' | 'default-all' | 'created-desc' | 'created-asc' | 'finished-desc' | 'finished-asc' | 'progress-asc' | 'progress-desc' | 'name-asc' | 'name-desc' | 'size-asc' | 'size-desc';
@@ -112,41 +113,29 @@ function prioritizeNewActiveTasks(tasks: readonly QueueTask[], newTaskIds: reado
   ];
 }
 
-const taskSortGroups: ReadonlyArray<{ label: string; options: ReadonlyArray<{ mode: TaskSortMode; label: string; ariaLabel: string }> }> = [
-  { label: '按创建时间', options: [
-    { mode: 'created-desc', label: '从新到旧', ariaLabel: '按创建时间从新到旧' },
-    { mode: 'created-asc', label: '从旧到新', ariaLabel: '按创建时间从旧到新' },
+type TranslationKey = Parameters<typeof t>[0];
+type TaskSortGroup = { labelKey: TranslationKey; options: ReadonlyArray<{ mode: TaskSortMode; labelKey: TranslationKey; ariaKey: TranslationKey }> };
+const taskSortGroups: ReadonlyArray<TaskSortGroup> = [
+  { labelKey: 'download.sort.createdAt', options: [
+    { mode: 'created-desc', labelKey: 'download.sort.newest', ariaKey: 'download.sort.createdNewest' },
+    { mode: 'created-asc', labelKey: 'download.sort.oldest', ariaKey: 'download.sort.createdOldest' },
   ] },
-  { label: '按当前进度', options: [
-    { mode: 'progress-asc', label: '从低到高', ariaLabel: '按当前进度从低到高' },
-    { mode: 'progress-desc', label: '从高到低', ariaLabel: '按当前进度从高到低' },
+  { labelKey: 'download.sort.progress', options: [
+    { mode: 'progress-asc', labelKey: 'download.sort.lowToHigh', ariaKey: 'download.sort.progressLowToHigh' },
+    { mode: 'progress-desc', labelKey: 'download.sort.highToLow', ariaKey: 'download.sort.progressHighToLow' },
   ] },
-  { label: '按文件名称', options: [
-    { mode: 'name-asc', label: '从 A 到 Z', ariaLabel: '按文件名称从 A 到 Z' },
-    { mode: 'name-desc', label: '从 Z 到 A', ariaLabel: '按文件名称从 Z 到 A' },
+  { labelKey: 'download.sort.fileName', options: [
+    { mode: 'name-asc', labelKey: 'download.sort.aToZ', ariaKey: 'download.sort.fileNameAToZ' },
+    { mode: 'name-desc', labelKey: 'download.sort.zToA', ariaKey: 'download.sort.fileNameZToA' },
   ] },
-  { label: '按文件大小', options: [
-    { mode: 'size-asc', label: '从小到大', ariaLabel: '按文件大小从小到大' },
-    { mode: 'size-desc', label: '从大到小', ariaLabel: '按文件大小从大到小' },
+  { labelKey: 'download.sort.fileSize', options: [
+    { mode: 'size-asc', labelKey: 'download.sort.smallToLarge', ariaKey: 'download.sort.fileSizeSmallToLarge' },
+    { mode: 'size-desc', labelKey: 'download.sort.largeToSmall', ariaKey: 'download.sort.fileSizeLargeToSmall' },
   ] },
 ];
-
-const additionalTaskSortLabels = {
-  'zh-CN': {
-    defaultGroup: '默认排序', activeFirst: '下载中优先', activeFirstAria: '默认排序：下载中优先',
-    finishedGroup: '按结束时间', newest: '从新到旧', oldest: '从旧到新',
-    finishedNewestAria: '按结束时间从新到旧', finishedOldestAria: '按结束时间从旧到新',
-  },
-  en: {
-    defaultGroup: 'Default order', activeFirst: 'Active first', activeFirstAria: 'Default order: active first',
-    finishedGroup: 'By finish time', newest: 'Newest first', oldest: 'Oldest first',
-    finishedNewestAria: 'By finish time, newest first', finishedOldestAria: 'By finish time, oldest first',
-  },
-} as const;
-
-const privacyTaskFilterOptions: ReadonlyArray<{ value: Exclude<PrivacyTaskFilter, 'all'>; label: string }> = [
-  { value: 'private', label: '显示隐私任务' },
-  { value: 'ordinary', label: '显示普通任务' },
+const privacyTaskFilterOptions: ReadonlyArray<{ value: Exclude<PrivacyTaskFilter, 'all'>; labelKey: TranslationKey }> = [
+  { value: 'private', labelKey: 'download.filter.private' },
+  { value: 'ordinary', labelKey: 'download.filter.ordinary' },
 ];
 
 function PrivacyLockIcon({ unlocked }: { unlocked: boolean }) {
@@ -158,15 +147,15 @@ function PrivacyLockIcon({ unlocked }: { unlocked: boolean }) {
 }
 
 function TaskSortControl({ tab, value, onChange, privacyFilter, onPrivacyFilterChange, showPrivacyFilter }: { tab: TaskListTab; value: TaskSortMode; onChange(mode: TaskSortMode): void; privacyFilter: PrivacyTaskFilter; onPrivacyFilterChange(filter: PrivacyTaskFilter): void; showPrivacyFilter: boolean }) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const labels = additionalTaskSortLabels[document.documentElement.lang.toLowerCase().startsWith('en') ? 'en' : 'zh-CN'];
-  const availableSortGroups = tab === 'all'
-    ? [{ label: labels.defaultGroup, options: [{ mode: 'default-all' as const, label: labels.activeFirst, ariaLabel: labels.activeFirstAria }] }, ...taskSortGroups]
+  const availableSortGroups: ReadonlyArray<TaskSortGroup> = tab === 'all'
+    ? [{ labelKey: 'download.sort.default', options: [{ mode: 'default-all' as const, labelKey: 'download.sort.activeFirst', ariaKey: 'download.sort.defaultActiveFirst' }] }, ...taskSortGroups]
     : tab === 'completed' || tab === 'failed'
-      ? [{ label: labels.finishedGroup, options: [
-        { mode: 'finished-desc' as const, label: labels.newest, ariaLabel: labels.finishedNewestAria },
-        { mode: 'finished-asc' as const, label: labels.oldest, ariaLabel: labels.finishedOldestAria },
+      ? [{ labelKey: 'download.sort.finishedAt', options: [
+        { mode: 'finished-desc' as const, labelKey: 'download.sort.newest', ariaKey: 'download.sort.finishedNewest' },
+        { mode: 'finished-asc' as const, labelKey: 'download.sort.oldest', ariaKey: 'download.sort.finishedOldest' },
       ] }, ...taskSortGroups]
       : taskSortGroups;
   useEffect(() => {
@@ -185,18 +174,18 @@ function TaskSortControl({ tab, value, onChange, privacyFilter, onPrivacyFilterC
     };
   }, [open]);
   return <div className="task-sort-control" ref={rootRef}>
-    <button type="button" className="task-sort-trigger" aria-label="排序任务" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+    <button type="button" className="task-sort-trigger" aria-label={t('download.sort.tasks')} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
       <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M10 6h9M10 12h6M10 18h3" /><path d="M5 5v14m-3-3 3 3 3-3" /></svg>
     </button>
-    {open && <div className="task-sort-menu" role="menu" aria-label="任务排序">
-      {availableSortGroups.map((group) => <section key={group.label}><p>{group.label}</p><div>{group.options.map((option) => <button type="button" key={option.mode} role="menuitemradio" aria-checked={value === option.mode} aria-label={option.ariaLabel} className={value === option.mode ? 'selected' : ''} onClick={() => { onChange(option.mode); setOpen(false); }}>{option.label}</button>)}</div></section>)}
-      {showPrivacyFilter && <section><p>显示任务</p><div>{privacyTaskFilterOptions.map((option) => {
+    {open && <div className="task-sort-menu" role="menu" aria-label={t('download.sort.menu')}>
+      {availableSortGroups.map((group) => <section key={group.labelKey}><p>{t(group.labelKey)}</p><div>{group.options.map((option) => <button type="button" key={option.mode} role="menuitemradio" aria-checked={value === option.mode} aria-label={t(option.ariaKey)} className={value === option.mode ? 'selected' : ''} onClick={() => { onChange(option.mode); setOpen(false); }}>{t(option.labelKey)}</button>)}</div></section>)}
+      {showPrivacyFilter && <section><p>{t('download.filter.title')}</p><div>{privacyTaskFilterOptions.map((option) => {
         const checked = privacyFilter === 'all' || privacyFilter === option.value;
         const onlySelected = privacyFilter === option.value;
-        return <button type="button" key={option.value} role="menuitemcheckbox" aria-checked={checked} aria-disabled={onlySelected} title={onlySelected ? '至少选择一项' : undefined} className={checked ? 'selected' : ''} onClick={() => {
+        return <button type="button" key={option.value} role="menuitemcheckbox" aria-checked={checked} aria-disabled={onlySelected} title={onlySelected ? t('download.filter.atLeastOne') : undefined} className={checked ? 'selected' : ''} onClick={() => {
           if (onlySelected) return;
           onPrivacyFilterChange(privacyFilter === 'all' ? (option.value === 'private' ? 'ordinary' : 'private') : 'all');
-        }}>{option.label}</button>;
+        }}>{t(option.labelKey)}</button>;
       })}</div></section>}
     </div>}
   </div>;
@@ -237,9 +226,9 @@ function taskTabForSearchResult(task: QueueTask): TaskListTab {
 }
 
 function taskStatusLabel(task: QueueTask): string {
-  if (task.status === 'completed') return '已完成';
-  if (task.status === 'failed') return '失败';
-  return '下载中';
+  if (task.status === 'completed') return t('download.status.completed');
+  if (task.status === 'failed') return t('download.status.failed');
+  return t('download.status.active');
 }
 
 function searchTaskMatches(task: QueueTask, keyword: string): boolean {
@@ -287,7 +276,7 @@ async function runWindowAction(action: 'minimize' | 'maximize' | 'hide') {
 async function browseDownloadDirectory(currentDirectory: string): Promise<string | null> {
   if (!isTauriRuntime()) return null;
   const { open } = await import('@tauri-apps/plugin-dialog');
-  const selected = await open({ directory: true, multiple: false, defaultPath: currentDirectory || undefined, title: '选择下载目录' });
+  const selected = await open({ directory: true, multiple: false, defaultPath: currentDirectory || undefined, title: t('settings.directory.choose') });
   return typeof selected === 'string' ? selected : null;
 }
 
@@ -331,6 +320,7 @@ function NavigationIcon({ kind }: { kind: 'tasks' | 'cloud' | 'settings' | 'abou
 }
 
 export function App() {
+  const { t } = useTranslation();
   const [tasks, setTasks] = useState<QueueTask[]>([]);
   const [newActiveTaskIds, setNewActiveTaskIds] = useState<string[]>([]);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
@@ -574,12 +564,12 @@ export function App() {
     applyTaskProjection({
       ...task,
       status: 'queued',
-      speed: '等待开始',
+      speed: t('download.waitingToStart'),
       download_speed: 0,
       upload_speed: 0,
       eta: undefined,
       eta_seconds: undefined,
-      statusMessage: '正在提交下载任务…',
+      statusMessage: t('download.submitting'),
       error: undefined,
       failure_code: undefined,
       reauthorization_required: undefined,
@@ -637,7 +627,7 @@ export function App() {
       if (current()) {
         taskAuthorizationActive.current = false;
         setTaskReauthorization(null);
-        setNotice({ kind: 'success', message: '授权成功，正在恢复受影响的下载任务' });
+        setNotice({ kind: 'success', message: t('cloud.authorization.restoringTasks') });
       }
     };
     let querying = false;
@@ -932,7 +922,7 @@ export function App() {
     const password = input?.value ?? '';
     if (input) input.value = '';
     if (!password) {
-      setPrivacyUnlockError('请输入隐私模式密码');
+      setPrivacyUnlockError(t('privacy.passwordRequired'));
       return;
     }
     setPrivacyUnlocking(true);
@@ -1141,7 +1131,7 @@ export function App() {
         setDuplicateQueue((current) => [...current, ...duplicates]);
         const failedTask = cloudTasks.find((task) => task.status === 'failed');
         if (failedTask && activeGeneration.current === requestGeneration) {
-          setNotice({ kind: 'error', message: `${failedTask.name}：${failedTask.error || '提交失败'}，可在“下载中”重试` });
+          setNotice({ kind: 'error', message: t('download.submitFailedRetry', { name: failedTask.name, error: failedTask.error || t('download.submitFailed'), tab: t('download.tabs.active') }) });
         }
         if (result.failures.length > 0) {
           const failedIds = new Set(result.failures.map((failure) => failure.selectedId));
@@ -1151,7 +1141,7 @@ export function App() {
           } : current);
           if (activeGeneration.current === requestGeneration) {
             const first = result.failures[0];
-            const prefix = result.failures.length > 1 ? `${result.failures.length} 个文件未能开始下载：` : '';
+            const prefix = result.failures.length > 1 ? t('download.filesFailedPrefix', { count: result.failures.length }) : '';
             setNotice({ kind: 'error', message: `${prefix}${first.message}` });
           }
         } else {
@@ -1168,7 +1158,7 @@ export function App() {
       return;
     }
     const task: QueueTask = {
-      id: activeConfirmation.taskId, name: '多文件下载任务', kind: 'folder', status: 'queued', progress: 0, speed: '等待开始',
+      id: activeConfirmation.taskId, name: t('download.multipleFilesTask'), kind: 'folder', status: 'queued', progress: 0, speed: t('download.waitingToStart'),
       children: activeConfirmation.resources.filter((resource) => selectedIds.includes(resource.id)).map((resource) => ({ id: resource.id, name: resource.name, kind: 'file', status: 'queued', progress: 0, size: resource.size }))
     };
     const nativeTask = await (destinationDirectory
@@ -1191,7 +1181,7 @@ export function App() {
     try {
       if (command === 'reauthorize') {
         if (taskAuthorizationActive.current) return;
-        setNotice({ kind: 'success', message: '正在打开网盘授权窗口…' });
+        setNotice({ kind: 'success', message: t('cloud.authorization.opening') });
         taskAuthorizationActive.current = true;
         const generation = ++taskAuthorizationGeneration.current;
         let authorization: CloudAuthorization;
@@ -1235,9 +1225,9 @@ export function App() {
         return;
       }
       if (command === 'copy_link') {
-        if (!task.source) throw new Error('该任务没有可复制的来源链接');
+        if (!task.source) throw new Error(t('download.error.noSourceToCopy'));
         await writeClipboardText(task.source);
-        setNotice({ kind: 'success', message: '下载链接已复制' });
+        setNotice({ kind: 'success', message: t('download.linkCopied') });
         return;
       }
       const result = await runTaskAction(id, command);
@@ -1280,9 +1270,9 @@ export function App() {
     try {
       if (command === 'copy_link') {
         const links = targets.map((task) => task.source?.trim()).filter((source): source is string => Boolean(source));
-        if (!links.length) throw new Error('所选任务没有可复制的来源链接');
+        if (!links.length) throw new Error(t('download.error.noSelectedSourcesToCopy'));
         await writeClipboardText(links.join('\n'));
-        setNotice({ kind: 'success', message: `已复制 ${links.length} 个下载链接` });
+        setNotice({ kind: 'success', message: t('download.linksCopied', { count: links.length }) });
         return;
       }
       if (command === 'delete') {
@@ -1389,12 +1379,12 @@ export function App() {
       setSelectedTaskIds((current) => current.filter((id) => !removed.has(id)));
       setDetailsTaskId((current) => current && removed.has(current) ? null : current);
     };
-    const successMessage = deleteFiles ? '任务和下载文件已删除' : '任务已删除，下载文件已保留';
+    const successMessage = deleteFiles ? t('download.removedWithFiles') : t('download.removedKeepingFiles');
     purgeInProgressRef.current = true;
     for (const id of ids) purgingTaskIds.current.add(id);
     protectRemovedTasksFromOlderSnapshots(ids);
     setPendingPurgeTaskIds(null);
-    setNotice({ kind: 'success', message: `正在后台删除 0 / ${ids.length} 个任务` });
+    setNotice({ kind: 'success', message: t('download.removingProgress', { removed: 0, total: ids.length }) });
 
     let removed = 0;
     let timer: number | undefined;
@@ -1403,7 +1393,7 @@ export function App() {
       if (!batch.length) return;
       removeTasksFromQueue(batch);
       removed += batch.length;
-      setNotice({ kind: 'success', message: `正在后台删除 ${removed} / ${ids.length} 个任务` });
+      setNotice({ kind: 'success', message: t('download.removingProgress', { removed, total: ids.length }) });
       if (removed < ids.length) {
         timer = window.setTimeout(removeVisibleTasks, backgroundPurgeFrameDelayMs);
       }
@@ -1484,17 +1474,17 @@ export function App() {
     if (outcome?.queueTask) {
       addNewDownloadTask(outcome.queueTask);
       setSelectedTaskId(outcome.queueTask.id);
-      setNotice({ kind: 'success', message: `已将「${outcome.queueTask.name}」加入下载队列` });
+      setNotice({ kind: 'success', message: t('download.addedToQueue', { name: outcome.queueTask.name }) });
       return;
     }
     const task = outcome?.task ?? value;
     if (!isQueueTask(task)) {
-      setNotice({ kind: 'error', message: '网盘下载任务的返回数据无效' });
+      setNotice({ kind: 'error', message: t('download.error.invalidCloudResponse') });
       return;
     }
     addNewDownloadTask(task);
     setSelectedTaskId(task.id);
-    setNotice({ kind: 'success', message: `已将「${task.name}」加入下载队列` });
+    setNotice({ kind: 'success', message: t('download.addedToQueue', { name: task.name }) });
   }
 
   async function submitPreparedBatch(
@@ -1537,7 +1527,7 @@ export function App() {
         return;
       }
       const prepared = item.result?.confirmation;
-      if (!prepared) throw new Error(`${item.input}：任务尚未解析完成`);
+      if (!prepared) throw new Error(t('download.error.taskNotParsed', { input: item.input }));
       const ids = selectedResourceIds(item);
       if (prepared.taskId.startsWith('cloud-share://')) {
         const result = await confirmCloudShareDownload(
@@ -1563,7 +1553,7 @@ export function App() {
         privateDownload,
         postProcessingNote,
       );
-      if (!task) throw new Error(`${prepared.title || item.input}：提交失败`);
+      if (!task) throw new Error(t('download.error.taskSubmissionFailed', { name: prepared.title || item.input }));
       acceptCreated(task);
     }));
 
@@ -1578,11 +1568,11 @@ export function App() {
       return [message];
     });
     if (failures.length) {
-      const message = `${failures.length} 个任务提交失败：${failures[0]}`;
+      const message = t('download.error.tasksSubmissionFailed', { count: failures.length, detail: failures[0] });
       setNotice({ kind: 'error', message });
       if (!firstCreated) throw new Error(message);
     }
-    if (!firstCreated) throw new Error('没有任务成功加入下载队列');
+    if (!firstCreated) throw new Error(t('download.error.noTaskAdded'));
   }
 
   return (
@@ -1591,8 +1581,8 @@ export function App() {
         <div className="app-header-drag-space" data-tauri-drag-region={nativeWindowDrag ? undefined : true} aria-hidden="true" />
         <div className="brand" data-tauri-drag-region={nativeWindowDrag ? undefined : 'deep'}>
           <div className="brand-mark" data-icon-variant={resolvedTheme} aria-hidden="true"><img src={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} alt="" draggable={false} /></div>
-          <h1>万能下载</h1>
-          <button type="button" className="sidebar-toggle" data-window-no-drag aria-label={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
+          <h1>{t('app.brand')}</h1>
+          <button type="button" className="sidebar-toggle" data-window-no-drag aria-label={sidebarCollapsed ? t('navigation.expandSidebar') : t('navigation.collapseSidebar')} aria-controls="primary-navigation" aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? t('navigation.expandSidebar') : t('navigation.collapseSidebar')} onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}><SidebarToggleIcon collapsed={sidebarCollapsed} /></button>
         </div>
         <div className="header-input-shell" data-window-no-drag>
           <label ref={searchDropTarget} className={`global-search${headerPanel === 'search' ? ' has-search-results' : ''}`}>
@@ -1601,8 +1591,8 @@ export function App() {
               style={{ WebkitUserSelect: 'text', userSelect: 'text' }}
               rows={1}
               wrap="off"
-              aria-label="搜索任务或粘贴下载链接"
-              placeholder="此处可搜索本地任务，粘贴下载链接，拖入bt种子文件"
+              aria-label={t('search.label')}
+              placeholder={t('search.placeholder')}
               disabled={newDownloadOpen || Boolean(detailsTask)}
               value={searchInput}
               onChange={(event) => {
@@ -1651,7 +1641,7 @@ export function App() {
                 }
               }}
             />
-            {headerPanel === 'search' && <button type="button" className="global-search-clear" aria-label="清除搜索" onClick={(event) => {
+            {headerPanel === 'search' && <button type="button" className="global-search-clear" aria-label={t('search.clear')} onClick={(event) => {
               event.preventDefault();
               setSearchInput('');
               setHeaderPanel(null);
@@ -1669,19 +1659,19 @@ export function App() {
                 setDownloadTab('active');
                 return result;
               }} onClose={() => { setHeaderPanel(null); setSearchInput(''); }} />
-                : <section className="header-search-results" role="region" aria-label="搜索结果">
-                  <header><strong>搜索结果</strong><span>{taskSearchResults.length} 个任务</span></header>
-                  {taskSearchResults.length ? <div>{taskSearchResults.map((task, index) => <button type="button" key={task.id} className={`header-search-result${selectedSearchResultIndex === index ? ' is-keyboard-selected' : ''}`} aria-label={`打开任务 ${displayTaskName(task)}`} onClick={() => selectSearchResult(task)}>
+                : <section className="header-search-results" role="region" aria-label={t('search.results')}>
+                  <header><strong>{t('search.results')}</strong><span>{t('search.taskCount', { count: taskSearchResults.length })}</span></header>
+                  {taskSearchResults.length ? <div>{taskSearchResults.map((task, index) => <button type="button" key={task.id} className={`header-search-result${selectedSearchResultIndex === index ? ' is-keyboard-selected' : ''}`} aria-label={t('search.openTask', { name: displayTaskName(task) })} onClick={() => selectSearchResult(task)}>
                     <span className={`header-search-status ${task.status === 'failed' ? 'failed' : taskTabForSearchResult(task)}`}>{taskStatusLabel(task)}</span>
                     <strong title={displayTaskName(task)}>{displayTaskName(task)}</strong>
-                  </button>)}</div> : <p>没有匹配的下载任务</p>}
+                  </button>)}</div> : <p>{t('search.noMatches')}</p>}
                 </section>}
           </div>}
         </div>
-        <div className="window-controls" aria-label="窗口控制" style={{ marginLeft: 'auto', flex: '0 0 auto' }}>
-          <button aria-label="最小化" onClick={() => void runWindowAction('minimize')}><WindowIcon kind="minimize" /></button>
-          <button aria-label="最大化或还原" onClick={() => void runWindowAction('maximize')}><WindowIcon kind="maximize" /></button>
-          <button className="window-close" aria-label="关闭" onClick={() => void runWindowAction('hide')}><WindowIcon kind="close" /></button>
+        <div className="window-controls" aria-label={t('window.controls')} style={{ marginLeft: 'auto', flex: '0 0 auto' }}>
+          <button aria-label={t('window.minimize')} onClick={() => void runWindowAction('minimize')}><WindowIcon kind="minimize" /></button>
+          <button aria-label={t('window.maximizeRestore')} onClick={() => void runWindowAction('maximize')}><WindowIcon kind="maximize" /></button>
+          <button className="window-close" aria-label={t('dialog.close')} onClick={() => void runWindowAction('hide')}><WindowIcon kind="close" /></button>
         </div>
       </header>
       <EngineStatusToast state={engineState} onRetry={() => {
@@ -1689,23 +1679,23 @@ export function App() {
         setEngineState((current) => ({ ...current, retrying: true, error: undefined }));
         void retryDownloadEngine().then(setEngineState).catch((error: unknown) => setEngineState({ available: false, retrying: false, error: String(error) }));
       }} />
-      <div className={`workspace${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}><nav id="primary-navigation" aria-label="主导航" aria-hidden={sidebarCollapsed}>
-        <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="tasks" /></span><span>任务</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
+      <div className={`workspace${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}><nav id="primary-navigation" aria-label={t('navigation.primary')} aria-hidden={sidebarCollapsed}>
+        <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="tasks" /></span><span>{t('navigation.tasks')}</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
         <CloudNavigation providers={authorizedCloudProviders} activePage={view === 'cloud' ? cloudPage : null} icon={<NavigationIcon kind="cloud" />} onSelect={page => { setCloudPage(page); setView('cloud'); }} />
-        <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="settings" /></span><span>设置</span></button>
-        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{appUpdate ? '有新版本' : '关于'}</span></button>
+        <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="settings" /></span><span>{t('navigation.settings')}</span></button>
+        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{appUpdate ? t('navigation.newVersion') : t('navigation.about')}</span></button>
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
-            <div className="download-tab-list workspace-tab-list" role="tablist" aria-label="下载任务">
-              <button role="tab" aria-selected={downloadTab === 'all'} onClick={() => selectDownloadTab('all')}>全部 <b>{allTasks.length}</b></button>
-              <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>下载中 <b>{activeTasks.length}</b></button>
-              <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>已完成 <b>{completedTasks.length}</b></button>
-              <button role="tab" aria-selected={downloadTab === 'failed'} onClick={() => selectDownloadTab('failed')}>失败 <b>{failedTasks.length}</b></button>
+            <div className="download-tab-list workspace-tab-list" role="tablist" aria-label={t('download.taskList')}>
+              <button role="tab" aria-selected={downloadTab === 'all'} onClick={() => selectDownloadTab('all')}>{t('download.tabs.all')} <b>{allTasks.length}</b></button>
+              <button role="tab" aria-selected={downloadTab === 'active'} onClick={() => selectDownloadTab('active')}>{t('download.tabs.active')} <b>{activeTasks.length}</b></button>
+              <button role="tab" aria-selected={downloadTab === 'completed'} onClick={() => selectDownloadTab('completed')}>{t('download.tabs.completed')} <b>{completedTasks.length}</b></button>
+              <button role="tab" aria-selected={downloadTab === 'failed'} onClick={() => selectDownloadTab('failed')}>{t('download.tabs.failed')} <b>{failedTasks.length}</b></button>
             </div>
-            <div className="speed-summary" aria-label="当前总下载速度"><strong>{currentSpeed}</strong></div>
+            <div className="speed-summary" aria-label={t('download.currentSpeed')}><strong>{currentSpeed}</strong></div>
             <div className="task-privacy-actions">
-              {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} title={privacyVisibility.unlocked ? '锁定隐私任务' : '解锁隐私任务'} onClick={() => void togglePrivacyVisibility()}><PrivacyLockIcon unlocked={privacyVisibility.unlocked} /></button>}
+              {privacyVisibility.enabled && <button type="button" className="task-privacy-lock" aria-label={privacyVisibility.unlocked ? t('privacy.lock') : t('privacy.unlock')} title={privacyVisibility.unlocked ? t('privacy.lock') : t('privacy.unlock')} onClick={() => void togglePrivacyVisibility()}><PrivacyLockIcon unlocked={privacyVisibility.unlocked} /></button>}
               <TaskSortControl tab={downloadTab} value={taskSorts[downloadTab]} onChange={(mode) => setTaskOrderPreferences((current) => ({
                 sorts: { ...current.sorts, [downloadTab]: mode },
                 orders: mode === 'manual' && !current.orders[downloadTab].length
@@ -1730,13 +1720,13 @@ export function App() {
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
-        {view === 'about' && <section className="view-panel" aria-label="关于"><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
+        {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
       </div>
       {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
       } : current)} onClose={dismissConfirmation} />}
-      {privacyUnlockOpen && <div className="modal-backdrop" role="presentation"><section className="cloud-trash-confirm" role="dialog" aria-modal="true" aria-labelledby="privacy-unlock-title"><h3 id="privacy-unlock-title">输入隐私密码解锁</h3><form onSubmit={(event) => { event.preventDefault(); void unlockPrivateTasks(); }}><div className="cloud-operation-editor"><label><input ref={privacyUnlockPassword} type="password" autoComplete="current-password" aria-label="隐私模式密码" disabled={privacyUnlocking} /></label></div>{privacyUnlockError && <p className="cloud-operation-status error" role="alert">{privacyUnlockError}</p>}<div className="new-download-actions"><button type="button" onClick={() => setPrivacyUnlockOpen(false)} disabled={privacyUnlocking}>取消</button><button className="primary" type="submit" disabled={privacyUnlocking}>{privacyUnlocking ? '正在解锁…' : '解锁'}</button></div></form></section></div>}
+      {privacyUnlockOpen && <div className="modal-backdrop" role="presentation"><section className="cloud-trash-confirm" role="dialog" aria-modal="true" aria-labelledby="privacy-unlock-title"><h3 id="privacy-unlock-title">{t('privacy.unlockTitle')}</h3><form onSubmit={(event) => { event.preventDefault(); void unlockPrivateTasks(); }}><div className="cloud-operation-editor"><label><input ref={privacyUnlockPassword} type="password" autoComplete="current-password" aria-label={t('settings.privacy.password')} disabled={privacyUnlocking} /></label></div>{privacyUnlockError && <p className="cloud-operation-status error" role="alert">{privacyUnlockError}</p>}<div className="new-download-actions"><button type="button" onClick={() => setPrivacyUnlockOpen(false)} disabled={privacyUnlocking}>{t('dialog.cancel')}</button><button className="primary" type="submit" disabled={privacyUnlocking}>{privacyUnlocking ? t('privacy.unlocking') : t('privacy.unlockAction')}</button></div></form></section></div>}
       {duplicate && <DuplicateDownloadDialog
         task={duplicate.task}
         state={duplicate.state}
