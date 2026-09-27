@@ -334,7 +334,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     <div className="settings-content">
       {activeTab === 'display' && <>
         <div className="settings-display-preferences">
-          <label className="setting-row"><span><b>{t('settings.language.label')}</b><small>{t('settings.language.description')}</small></span><select aria-label={t('settings.language.label')} value={localePreference} onChange={(event) => setLocalePreference(event.target.value as typeof localePreference)}><option value="auto">{t('common.automatic')}</option>{localeMetadata.map((locale) => <option key={locale.id} value={locale.id}>{locale.label}</option>)}</select></label>
+          <label className="setting-row"><span><b>{t('settings.language.label')}</b></span><select aria-label={t('settings.language.label')} value={localePreference} onChange={(event) => setLocalePreference(event.target.value as typeof localePreference)}><option value="auto">{t('common.automatic')}</option>{localeMetadata.map((locale) => <option key={locale.id} value={locale.id}>{locale.label}</option>)}</select></label>
           <label className="setting-row"><span><b>{t('settings.launcher.visibility')}</b></span><select aria-label={t('settings.launcher.visibility')} value={launcherVisibility} onChange={(event) => updateLauncherVisibility(event.target.value as LauncherVisibility)}><option value="always">{t('settings.launcher.always')}</option><option value="downloading">{t('settings.launcher.downloading')}</option><option value="hidden">{t('settings.launcher.hidden')}</option></select></label>
         </div>
         <section className="theme-setting" aria-labelledby="theme-setting-title">

@@ -335,7 +335,7 @@ const messages = {
   'cloud.readingAccountStatus': '正在读取网盘账号状态',
   'cloud.recoveryFailed': '恢复账号失败：{detail}',
   'cloud.accountRecovery': '{name}账号恢复',
-  'cloud.providerDrive': '{name}网盘',
+  'cloud.providerDrive': '{name}',
   'cloud.error.readDirectory': '无法读取网盘目录。',
   'cloud.action.refresh': '刷新',
   'cloud.action.inProgress': '操作',

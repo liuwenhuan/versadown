@@ -162,6 +162,45 @@ it('offers an OpenAI-compatible AI analysis configuration in advanced settings',
   expect(screen.queryByRole('button', { name: '保存 AI 配置' })).not.toBeInTheDocument();
 });
 
+it('lets network settings save buttons wrap long translated labels', async () => {
+  const user = userEvent.setup();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const { container } = render(<SettingsPanel initial={initial} onChange={() => {}} />);
+    await user.click(screen.getAllByRole('tab')[1]);
+
+    const saveButtons = container.querySelectorAll<HTMLButtonElement>('.settings-inline-save');
+    expect(saveButtons).toHaveLength(3);
+    for (const button of saveButtons) {
+      expect(getComputedStyle(button).whiteSpace).toBe('normal');
+      expect(getComputedStyle(button).height).toBe('auto');
+      expect(getComputedStyle(button).minHeight).toBe('38px');
+    }
+  } finally {
+    stylesheet.remove();
+  }
+});
+
+it('allows the privacy download description to wrap inside its settings card', async () => {
+  const user = userEvent.setup();
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const { container } = render(<SettingsPanel initial={initial} onChange={() => {}} />);
+    await user.click(screen.getAllByRole('tab')[2]);
+
+    const description = container.querySelector<HTMLElement>('.privacy-download-settings .setting-row small')!;
+    expect(description).toBeVisible();
+    expect(getComputedStyle(description).whiteSpace).toBe('normal');
+    expect(getComputedStyle(description).maxWidth).toBe('480px');
+  } finally {
+    stylesheet.remove();
+  }
+});
+
 it('saves the download status notification preference from common settings', async () => {
   const user = userEvent.setup();
   const onChange = vi.fn();
@@ -310,7 +349,9 @@ it('uses compact aligned controls and consistent cards across settings tabs', as
     const privacyToggle = screen.getByRole('checkbox', { name: '开启隐私下载' });
     expect(getComputedStyle(privacyToggle).width).toBe('18px');
     expect(getComputedStyle(privacyToggle).height).toBe('18px');
-    expect(getComputedStyle(screen.getByText(/私密任务只会/)).whiteSpace).toBe('nowrap');
+    const privacyDescription = screen.getByText(/私密任务只会/);
+    expect(getComputedStyle(privacyDescription).whiteSpace).toBe('normal');
+    expect(getComputedStyle(privacyDescription).maxWidth).toBe('480px');
     const oldPassword = screen.getByLabelText('输入旧密码');
     const newPassword = screen.getByLabelText('设置新密码');
     const savePassword = screen.getByRole('button', { name: '保存密码' });
