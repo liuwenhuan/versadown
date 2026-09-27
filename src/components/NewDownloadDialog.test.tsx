@@ -806,6 +806,45 @@ it('keeps the selected task summary in the dialog title and makes only the chang
   expect(browseDirectory).toHaveBeenCalledWith('');
 });
 
+it('keeps footer actions readable beside a long Linux download directory', async () => {
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    render(<NewDownloadDialog
+      open
+      placement="modal"
+      initialInput="magnet:?xt=urn:btih:linux-path"
+      downloadDirectory="/home/hualet/.local/share/com.versadown.desktop/downloads/very-long-directory-name"
+      onScan={async () => [{ input: 'magnet:?xt=urn:btih:linux-path', valid: true, kind: 'magnet' }]}
+      onParse={async () => ({ confirmation: {
+        taskId: 'linux-path', title: 'movie.torrent', requiresConfirmation: true, processing: [],
+        resources: [{ id: '1', name: 'movie.mkv', size: '3 GB', selected: true }],
+      } })}
+      onDiscardPrepared={vi.fn()}
+      onSubmitBatch={vi.fn()}
+      onClose={vi.fn()}
+    />);
+
+    expect(await screen.findByText('movie.torrent')).toBeVisible();
+    const footer = screen.getByRole('dialog').querySelector('.batch-download-footer')!;
+    const destination = footer.querySelector('.batch-download-destination')!;
+    const destinationText = destination.querySelector('span')!;
+    const actions = footer.querySelector<HTMLElement>(':scope > div:last-child')!;
+    expect(getComputedStyle(destination).flexShrink).toBe('1');
+    expect(getComputedStyle(destinationText).textOverflow).toBe('ellipsis');
+    expect(getComputedStyle(destinationText).overflow).toBe('hidden');
+    expect(getComputedStyle(footer).fontSize).toBe('14px');
+    expect(getComputedStyle(actions).flexShrink).toBe('0');
+    for (const button of actions.querySelectorAll('button')) {
+      expect(getComputedStyle(button).fontSize).toBe('14px');
+      expect(getComputedStyle(button).whiteSpace).toBe('nowrap');
+    }
+  } finally {
+    stylesheet.remove();
+  }
+});
+
 it('marks a parsing task with the same live progress indicator used for metadata retrieval', async () => {
   let resolveParse!: (result: { confirmation: { taskId: string; title: string; requiresConfirmation: true; resources: []; processing: [] } }) => void;
   render(<NewDownloadDialog
