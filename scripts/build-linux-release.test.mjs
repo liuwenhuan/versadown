@@ -66,7 +66,7 @@ test('builds only Linux bundles and publishes all packages with valid checksums'
   const fixture = createFixture(t);
   const result = runFixture(fixture);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(readFileSync(join(fixture.root, 'pnpm-args'), 'utf8'), 'exec tauri build --bundles deb,rpm,appimage --ci');
+  assert.equal(readFileSync(join(fixture.root, 'pnpm-args'), 'utf8'), 'exec tauri build --bundles deb,rpm,appimage --config src-tauri/tauri.linux.conf.json --ci');
 
   const output = join(fixture.root, 'artifacts', 'linux');
   const deb = 'VersaDown_0.1.0_amd64.deb';

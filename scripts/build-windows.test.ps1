@@ -46,7 +46,8 @@ try {
         'src-tauri/Cargo.toml',
         'src-tauri/Cargo.lock',
         'src-tauri/build.rs',
-        'src-tauri/tauri.conf.json'
+        'src-tauri/tauri.conf.json',
+        'src-tauri/tauri.windows.conf.json'
     )) {
         Write-TestFile -Path (Join-Path $testRoot $relativePath) -Content "before-$relativePath"
     }
@@ -61,6 +62,9 @@ try {
     $changedSignature = Get-QuickRustSignature -ProjectRoot $testRoot
     Assert-True -Condition ($baselineFrontendSignature -ne $changedFrontendSignature) -Message 'The frontend signature must change when frontend source changes.'
     Assert-True -Condition ($baselineSignature -ne $changedSignature) -Message 'The quick-build signature must change when frontend source changes.'
+    Write-TestFile -Path (Join-Path $testRoot 'src-tauri/tauri.windows.conf.json') -Content 'after-windows-config-change'
+    $changedWindowsConfigSignature = Get-QuickRustSignature -ProjectRoot $testRoot
+    Assert-True -Condition ($changedSignature -ne $changedWindowsConfigSignature) -Message 'The quick-build signature must change when the Windows bundle configuration changes.'
     $fakeCargo = Join-Path $testRoot 'fake-cargo.cmd'
     $cleanMarker = Join-Path $testRoot 'cargo-clean-called.txt'
     Write-TestFile -Path $fakeCargo -Content "@echo off`r`necho %* > `"$cleanMarker`"`r`nexit /b 0"
@@ -98,7 +102,7 @@ try {
     $fakePnpm = Join-Path $testRoot 'fake-pnpm.cmd'
     Write-TestFile -Path $fakePnpm -Content "@echo off`r`necho %* > `"$installerMarker`"`r`nexit /b 0"
     Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $compileCargo -PnpmCommand $fakePnpm -TargetRoot $targetRoot -Profile release -FrontendSignature $changedFrontendSignature -Installer
-    Assert-True -Condition ((Get-Content -LiteralPath $installerMarker -Raw) -match 'exec tauri build --bundles nsis --runner') -Message 'The EXE installer build must package NSIS without running the MSI bundler.'
+    Assert-True -Condition ((Get-Content -LiteralPath $installerMarker -Raw) -match 'exec tauri build --bundles nsis --config src-tauri/tauri\.windows\.conf\.json --runner') -Message 'The EXE installer build must use Windows-only resources and package NSIS without running the MSI bundler.'
 
     # Cargo/linker helpers may leave a descendant alive after the build command
     # itself exits. The build script must wait for that direct command, not the
