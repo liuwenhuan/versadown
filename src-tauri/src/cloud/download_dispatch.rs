@@ -204,8 +204,10 @@ impl CloudDownloadDispatch {
         }
         let signed_url_refresh = signed_cloud_url_requires_refresh(&task);
         let retry_options = retry_options.map(|(allow_overwrite, continue_download)| {
-            let allow_overwrite = allow_overwrite
-                || (signed_url_refresh && task.aria_error_code.as_deref() == Some("8"));
+            // Error 8 describes the provider URL that aria2 just used, not
+            // the integrity of the persisted byte ranges. A fresh signed URL
+            // must receive the verified checkpoint unless the user explicitly
+            // chose overwrite.
             (
                 allow_overwrite,
                 (continue_download || signed_url_refresh) && !allow_overwrite,
@@ -672,18 +674,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paused_cloud_aria_task_can_restart_after_unsupported_resume() {
+    async fn failed_cloud_aria_task_keeps_its_checkpoint_after_range_rejection() {
         let store = TaskStore::open_in_memory().unwrap();
         let mut task = store
-            .create(NewTask::direct("cloud://aliyun/file-id"))
+            .create(NewTask::direct("cloud-share://pikpak/share-id/file-id"))
             .unwrap();
-        task.status = TaskStatus::Paused;
+        task.status = TaskStatus::Failed;
         task.aria_gid = Some("0123456789abcdef".into());
+        task.aria_error_code = Some("8".into());
         let task = store.apply_transfer_snapshot(task).unwrap();
         let dispatch = CloudDownloadDispatch::default();
 
         let (queued, _) = dispatch
-            .prepare_expected_with_retry_intent(&store, &task, true, false)
+            .prepare_expected_with_retry_intent(&store, &task, false, true)
             .await
             .unwrap();
 
@@ -691,8 +694,12 @@ mod tests {
         assert_eq!(queued.aria_gid.as_deref(), Some("0123456789abcdef"));
         assert_eq!(queued.failure_code.as_deref(), Some(CLOUD_URL_REFRESHING));
         let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
-        assert!(options.allow_overwrite);
-        assert!(!options.continue_download);
+        assert!(!options.allow_overwrite);
+        assert!(options.continue_download);
+        assert_eq!(
+            options.native_resume_gid.as_deref(),
+            Some("0123456789abcdef")
+        );
     }
 
     #[tokio::test]

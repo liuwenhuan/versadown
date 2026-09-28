@@ -12,7 +12,7 @@ impl CloudDownloadRefreshBudget {
         // or its previous validator may no longer match after it is re-signed.
         // Native stream code 6 includes exhausted partial-response retries.
         // Re-resolve once after the engine exhausts its transport retries;
-        // retain the checkpoint rather than treating this as code 8's restart.
+        // retain the checkpoint; a fresh provider URL is resolved for code 8 too.
         // Disk, local permission, and unrelated protocol errors are excluded.
         if !matches!(error, Some("6" | "8" | "22" | "24")) {
             return false;

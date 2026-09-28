@@ -2494,10 +2494,6 @@ pub(crate) async fn resubmit_task(
                     .map(str::to_owned);
             }
         }
-        restart_cloud_download_after_unsupported_resume(
-            &mut options,
-            task.aria_error_code.as_deref(),
-        );
         return crate::cloud::commands::queue_cloud_dispatch(app.clone(), state, task, options)
             .await
             .map_err(|e| e.to_string());
@@ -2561,26 +2557,10 @@ fn task_output_directory(store: &TaskStore, task_id: Uuid) -> Result<std::path::
         .ok_or_else(|| "下载文件已不存在，无法打开所在目录".to_string())
 }
 
-/// aria2 error 8 means the remote server does not support resuming this file.
-/// A new cloud URL is still useful, but its partial payload cannot be trusted
-/// as a checkpoint.  Start the same managed task over rather than repeatedly
-/// submitting an unsupported range request.
-fn restart_cloud_download_after_unsupported_resume(
-    options: &mut UriSubmissionOptions,
-    aria_error_code: Option<&str>,
-) {
-    if aria_error_code != Some("8") {
-        return;
-    }
-    options.allow_overwrite = true;
-    options.continue_download = false;
-    options.native_resume_gid = None;
-}
-
 /// A cloud retry obtains a fresh provider URL, but the partial local payload
 /// remains the same managed download. Request continuation so DownloadService
-/// validates its native checkpoint before aria2 sees the new URL. Error 8 is
-/// handled separately because that server explicitly rejected the Range.
+/// validates its native checkpoint before aria2 sees the new URL. A rejected
+/// Range request refers to the expiring provider URL, not the local checkpoint.
 fn cloud_retry_submission_options(task: &DownloadTask) -> UriSubmissionOptions {
     UriSubmissionOptions {
         continue_download: task.source.starts_with("cloud://")
@@ -2672,10 +2652,6 @@ pub(crate) fn schedule_cloud_download_refresh(app: AppHandle, task: &DownloadTas
                 }
             }
         }
-        restart_cloud_download_after_unsupported_resume(
-            &mut options,
-            current.aria_error_code.as_deref(),
-        );
         let _ = crate::cloud::commands::queue_cloud_dispatch(app.clone(), &state, current, options)
             .await;
     });
@@ -6183,33 +6159,6 @@ mod tests {
             .expect("queue cloud dispatch has a stable end")
             .0;
         assert!(queue.contains("prepare_expected_with_retry_intent"));
-    }
-
-    #[test]
-    fn cloud_retry_restarts_when_the_server_cannot_resume() {
-        let mut options = UriSubmissionOptions {
-            continue_download: true,
-            native_resume_gid: Some("old-gid".into()),
-            ..Default::default()
-        };
-        restart_cloud_download_after_unsupported_resume(&mut options, Some("8"));
-        assert!(options.allow_overwrite);
-        assert!(!options.continue_download);
-        assert!(options.native_resume_gid.is_none());
-
-        let mut unchanged = UriSubmissionOptions {
-            continue_download: true,
-            native_resume_gid: Some("old-gid".into()),
-            ..Default::default()
-        };
-        restart_cloud_download_after_unsupported_resume(&mut unchanged, Some("22"));
-        assert!(!unchanged.allow_overwrite);
-        assert!(unchanged.continue_download);
-        assert_eq!(unchanged.native_resume_gid.as_deref(), Some("old-gid"));
-        restart_cloud_download_after_unsupported_resume(&mut unchanged, Some("6"));
-        assert!(!unchanged.allow_overwrite);
-        assert!(unchanged.continue_download);
-        assert_eq!(unchanged.native_resume_gid.as_deref(), Some("old-gid"));
     }
 
     #[test]

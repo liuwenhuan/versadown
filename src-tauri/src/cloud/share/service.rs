@@ -505,7 +505,7 @@ impl CloudShareRefreshBudget {
     pub fn claim(&self, source: &str, aria_error_code: Option<&str>) -> Result<bool, QuarkError> {
         // 22 and 24 mean the signed URL was rejected.  8 means the CDN
         // cannot resume the partial response. All require a newly resolved
-        // URL; the caller decides whether 8 must restart from zero. Native
+        // URL; code 8 preserves the verified local ranges. Native
         // stream code 6 also gets one fresh URL after transport retries are
         // exhausted, but must preserve already verified ranges.
         if !source.starts_with("cloud-share://")
