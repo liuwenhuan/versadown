@@ -46,7 +46,6 @@ $sidecarSource = Join-Path $projectRoot "src-tauri\binaries\$sidecarName"
 $publishedSidecar = Join-Path $publishedSidecarDir $sidecarName
 $retiredXunleiHelper = Join-Path $publishedSidecarDir 'xunlei-native-helper.cjs'
 $legacyPublishedSidecar = Join-Path $publishedSidecarDir 'aria2c-x86_64-pc-windows-msvc.exe'
-$vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
 
 function Get-FileSha256 {
     [CmdletBinding()]
@@ -393,11 +392,8 @@ if ($DryRun) {
 $buildTools = Get-VersaDownBuildTools -ProjectRoot $projectRoot
 $pnpmCommand = $buildTools.Pnpm
 $cargoCommand = $buildTools.Cargo
+$vcvars = Get-VersaDownMsvcEnvironment
 $env:Path = "$(Split-Path -Parent $pnpmCommand);$(Split-Path -Parent $cargoCommand);$env:Path"
-
-if (-not (Test-Path -LiteralPath $vcvars)) {
-    throw "Visual Studio C++ build environment was not found: $vcvars"
-}
 
 Set-Location $projectRoot
 Assert-PublishedBinaryAvailable -PublishedBinary $publishedBinary

@@ -65,15 +65,48 @@ function Get-VersaDownBuildTools {
     $codexRuntime = Join-Path $userProfile '.cache\codex-runtimes\codex-primary-runtime\dependencies'
     $projectCargo = Join-Path $ProjectRoot '.tools\cargo\bin\cargo.exe'
     $projectPnpm = Join-Path $ProjectRoot '.tools\node-v24.20.0-win-x64\node_modules\corepack\shims\pnpm.cmd'
+    $pathCargo = (Get-Command cargo.exe -ErrorAction SilentlyContinue).Source
+    $pathPnpm = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
 
     [pscustomobject]@{
         Cargo = Resolve-VersaDownBuildTool -ToolName 'Cargo' -Candidates @(
             (Join-Path $userProfile '.cargo\bin\cargo.exe'),
-            $projectCargo
+            $projectCargo,
+            $pathCargo
         )
         Pnpm = Resolve-VersaDownBuildTool -ToolName 'pnpm' -Candidates @(
             (Join-Path $codexRuntime 'bin\fallback\pnpm.cmd'),
-            $projectPnpm
+            $projectPnpm,
+            $pathPnpm
         )
     }
+}
+
+function Get-VersaDownMsvcEnvironment {
+    [CmdletBinding()]
+    param()
+
+    $candidates = @($env:VCVARS_PATH)
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+        $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($installation)) {
+            $candidates += Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+        }
+    }
+
+    foreach ($edition in @('BuildTools', 'Enterprise', 'Professional', 'Community')) {
+        foreach ($programFiles in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+            if (-not [string]::IsNullOrWhiteSpace($programFiles)) {
+                $candidates += Join-Path $programFiles "Microsoft Visual Studio\2022\$edition\VC\Auxiliary\Build\vcvars64.bat"
+            }
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return (Get-Item -LiteralPath $candidate).FullName
+        }
+    }
+    throw 'Visual Studio C++ build environment was not found.'
 }
