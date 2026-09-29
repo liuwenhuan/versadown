@@ -6,13 +6,14 @@ import type { QueueTask, QueueTaskInput } from './lib/types';
 import { getThemeMode, setThemeMode } from './lib/theme';
 import { cloudCatalog } from './test/cloudCatalog';
 import { scanDownloadInputs } from './lib/api';
+import { t } from './i18n';
 
 const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTaskInput) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
   confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
-  moveToRecycle: vi.fn(), purgeTasks: vi.fn(), deleteTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(),
+  moveToRecycle: vi.fn(), purgeTasks: vi.fn(), deleteTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(), clipboardRead: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
   getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
@@ -56,7 +57,7 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
   invoke: (command: string, args: unknown) => command === 'main_window_interaction_state'
     ? state.windowSnapshot() : state.cloudInvoke(command, args),
 }));
-vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite }));
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite, readText: state.clipboardRead }));
 vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
   ...await importOriginal<typeof import('@tauri-apps/api/window')>(),
   getCurrentWindow: () => ({
@@ -106,6 +107,7 @@ beforeEach(() => {
   state.deleteTasks.mockReset();
   state.setTaskPrivacy.mockReset();
   state.clipboardWrite.mockReset();
+  state.clipboardRead.mockReset().mockResolvedValue('');
   state.updateAiSettings.mockReset();
   state.listAiModels.mockReset();
   state.startDragging.mockReset();
@@ -1807,12 +1809,49 @@ it('retrieves a compatible service model from its selector and persists the sele
 
 it('opens the normal new-download dialog from the floating-ball menu command', async () => {
   state.list.mockResolvedValueOnce([]);
+  state.clipboardRead.mockResolvedValue('notes without a link');
   render(<App />);
   await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
 
   act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
 
-  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+  const dialog = await screen.findByRole('dialog', { name: t('download.new') });
+  expect(within(dialog).getByRole('textbox', { name: t('download.content') })).toHaveValue('');
+  expect(state.clipboardRead).toHaveBeenCalledOnce();
+});
+
+it('parses a clipboard link from the floating-ball menu and waits for task confirmation', async () => {
+  const clipboard = '分享地址：https://example.test/archive.zip';
+  const link = 'https://example.test/archive.zip';
+  state.clipboardRead.mockResolvedValue(clipboard);
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input: link, valid: true, kind: 'direct' }]);
+  state.parse.mockResolvedValueOnce({ confirmation: {
+    taskId: 'clipboard-draft', title: 'archive.zip', requiresConfirmation: true,
+    resources: [], processing: [],
+  } });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
+
+  const dialog = await screen.findByRole('dialog', { name: t('download.new') });
+  expect(await within(dialog).findByText('archive.zip')).toBeVisible();
+  expect(scanDownloadInputs).toHaveBeenCalledWith(clipboard);
+  expect(state.parse).toHaveBeenCalledWith(link, undefined, true);
+  expect(within(dialog).getByRole('button', { name: t('download.newTask') })).toBeVisible();
+  expect(state.confirm).not.toHaveBeenCalled();
+});
+
+it('allows manual entry when the floating-ball menu cannot read the clipboard', async () => {
+  state.clipboardRead.mockRejectedValue(new Error('clipboard unavailable'));
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
+
+  const dialog = await screen.findByRole('dialog', { name: t('download.new') });
+  expect(within(dialog).getByRole('textbox', { name: t('download.content') })).toHaveValue('');
+  expect(state.clipboardRead).toHaveBeenCalledOnce();
 });
 
 it('opens the normal new-download dialog with an accepted floating-ball drop', async () => {
@@ -1825,7 +1864,7 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
     });
   });
 
-  expect(screen.getByRole('dialog', { name: '新建下载' })).toBeVisible();
+  expect(screen.getByRole('dialog', { name: t('download.new') })).toBeVisible();
   await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
 });
 

@@ -1,10 +1,10 @@
 //! Opt-in, read-only download diagnostics. Never prints signed URLs or credentials.
+use rusqlite::{Connection, OpenFlags};
+use std::{io::Read, path::PathBuf, time::Duration};
 use versadown_lib::cloud::{
     commands::parse_stable_cloud_source, CloudHttpRequest, CloudHttpResponse, CloudHttpTransport,
     PikPakClient, QuarkError, ReqwestTransport, SystemCredentialStore,
 };
-use rusqlite::{Connection, OpenFlags};
-use std::{io::Read, path::PathBuf, time::Duration};
 
 struct UsageTransport {
     inner: ReqwestTransport,

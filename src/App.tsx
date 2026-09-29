@@ -1009,11 +1009,19 @@ export function App() {
     if (!isTauriRuntime()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    listen<'new-download' | 'resume-all' | 'pause-all'>('launcher-command', (event) => {
+    listen<'new-download' | 'resume-all' | 'pause-all'>('launcher-command', async (event) => {
       if (event.payload === 'new-download') {
+        let input = '';
+        try {
+          const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
+          const clipboard = await readText();
+          if (isDownloadInput(clipboard)) input = clipboard.trim();
+        } catch {
+          // Clipboard access is optional; manual entry remains available.
+        }
         setView('downloads');
         setDownloadTab('active');
-        setNewDownloadInput('');
+        setNewDownloadInput(input);
         setNewDownloadOpen(true);
       }
       if (event.payload === 'resume-all') void runLauncherBatchAction('resume');
