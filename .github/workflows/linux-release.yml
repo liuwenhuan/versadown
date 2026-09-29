@@ -78,7 +78,11 @@ jobs:
           Copy-Item -LiteralPath $installers[0].FullName -Destination 'artifacts/windows'
           $installerName = $installers[0].Name
           $installerHash = (Get-FileHash -LiteralPath (Join-Path 'artifacts/windows' $installerName) -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content -LiteralPath 'artifacts/windows/SHA256SUMS.windows' -Encoding ascii -Value "$installerHash  $installerName"
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) 'artifacts/windows/SHA256SUMS.windows'),
+            "$installerHash  $installerName`n",
+            [System.Text.Encoding]::ASCII
+          )
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64-release
@@ -114,6 +118,7 @@ jobs:
           )
           (
             cd artifacts/windows
+            sed -i 's/\r$//' SHA256SUMS.windows
             sha256sum --check SHA256SUMS.windows
           )
           assets=(artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)

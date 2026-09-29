@@ -1,0 +1,85 @@
+name: Publish verified release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to publish
+        required: true
+        type: string
+      source_run_id:
+        description: GitHub Actions run containing both platform artifacts
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+      - name: Confirm artifacts were built from the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          source_sha="$(gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN_ID" --jq '.head_sha')"
+          tag_sha="$(git rev-parse HEAD)"
+          if [[ "$source_sha" != "$tag_sha" ]]; then
+            echo "Run $SOURCE_RUN_ID was built from $source_sha, not tag commit $tag_sha." >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64-release
+          path: artifacts/linux
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64-release
+          path: artifacts/windows
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Verify and publish both platform assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd artifacts/linux
+            sha256sum --check SHA256SUMS
+          )
+          (
+            cd artifacts/windows
+            sed -i 's/\r$//' SHA256SUMS.windows
+            sha256sum --check SHA256SUMS.windows
+          )
+          assets=(artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)
+          for asset in "${assets[@]}"; do
+            test -f "$asset"
+          done
+          if draft_state="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "$draft_state" == true ]]; then
+              gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+              gh release edit "$RELEASE_TAG" --draft=false
+            else
+              echo "Release $RELEASE_TAG is already published; refusing to overwrite it." >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes
+          fi
