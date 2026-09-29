@@ -172,11 +172,18 @@ impl BaiduRangeGateway {
         let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             .timeout(std::time::Duration::from_secs(90));
-        builder = if let Some(proxy) = proxy {
-            builder.proxy(Proxy::all(proxy).map_err(|_| GatewayError::InvalidProxy)?)
-        } else {
-            builder.no_proxy()
-        };
+        if let Some(proxy) = proxy {
+            builder = builder.proxy(Proxy::all(proxy).map_err(|_| GatewayError::InvalidProxy)?);
+        } else if match parsed.host() {
+            Some(url::Host::Ipv4(host)) => host.is_loopback(),
+            Some(url::Host::Ipv6(host)) => host.is_loopback(),
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            None => false,
+        } {
+            // Fixture and internal origins must remain local even when the
+            // system proxy does not exclude loopback addresses.
+            builder = builder.no_proxy();
+        }
         let client = builder.build().map_err(|_| GatewayError::Transport)?;
         let mut targets = self.shared.targets.write().unwrap();
         let existing = reuse_existing
@@ -333,7 +340,7 @@ impl Target {
             .and_then(parse_content_range)
             .ok_or(StatusCode::BAD_GATEWAY)?;
         if actual_start != start
-            || actual_end != end.min(total - 1)
+            || actual_end > end.min(total - 1)
             || expected_total.is_some_and(|expected| expected != total)
             || end - start >= CHUNK_BYTES
         {

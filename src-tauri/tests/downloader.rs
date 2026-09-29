@@ -96,10 +96,9 @@ fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> Dow
 }
 
 #[tokio::test]
-async fn cloud_url_refresh_reuses_existing_gid_and_preserves_native_checkpoint_uri() {
+async fn failed_cloud_url_refresh_rebinds_native_checkpoint_to_a_stable_gateway_uri() {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_path(&directory.path().join("tasks.sqlite")).unwrap());
-    let api = RecordingAria2::successful();
     let task = store
         .create(NewTask {
             source: "cloud://pikpak/file-id".into(),
@@ -145,42 +144,41 @@ async fn cloud_url_refresh_reuses_existing_gid_and_preserves_native_checkpoint_u
             ],
         )
         .unwrap();
+    let mut status = RecordingAria2::active("0123456789abcdef");
+    status.status = "error".into();
+    status.error_code = Some("8".into());
+    status.error_message = Some("The requested byte range is no longer satisfiable".into());
+    let api = Arc::new(RecordingAria2 {
+        status_override: Some(status),
+        ..Default::default()
+    });
     let service = DownloadService::new(api.clone(), Arc::clone(&store));
 
     let refreshed = service
         .replace_cloud_uri_with_options(
             task.id,
             "0123456789abcdef",
-            vec!["https://fresh.example.test/file".into()],
+            vec!["http://127.0.0.1:49152/stable-token".into()],
             UriSubmissionOptions {
                 directory: Some(directory.path().to_path_buf()),
                 output_name: Some("file.bin".into()),
                 continue_download: true,
+                direct_loopback: true,
                 ..Default::default()
             },
         )
         .await
         .unwrap();
 
-    assert_eq!(refreshed.aria_gid.as_deref(), Some("0123456789abcdef"));
+    assert_eq!(refreshed.aria_gid.as_deref(), Some("gid-1"));
     assert!(
-        !api.calls().iter().any(|call| call == "aria2.addUri"),
-        "refreshing a signed URL must not create a second download for the same output"
-    );
-    assert!(
-        api.calls().iter().any(|call| call == "aria2.changeUri"),
-        "the fresh provider URL must be added to the existing download"
+        api.calls().iter().any(|call| call == "aria2.addUri"),
+        "a failed GID must submit its stable replacement URI"
     );
     assert_eq!(
-        api.changed_uris(),
-        vec![(
-            vec!["https://expired.example.test/file".to_string()],
-            vec![
-                "https://fresh.example.test/file".to_string(),
-                "https://expired.example.test/file".to_string(),
-            ]
-        )],
-        "the atomic URI rotation must leave the checkpoint URI available for range restoration"
+        api.uris.lock().unwrap()[0],
+        vec!["http://127.0.0.1:49152/stable-token"],
+        "the expired CDN URI must not be submitted as an alternate mirror"
     );
 }
 
@@ -236,7 +234,9 @@ impl Aria2Api for RecordingAria2 {
     async fn tell_status(&self, gid: &str) -> Result<Aria2Status, Aria2Error> {
         self.record("aria2.tellStatus");
         if let Some(status) = &self.status_override {
-            return Ok(status.clone());
+            let mut status = status.clone();
+            status.gid = gid.to_string();
+            return Ok(status);
         }
         let mut status = Self::active(gid);
         if let Some(message) = &self.status_error_message {

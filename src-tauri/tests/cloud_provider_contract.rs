@@ -99,7 +99,7 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             RustDirect,
             true,
             true,
-            false,
+            true,
             "https://mypikpak.com/s/example",
         ),
         (
@@ -336,7 +336,7 @@ fn share_capabilities_report_actual_operations_and_reject_absent_transfer_before
     );
     for (provider, transfer) in [
         (CloudProvider::Quark, true),
-        (CloudProvider::Pikpak, false),
+        (CloudProvider::Pikpak, true),
         (CloudProvider::Baidu, true),
         (CloudProvider::Tianyi, false),
         (CloudProvider::Aliyun, true),
@@ -824,7 +824,7 @@ fn registry_only_advertises_implemented_share_transfer_capabilities() {
         (CloudProvider::Baidu, true),
         (CloudProvider::Uc, true),
         (CloudProvider::Xunlei, true),
-        (CloudProvider::Pikpak, false),
+        (CloudProvider::Pikpak, true),
         (CloudProvider::Tianyi, false),
         (CloudProvider::Aliyun, true),
     ] {

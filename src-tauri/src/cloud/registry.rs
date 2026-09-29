@@ -142,7 +142,7 @@ impl ProviderRegistry {
                 transferable!(super::aliyun::AliyunShareAdapter { credentials, http })
             }
             CloudProvider::Pikpak => {
-                read_only!(super::pikpak::PikPakShareAdapter { credentials, http })
+                transferable!(super::pikpak::PikPakShareAdapter { credentials, http })
             }
             CloudProvider::Tianyi => {
                 read_only!(super::tianyi::TianyiShareAdapter { credentials, http })
@@ -368,8 +368,8 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             download: true,
             upload: true,
             share_inspect: true,
-            share_transfer: matches!(provider, Quark | Baidu | Aliyun | Uc | Xunlei),
-            recorded_transfer_resolve: matches!(provider, Quark | Baidu | Aliyun | Uc | Xunlei),
+            share_transfer: matches!(provider, Quark | Pikpak | Baidu | Aliyun | Uc | Xunlei),
+            recorded_transfer_resolve: matches!(provider, Quark | Pikpak | Baidu | Aliyun | Uc | Xunlei),
             share_create: true,
             share_list: true,
             share_cancel: true,

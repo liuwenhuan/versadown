@@ -747,10 +747,33 @@ impl DownloadService {
                 self.reconcile_task_unlocked(task_id).await
             };
         }
+        let rebound_checkpoint_uri = if options.direct_loopback && uris.len() == 1 {
+            super::native_resume::rebind_verified_checkpoint_uri(
+                &self.store,
+                &task,
+                expected_gid,
+                &uris[0],
+            )
+        } else {
+            None
+        };
         let mut options = self.prepare_uri_options(&mut task, &mut uris, options)?;
         options.insert("pause".into(), "false".into());
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
-        let gid = self.add_uri_for_task(task_id, uris, options).await?;
+        let gid = match self.add_uri_for_task(task_id, uris, options).await {
+            Ok(gid) => gid,
+            Err(error) => {
+                if let Some(previous_uri) = rebound_checkpoint_uri {
+                    let _ = super::native_resume::rebind_verified_checkpoint_uri(
+                        &self.store,
+                        &task,
+                        expected_gid,
+                        &previous_uri,
+                    );
+                }
+                return Err(error.into());
+            }
+        };
         if let Err(error) = self
             .store
             .replace_cloud_url_gid(task_id, expected_gid, &gid)

@@ -1135,7 +1135,7 @@ async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options(
         .await
         .unwrap();
     let task_id = uuid::Uuid::new_v4();
-    let (url, options, mut registration) = super::register_baidu_gateway_download(
+    let (url, options, mut registration) = super::register_stable_range_gateway_download(
         &gateway,
         task_id,
         "https://d.pcs.baidu.com/file?sign=secret".into(),
@@ -1157,7 +1157,7 @@ async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options(
     assert_eq!(aria2.get("all-proxy").map(String::as_str), Some(""));
     assert!(!aria2.contains_key("header"));
     registration.commit();
-    let (refreshed_url, _, mut refreshed) = super::register_baidu_gateway_download(
+    let (refreshed_url, _, mut refreshed) = super::register_stable_range_gateway_download(
         &gateway,
         task_id,
         "https://d.pcs.baidu.com/file?sign=renewed".into(),
@@ -1168,6 +1168,11 @@ async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options(
     assert_eq!(refreshed_url, url);
     refreshed.commit();
     gateway.remove_task(task_id);
+}
+
+#[test]
+fn pikpak_uses_a_stable_local_gateway_for_refreshable_cdn_links() {
+    assert!(super::requires_stable_range_gateway(CloudProvider::Pikpak));
 }
 
 #[tokio::test]
@@ -1189,7 +1194,7 @@ async fn baidu_share_submission_keeps_configured_connections_through_gateway() {
         .unwrap();
     let task_id = uuid::Uuid::new_v4();
     let (_, options, mut registration) =
-        super::register_baidu_gateway_download(&gateway, task_id, signed_url, options, false)
+        super::register_stable_range_gateway_download(&gateway, task_id, signed_url, options, false)
             .unwrap();
 
     let aria2 = options.into_aria2_options().unwrap();

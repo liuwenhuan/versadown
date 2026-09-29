@@ -686,7 +686,7 @@ pub async fn queue_cloud_dispatch(
                     let (signed_url, options) =
                         share::share_submission_options(resolved, configured)?;
                     let mut gateway_registration = None;
-                    let (url, options) = if provider == CloudProvider::Baidu {
+                    let (url, options) = if requires_stable_range_gateway(provider) {
                         let gateway = state
                             .baidu_range_gateway
                             .get_or_try_init(|| async {
@@ -696,7 +696,7 @@ pub async fn queue_cloud_dispatch(
                             })
                             .await
                             .map_err(|_| QuarkError::DownloadSubmissionFailed)?;
-                        let (url, options, registration) = register_baidu_gateway_download(
+                        let (url, options, registration) = register_stable_range_gateway_download(
                             gateway,
                             id,
                             signed_url,
@@ -794,7 +794,7 @@ pub(crate) fn emit_cloud_dispatch_update(app: &AppHandle, state: &AppState, task
     let _ = crate::commands::emit_task_update_for_task(app, &state.store, None, task.clone());
 }
 
-pub(crate) fn register_baidu_gateway_download(
+pub(crate) fn register_stable_range_gateway_download(
     gateway: &crate::cloud::baidu_range_gateway::BaiduRangeGateway,
     task_id: Uuid,
     signed_url: String,
@@ -828,6 +828,12 @@ pub(crate) fn register_baidu_gateway_download(
     options.proxy = None;
     options.direct_loopback = true;
     Ok((registration.url().to_owned(), options, registration))
+}
+
+/// Signed CDN URLs that must be refreshed keep one loopback URI in aria2 so
+/// native range checkpoints never retain an expired provider URL as a mirror.
+pub(crate) fn requires_stable_range_gateway(provider: CloudProvider) -> bool {
+    matches!(provider, CloudProvider::Baidu | CloudProvider::Pikpak)
 }
 
 pub fn apply_cloud_download_policy(

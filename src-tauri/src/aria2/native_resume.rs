@@ -103,6 +103,44 @@ pub(crate) fn checkpoint_for_task(
     found
 }
 
+/// Moves a fully validated, stopped checkpoint to a replacement local URI.
+/// The payload path and completed ranges stay owned by aria2-next; only the
+/// identity it uses to find that record is changed before a replacement GID is
+/// submitted.
+pub(crate) fn rebind_verified_checkpoint_uri(
+    store: &TaskStore,
+    task: &DownloadTask,
+    gid: &str,
+    replacement_uri: &str,
+) -> Option<String> {
+    let checkpoint = checkpoint(store, task, gid)?;
+    let parsed = url::Url::parse(replacement_uri).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    if checkpoint.uri == replacement_uri {
+        return Some(checkpoint.uri);
+    }
+    let connection = Connection::open_with_flags(
+        store.native_stream_state_path()?,
+        OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .ok()?;
+    (connection
+        .execute(
+            "UPDATE downloads SET uri=?1 WHERE gid=?2 AND uri=?3 AND path=?4",
+            rusqlite::params![
+                replacement_uri,
+                gid,
+                checkpoint.uri,
+                checkpoint.path.to_string_lossy(),
+            ],
+        )
+        .ok()?
+        == 1)
+        .then_some(checkpoint.uri)
+}
+
 fn task_payload(store: &TaskStore, task: &DownloadTask) -> Option<(std::path::PathBuf, u64)> {
     let files = store.files(task.id).ok()?;
     if files.len() != 1 {
@@ -191,11 +229,11 @@ mod tests {
             .unwrap();
         let state_directory = root.path().join("aria2-next-state/stream");
         std::fs::create_dir_all(&state_directory).unwrap();
-        let checkpoint = rusqlite::Connection::open(state_directory.join("state.db")).unwrap();
-        checkpoint
+        let checkpoint_db = rusqlite::Connection::open(state_directory.join("state.db")).unwrap();
+        checkpoint_db
             .execute_batch("CREATE TABLE downloads (gid TEXT PRIMARY KEY, uri TEXT, path TEXT, total_length INTEGER, completed_length INTEGER, completed_ranges TEXT);")
             .unwrap();
-        checkpoint
+        checkpoint_db
             .execute(
                 "INSERT INTO downloads VALUES (?1, ?2, ?3, 128, 7, '0-7')",
                 rusqlite::params![
@@ -210,5 +248,64 @@ mod tests {
 
         assert_eq!(recovered.path, payload);
         assert_eq!(recovered.uri, "https://previous.example.test/archive.zip");
+    }
+
+    #[test]
+    fn rebinds_a_verified_checkpoint_to_a_stable_gateway_uri() {
+        let root = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap();
+        let task = store
+            .create(NewTask::direct("https://fresh.example.test/archive.zip"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                total_length: Some(128),
+                completed_length: 7,
+                ..task
+            })
+            .unwrap();
+        let payload = root.path().join("archive.zip");
+        std::fs::File::create(&payload)
+            .unwrap()
+            .set_len(128)
+            .unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 128, 7, true)],
+            )
+            .unwrap();
+        let state_directory = root.path().join("aria2-next-state/stream");
+        std::fs::create_dir_all(&state_directory).unwrap();
+        let checkpoint_db = rusqlite::Connection::open(state_directory.join("state.db")).unwrap();
+        checkpoint_db
+            .execute_batch("CREATE TABLE downloads (gid TEXT PRIMARY KEY, uri TEXT, path TEXT, total_length INTEGER, completed_length INTEGER, completed_ranges TEXT);")
+            .unwrap();
+        checkpoint_db
+            .execute(
+                "INSERT INTO downloads VALUES (?1, ?2, ?3, 128, 7, '0-7')",
+                rusqlite::params![
+                    "0123456789abcdef",
+                    "https://previous.example.test/archive.zip",
+                    payload.to_string_lossy(),
+                ],
+            )
+            .unwrap();
+
+        let old = rebind_verified_checkpoint_uri(
+            &store,
+            &task,
+            "0123456789abcdef",
+            "http://127.0.0.1:49152/stable-token",
+        )
+        .expect("verified checkpoint should be rebound");
+
+        assert_eq!(old, "https://previous.example.test/archive.zip");
+        assert_eq!(
+            checkpoint(&store, &task, "0123456789abcdef")
+                .expect("rebound checkpoint should stay valid")
+                .uri,
+            "http://127.0.0.1:49152/stable-token"
+        );
     }
 }

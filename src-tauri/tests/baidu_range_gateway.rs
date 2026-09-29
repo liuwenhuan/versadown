@@ -126,6 +126,57 @@ async fn origin_returns_short_body() -> Response {
         .unwrap()
 }
 
+async fn origin_returns_valid_short_ranges(
+    State(origin): State<Origin>,
+    mut headers: HeaderMap,
+) -> Response {
+    let start = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes="))
+        .and_then(|value| value.split_once('-'))
+        .and_then(|(start, _)| start.parse::<usize>().ok())
+        .unwrap();
+    headers.insert(
+        header::RANGE,
+        format!("bytes={start}-{}", start + 1024 * 1024 - 1)
+            .parse()
+            .unwrap(),
+    );
+    serve_origin(State(origin), headers).await
+}
+
+#[tokio::test]
+async fn valid_short_upstream_ranges_are_streamed_without_gaps() {
+    let payload = Arc::new((0..(2 * CHUNK + 17)).map(|index| (index % 251) as u8).collect());
+    let origin = Origin {
+        payload: Arc::clone(&payload),
+        ranges: Arc::new(Mutex::new(Vec::new())),
+        delay: Duration::ZERO,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}/short", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/short", get(origin_returns_valid_short_ranges))
+                .with_state(origin),
+        )
+        .await
+        .unwrap();
+    });
+    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let registration = gateway.register(Uuid::new_v4(), upstream, vec![], None).unwrap();
+    let response = reqwest::Client::builder().no_proxy().build().unwrap()
+        .get(registration.url())
+        .header(header::RANGE, format!("bytes=0-{}", payload.len() - 1))
+        .send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), payload.as_slice());
+    server.abort();
+}
+
 async fn origin_changes_total(State(origin): State<Origin>, headers: HeaderMap) -> Response {
     let requested = headers
         .get(header::RANGE)
