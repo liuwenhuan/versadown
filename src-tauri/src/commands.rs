@@ -336,6 +336,33 @@ fn validated_download_directory(value: &str) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+fn magnet_preview_task_directory_name(task_name: &str) -> String {
+    #[cfg(windows)]
+    {
+        task_name
+            .chars()
+            .map(|character| {
+                if character.is_control()
+                    || matches!(
+                        character,
+                        '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                    )
+                {
+                    '_'
+                } else {
+                    character
+                }
+            })
+            .collect::<String>()
+            .trim_end_matches(|character| character == ' ' || character == '.')
+            .to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        task_name.to_owned()
+    }
+}
+
 fn magnet_preview_file_path(
     download_directory: &Path,
     task_name: &str,
@@ -358,7 +385,7 @@ fn magnet_preview_file_path(
 
     let mut path = download_directory.to_path_buf();
     if multi_file {
-        let torrent_root = Path::new(task_name.trim());
+        let torrent_root = PathBuf::from(magnet_preview_task_directory_name(task_name.trim()));
         if torrent_root.as_os_str().is_empty()
             || !torrent_root
                 .components()
@@ -367,11 +394,22 @@ fn magnet_preview_file_path(
         {
             return Err(unsafe_path());
         }
-        if !relative.starts_with(torrent_root) {
+        let original_root = Path::new(task_name.trim());
+        if relative.starts_with(original_root) && !relative.starts_with(&torrent_root) {
+            let suffix = relative
+                .strip_prefix(original_root)
+                .map_err(|_| unsafe_path())?;
+            path.push(&torrent_root);
+            path.push(suffix);
+        } else if !relative.starts_with(&torrent_root) {
             path.push(torrent_root);
+            path.push(relative);
+        } else {
+            path.push(relative);
         }
+    } else {
+        path.push(relative);
     }
-    path.push(relative);
     if !path.is_absolute()
         || !path.strip_prefix(download_directory).is_ok_and(|suffix| {
             suffix
@@ -405,10 +443,14 @@ fn magnet_preview_relative_path(
     }
 
     let components = stored_path.components().collect::<Vec<_>>();
-    let Some(root_index) = components
-        .iter()
-        .rposition(|component| matches!(component, Component::Normal(name) if *name == task_name))
-    else {
+    let original_root = task_name.trim();
+    let normalized_root = magnet_preview_task_directory_name(original_root);
+    let Some(root_index) = components.iter().rposition(|component| {
+        matches!(component, Component::Normal(name) if {
+            let name = name.to_string_lossy();
+            name == original_root || name == normalized_root
+        })
+    }) else {
         return Err(unsafe_path());
     };
     let mut relative = PathBuf::new();
@@ -1085,11 +1127,11 @@ pub async fn confirm_download_command(
             .directory
             .clone()
             .ok_or_else(|| "磁链任务缺少下载目录".to_string())?;
+        rebase_magnet_preview_files(&state.store, &current, &download_directory)?;
         let task = service
             .select_files_with_options(id, indices, options)
             .await
             .map_err(|error| fail_engine_submission(&state.store, &current, error))?;
-        rebase_magnet_preview_files(&state.store, &task, &download_directory)?;
         return task_payload(&state.store, task);
     }
     if let Some(error) = unbound_torrent_confirmation_error(&current) {
@@ -6807,6 +6849,50 @@ mod tests {
                 r"E:\Chosen\Collection\b.bin"
             ]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn magnet_preview_paths_accept_aria2_sanitized_task_directory_names() {
+        let task_name = "Collection*";
+        let stored = Path::new(r"D:\Old\Collection_\Disc 1\a.bin");
+
+        assert_eq!(
+            magnet_preview_relative_path(task_name, stored, true).unwrap(),
+            PathBuf::from(r"Disc 1\a.bin")
+        );
+        assert_eq!(
+            magnet_preview_file_path(Path::new(r"E:\Chosen"), task_name, r"Disc 1\a.bin", true,)
+                .unwrap(),
+            PathBuf::from(r"E:\Chosen\Collection_\Disc 1\a.bin")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unsafe_magnet_preview_paths_fail_before_persisting_any_rebased_files() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(NewTask {
+                source: "magnet:?xt=urn:btih:unsafe-preview".into(),
+                name: "Collection".into(),
+                kind: "magnet".into(),
+                is_private: false,
+            })
+            .unwrap();
+        let original = r"D:\Old\Collection\..\outside.bin";
+        store
+            .upsert_files(
+                task.id,
+                &[
+                    (1, original.into(), 1, 0, true),
+                    (2, r"D:\Old\Collection\safe.bin".into(), 1, 0, true),
+                ],
+            )
+            .unwrap();
+
+        assert!(rebase_magnet_preview_files(&store, &task, Path::new(r"E:\Chosen")).is_err());
+        assert_eq!(store.files(task.id).unwrap()[0].path, original);
     }
 
     #[cfg(windows)]
