@@ -16,6 +16,7 @@ mod ftp;
 mod launcher;
 mod launcher_drag;
 mod launcher_input;
+mod launcher_window;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
@@ -26,6 +27,7 @@ mod privacy;
 mod processing;
 mod store;
 mod update;
+mod webview_memory;
 mod window_icon;
 #[cfg(windows)]
 mod window_interaction;
@@ -209,6 +211,7 @@ async fn main_window_interaction_state(app: tauri::AppHandle) -> Result<serde_js
 }
 
 pub fn run() {
+    webview_memory::apply_process_defaults();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -367,6 +370,14 @@ pub fn run() {
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
             ));
+            // Created only after `AppState` is managed: its page reads settings
+            // as soon as it loads.
+            let launcher =
+                launcher_window::ensure_launcher_window(app.handle(), launcher_visibility)
+                    .map_err(std::io::Error::other)?;
+            if let Some(main) = app.get_webview_window("main") {
+                webview_memory::configure_webview(&main);
+            }
             #[cfg(windows)]
             if background_ui_test.as_deref() != Some("1") {
                 if let Some(main) = app.get_webview_window("main") {
@@ -380,68 +391,8 @@ pub fn run() {
                     main.show()?;
                 }
                 if launcher_visibility == LauncherVisibility::Always {
-                    if let Some(launcher) = app.get_webview_window("launcher") {
-                        // The launcher canvas is authored in CSS logical pixels.
-                        // A PhysicalSize here shrinks its WebKitGTK viewport on
-                        // fractional-scale X11 desktops, placing the icon outside
-                        // the rendered surface.
-                        launcher.set_size(tauri::LogicalSize::new(410.0, 720.0))?;
-                        // A transparent 410x720 WebView is larger than its
-                        // visible icon. Make its initial state click-through
-                        // before it can be shown; the region monitor restores
-                        // input only under the icon/popup once it is ready.
-                        #[cfg(windows)]
-                        if let Err(error) = launcher.set_ignore_cursor_events(true) {
-                            eprintln!("无法初始化悬浮窗鼠标穿透: {error}");
-                        }
-                        // The command installs the HWND subclass on its owner thread.
-                        // On Linux the GTK GdkWindow does not exist until it is shown,
-                        // so show first and install the X11 input shape afterwards.
-                        tauri::async_runtime::spawn(async move {
-                            #[cfg(all(unix, not(target_os = "macos")))]
-                            {
-                                if let Err(error) = launcher.show() {
-                                    eprintln!("无法显示悬浮窗: {error}");
-                                    return;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                if let Err(error) =
-                                    launcher_input::install_linux_context_menu(&launcher)
-                                {
-                                    eprintln!("无法安装悬浮窗右键菜单: {error}");
-                                }
-                                if let Err(error) = launcher_input::install_linux_drag(&launcher) {
-                                    eprintln!("无法安装悬浮窗拖动: {error}");
-                                }
-                            }
-                            let result = launcher_input::set_launcher_input_regions(
-                                launcher.clone(),
-                                vec![launcher_input::LauncherInputRegion {
-                                    x: 346.0,
-                                    y: 328.0,
-                                    width: 64.0,
-                                    height: 64.0,
-                                }],
-                                launcher.scale_factor().unwrap_or(1.0),
-                                launcher.state::<launcher::LauncherInteractionState>(),
-                            )
-                            .await;
-                            match result {
-                                Ok(()) => {}
-                                // A WebView child can be created slightly after the
-                                // launcher root HWND. The renderer will retry its
-                                // input-region update once mounted; never leave an
-                                // otherwise valid launcher permanently hidden while
-                                // that native refinement catches up.
-                                Err(error) => {
-                                    eprintln!("无法初始化悬浮窗输入区域，将由界面重试: {error}")
-                                }
-                            }
-                            #[cfg(not(all(unix, not(target_os = "macos"))))]
-                            if let Err(error) = launcher.show() {
-                                eprintln!("无法显示悬浮窗: {error}");
-                            }
-                        });
+                    if let Some(launcher) = launcher {
+                        launcher_window::present_launcher(launcher)?;
                     }
                 }
             }

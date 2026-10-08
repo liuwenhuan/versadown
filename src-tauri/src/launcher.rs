@@ -486,11 +486,13 @@ fn exit_window_snapshot(app: &AppHandle) -> Result<ExitWindowSnapshot, String> {
     let manager = app
         .get_webview_window("main")
         .ok_or_else(|| "下载管理器窗口不存在".to_string())?;
-    let launcher = app
-        .get_webview_window("launcher")
-        .ok_or_else(|| "悬浮窗不存在".to_string())?;
+    // A `hidden` launcher may never have been created on Linux.
+    let launcher_visible = match app.get_webview_window("launcher") {
+        Some(launcher) => launcher.is_visible().map_err(|error| error.to_string())?,
+        None => false,
+    };
     Ok(ExitWindowSnapshot {
         manager_visible: manager.is_visible().map_err(|error| error.to_string())?,
-        launcher_visible: launcher.is_visible().map_err(|error| error.to_string())?,
+        launcher_visible,
     })
 }

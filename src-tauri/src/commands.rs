@@ -3859,6 +3859,9 @@ pub fn update_launcher_visibility_from_native_menu(
     }
     settings.launcher_visibility = visibility;
     persist_settings(&state.settings_path, &settings)?;
+    // Window creation must never run under the settings lock.
+    drop(settings);
+    crate::launcher_window::sync_launcher_window(app, visibility);
     for label in ["launcher", "launcher-popup"] {
         let _ = app.emit_to(label, "launcher-visibility-updated", visibility);
     }
@@ -3972,6 +3975,7 @@ pub async fn update_settings(
         .settings
         .lock()
         .map_err(|_| "设置锁不可用".to_string())? = settings.clone();
+    crate::launcher_window::sync_launcher_window(&app, settings.launcher_visibility);
     for label in ["launcher", "launcher-popup"] {
         let _ = app.emit_to(
             label,

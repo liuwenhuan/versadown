@@ -44,3 +44,34 @@ fn launcher_window_leaves_room_for_the_context_menu_and_its_shadow() {
     assert_eq!(window["decorations"], false);
     assert_eq!(window["shadow"], false);
 }
+
+fn config_windows(file: &str) -> Vec<Value> {
+    let raw = std::fs::read_to_string(format!("{}/{file}", env!("CARGO_MANIFEST_DIR")))
+        .expect("tauri configuration should be readable");
+    let config: Value =
+        serde_json::from_str(&raw).expect("tauri configuration should be valid JSON");
+    config["app"]["windows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn linux_creates_the_launcher_in_code_from_the_shared_window_config() {
+    // Tauri replaces the whole `windows` array when merging platform configs,
+    // so the Linux copy must stay identical apart from deferring the launcher
+    // (it is built at runtime to share the manager's web process).
+    let base = config_windows("tauri.conf.json");
+    let linux = config_windows("tauri.linux.conf.json");
+    let expected: Vec<Value> = base
+        .into_iter()
+        .map(|mut window| {
+            if window["label"] == "launcher" {
+                window["create"] = Value::Bool(false);
+            }
+            window
+        })
+        .collect();
+
+    assert_eq!(linux, expected);
+}
