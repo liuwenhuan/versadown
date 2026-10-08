@@ -75,3 +75,13 @@ fn linux_creates_the_launcher_in_code_from_the_shared_window_config() {
 
     assert_eq!(linux, expected);
 }
+
+#[test]
+fn launcher_canvas_leaves_a_popup_slot_on_both_sides_of_the_icon() {
+    // Mirrors `launcherCanvas` in src/lib/launcherWindow.ts: a 346px popup
+    // slot, the 64px icon, then another 346px slot.
+    let window = launcher_window();
+
+    assert_eq!(window["width"], 346 * 2 + 64);
+    assert_eq!(window["height"], 720);
+}

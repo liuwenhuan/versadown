@@ -43,8 +43,26 @@ pub fn ensure_launcher_window(
         }
     };
     let window = builder.build().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    allow_launcher_above_screen_top(&window)?;
     crate::webview_memory::configure_webview(&window);
     Ok(Some(window))
+}
+
+/// The icon sits in the middle of a 720px transparent canvas, so reaching the
+/// top of the screen needs a negative window origin. KWin clamps ordinary
+/// windows to the top edge; notification windows are exempt, yet unlike docks
+/// still take focus, which the context menu's blur-to-close relies on. GTK
+/// only honours the hint before the window is first shown.
+#[cfg(target_os = "linux")]
+fn allow_launcher_above_screen_top(window: &WebviewWindow) -> Result<(), String> {
+    use gtk::prelude::GtkWindowExt;
+
+    window
+        .gtk_window()
+        .map_err(|error| error.to_string())?
+        .set_type_hint(gtk::gdk::WindowTypeHint::Notification);
+    Ok(())
 }
 
 /// Settings may turn a never-created launcher back on from any thread.
@@ -99,8 +117,8 @@ pub fn present_launcher(launcher: WebviewWindow) -> tauri::Result<()> {
     // A PhysicalSize here shrinks its WebKitGTK viewport on
     // fractional-scale X11 desktops, placing the icon outside
     // the rendered surface.
-    launcher.set_size(tauri::LogicalSize::new(410.0, 720.0))?;
-    // A transparent 410x720 WebView is larger than its
+    launcher.set_size(tauri::LogicalSize::new(756.0, 720.0))?;
+    // A transparent 756x720 WebView is larger than its
     // visible icon. Make its initial state click-through
     // before it can be shown; the region monitor restores
     // input only under the icon/popup once it is ready.

@@ -66,7 +66,7 @@ fn physical_regions(
         .collect()
 }
 
-const LAUNCHER_CANVAS_WIDTH: f64 = 410.0;
+const LAUNCHER_CANVAS_WIDTH: f64 = 756.0;
 
 // GDK button coordinates are physical pixels on fractional-scale X11
 // desktops, while WebKitGTK's widget scale can remain at one. The launcher
@@ -925,8 +925,10 @@ mod tests {
 
     #[test]
     fn x11_drag_uses_the_physical_canvas_width_for_fractional_scale() {
-        let regions = launcher_drag_icon_regions(615).unwrap();
+        // 756 logical px at 1.5x; the icon spans x 519..615 physical.
+        let regions = launcher_drag_icon_regions(1134).unwrap();
         assert!(point_hits_regions((563, 538), &regions));
+        assert!(!point_hits_regions((700, 538), &regions));
     }
 
     #[test]

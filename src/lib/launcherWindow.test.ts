@@ -10,6 +10,7 @@ const native = vi.hoisted(() => {
     emitTo: vi.fn(async () => { calls.push('emit'); }),
     getByLabel: vi.fn(),
     currentMonitor: vi.fn(),
+    availableMonitors: vi.fn(),
     launcherPosition: vi.fn(),
     launcherSize: vi.fn(),
     setSize: vi.fn().mockResolvedValue(undefined),
@@ -27,6 +28,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
 vi.mock('@tauri-apps/api/event', () => ({ emitTo: native.emitTo }));
 vi.mock('@tauri-apps/api/window', () => ({
   currentMonitor: native.currentMonitor,
+  availableMonitors: native.availableMonitors,
   getCurrentWindow: vi.fn(() => ({ label: 'launcher', outerPosition: native.launcherPosition, outerSize: native.launcherSize, setSize: native.setSize, setPosition: native.setPosition })),
   LogicalSize: class LogicalSize {
     constructor(public width: number, public height: number) {}
@@ -54,10 +56,12 @@ beforeEach(() => {
 
 it('uses one fixed canvas with an invariant hexagon anchor', () => {
   expect(launcherWindow.launcherCanvas).toEqual({
-    width: 410,
+    width: 756,
     height: 720,
+    popupSlotWidth: 346,
     popupSlotHeight: 328,
     iconSize: 64,
+    iconLeft: 346,
     iconTop: 328,
     margin: 24,
   });
@@ -93,7 +97,7 @@ it('positions the fixed canvas without consulting a variable native window size'
   });
   native.launcherSize.mockResolvedValueOnce({ width: 64, height: 64 });
   await launcherWindow.anchorLauncherToWorkArea();
-  expect(native.setSize).toHaveBeenCalledWith({ width: 615, height: 1080 });
+  expect(native.setSize).toHaveBeenCalledWith({ width: 1134, height: 1080 });
   expect(native.setPosition).toHaveBeenCalledWith({ x: 1369, y: 506 });
   expect(native.launcherSize).not.toHaveBeenCalled();
 });
@@ -224,4 +228,86 @@ it('opens the manager new-task dialog with an accepted launcher drop', async () 
     'launcher-new-download',
     'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
   );
+});
+
+// 2560x1600 at 1.5x with a 60px bottom dock: the icon is 96px physical and
+// sits at (519, 492) inside the 615x1080 canvas.
+const primaryWorkArea = { x: 0, y: 0, width: 2560, height: 1540 };
+const dragBounds = { workAreas: [primaryWorkArea], displayScaleFactor: 1.5 };
+
+it('stops a dragged icon with its top edge on the top of the work area', () => {
+  expect(launcherWindow.clampLauncherWindowPosition({ x: 1369, y: -900 }, dragBounds))
+    .toEqual({ x: 1369, y: -492 });
+});
+
+it('keeps the dragged icon inside the left, right and bottom work-area edges', () => {
+  expect(launcherWindow.clampLauncherWindowPosition({ x: -900, y: 300 }, dragBounds))
+    .toEqual({ x: -519, y: 300 });
+  expect(launcherWindow.clampLauncherWindowPosition({ x: 2400, y: 300 }, dragBounds))
+    .toEqual({ x: 2560 - 96 - 519, y: 300 });
+  expect(launcherWindow.clampLauncherWindowPosition({ x: 1369, y: 1500 }, dragBounds))
+    .toEqual({ x: 1369, y: 1540 - 96 - 492 });
+});
+
+it('lets the icon move onto a second monitor and clamps it there', () => {
+  const bounds = {
+    workAreas: [primaryWorkArea, { x: 2560, y: 0, width: 1920, height: 1080 }],
+    displayScaleFactor: 1.5,
+  };
+  expect(launcherWindow.clampLauncherWindowPosition({ x: 2800, y: 100 }, bounds))
+    .toEqual({ x: 2800, y: 100 });
+  expect(launcherWindow.clampLauncherWindowPosition({ x: 2800, y: 900 }, bounds))
+    .toEqual({ x: 2800, y: 1080 - 96 - 492 });
+});
+
+it('clamps captured pointer drags when the session carries work-area bounds', () => {
+  expect(launcherWindow.launcherPointerDragPosition(
+    {
+      windowPosition: { x: 1369, y: 506 },
+      pointerPosition: { x: 378, y: 360 },
+      scaleFactor: 1.5,
+      bounds: dragBounds,
+    },
+    { x: 378, y: -400 },
+  )).toEqual({ x: 1369, y: -492 });
+});
+
+it('records every monitor work area when a pointer drag begins', async () => {
+  native.launcherPosition.mockResolvedValueOnce({ x: 1369, y: 506 });
+  native.currentMonitor.mockResolvedValueOnce({ scaleFactor: 1.5 });
+  native.availableMonitors.mockResolvedValueOnce([
+    { workArea: { position: { x: 0, y: 0 }, size: { width: 2560, height: 1540 } } },
+  ]);
+
+  const session = await launcherWindow.beginLauncherPointerDrag({ x: 378, y: 360 });
+
+  expect(session.bounds).toEqual(dragBounds);
+});
+
+it('reserves an equal popup slot on both sides of the icon', () => {
+  const { width, popupSlotWidth, iconLeft, iconSize } = launcherWindow.launcherCanvas;
+  expect(iconLeft).toBe(popupSlotWidth);
+  expect(width).toBe(popupSlotWidth * 2 + iconSize);
+  expect(launcherWindow.launcherIconRegion).toEqual({ x: 346, y: 328, width: 64, height: 64 });
+});
+
+it('opens the popup to the left when the complete popup fits there', () => {
+  const icon = { x: 850, y: 500, width: 96, height: 96 };
+  expect(launcherWindow.launcherPopupSideFromIcon(icon, 432, { x: 0, y: 0, width: 2560, height: 1540 }))
+    .toBe('left');
+});
+
+it('opens the popup to the right when the icon is near the left work-area edge', () => {
+  const icon = { x: 0, y: 500, width: 96, height: 96 };
+  expect(launcherWindow.launcherPopupSideFromIcon(icon, 432, { x: 0, y: 0, width: 2560, height: 1540 }))
+    .toBe('right');
+});
+
+it('reads the popup side from the current launcher position', async () => {
+  native.launcherPosition.mockResolvedValueOnce({ x: -519, y: 300 });
+  native.currentMonitor.mockResolvedValueOnce({
+    scaleFactor: 1.5,
+    workArea: { position: { x: 0, y: 0 }, size: { width: 2560, height: 1540 } },
+  });
+  await expect(launcherWindow.getLauncherPopupSide()).resolves.toBe('right');
 });

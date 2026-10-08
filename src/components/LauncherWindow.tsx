@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { FloatingLauncher, type LauncherPointerPosition } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, launcherIconRegion, moveLauncherPointerDrag, openLauncherAllTasks, openLauncherNewDownload, runLauncherMenuAction, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, getLauncherPopupSide, launcherIconRegion, moveLauncherPointerDrag, openLauncherAllTasks, openLauncherNewDownload, runLauncherMenuAction, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement, type LauncherPopupSide } from '../lib/launcherWindow';
 import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, stageDroppedTorrent, updateSettings } from '../lib/api';
 import { runNativeLauncherDrag } from '../lib/launcherWindow';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
@@ -19,6 +19,8 @@ export function LauncherWindow() {
   const [mode, setMode] = useState<LauncherSurfaceMode>('compact');
   const [popupPlacement, setPopupPlacement] = useState<LauncherPopupPlacement>('above');
   const popupPlacementRef = useRef<LauncherPopupPlacement>('above');
+  const [popupSide, setPopupSide] = useState<LauncherPopupSide>('left');
+  const popupSideRef = useRef<LauncherPopupSide>('left');
   const [managerVisible, setManagerVisible] = useState(true);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>('always');
   const [settingsReady, setSettingsReady] = useState(false);
@@ -40,6 +42,7 @@ export function LauncherWindow() {
   const nativeDragInFlight = useRef(false);
   const dragEndPointer = useRef<LauncherPointerPosition | null>(null);
   popupPlacementRef.current = popupPlacement;
+  popupSideRef.current = popupSide;
   const hasActiveDownload = activeCount > 0;
   const shouldShowLauncher = launcherVisibility === 'always' || (launcherVisibility === 'downloading' && hasActiveDownload);
 
@@ -62,9 +65,14 @@ export function LauncherWindow() {
     transitionQueue.current = transitionQueue.current.then(async () => {
       if (disposed.current) return;
       const target = requestedMode.current;
-      const placement = target === 'compact' ? null : await getLauncherPopupPlacement();
+      const layout = target === 'compact'
+        ? null
+        : await Promise.all([getLauncherPopupPlacement(), getLauncherPopupSide()]);
       if (disposed.current || target !== requestedMode.current) return;
-      if (placement) setPopupPlacement(placement);
+      if (layout) {
+        setPopupPlacement(layout[0]);
+        setPopupSide(layout[1]);
+      }
       setMode(target);
     }).catch(() => undefined);
   }, []);
@@ -76,8 +84,13 @@ export function LauncherWindow() {
     } catch {
       // The native adapter retains the previous safe regions on failure.
     }
-    const placement = await getLauncherPopupPlacement().catch(() => popupPlacementRef.current);
-    if (!disposed.current) setPopupPlacement(placement);
+    const [placement, side] = await Promise.all([
+      getLauncherPopupPlacement().catch(() => popupPlacementRef.current),
+      getLauncherPopupSide().catch(() => popupSideRef.current),
+    ]);
+    if (disposed.current) return;
+    setPopupPlacement(placement);
+    setPopupSide(side);
   }, [applyRegions]);
 
   useLayoutEffect(() => {
@@ -99,7 +112,7 @@ export function LauncherWindow() {
     const observer = element && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(syncInput) : null;
     if (element) observer?.observe(element);
     return () => { disposed = true; observer?.disconnect(); };
-  }, [applyRegions, mode, popupPlacement]);
+  }, [applyRegions, mode, popupPlacement, popupSide]);
 
   useEffect(() => {
     disposed.current = false;
@@ -307,7 +320,7 @@ export function LauncherWindow() {
   }
 
   return (
-    <main className={`launcher-shell ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''}`} aria-label={t('launcher.windowLabel')}>
+    <main className={`launcher-shell ${mode === 'context-menu' ? 'launcher-menu-open' : ''} ${popupPlacement === 'below' ? 'launcher-popup-below' : ''} ${popupSide === 'right' ? 'launcher-popup-right' : ''}`} aria-label={t('launcher.windowLabel')}>
       <FloatingLauncher
         onScan={scanDownloadInputs}
         onDroppedInput={openLauncherNewDownload}

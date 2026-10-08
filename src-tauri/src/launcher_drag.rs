@@ -38,7 +38,7 @@ pub async fn drag_launcher_window(
     if grab_offset.is_some_and(|point| {
         !point.x.is_finite()
             || !point.y.is_finite()
-            || !(0.0..=410.0).contains(&point.x)
+            || !(0.0..=756.0).contains(&point.x)
             || !(0.0..=720.0).contains(&point.y)
     }) {
         return Err("悬浮窗拖动坐标无效".into());

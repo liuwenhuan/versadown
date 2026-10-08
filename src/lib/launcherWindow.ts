@@ -1,14 +1,18 @@
 import { emitTo } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, Window } from '@tauri-apps/api/window';
+import { availableMonitors, currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, Window, type Monitor } from '@tauri-apps/api/window';
 import { isTauriRuntime } from './api';
 
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
+// The icon sits between equal popup slots on every side, so the menu can open
+// toward whichever side has room without ever resizing the native window.
 export const launcherCanvas = {
-  width: 410,
+  width: 756,
   height: 720,
+  popupSlotWidth: 346,
   popupSlotHeight: 328,
   iconSize: 64,
+  iconLeft: 346,
   iconTop: 328,
   margin: 24,
 } as const;
@@ -16,16 +20,19 @@ export const launcherCanvas = {
 type WorkArea = { x: number; y: number; width: number; height: number };
 type Rect = { x: number; y: number; width: number; height: number };
 export type LauncherPopupPlacement = 'above' | 'below';
+export type LauncherPopupSide = 'left' | 'right';
 export type LauncherInputRegion = { x: number; y: number; width: number; height: number };
 export type LauncherPointerPosition = { x: number; y: number };
+export type LauncherDragBounds = { workAreas: WorkArea[]; displayScaleFactor: number };
 export type LauncherPointerDragSession = {
   windowPosition: { x: number; y: number };
   pointerPosition: LauncherPointerPosition;
   scaleFactor: number;
+  bounds?: LauncherDragBounds;
 };
 
 export const launcherIconRegion: LauncherInputRegion = {
-  x: launcherCanvas.width - launcherCanvas.iconSize,
+  x: launcherCanvas.iconLeft,
   y: launcherCanvas.iconTop,
   width: launcherCanvas.iconSize,
   height: launcherCanvas.iconSize,
@@ -61,13 +68,13 @@ export async function setLauncherInputRegions(regions: LauncherInputRegion[]) {
 }
 
 export function launcherCanvasPosition(workArea: WorkArea, scaleFactor: number) {
-  const canvasWidth = Math.round(launcherCanvas.width * scaleFactor);
+  const iconRight = Math.round((launcherCanvas.iconLeft + launcherCanvas.iconSize) * scaleFactor);
   const iconBottom = Math.round(
     (launcherCanvas.iconTop + launcherCanvas.iconSize) * scaleFactor,
   );
   const margin = Math.round(launcherCanvas.margin * scaleFactor);
   return {
-    x: workArea.x + workArea.width - canvasWidth - margin,
+    x: workArea.x + workArea.width - iconRight - margin,
     y: workArea.y + workArea.height - iconBottom - margin,
   };
 }
@@ -77,7 +84,7 @@ export function launcherIconScreenRect(
   scaleFactor: number,
 ): Rect {
   return {
-    x: windowPosition.x + Math.round((launcherCanvas.width - launcherCanvas.iconSize) * scaleFactor),
+    x: windowPosition.x + Math.round(launcherCanvas.iconLeft * scaleFactor),
     y: windowPosition.y + Math.round(launcherCanvas.iconTop * scaleFactor),
     width: Math.round(launcherCanvas.iconSize * scaleFactor),
     height: Math.round(launcherCanvas.iconSize * scaleFactor),
@@ -93,10 +100,40 @@ export function launcherPointerDragPosition(
   session: LauncherPointerDragSession,
   pointerPosition: LauncherPointerPosition,
 ) {
-  return {
+  const position = {
     x: session.windowPosition.x + Math.round((pointerPosition.x - session.pointerPosition.x) * session.scaleFactor),
     y: session.windowPosition.y + Math.round((pointerPosition.y - session.pointerPosition.y) * session.scaleFactor),
   };
+  return session.bounds ? clampLauncherWindowPosition(position, session.bounds) : position;
+}
+
+function squaredDistanceToRect(point: { x: number; y: number }, rect: WorkArea) {
+  const dx = Math.max(rect.x - point.x, 0, point.x - (rect.x + rect.width));
+  const dy = Math.max(rect.y - point.y, 0, point.y - (rect.y + rect.height));
+  return dx * dx + dy * dy;
+}
+
+// The canvas must leave the screen for its icon to reach an edge, and the
+// Linux launcher is a notification window the window manager never clamps.
+// Keep the icon itself inside the work area nearest to it instead.
+export function clampLauncherWindowPosition(
+  position: { x: number; y: number },
+  bounds: LauncherDragBounds,
+) {
+  if (bounds.workAreas.length === 0) return position;
+  const icon = launcherIconScreenRect(position, bounds.displayScaleFactor);
+  const center = { x: icon.x + icon.width / 2, y: icon.y + icon.height / 2 };
+  const area = bounds.workAreas.reduce((nearest, candidate) => (
+    squaredDistanceToRect(center, candidate) < squaredDistanceToRect(center, nearest) ? candidate : nearest
+  ));
+  const iconX = Math.min(Math.max(icon.x, area.x), area.x + area.width - icon.width);
+  const iconY = Math.min(Math.max(icon.y, area.y), area.y + area.height - icon.height);
+  return { x: position.x + iconX - icon.x, y: position.y + iconY - icon.y };
+}
+
+function monitorWorkArea(monitor: Monitor): WorkArea {
+  const { position, size } = monitor.workArea;
+  return { x: position.x, y: position.y, width: size.width, height: size.height };
 }
 
 // WebView implementations disagree on whether screenX/screenY are CSS or
@@ -127,11 +164,17 @@ export async function beginLauncherPointerDrag(
   grabOffset?: LauncherPointerPosition,
 ): Promise<LauncherPointerDragSession> {
   const launcher = getCurrentWindow();
-  const [windowPosition, monitor] = await Promise.all([launcher.outerPosition(), currentMonitor()]);
+  const [windowPosition, monitor, monitors] = await Promise.all([
+    launcher.outerPosition(),
+    currentMonitor(),
+    // Without monitor geometry the drag still works, just unclamped.
+    availableMonitors().catch((): Monitor[] => []),
+  ]);
   const displayScaleFactor = launcherDisplayScaleFactor(monitor?.scaleFactor);
   return {
     windowPosition,
     pointerPosition,
+    bounds: { workAreas: monitors.map(monitorWorkArea), displayScaleFactor },
     scaleFactor: launcherPointerCoordinateScaleFactor(
       windowPosition,
       pointerPosition,
@@ -164,19 +207,44 @@ export function launcherPopupPlacementFromIcon(
   return icon.y - popupHeight < workArea.y ? 'below' : 'above';
 }
 
+export function launcherPopupSideFromIcon(
+  icon: Rect,
+  popupWidth: number,
+  workArea: WorkArea,
+): LauncherPopupSide {
+  return icon.x + icon.width - popupWidth < workArea.x ? 'right' : 'left';
+}
+
 export function isLauncherWindow() {
   return isTauriRuntime() && getCurrentWindow().label === LAUNCHER_WINDOW_LABEL;
 }
 
-export async function getLauncherPopupPlacement(): Promise<LauncherPopupPlacement> {
-  if (!isTauriRuntime()) return 'above';
+async function currentIconGeometry() {
+  if (!isTauriRuntime()) return null;
   const launcher = getCurrentWindow();
   const [position, monitor] = await Promise.all([launcher.outerPosition(), currentMonitor()]);
-  if (!monitor) return 'above';
+  if (!monitor) return null;
+  const scaleFactor = launcherDisplayScaleFactor(monitor.scaleFactor);
+  return { icon: launcherIconScreenRect(position, scaleFactor), scaleFactor, workArea: monitorWorkArea(monitor) };
+}
+
+export async function getLauncherPopupPlacement(): Promise<LauncherPopupPlacement> {
+  const geometry = await currentIconGeometry();
+  if (!geometry) return 'above';
   return launcherPopupPlacementFromIcon(
-    launcherIconScreenRect(position, launcherDisplayScaleFactor(monitor.scaleFactor)),
-    Math.round(launcherCanvas.popupSlotHeight * launcherDisplayScaleFactor(monitor.scaleFactor)),
-    { x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }
+    geometry.icon,
+    Math.round(launcherCanvas.popupSlotHeight * geometry.scaleFactor),
+    geometry.workArea,
+  );
+}
+
+export async function getLauncherPopupSide(): Promise<LauncherPopupSide> {
+  const geometry = await currentIconGeometry();
+  if (!geometry) return 'left';
+  return launcherPopupSideFromIcon(
+    geometry.icon,
+    Math.round(launcherCanvas.popupSlotWidth * geometry.scaleFactor),
+    geometry.workArea,
   );
 }
 

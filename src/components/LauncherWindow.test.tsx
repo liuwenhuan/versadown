@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
   getGlobalStat: vi.fn(), getSettings: vi.fn(), scanDownloadInputs: vi.fn(),
-  updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(),
+  updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(), getLauncherPopupSide: vi.fn(),
   setLauncherInputRegions: vi.fn(),
   runNativeLauncherDrag: vi.fn(),
   beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(), openActiveDownloads: vi.fn(), openNewDownload: vi.fn(), stageDroppedTorrent: vi.fn(),
@@ -27,10 +27,11 @@ vi.mock('@tauri-apps/api/window', () => ({
   }),
 }));
 vi.mock('../lib/launcherWindow', () => ({
-  launcherCanvas: { width: 410, height: 720, popupSlotHeight: 328, iconSize: 64, iconTop: 328, margin: 24 },
+  launcherCanvas: { width: 756, height: 720, popupSlotWidth: 346, popupSlotHeight: 328, iconSize: 64, iconLeft: 346, iconTop: 328, margin: 24 },
   launcherIconRegion: { x: 346, y: 328, width: 64, height: 64 },
   setLauncherInputRegions: state.setLauncherInputRegions,
   getLauncherPopupPlacement: state.getLauncherPopupPlacement,
+  getLauncherPopupSide: state.getLauncherPopupSide,
   anchorLauncherToWorkArea: vi.fn().mockResolvedValue(undefined),
   setLauncherWindowVisible: vi.fn().mockResolvedValue(undefined),
   runLauncherMenuAction: vi.fn().mockResolvedValue(undefined),
@@ -72,6 +73,7 @@ beforeEach(() => {
   state.updateSettings.mockReset();
   state.getManagerVisible.mockReset().mockResolvedValue(true);
   state.getLauncherPopupPlacement.mockReset().mockResolvedValue('above');
+  state.getLauncherPopupSide.mockReset().mockResolvedValue('left');
   state.setLauncherInputRegions.mockReset().mockResolvedValue(undefined);
   state.runNativeLauncherDrag.mockReset().mockResolvedValue(false);
   state.beginLauncherPointerDrag.mockReset().mockResolvedValue({
@@ -105,8 +107,9 @@ it('keeps the floating-display menu heading to one row after its helper copy is 
 
 it('keeps the hexagon at the same fixed-canvas coordinate for both popup placements', () => {
   const styles = readFileSync('src/styles.css', 'utf8');
-  expect(styles.includes('.launcher-shell .launcher-interaction-target{position:absolute;right:0;top:328px;')).toBe(true);
+  expect(styles.includes('.launcher-shell .launcher-interaction-target{position:absolute;left:346px;top:328px;')).toBe(true);
   expect(styles.includes('.launcher-popup-below .launcher-interaction-target')).toBe(false);
+  expect(styles.includes('.launcher-popup-right .launcher-interaction-target')).toBe(false);
   expect(styles.includes('launcher-viewport-transitioning')).toBe(false);
 });
 
@@ -357,6 +360,27 @@ it('uses the below slot for the context menu without moving the icon', async () 
     expect(trigger.closest('main')).toHaveClass('launcher-popup-below');
     expect(getComputedStyle(trigger.closest('.launcher-interaction-target')!).top).toBe('328px');
     expect(getComputedStyle(surface).top).toBe('392px');
+  } finally { stylesheet.remove(); }
+});
+
+it('opens the context menu into the right slot near the left screen edge', async () => {
+  state.getLauncherPopupSide.mockResolvedValue('right');
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = readFileSync('src/styles.css', 'utf8');
+  document.head.appendChild(stylesheet);
+  try {
+    const { container } = render(<LauncherWindow />);
+    const target = container.querySelector('.launcher-interaction-target')!;
+    fireEvent.contextMenu(container.querySelector('.launcher-trigger')!);
+    const surface = await waitFor(() => {
+      const menu = container.querySelector<HTMLElement>('.launcher-context-menu');
+      expect(menu).not.toBeNull();
+      return menu!;
+    });
+    expect(container.querySelector('main')).toHaveClass('launcher-popup-right');
+    expect(getComputedStyle(target).left).toBe('346px');
+    expect(getComputedStyle(surface).left).toBe('346px');
+    expect(getComputedStyle(surface).right).toBe('auto');
   } finally { stylesheet.remove(); }
 });
 
