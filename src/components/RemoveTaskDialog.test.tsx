@@ -10,7 +10,7 @@ it('asks whether downloaded files should be deleted before permanent removal', a
 
   expect(screen.getByRole('dialog', { name: '彻底删除任务' })).toHaveTextContent('同时删除下载文件');
   await user.click(screen.getByRole('checkbox', { name: '同时删除下载文件' }));
-  await user.click(screen.getByRole('button', { name: '彻底删除' }));
+  await user.click(screen.getByRole('button', { name: '彻底删除任务' }));
   expect(onConfirm).toHaveBeenCalledWith(true);
 });
 

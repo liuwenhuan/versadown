@@ -17,7 +17,9 @@ export default defineConfig({
       '**/.worktrees/**',
       '**/.tools/**',
       '**/.tmp-*/**',
-      '**/.pnpm-store/**'
+      '**/.pnpm-store/**',
+      // node:test suites, run with `node --test`
+      'scripts/**'
     ]
   }
 });

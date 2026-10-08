@@ -38,8 +38,10 @@ fn main_window_uses_the_requested_960_by_640_minimum() {
 fn launcher_window_leaves_room_for_the_context_menu_and_its_shadow() {
     let window = launcher_window();
 
-    assert!(window["maxWidth"].as_u64().unwrap_or_default() >= 304);
-    assert!(window["maxHeight"].as_u64().unwrap_or_default() >= 392);
+    // The canvas has a fixed size (no min/max constraints), so it must
+    // itself fit the context menu and its shadow.
+    assert!(window["width"].as_u64().unwrap_or_default() >= 304);
+    assert!(window["height"].as_u64().unwrap_or_default() >= 392);
     assert_eq!(window["title"], "");
     assert_eq!(window["decorations"], false);
     assert_eq!(window["shadow"], false);

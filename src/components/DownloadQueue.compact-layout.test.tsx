@@ -25,7 +25,7 @@ it('keeps queue tasks compact while preserving a generous row hit area', () => {
     expect(getComputedStyle(row!).paddingTop).toBe('8px');
     expect(getComputedStyle(row!).paddingBottom).toBe('8px');
     expect(getComputedStyle(title!).fontSize).toBe('13px');
-    expect(getComputedStyle(action!).width).toBe('34px');
+    expect(getComputedStyle(action!).width).toBe('76px');
     expect(getComputedStyle(action!).height).toBe('34px');
   } finally {
     stylesheet.remove();

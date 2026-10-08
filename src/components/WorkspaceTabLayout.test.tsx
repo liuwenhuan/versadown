@@ -12,6 +12,6 @@ it('shows cloud management without the former content tab bar', async () => {
 
   render(<CloudWorkspace client={client as never} activePage="management" onPageChange={vi.fn()} onProvidersChange={vi.fn()} />);
 
-  expect(await screen.findByRole('region', { name: '夸克账号授权' })).toBeVisible();
+  expect(await screen.findByRole('region', { name: '夸克网盘账号授权' })).toBeVisible();
   expect(screen.queryByRole('tablist', { name: '我的网盘标签' })).not.toBeInTheDocument();
 });

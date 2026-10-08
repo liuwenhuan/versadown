@@ -17,9 +17,9 @@ it('keeps discovered password masked until the user reveals it', async () => {
   const user = userEvent.setup();
   render(<ParseConfirmDialog result={result} onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
   expect(screen.queryByText('pass-123')).not.toBeInTheDocument();
-  await user.click(screen.getByRole('button', { name: /查看后处理与密码/ }));
+  await user.click(screen.getByRole('button', { name: /查看 后处理与密码/ }));
   expect(screen.queryByText('pass-123')).not.toBeInTheDocument();
-  await user.click(screen.getByRole('button', { name: '显示密码' }));
+  await user.click(screen.getByRole('button', { name: '显示' }));
   expect(screen.getByText('pass-123')).toBeVisible();
 });
 
@@ -115,7 +115,7 @@ it('removes expanded processing content when the next result has none', async ()
   const user = userEvent.setup();
   const props = { onConfirm: vi.fn(), onSelectionChange: vi.fn(), onClose: vi.fn() };
   const { rerender } = render(<ParseConfirmDialog result={result} {...props} />);
-  await user.click(screen.getByRole('button', { name: /查看后处理与密码/ }));
+  await user.click(screen.getByRole('button', { name: /查看 后处理与密码/ }));
   expect(screen.getByText('解压分卷并合并')).toBeVisible();
   rerender(<ParseConfirmDialog result={{ ...result, taskId: 'empty', processing: [], discoveredPassword: undefined }} {...props} />);
   expect(screen.queryByRole('button', { name: /后处理与密码/ })).not.toBeInTheDocument();

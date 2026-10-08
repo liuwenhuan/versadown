@@ -31,7 +31,7 @@ it('separates settings into common, network, and advanced workspaces', async () 
   const user = userEvent.setup();
   render(<SettingsPanel initial={initial} onChange={() => {}} />);
 
-  expect(screen.getByRole('tab', { name: '常用' })).toBeVisible();
+  expect(screen.getByRole('tab', { name: '通用' })).toBeVisible();
   expect(screen.getByRole('tab', { name: '网络' })).toBeVisible();
   expect(screen.getByRole('tab', { name: '高级' })).toBeVisible();
   expect(screen.getByRole('textbox', { name: '下载目录' })).toBeVisible();
@@ -56,9 +56,9 @@ it('keeps proxy, traffic caps, and aria2 configuration in separate network setti
   expect(screen.getByText('启用下载代理服务器')).toBeVisible();
   const rateLimitForm = screen.getByText('限速设置').closest('form');
   const aria2Form = screen.getByText('aria2 下载引擎').closest('form');
-  const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速' });
-  const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速' });
-  const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速' });
+  const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速（MiB/s）' });
+  const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速（MiB/s）' });
+  const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速（MiB/s）' });
   const rateLimitFieldset = overallDownloadLimit.closest('fieldset');
 
   expect(rateLimitForm).toContainElement(overallDownloadLimit);
@@ -83,9 +83,9 @@ it('keeps rate limits and their save control inline while accepting one decimal 
     render(<SettingsPanel initial={initial} onChange={onChange} />);
     await user.click(screen.getByRole('tab', { name: '网络' }));
 
-    const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速' });
-    const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速' });
-    const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速' });
+    const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速（MiB/s）' });
+    const p2pUploadLimit = screen.getByRole('spinbutton', { name: 'P2P 上传限速（MiB/s）' });
+    const cloudUploadLimit = screen.getByRole('spinbutton', { name: '网盘上传限速（MiB/s）' });
     const rateLimitFieldset = overallDownloadLimit.closest('fieldset')!;
     expect(screen.getByRole('button', { name: '保存限速设置' }).parentElement).toBe(rateLimitFieldset);
     expect(getComputedStyle(rateLimitFieldset).gridTemplateColumns).toBe('repeat(3, minmax(0, 1fr)) auto');
@@ -142,7 +142,7 @@ it('applies the download directory immediately after native folder selection', a
   const onChange = vi.fn();
   render(<SettingsPanel initial={initial} onChange={onChange} browseDirectory={async () => 'E:\\Library'} />);
 
-  await user.click(screen.getByRole('button', { name: '浏览下载目录' }));
+  await user.click(screen.getByRole('button', { name: '浏览' }));
 
   expect(screen.getByRole('textbox', { name: '下载目录' })).toHaveValue('E:\\Library');
   expect(onChange).toHaveBeenLastCalledWith({ ...initial, downloadDirectory: 'E:\\Library' });
@@ -155,9 +155,9 @@ it('offers an OpenAI-compatible AI analysis configuration in advanced settings',
   await user.click(screen.getByRole('tab', { name: '高级' }));
 
   expect(screen.getByRole('checkbox', { name: '启用 AI 智能分析' })).toBeVisible();
-  expect(screen.getByRole('textbox', { name: 'AI 服务地址' })).toBeVisible();
-  expect(screen.getByLabelText('AI API Key')).toHaveAttribute('type', 'password');
-  expect(screen.getByRole('combobox', { name: 'AI 模型' })).toBeVisible();
+  expect(screen.getByRole('textbox', { name: '服务地址' })).toBeVisible();
+  expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password');
+  expect(screen.getByRole('combobox', { name: '模型' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '获取可用模型' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '保存 AI 配置' })).not.toBeInTheDocument();
 });
@@ -222,9 +222,9 @@ it('refreshes models when its selector is opened and saves the complete AI confi
 
   await user.click(screen.getByRole('tab', { name: '高级' }));
   await user.click(screen.getByRole('checkbox', { name: '启用 AI 智能分析' }));
-  await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
-  await user.type(screen.getByLabelText('AI API Key'), 'sk-local-secret');
-  const model = screen.getByRole('combobox', { name: 'AI 模型' });
+  await user.type(screen.getByRole('textbox', { name: '服务地址' }), 'https://gateway.example.test/v1');
+  await user.type(screen.getByLabelText('API Key'), 'sk-local-secret');
+  const model = screen.getByRole('combobox', { name: '模型' });
   fireEvent.pointerDown(model);
   expect(await screen.findByRole('option', { name: 'gpt-5-mini' })).toBeVisible();
   expect(loadAiModels).toHaveBeenCalledWith({ enabled: true, baseUrl: 'https://gateway.example.test/v1', model: '', apiKey: 'sk-local-secret' });
@@ -239,9 +239,9 @@ it('shows the returned model-list error when the selector cannot load models', a
   render(<SettingsPanel initial={initial} onChange={() => {}} loadAiModels={vi.fn().mockRejectedValue(new Error('AI 服务返回 HTTP 401：invalid api key'))} onNotice={onNotice} />);
 
   await user.click(screen.getByRole('tab', { name: '高级' }));
-  await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
-  await user.type(screen.getByLabelText('AI API Key'), 'bad-key');
-  const model = screen.getByRole('combobox', { name: 'AI 模型' });
+  await user.type(screen.getByRole('textbox', { name: '服务地址' }), 'https://gateway.example.test/v1');
+  await user.type(screen.getByLabelText('API Key'), 'bad-key');
+  const model = screen.getByRole('combobox', { name: '模型' });
   await user.click(model);
 
   const error = await screen.findByRole('status');
@@ -330,11 +330,11 @@ it('uses compact aligned controls and consistent cards across settings tabs', as
 
     await user.click(screen.getByRole('tab', { name: '网络' }));
     expect(getComputedStyle(screen.getByRole('checkbox', { name: '启用下载代理' })).width).toBe('18px');
-    const proxyFieldset = screen.getByLabelText('代理密码').closest('fieldset');
+    const proxyFieldset = screen.getByLabelText('密码（可选）').closest('fieldset');
     expect(screen.getByRole('button', { name: '保存代理设置' }).parentElement).toBe(proxyFieldset);
     expect(Array.from(proxyFieldset!.children).slice(-3)).toEqual([
-      screen.getByRole('textbox', { name: '代理用户名' }).closest('label'),
-      screen.getByLabelText('代理密码').closest('label'),
+      screen.getByRole('textbox', { name: '用户名（可选）' }).closest('label'),
+      screen.getByLabelText('密码（可选）').closest('label'),
       screen.getByRole('button', { name: '保存代理设置' }),
     ]);
     const aria2Fieldset = screen.getByRole('spinbutton', { name: 'BT 分享率' }).closest('fieldset');
@@ -399,13 +399,13 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   await user.click(screen.getByRole('tab', { name: '网络' }));
 
   await user.click(screen.getByRole('checkbox', { name: '启用下载代理' }));
-  await user.selectOptions(screen.getByRole('combobox', { name: '代理协议' }), 'https');
-  await user.clear(screen.getByRole('textbox', { name: '代理服务器' }));
-  await user.type(screen.getByRole('textbox', { name: '代理服务器' }), '127.0.0.1');
-  await user.clear(screen.getByRole('spinbutton', { name: '代理端口' }));
-  await user.type(screen.getByRole('spinbutton', { name: '代理端口' }), '1080');
-  await user.type(screen.getByRole('textbox', { name: '代理用户名' }), 'alice');
-  await user.type(screen.getByLabelText('代理密码'), 'secret');
+  await user.selectOptions(screen.getByRole('combobox', { name: '协议' }), 'https');
+  await user.clear(screen.getByRole('textbox', { name: '服务器' }));
+  await user.type(screen.getByRole('textbox', { name: '服务器' }), '127.0.0.1');
+  await user.clear(screen.getByRole('spinbutton', { name: '端口' }));
+  await user.type(screen.getByRole('spinbutton', { name: '端口' }), '1080');
+  await user.type(screen.getByRole('textbox', { name: '用户名（可选）' }), 'alice');
+  await user.type(screen.getByLabelText('密码（可选）'), 'secret');
   await user.click(screen.getByRole('button', { name: '保存代理设置' }));
 
   expect(onChange).toHaveBeenLastCalledWith({
@@ -426,8 +426,8 @@ it('saves aria2 RPC and engine settings from the network settings', async () => 
   render(<SettingsPanel initial={initial} onChange={onChange} />);
   await user.click(screen.getByRole('tab', { name: '网络' }));
 
-  await user.clear(screen.getByRole('spinbutton', { name: 'aria2 RPC 端口' }));
-  await user.type(screen.getByRole('spinbutton', { name: 'aria2 RPC 端口' }), '16800');
+  await user.clear(screen.getByRole('spinbutton', { name: 'RPC 端口' }));
+  await user.type(screen.getByRole('spinbutton', { name: 'RPC 端口' }), '16800');
   await user.type(screen.getByLabelText('aria2 RPC Token'), 'local-token');
   await user.clear(screen.getByRole('spinbutton', { name: '最大并发任务数' }));
   await user.type(screen.getByRole('spinbutton', { name: '最大并发任务数' }), '3');
@@ -486,12 +486,12 @@ it('saves the standalone rate limits in bytes per second', async () => {
   render(<SettingsPanel initial={initial} onChange={onChange} />);
   await user.click(screen.getByRole('tab', { name: '网络' }));
 
-  await user.clear(screen.getByRole('spinbutton', { name: '整体下载限速' }));
-  await user.type(screen.getByRole('spinbutton', { name: '整体下载限速' }), '2.5');
-  await user.clear(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }));
-  await user.type(screen.getByRole('spinbutton', { name: 'P2P 上传限速' }), '1.5');
-  await user.clear(screen.getByRole('spinbutton', { name: '网盘上传限速' }));
-  await user.type(screen.getByRole('spinbutton', { name: '网盘上传限速' }), '3');
+  await user.clear(screen.getByRole('spinbutton', { name: '整体下载限速（MiB/s）' }));
+  await user.type(screen.getByRole('spinbutton', { name: '整体下载限速（MiB/s）' }), '2.5');
+  await user.clear(screen.getByRole('spinbutton', { name: 'P2P 上传限速（MiB/s）' }));
+  await user.type(screen.getByRole('spinbutton', { name: 'P2P 上传限速（MiB/s）' }), '1.5');
+  await user.clear(screen.getByRole('spinbutton', { name: '网盘上传限速（MiB/s）' }));
+  await user.type(screen.getByRole('spinbutton', { name: '网盘上传限速（MiB/s）' }), '3');
   await user.click(screen.getByRole('button', { name: '保存限速设置' }));
 
   expect(onChange).toHaveBeenLastCalledWith({

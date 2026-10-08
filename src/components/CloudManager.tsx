@@ -1599,11 +1599,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const notice = operation ?? uploadResult;
     if (!notice) return null;
     const progress = operation?.uploadProgress;
+    // `runOperation('上传', …)` posts this localized text until the first progress event.
+    const uploadWorkingMessage = t('cloud.operation.working', { name: t('cloud.action.upload') });
     const phaseLabels = { preparing: t('cloud.upload.preparing'), uploading: t('cloud.upload.uploading'), finalizing: t('cloud.upload.finalizing'), paused: t('cloud.upload.paused'), cancelling: t('cloud.upload.cancelling'), cancelled: t('cloud.upload.cancelled'), completed: t('cloud.upload.completed'), failed: t('cloud.upload.failed') };
     const controllable = progress && !['completed', 'failed', 'cancelled'].includes(progress.phase) && client.controlCloudUpload && progress.uploadId;
     return <div className={`cloud-operation-status ${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>
       <div className="cloud-upload-status-content">
-        {!progress && <span>{notice.message === '上传进行中…' ? t('cloud.upload.preparing') : notice.message}</span>}
+        {!progress && <span>{notice.message === uploadWorkingMessage ? t('cloud.upload.preparing') : notice.message}</span>}
         {uploadResult && uploadResult.message !== notice.message && <p>{uploadResult.message}</p>}
         {progress && <>
           <div>{phaseLabels[progress.phase]}{progress.currentFiles.length > 0 && `：${progress.currentFiles.join('、')}`}</div>

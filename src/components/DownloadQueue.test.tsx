@@ -107,7 +107,7 @@ it('uses one queued control with the regular task menu until aria2 promotes the 
   expect(screen.queryByRole('button', { name: '更多操作 waiting.zip' })).not.toBeInTheDocument();
   expect(queued.closest('.task-actions')?.querySelectorAll('button')).toHaveLength(1);
   await user.click(queued);
-  expect(screen.getByRole('menu', { name: 'waiting.zip 任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menu', { name: 'waiting.zip任务菜单' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
 
@@ -683,7 +683,7 @@ it('renders silent login recovery and native SVIP acceleration as non-error stat
     onSelect={() => {}}
     onCommand={() => {}}
   />);
-  const svip = screen.getByText('迅雷网盘任务 · svip加速');
+  const svip = screen.getByText('迅雷网盘 · SVIP 加速');
   expect(svip).not.toHaveClass('task-error');
   expect(screen.queryByText('正在使用迅雷svip加速')).not.toBeInTheDocument();
 });
@@ -761,12 +761,12 @@ it('labels protocol and cloud-provider tasks without exposing raw protocol links
   expect(screen.getByText('HLS 流媒体下载')).toBeVisible();
   expect(screen.getByText('MPEG-DASH 流媒体下载')).toBeVisible();
   expect(screen.getByText('夸克网盘任务')).toBeVisible();
-  expect(screen.getByText('PikPak网盘任务')).toBeVisible();
+  expect(screen.getByText('PikPak 网盘任务')).toBeVisible();
   expect(screen.getByText('百度网盘任务')).toBeVisible();
   expect(screen.getByText('天翼云盘任务')).toBeVisible();
   expect(screen.getByText('阿里云盘任务')).toBeVisible();
   expect(screen.getByText('迅雷网盘任务')).toBeVisible();
-  expect(screen.getByText('UC网盘任务')).toBeVisible();
+  expect(screen.getByText('UC 网盘任务')).toBeVisible();
   expect(screen.queryByText(/demo:secret/)).not.toBeInTheDocument();
   expect(screen.queryByText(/cloud-directory:|cloud-share:/)).not.toBeInTheDocument();
 });
@@ -876,7 +876,7 @@ it('opens the directory when a completed task mixes video and other files', asyn
   expect(screen.getByText('2026-09-10 08:00')).toBeVisible();
   expect(screen.getByText('1.0 GB')).toBeVisible();
   expect(screen.getByRole('progressbar', { name: '纪录片合集 下载进度' })).toHaveAttribute('aria-valuenow', '100');
-  expect(screen.getByText('已完成')).toBeVisible();
+  expect(screen.getByText('下载完成')).toBeVisible();
 
   await user.click(screen.getByRole('button', { name: '打开 纪录片合集 所在目录' }));
   expect(onCommand).toHaveBeenCalledWith('completed-video', 'open_directory');
@@ -1089,7 +1089,7 @@ it('keeps permanent deletion in the menu while the row exposes pause and more ac
   expect(screen.getByRole('button', { name: '更多操作 game.zip' })).toBeVisible();
   expect(screen.queryByRole('button', { name: '取消 game.zip' })).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: '更多操作 game.zip' }));
-  expect(screen.getByRole('menu', { name: 'game.zip 任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menu', { name: 'game.zip任务菜单' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
 });
 
@@ -1104,13 +1104,13 @@ it('offers real state-aware commands when an active task is right-clicked', asyn
   />);
 
   fireEvent.contextMenu(screen.getByText('game.zip'), { clientX: 280, clientY: 180 });
-  expect(screen.getByRole('menu', { name: 'game.zip 任务菜单' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '暂停下载' })).toBeVisible();
+  expect(screen.getByRole('menu', { name: 'game.zip任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '暂停' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '重新下载' })).not.toBeInTheDocument();
 
-  await user.click(screen.getByRole('menuitem', { name: '暂停下载' }));
+  await user.click(screen.getByRole('menuitem', { name: '暂停' }));
   expect(onCommand).toHaveBeenCalledWith('active-1', 'pause');
   expect(screen.queryByRole('menu')).not.toBeInTheDocument();
 });
@@ -1131,7 +1131,7 @@ it.each([
 
   fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-normal"] .task-row`)!);
   expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('menuitem', { name: '移入正常下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入普通下载' })).not.toBeInTheDocument();
 
   rerender(<DownloadQueue
     tasks={[{ id: `${status}-normal`, name: `${label}-普通任务`, kind: 'file', status, progress: status === 'completed' || status === 'recycled' ? 100 : 0 }]}
@@ -1142,7 +1142,7 @@ it.each([
   />);
   fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-normal"] .task-row`)!);
   expect(screen.getByRole('menuitem', { name: '移入隐私下载' })).toBeVisible();
-  expect(screen.queryByRole('menuitem', { name: '移入正常下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入普通下载' })).not.toBeInTheDocument();
 });
 
 it.each([
@@ -1156,11 +1156,11 @@ it.each([
 
   fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-private"] .task-row`)!);
   expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('menuitem', { name: '移入正常下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入普通下载' })).not.toBeInTheDocument();
 
   rerender(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} privacyEnabled />);
   fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-private"] .task-row`)!);
-  expect(screen.getByRole('menuitem', { name: '移入正常下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '移入普通下载' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
 });
 
@@ -1182,7 +1182,7 @@ it('shows both privacy actions for a mixed multi-selection and forwards the requ
   fireEvent.click(screen.getByText('隐私任务'), { ctrlKey: true });
   fireEvent.contextMenu(screen.getByText('普通任务'));
   expect(screen.getByRole('menuitem', { name: '移入隐私下载' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '移入正常下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '移入普通下载' })).toBeVisible();
 
   fireEvent.click(screen.getByRole('menuitem', { name: '移入隐私下载' }));
   expect(onBatchCommand).toHaveBeenCalledWith(['ordinary', 'private'], 'move_to_private');
@@ -1227,9 +1227,9 @@ it('keeps modifier-selected tasks together and exposes only batch-safe menu acti
   expect(secondRow).toHaveAttribute('aria-selected', 'true');
 
   fireEvent.contextMenu(screen.getByText('first.zip'), { clientX: 280, clientY: 180 });
-  expect(screen.getByRole('menu', { name: '已选择 2 个任务 任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menu', { name: '已选择 2 个任务任务菜单' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '开始下载' })).toBeVisible();
-  expect(screen.getByRole('menuitem', { name: '暂停下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '暂停' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '删除' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '复制下载链接' })).toBeVisible();
   expect(screen.queryByRole('menuitem', { name: '打开下载目录' })).not.toBeInTheDocument();
@@ -1396,7 +1396,7 @@ it('offers terminal-task deletion without showing invalid transfer commands', ()
   expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '复制下载链接' })).toBeVisible();
   expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
-  expect(screen.queryByRole('menuitem', { name: '暂停下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '暂停' })).not.toBeInTheDocument();
   expect(screen.queryByRole('menuitem', { name: '取消任务' })).not.toBeInTheDocument();
 });
 
@@ -1410,9 +1410,9 @@ it('omits terminal status text from the more-menu header', () => {
 
   fireEvent.contextMenu(screen.getByText('wallpaper 4.jpg'));
 
-  const menu = screen.getByRole('menu', { name: 'wallpaper 4.jpg 任务菜单' });
-  expect(menu).toHaveTextContent('wallpaper 4.jpg');
-  expect(menu).not.toHaveTextContent('已完成');
+  const menu = screen.getByRole('menu', { name: 'wallpaper 4.jpg任务菜单' });
+  expect(menu.querySelector('header')).toBeNull();
+  expect(menu).not.toHaveTextContent('下载完成');
 });
 
 it('dismisses the task menu with Escape', () => {

@@ -356,8 +356,8 @@ it('shows all pasted tasks in one dialog and submits one shared post-processing 
   expect(screen.getByText('目录二')).toBeVisible();
   expect(screen.getByRole('button', { name: '收起目录一' })).toBeVisible();
   expect(screen.getByText('a.zip')).toBeVisible();
-  await user.click(screen.getByRole('button', { name: '解压密码和后处理' }));
-  await user.type(screen.getByRole('textbox', { name: '解压密码和后处理' }), '密码 88in\n完成后拼接');
+  await user.click(screen.getByRole('button', { name: '后处理与密码' }));
+  await user.type(screen.getByRole('textbox', { name: '后处理与密码' }), '密码 88in\n完成后拼接');
   await user.click(screen.getByRole('button', { name: '新建任务' }));
 
   expect(onSubmitBatch).toHaveBeenCalledTimes(1);
@@ -506,7 +506,7 @@ it('uses a shorter batch dialog and vertically centers the post-processing arrow
     await screen.findByText('file.zip');
     const dialog = screen.getByRole('dialog', { name: '新建下载' });
     expect(getComputedStyle(dialog).height).toContain('520px');
-    const disclosure = screen.getByRole('button', { name: '解压密码和后处理' });
+    const disclosure = screen.getByRole('button', { name: '后处理与密码' });
     expect(getComputedStyle(disclosure).display).toBe('flex');
     expect(getComputedStyle(disclosure).alignItems).toBe('center');
     const arrow = disclosure.querySelector('svg');
@@ -652,12 +652,12 @@ it('keeps batch task rows at their content height while post-processing is expan
       onClose={vi.fn()}
     />);
 
-    expect(await screen.findByText('已选 10 个任务')).toBeVisible();
-    await user.click(screen.getByRole('button', { name: '解压密码和后处理' }));
+    expect(await screen.findByText('已选择 10 个任务')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '后处理与密码' }));
     const list = screen.getByRole('region', { name: '待新建任务' });
     expect(getComputedStyle(list).gridAutoRows).toBe('max-content');
     expect(getComputedStyle(list).alignContent).toBe('start');
-    expect(getComputedStyle(screen.getByRole('textbox', { name: '解压密码和后处理' })).flexShrink).toBe('0');
+    expect(getComputedStyle(screen.getByRole('textbox', { name: '后处理与密码' })).flexShrink).toBe('0');
   } finally {
     stylesheet.remove();
   }
@@ -797,9 +797,9 @@ it('keeps the selected task summary in the dialog title and makes only the chang
 
   expect(await screen.findByText('1 项可下载')).toBeVisible();
   const dialog = screen.getByRole('dialog', { name: '新建下载' });
-  expect(dialog.querySelector('.launcher-title')).toHaveTextContent('新建任务已选 1 个任务');
+  expect(dialog.querySelector('.launcher-title')).toHaveTextContent('新建任务已选择 1 个任务');
   const footer = dialog.querySelector('.batch-download-footer')!;
-  expect(footer).not.toHaveTextContent('已选 1 个任务');
+  expect(footer).not.toHaveTextContent('已选择 1 个任务');
   expect(screen.getByRole('button', { name: '新建隐私任务' })).toBeVisible();
 
   await user.click(screen.getByRole('button', { name: '更改' }));

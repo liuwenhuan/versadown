@@ -57,10 +57,10 @@ it('places authorized cloud submenus below My Cloud and opens their files from a
     render(<App />);
     const navigation = screen.getByRole('navigation', { name: '主导航' });
     const quark = await within(navigation).findByRole('button', { name: '夸克网盘' });
-    const pikpak = within(navigation).getByRole('button', { name: 'PikPak网盘' });
+    const pikpak = within(navigation).getByRole('button', { name: 'PikPak 网盘' });
     const labels = within(navigation).getAllByRole('button').map(button => button.textContent);
     expect(labels.indexOf('夸克网盘')).toBeGreaterThan(labels.indexOf('我的网盘'));
-    expect(labels.indexOf('PikPak网盘')).toBeLessThan(labels.indexOf('设置'));
+    expect(labels.indexOf('PikPak 网盘')).toBeLessThan(labels.indexOf('设置'));
     expect(quark.querySelector('svg')).toBeNull();
     expect(quark).toHaveStyle({ fontSize: '14px', paddingLeft: '44px' });
     expect(within(navigation).getByRole('button', { name: '我的网盘' })).toHaveStyle({ fontSize: '15px', gridTemplateColumns: '28px 1fr auto', gap: '6px', paddingLeft: '10px' });
@@ -98,7 +98,7 @@ it('adds a sidebar cloud submenu after authorization and removes it after logout
   const navigation = screen.getByRole('navigation', { name: '主导航' });
   await user.click(within(navigation).getByRole('button', { name: '我的网盘' }));
   expect(within(navigation).queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
-  const card = await screen.findByRole('region', { name: '夸克账号授权' });
+  const card = await screen.findByRole('region', { name: '夸克网盘账号授权' });
   await user.click(within(card).getByRole('button', { name: '使用网页授权' }));
   await user.click(await screen.findByRole('button', { name: '我已完成授权' }));
   expect(await within(navigation).findByRole('button', { name: '夸克网盘' })).toBeVisible();
@@ -112,7 +112,7 @@ it('adds a sidebar cloud submenu after authorization and removes it after logout
 it('renders the compact download-manager layout without browser navigation controls', async () => {
   render(<App />);
   expect(screen.getByRole('heading', { name: '万能下载' })).toBeVisible();
-  expect(screen.getByPlaceholderText('此处可搜索本地任务，粘贴下载链接，拖入bt种子文件')).toBeVisible();
+  expect(screen.getByPlaceholderText('此处可搜索本地任务，粘贴下载链接，拖入 BT 种子文件')).toBeVisible();
   expect(screen.queryByRole('button', { name: '新建下载' })).not.toBeInTheDocument();
   expect(screen.getByRole('tab', { name: /全部/ })).toBeVisible();
   expect(screen.getByRole('tab', { name: /下载中/ })).toBeVisible();

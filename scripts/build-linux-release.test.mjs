@@ -75,7 +75,12 @@ test('builds only Linux bundles and publishes all packages with valid checksums'
   assert.equal(readFileSync(join(output, deb), 'utf8'), 'deb-payload');
   assert.equal(readFileSync(join(output, rpm), 'utf8'), 'rpm-payload');
   assert.equal(readFileSync(join(output, appImage), 'utf8'), 'appimage-payload');
-  const checksum = spawnSync('sha256sum', ['--check', 'SHA256SUMS'], { cwd: output, encoding: 'utf8' });
+  // sha256sum localizes its verdict ("成功" on zh_CN); pin the C locale.
+  const checksum = spawnSync('sha256sum', ['--check', 'SHA256SUMS'], {
+    cwd: output,
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C' },
+  });
   assert.equal(checksum.status, 0, checksum.stderr);
   assert.match(checksum.stdout, /VersaDown_0\.1\.0_amd64\.deb: OK/);
   assert.match(checksum.stdout, /VersaDown-0\.1\.0-1\.x86_64\.rpm: OK/);

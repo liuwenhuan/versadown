@@ -5,6 +5,7 @@ import { vi } from 'vitest';
 import { CloudManager as NativeCloudManager, type CloudManagerProps } from './CloudManager';
 import type { CloudProvider } from '../lib/cloudTypes';
 import { cloudCatalog, cloudRecycleBinDirectoryId, cloudRootDirectoryId } from '../test/cloudCatalog';
+import { setLocalePreference, t } from '../i18n';
 
 function CloudManager(props: Omit<CloudManagerProps, 'descriptor'>) {
   return <NativeCloudManager descriptor={cloudCatalog.find(d => d.provider === props.provider)!} {...props} />;
@@ -24,6 +25,23 @@ it('refreshes a cached directory when its account is renewed externally', async 
   await screen.findByText('会话连接已断开');
   view.rerender(<CloudManager provider="quark" client={client} initialAccount={{ ...account }} restoreOnMount={false} showSessionActions={false} />);
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
+});
+
+it('shows the preparing notice before the first upload progress in a non-Chinese locale', async () => {
+  await setLocalePreference('en');
+  try {
+    const user = userEvent.setup();
+    const client = createCloudFake({ uploadCloudFiles: vi.fn(() => new Promise(() => undefined)) });
+    render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+    await screen.findByRole('tree');
+    await user.click(screen.getByRole('button', { name: t('cloud.action.upload'), exact: true }));
+    const picker = await screen.findByRole('dialog', { name: t('upload.selectContent') });
+    await user.click(await within(picker).findByRole('checkbox', { name: t('upload.selectCurrentFolder') }));
+    await user.click(within(picker).getByRole('button', { name: t('upload.confirm') }));
+    expect(await screen.findByText(t('cloud.upload.preparing'))).toBeVisible();
+  } finally {
+    await setLocalePreference('auto');
+  }
 });
 
 it('shows live upload bytes, speed and confirmation phase in the existing operation notice', async () => {
@@ -95,9 +113,9 @@ it('controls the current upload with pause resume and cancel and preserves compl
   expect(screen.getByText(/25 B\/s/)).toBeVisible();
   await user.click(await screen.findByRole('button', { name: '取消上传' }));
   expect(controlCloudUpload.mock.calls).toEqual(['pause', 'resume', 'cancel'].map(action => ['quark', 'upload-1', action]));
-  expect(await screen.findByRole('button', { name: '正在取消…' })).toBeDisabled();
+  expect(await screen.findByRole('button', { name: '正在取消上传…' })).toBeDisabled();
   await act(async () => { receive({ ...progress, phase: 'cancelled', speedBytesPerSecond: 0 }); finish({ uploaded: [{ id: 'done', name: 'a.txt', kind: 'file', parentId: '0' }], failures: [{ inputIndex: 1, itemName: 'b.txt', code: 'upload_cancelled', message: '上传已取消' }], cancelled: true }); });
-  expect(await screen.findByText('上传已取消，已保留 1 项上传结果')).toBeVisible();
+  expect(await screen.findByText('上传已取消，已保留 1 项上传结果。')).toBeVisible();
   expect(screen.queryByRole('button', { name: '暂停上传' })).not.toBeInTheDocument();
   expect(screen.queryByText(/失败 1 项/)).not.toBeInTheDocument();
 });
@@ -309,11 +327,11 @@ it('uses catalog authorization and directory identifiers instead of provider def
   const client = createCloudFake();
   const descriptor = { ...cloudCatalog[0], displayName: '目录名称', rootDirectoryId: 'custom-root', recycleBinDirectoryId: 'custom-trash', authorization: { provider: 'quark' as const, web: false, password: true, passwordLoginMode: 'rustDirect' as const } };
   const { rerender } = render(<NativeCloudManager descriptor={descriptor} provider="quark" client={client} authorizationOnly />);
-  expect(screen.getByRole('region', { name: '目录名称账号授权' })).toBeVisible();
+  expect(screen.getByRole('region', { name: '夸克网盘账号授权' })).toBeVisible();
   expect(screen.getByLabelText('账号')).toBeVisible();
   expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
   rerender(<NativeCloudManager key="files" descriptor={descriptor} provider="quark" client={client} initialAccount={{ id: 'q1', provider: 'quark', displayName: 'q', authMethod: 'web' }} restoreOnMount={false} />);
-  await screen.findByRole('tree', { name: '目录名称网盘文件' });
+  await screen.findByRole('tree', { name: '夸克网盘文件' });
   expect(client.listCloudDirectory).toHaveBeenCalledWith('quark', 'custom-root');
   expect(screen.getByRole('treeitem', { name: /回收站/ })).toBeVisible();
 });
@@ -386,7 +404,7 @@ it('replaces file details with a sharing dialog that submits the selected files 
   await user.click(screen.getByRole('menuitem', { name: '分享' }));
   const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
   await user.type(within(dialog).getByRole('textbox', { name: '提取码' }), 'a7b2');
-  await user.selectOptions(within(dialog).getByRole('combobox', { name: '分享有效期' }), '7');
+  await user.selectOptions(within(dialog).getByRole('combobox', { name: '有效期' }), '7');
   await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
 
   expect(createCloudShare).toHaveBeenCalledWith('quark', ['file-1'], { name: '报告.pdf', passCode: 'a7b2', expiresInDays: 7 });
@@ -704,7 +722,7 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
       expect(getComputedStyle(list).minHeight).toBe('0');
       expect(getComputedStyle(list).overflowX).toBe('hidden');
       const refresh = screen.getByRole('button', { name: '刷新' });
-      const breadcrumbs = screen.getByRole('navigation', { name: '当前目录' });
+      const breadcrumbs = screen.getByRole('navigation', { name: /^当前目录：/ });
       expect(refresh.compareDocumentPosition(breadcrumbs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
       expect(getComputedStyle(refresh).display).toBe('grid');
       expect(getComputedStyle(refresh).placeItems).toBe('center');
@@ -868,7 +886,7 @@ it('never creates account switching tabs inside one provider manager', async () 
 it('keeps the unauthenticated provider card focused on the available sign-in action', async () => {
   render(<CloudManager provider="quark" client={createCloudFake()} />);
 
-  expect(screen.getByRole('region', { name: '夸克账号授权' })).toBeVisible();
+  expect(screen.getByRole('region', { name: '夸克网盘账号授权' })).toBeVisible();
   expect(screen.queryByText('自有网盘 · 本地会话')).not.toBeInTheDocument();
   expect(screen.queryByText(/授权完成前不会显示或加载任何文件/)).not.toBeInTheDocument();
   expect(screen.queryByText(/夸克未提供可用的账号密码开放登录接口/)).not.toBeInTheDocument();
@@ -881,8 +899,8 @@ it('keeps the unauthenticated provider card focused on the available sign-in act
 });
 
 it.each([
-  ['quark', '夸克', false], ['pikpak', 'PikPak', true], ['baidu', '百度', true], ['tianyi', '天翼', true],
-  ['aliyun', '阿里', false], ['xunlei', '迅雷', true], ['uc', 'UC', false]
+  ['quark', '夸克网盘', false], ['pikpak', 'PikPak 网盘', true], ['baidu', '百度网盘', true], ['tianyi', '天翼云盘', true],
+  ['aliyun', '阿里云盘', false], ['xunlei', '迅雷网盘', true], ['uc', 'UC 网盘', false]
 ] as const)('keeps the %s login card concise while prioritizing its supported login method', async (provider, label, supportsPasswordLogin) => {
   const client = createCloudFake({ getCloudAuthorizationCapabilities: vi.fn().mockReturnValue(new Promise<never>(() => undefined)) });
   render(<CloudManager provider={provider} client={client} authorizationOnly />);
@@ -905,49 +923,49 @@ it.each([
 });
 
 it.each([
-  ['quark', '夸克', 'https://pan.quark.cn'],
-  ['pikpak', 'PikPak', 'https://mypikpak.com/drive'],
-  ['baidu', '百度', 'https://pan.baidu.com'],
-  ['tianyi', '天翼', 'https://cloud.189.cn'],
-  ['aliyun', '阿里', 'https://www.aliyundrive.com/drive'],
-  ['xunlei', '迅雷', 'https://pan.xunlei.com'],
-  ['uc', 'UC', 'https://drive.uc.cn']
+  ['quark', '夸克网盘', 'https://pan.quark.cn'],
+  ['pikpak', 'PikPak 网盘', 'https://mypikpak.com/drive'],
+  ['baidu', '百度网盘', 'https://pan.baidu.com'],
+  ['tianyi', '天翼云盘', 'https://cloud.189.cn'],
+  ['aliyun', '阿里云盘', 'https://www.aliyundrive.com/drive'],
+  ['xunlei', '迅雷网盘', 'https://pan.xunlei.com'],
+  ['uc', 'UC 网盘', 'https://drive.uc.cn']
 ] as const)('shows the %s provider information inside its authorization card', async (provider, label, authorizationUrl) => {
   const user = userEvent.setup();
   const descriptor = { ...cloudCatalog.find(item => item.provider === provider)!, authorizationUrl };
   render(<NativeCloudManager descriptor={descriptor} provider={provider} client={createCloudFake()} authorizationOnly />);
   const card = screen.getByRole('region', { name: `${label}账号授权` });
 
-  await user.click(screen.getByRole('button', { name: `查看${label}网盘信息` }));
+  await user.click(screen.getByRole('button', { name: `查看${label}信息` }));
 
-  expect(screen.queryByRole('dialog', { name: `${label}网盘信息` })).not.toBeInTheDocument();
-  const info = within(card).getByRole('region', { name: `${label}网盘信息` });
-  expect(within(info).getByRole('link', { name: `${label}网盘官方网站` })).toHaveAttribute('href', authorizationUrl);
+  expect(screen.queryByRole('dialog', { name: `${label}信息` })).not.toBeInTheDocument();
+  const info = within(card).getByRole('region', { name: `${label}信息` });
+  expect(within(info).getByRole('link', { name: `${label}官方网站` })).toHaveAttribute('href', authorizationUrl);
   expect(within(info).getByRole('link', { name: '插件制作者 aigutta' })).toHaveAttribute('href', 'https://versadown.aigutta.com');
-  const close = within(card).getByRole('button', { name: `关闭${label}网盘信息` });
+  const close = within(card).getByRole('button', { name: `关闭${label}信息` });
   expect(close).toHaveTextContent('×');
   await user.click(close);
-  expect(within(card).queryByRole('region', { name: `${label}网盘信息` })).not.toBeInTheDocument();
-  expect(within(card).getByRole('button', { name: `查看${label}网盘信息` })).toBeVisible();
+  expect(within(card).queryByRole('region', { name: `${label}信息` })).not.toBeInTheDocument();
+  expect(within(card).getByRole('button', { name: `查看${label}信息` })).toBeVisible();
 });
 
 it('shows the PikPak regional and Xunlei SVIP notices from their information buttons', async () => {
   const user = userEvent.setup();
   const pikpak = { ...cloudCatalog.find(item => item.provider === 'pikpak')!, authorizationUrl: 'https://mypikpak.com/drive' };
   const view = render(<NativeCloudManager descriptor={pikpak} provider="pikpak" client={createCloudFake()} authorizationOnly />);
-  await user.click(screen.getByRole('button', { name: '查看PikPak网盘信息' }));
-  expect(screen.getByRole('region', { name: 'PikPak网盘信息' })).toHaveTextContent('此网盘中国大陆无法直接访问');
+  await user.click(screen.getByRole('button', { name: '查看PikPak 网盘信息' }));
+  expect(screen.getByRole('region', { name: 'PikPak 网盘信息' })).toHaveTextContent('此网盘在中国大陆可能无法直接访问。');
 
   const xunlei = { ...cloudCatalog.find(item => item.provider === 'xunlei')!, authorizationUrl: 'https://pan.xunlei.com' };
   view.unmount();
   const xunleiView = render(<NativeCloudManager descriptor={xunlei} provider="xunlei" client={createCloudFake()} authorizationOnly />);
   await user.click(screen.getByRole('button', { name: '查看迅雷网盘信息' }));
-  expect(screen.getByRole('region', { name: '迅雷网盘信息' })).toHaveTextContent('安装迅雷官方客户端后方可使用SVIP下载通道。');
+  expect(screen.getByRole('region', { name: '迅雷网盘信息' })).toHaveTextContent('安装迅雷官方客户端后方可使用 SVIP 下载通道。');
 
   xunleiView.unmount();
   render(<CloudManager provider="quark" client={createCloudFake()} authorizationOnly />);
   await user.click(screen.getByRole('button', { name: '查看夸克网盘信息' }));
-  expect(screen.getByRole('region', { name: '夸克网盘信息' })).not.toHaveTextContent('中国大陆无法直接访问');
+  expect(screen.getByRole('region', { name: '夸克网盘信息' })).not.toHaveTextContent('中国大陆可能无法直接访问');
 });
 
 it('shows Tianyi device-lock guidance and keeps provider information available after authorization', async () => {
@@ -955,17 +973,17 @@ it('shows Tianyi device-lock guidance and keeps provider information available a
   const descriptor = { ...cloudCatalog.find(item => item.provider === 'tianyi')!, authorizationUrl: 'https://cloud.189.cn' };
   render(<NativeCloudManager descriptor={descriptor} provider="tianyi" client={createCloudFake()} authorizationOnly initialAccount={{ id: 't-1', displayName: 'alice', provider: 'tianyi', authMethod: 'password' }} restoreOnMount={false} />);
 
-  await user.click(screen.getByRole('button', { name: '查看天翼网盘信息' }));
-  const info = screen.getByRole('region', { name: '天翼网盘信息' });
+  await user.click(screen.getByRole('button', { name: '查看天翼云盘信息' }));
+  const info = screen.getByRole('region', { name: '天翼云盘信息' });
   expect(info).toHaveTextContent('如果通过账号和密码登录，推荐登录门户网址');
-  expect(info).toHaveTextContent('点击“账号安全”，关闭“设备锁”，这样无需每次登录做短信认证。');
+  expect(info).toHaveTextContent('然后点击“账号安全”，关闭“设备锁”，这样无需每次登录都进行短信认证。');
   expect(within(info).getByRole('link', { name: '天翼账号登录门户' })).toHaveAttribute('href', 'https://e.dlife.cn');
 });
 
 it.each([
-  ['aliyun', '阿里'],
-  ['xunlei', '迅雷'],
-  ['uc', 'UC']
+  ['aliyun', '阿里云盘'],
+  ['xunlei', '迅雷网盘'],
+  ['uc', 'UC 网盘']
 ] as const)('keeps the account and offers official WebView recovery for %s', async (provider, label) => {
   const client = createCloudFake({ listCloudDirectory: vi.fn().mockRejectedValue({ code: 'web_auth_required', message: 'verification required' }) });
   render(<CloudManager provider={provider} client={client} initialAccount={{ id: `${provider}-account`, displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
@@ -1010,23 +1028,23 @@ it('recovers an existing account on mount before loading its root directory', as
   const client = createCloudFake({ getCloudAccount: vi.fn().mockResolvedValue({ id: 'saved-1', displayName: 'saved-alice', provider: 'quark', authMethod: 'web' }) });
   render(<CloudManager provider="quark" client={client} />);
 
-  expect(await screen.findByRole('region', { name: '夸克文件管理器' })).toBeVisible();
+  expect(await screen.findByRole('region', { name: '夸克网盘文件管理器' })).toBeVisible();
   expect(client.listCloudDirectory).toHaveBeenCalledWith('quark', '0');
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
 });
 
 it.each([
-  ['baidu', '百度', '/'],
-  ['tianyi', '天翼', '-11'],
-  ['aliyun', '阿里', 'root'],
-  ['xunlei', '迅雷', '0']
+  ['baidu', '百度网盘', '/'],
+  ['tianyi', '天翼云盘', '-11'],
+  ['aliyun', '阿里云盘', 'root'],
+  ['xunlei', '迅雷网盘', '0']
 ] as const)('uses the native root identifier for %s', async (provider, label, root) => {
   const client = createCloudFake({
     getCloudAccount: vi.fn().mockResolvedValue({ id: `${provider}-account`, displayName: 'alice', provider, authMethod: 'web' })
   });
   render(<CloudManager provider={provider} client={client} />);
 
-  expect(await screen.findByRole('tree', { name: `${label}网盘文件` })).toBeVisible();
+  expect(await screen.findByRole('tree', { name: `${label}文件` })).toBeVisible();
   expect(client.listCloudDirectory).toHaveBeenCalledWith(provider, root);
 });
 
@@ -1055,7 +1073,7 @@ it('automatically completes web authorization and loads the authorized account',
 
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await act(async () => { client.emitAuthorization({ id: 'second', displayName: 'alice', provider: 'quark', authMethod: 'web' }); });
-  expect(await screen.findByRole('region', { name: '夸克文件管理器' }, { timeout: 1500 })).toBeVisible();
+  expect(await screen.findByRole('region', { name: '夸克网盘文件管理器' }, { timeout: 1500 })).toBeVisible();
   expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
   expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
 });
@@ -1154,7 +1172,7 @@ it('logs out only after confirmation and returns to the authorization boundary',
   expect(client.logoutCloud).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: '确认退出授权' }));
   expect(client.logoutCloud).toHaveBeenCalledWith('quark');
-  expect(await screen.findByRole('region', { name: '夸克账号授权' })).toBeVisible();
+  expect(await screen.findByRole('region', { name: '夸克网盘账号授权' })).toBeVisible();
   expect(screen.queryByRole('tree', { name: '夸克网盘文件' })).not.toBeInTheDocument();
 });
 
@@ -1166,13 +1184,13 @@ it('accepts the authorized single account and drives the injected directory oper
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
 
-  expect(await screen.findByRole('region', { name: '夸克文件管理器' })).toBeVisible();
+  expect(await screen.findByRole('region', { name: '夸克网盘文件管理器' })).toBeVisible();
   expect(screen.getByRole('tree', { name: '夸克网盘文件' })).toBeVisible();
   expect(screen.getByText('报告.pdf')).toBeVisible();
 
   await user.dblClick(screen.getByText('归档'));
   expect(await screen.findByText('说明.txt')).toBeVisible();
-  expect(screen.getByRole('navigation', { name: '当前目录' })).toHaveTextContent('根目录');
+  expect(screen.getByRole('navigation', { name: /^当前目录：/ })).toHaveTextContent('根目录');
   expect(client.listCloudDirectory).toHaveBeenLastCalledWith('quark', 'folder-1');
 
   await user.click(screen.getByRole('button', { name: '新建目录' }));
@@ -1210,7 +1228,7 @@ it('keeps file controls on one line and preserves full breadcrumb names in toolt
   expect(screen.getByLabelText('文件操作')).toHaveClass('cloud-toolbar--single-line');
 
   await user.dblClick(screen.getByText('归档'));
-  const navigation = screen.getByRole('navigation', { name: '当前目录' });
+  const navigation = screen.getByRole('navigation', { name: /^当前目录：/ });
   expect(within(navigation).getByRole('button', { name: '归档' })).toHaveAttribute('title', '归档');
 });
 
@@ -1379,8 +1397,8 @@ it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as cons
     expect(screen.queryByRole('button', { name: '返回上一级' })).not.toBeInTheDocument();
     await user.dblClick(screen.getByText('子目录'));
     const parentRow = await screen.findByRole('treeitem', { name: '返回上一级目录' });
-    expect(parentRow).toHaveTextContent('返回上级目录');
-    expect(within(parentRow).getByRole('checkbox', { name: '选择 返回上级目录' })).toBeDisabled();
+    expect(parentRow).toHaveTextContent('返回上一级目录');
+    expect(within(parentRow).getByRole('checkbox', { name: '选择 返回上一级目录' })).toBeDisabled();
     await user.click(parentRow);
     await waitFor(() => expect(listCloudDirectory).toHaveBeenLastCalledWith(provider, cloudRootDirectoryId[provider]));
   }
@@ -1400,8 +1418,8 @@ it.each(['回收站', '我的分享'] as const)(
 
     await user.dblClick(await screen.findByText(virtualFolder, { exact: true }));
     const parentRow = await screen.findByRole('treeitem', { name: '返回上一级目录' });
-    expect(parentRow).toHaveTextContent('返回上级目录');
-    expect(within(parentRow).getByRole('checkbox', { name: '选择 返回上级目录' })).toBeDisabled();
+    expect(parentRow).toHaveTextContent('返回上一级目录');
+    expect(within(parentRow).getByRole('checkbox', { name: '选择 返回上一级目录' })).toBeDisabled();
     await user.click(parentRow);
 
     await waitFor(() => expect(listCloudDirectory).toHaveBeenLastCalledWith(provider, cloudRootDirectoryId[provider]));
@@ -1480,11 +1498,11 @@ it('keeps an authorization card at the connected-card height while its provider 
     render(<div className="cloud-provider-auths"><CloudManager provider="uc" client={createCloudFake()} authorizationOnly initialAccount={{ id: 'uc-1', displayName: 'alice', provider: 'uc', authMethod: 'web' }} restoreOnMount={false} /></div>);
 
     await act(async () => { await Promise.resolve(); });
-    const card = screen.getByRole('region', { name: 'UC账号授权' });
+    const card = screen.getByRole('region', { name: 'UC 网盘账号授权' });
     expect(getComputedStyle(card).minHeight).toBe('168px');
 
-    await user.click(screen.getByRole('button', { name: '查看UC网盘信息' }));
-    expect(screen.getByRole('region', { name: 'UC网盘信息' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '查看UC 网盘信息' }));
+    expect(screen.getByRole('region', { name: 'UC 网盘信息' })).toBeVisible();
     expect(getComputedStyle(card).minHeight).toBe('168px');
   } finally {
     stylesheet.remove();
@@ -1579,11 +1597,11 @@ it('closes the destination picker and requires official web authorization when i
   fireEvent.contextMenu(screen.getByText('报告.pdf'), { clientX: 300, clientY: 240 });
   await user.click(screen.getByRole('menuitem', { name: '移动' }));
 
-  expect(await screen.findByRole('button', { name: '打开 迅雷 授权并继续选择移动目标' })).toBeVisible();
+  expect(await screen.findByRole('button', { name: '打开 迅雷网盘 授权并继续选择移动目标' })).toBeVisible();
   expect(screen.queryByRole('dialog', { name: '选择移动位置' })).not.toBeInTheDocument();
-  expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
+  expect(screen.getByRole('region', { name: '迅雷网盘文件管理器' })).toBeVisible();
   expect(client.moveCloudFiles).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('button', { name: '打开 迅雷 授权并继续选择移动目标' }));
+  await user.click(screen.getByRole('button', { name: '打开 迅雷网盘 授权并继续选择移动目标' }));
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
   await act(async () => { client.emitAuthorization({ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }); });
   expect(await screen.findByRole('dialog', { name: '选择移动位置' })).toBeVisible();
@@ -1614,7 +1632,7 @@ it('normalizes provider modified times in the list while preserving valid Tianyi
   });
   render(<CloudManager provider="tianyi" client={client} initialAccount={{ id: 't-1', displayName: 'alice', provider: 'tianyi', authMethod: 'web' }} restoreOnMount={false} />);
 
-  const tree = await screen.findByRole('tree', { name: '天翼网盘文件' });
+  const tree = await screen.findByRole('tree', { name: '天翼云盘文件' });
   expect(within(tree).getByText('seconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
   expect(within(tree).getByText('milliseconds.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
   expect(within(tree).getByText('iso.txt').closest('[role="treeitem"]')).toHaveTextContent(localTimestamp);
@@ -1688,9 +1706,9 @@ it('renders an inline authorization continuation when the initial directory cred
   await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await user.click(screen.getByRole('button', { name: '我已完成授权' }));
   expect(await screen.findByRole('alert')).toHaveTextContent('会话失效');
-  expect(screen.getByRole('button', { name: '打开 PikPak 授权并继续加载目录' })).toBeVisible();
-  expect(screen.getByRole('region', { name: 'PikPak文件管理器' })).toBeVisible();
-  expect(screen.queryByRole('tree', { name: 'PikPak网盘文件' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '打开 PikPak 网盘 授权并继续加载目录' })).toBeVisible();
+  expect(screen.getByRole('region', { name: 'PikPak 网盘文件管理器' })).toBeVisible();
+  expect(screen.queryByRole('tree', { name: 'PikPak 网盘文件' })).not.toBeInTheDocument();
 });
 
 it('requires a recycle-bin confirmation before deleting selected files', async () => {
@@ -1792,7 +1810,7 @@ it('limits PikPak recycle-bin items to restore and permanent deletion without fo
 
   await screen.findByText('回收站');
   fireEvent.doubleClick(screen.getByText('回收站'));
-  const tree = await screen.findByRole('tree', { name: 'PikPak网盘文件' });
+  const tree = await screen.findByRole('tree', { name: 'PikPak 网盘文件' });
   await screen.findByText('已删除文件.txt');
   expect(screen.queryByRole('button', { name: '上传' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '新建目录' })).not.toBeInTheDocument();
@@ -1893,7 +1911,7 @@ it('treats the root PikPak recycle-bin folder as navigation-only', async () => {
   await user.click(recycleBin);
   expect(screen.queryByRole('toolbar', { name: /已选择/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '下载' })).not.toBeInTheDocument();
-  fireEvent.keyDown(screen.getByRole('tree', { name: 'PikPak网盘文件' }), { key: 'Delete' });
+  fireEvent.keyDown(screen.getByRole('tree', { name: 'PikPak 网盘文件' }), { key: 'Delete' });
   expect(screen.queryByRole('alertdialog', { name: '确认移入回收站' })).not.toBeInTheDocument();
 
   fireEvent.contextMenu(recycleBin, { clientX: 300, clientY: 240 });
@@ -1969,7 +1987,7 @@ it('requires an ordinary-download confirmation before queuing a cloud file when 
   await user.click(screen.getByRole('checkbox', { name: '选择 报告.pdf' }));
   await user.click(screen.getByRole('button', { name: '下载' }));
 
-  const confirmation = screen.getByRole('alertdialog', { name: '确认下载' });
+  const confirmation = screen.getByRole('alertdialog', { name: '确认下载内容' });
   expect(downloadCloudFile).not.toHaveBeenCalled();
   await user.click(within(confirmation).getByRole('button', { name: '立即下载' }));
 
@@ -1987,7 +2005,7 @@ it('marks a selected cloud folder private only after the private-download confir
   await user.click(screen.getByRole('checkbox', { name: '选择 归档' }));
   await user.click(screen.getByRole('button', { name: '下载' }));
 
-  const confirmation = screen.getByRole('alertdialog', { name: '确认下载' });
+  const confirmation = screen.getByRole('alertdialog', { name: '确认下载内容' });
   expect(downloadCloudDirectory).not.toHaveBeenCalled();
   await user.click(within(confirmation).getByRole('button', { name: '隐私下载' }));
 
@@ -2030,9 +2048,9 @@ it('keeps the current file list visible when a cloud operation fails', async () 
 });
 
 it.each([
-  ['pikpak', 'PikPak'],
-  ['baidu', '百度'],
-  ['xunlei', '迅雷']
+  ['pikpak', 'PikPak 网盘'],
+  ['baidu', '百度网盘'],
+  ['xunlei', '迅雷网盘']
 ] as const)('offers %s reauthorization after a download requires official web verification', async (provider, label) => {
   const user = userEvent.setup();
   const client = createCloudFake({
@@ -2043,7 +2061,7 @@ it.each([
   });
   render(<CloudManager provider={provider} client={client} initialAccount={{ id: 'account-1', displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
 
-  await screen.findByRole('tree', { name: `${label}网盘文件` });
+  await screen.findByRole('tree', { name: `${label}文件` });
   await user.click(screen.getByText('报告.pdf'));
   await user.click(screen.getByRole('button', { name: '下载' }));
 
@@ -2074,7 +2092,7 @@ it('reauthorizes from the operation error and resumes the exact recycle-bin acti
   await user.click(screen.getByRole('button', { name: '永久删除' }));
   await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
 
-  const continueButton = await screen.findByRole('button', { name: '打开 PikPak 授权并继续永久删除' });
+  const continueButton = await screen.findByRole('button', { name: '打开 PikPak 网盘 授权并继续永久删除' });
   expect(deleteCloudFiles).toHaveBeenCalledTimes(1);
   await user.click(continueButton);
   await act(async () => { client.emitAuthorization({ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }); });
@@ -2093,12 +2111,12 @@ it('does not resume a protected operation when authorization returns another acc
 
   await user.click(await screen.findByText('报告.pdf'));
   await user.click(screen.getByRole('button', { name: '下载' }));
-  await user.click(await screen.findByRole('button', { name: '打开 PikPak 授权并继续下载' }));
+  await user.click(await screen.findByRole('button', { name: '打开 PikPak 网盘 授权并继续下载' }));
   await act(async () => { client.emitAuthorization({ id: 'p-2', displayName: 'bob', provider: 'pikpak', authMethod: 'web' }); });
 
   expect(downloadCloudFile).toHaveBeenCalledTimes(1);
   expect(await screen.findByRole('alert')).toHaveTextContent('授权账号与当前会话不一致');
-  expect(screen.getByRole('button', { name: '打开 PikPak 授权并继续下载' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 PikPak 网盘 授权并继续下载' })).toBeVisible();
 });
 
 it('opens PikPak operation verification without reauthorizing or replaying permanent deletion', async () => {
@@ -2224,7 +2242,7 @@ it('preserves the Xunlei account, directory and rejection when renewed authoriza
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
 
     expect(client.completeCloudAuthorization).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
+    expect(screen.getByRole('region', { name: '迅雷网盘文件管理器' })).toBeVisible();
     expect(screen.getByText('报告.pdf')).toBeVisible();
     expect(screen.getByRole('alert')).toHaveTextContent('迅雷拒绝了本次授权验证。');
     expect(screen.getByRole('button', { name: '重新网页授权' })).toBeVisible();
@@ -2245,7 +2263,7 @@ it.each(['web_auth_required', 'credentials_expired'])('recovers Xunlei initial d
   await user.click(await screen.findByRole('button', { name: '重新网页授权' }));
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
   await act(async () => { client.emitAuthorization({ id: 'account-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }); });
-  expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
+  expect(screen.getByRole('region', { name: '迅雷网盘文件管理器' })).toBeVisible();
   expect(await screen.findByText('恢复后的文件.txt', {}, { timeout: 2_000 })).toBeVisible();
   expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
 });
@@ -2274,7 +2292,7 @@ it('resumes loading the requested nested directory instead of returning to the r
   render(<CloudManager provider="uc" client={client} initialAccount={{ id: 'uc-1', displayName: 'alice', provider: 'uc', authMethod: 'web' }} restoreOnMount={false} />);
 
   await user.dblClick(await screen.findByText('资料'));
-  await user.click(await screen.findByRole('button', { name: '打开 UC 授权并继续加载目录' }));
+  await user.click(await screen.findByRole('button', { name: '打开 UC 网盘 授权并继续加载目录' }));
   await act(async () => { client.emitAuthorization({ id: 'uc-1', displayName: 'alice', provider: 'uc', authMethod: 'web' }); });
 
   expect(await screen.findByText('内容.txt')).toBeVisible();
@@ -2301,7 +2319,7 @@ it.each(['web_auth_required', 'credentials_expired'])('keeps the Xunlei account 
     await act(async () => { await Promise.resolve(); });
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
 
-    expect(screen.getByRole('region', { name: '迅雷文件管理器' })).toBeVisible();
+    expect(screen.getByRole('region', { name: '迅雷网盘文件管理器' })).toBeVisible();
     expect(screen.getByText('报告.pdf')).toBeVisible();
     expect(client.logoutCloud).not.toHaveBeenCalled();
     expect(onAccountLoggedOut).not.toHaveBeenCalled();
@@ -2379,10 +2397,10 @@ it('keeps selected upload paths and retries only authorization-failed files afte
   });
   render(<CloudManager provider="pikpak" client={client} initialAccount={{ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }} restoreOnMount={false} />);
 
-  await screen.findByRole('tree', { name: 'PikPak网盘文件' });
+  await screen.findByRole('tree', { name: 'PikPak 网盘文件' });
   await user.click(screen.getByRole('button', { name: '上传' }));
   await confirmAllLocalUploads(user);
-  await user.click(await screen.findByRole('button', { name: '打开 PikPak 授权并继续上传' }));
+  await user.click(await screen.findByRole('button', { name: '打开 PikPak 网盘 授权并继续上传' }));
   await act(async () => { client.emitAuthorization({ id: 'p-1', displayName: 'alice', provider: 'pikpak', authMethod: 'web' }); });
 
   await waitFor(() => expect(uploadCloudFiles).toHaveBeenCalledTimes(2));
@@ -2457,36 +2475,30 @@ it('opens Baidu recycle-bin verification and waits for an explicit retry of perm
 });
 
 it('localizes a Baidu verification account mismatch without retrying permanent deletion', async () => {
-  const previousLanguage = document.documentElement.lang;
-  document.documentElement.lang = 'en';
-  try {
-    const user = userEvent.setup();
-    const recycleBinId = cloudRecycleBinDirectoryId.baidu;
-    const deleteCloudFiles = vi.fn().mockRejectedValueOnce({ code: 'baidu_operation_verification_required' });
-    const completeCloudOperationVerification = vi.fn().mockRejectedValue({ code: 'account_mismatch', message: '验证账号不一致' });
-    const client = createCloudFake({
-      deleteCloudFiles,
-      openCloudOperationVerification: vi.fn().mockResolvedValue(undefined),
-      completeCloudOperationVerification,
-      listCloudDirectory: vi.fn().mockImplementation((_provider: CloudProvider, parentId = '/') => Promise.resolve(parentId === recycleBinId
-        ? { id: recycleBinId, items: [{ id: '987', parentId: recycleBinId, name: 'verify.txt', kind: 'file', size: 12 }] }
-        : { id: parentId, items: [] })),
-    });
-    render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+  const user = userEvent.setup();
+  const recycleBinId = cloudRecycleBinDirectoryId.baidu;
+  const deleteCloudFiles = vi.fn().mockRejectedValueOnce({ code: 'baidu_operation_verification_required' });
+  const completeCloudOperationVerification = vi.fn().mockRejectedValue({ code: 'account_mismatch', message: '验证账号不一致' });
+  const client = createCloudFake({
+    deleteCloudFiles,
+    openCloudOperationVerification: vi.fn().mockResolvedValue(undefined),
+    completeCloudOperationVerification,
+    listCloudDirectory: vi.fn().mockImplementation((_provider: CloudProvider, parentId = '/') => Promise.resolve(parentId === recycleBinId
+      ? { id: recycleBinId, items: [{ id: '987', parentId: recycleBinId, name: 'verify.txt', kind: 'file', size: 12 }] }
+      : { id: parentId, items: [] })),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
 
-    await user.dblClick(await screen.findByText('回收站'));
-    await user.click(await screen.findByText('verify.txt'));
-    await user.click(screen.getByRole('button', { name: '永久删除' }));
-    await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
-    await user.click(await screen.findByRole('button', { name: 'Open Baidu recycle bin for verification' }));
-    await user.click(screen.getByRole('button', { name: 'I have verified' }));
+  await user.dblClick(await screen.findByText('回收站'));
+  await user.click(await screen.findByText('verify.txt'));
+  await user.click(screen.getByRole('button', { name: '永久删除' }));
+  await user.click(within(screen.getByRole('alertdialog', { name: '确认永久删除' })).getByRole('button', { name: '永久删除', exact: true }));
+  await user.click(await screen.findByRole('button', { name: '打开百度网盘官方回收站验证' }));
+  await user.click(screen.getByRole('button', { name: '我已完成验证' }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('The verified account does not match the current session.');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('验证账号不一致');
-    expect(deleteCloudFiles).toHaveBeenCalledTimes(1);
-  } finally {
-    document.documentElement.lang = previousLanguage;
-  }
+  expect(await screen.findByRole('alert')).toHaveTextContent('验证账号与当前会话不一致。请使用原账号完成验证。');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('验证账号不一致');
+  expect(deleteCloudFiles).toHaveBeenCalledTimes(1);
 });
 
 it.each(['quark', 'pikpak', 'baidu', 'tianyi', 'aliyun', 'xunlei', 'uc'] as const)('retries the server-backed directory listing until an uploaded %s file is visible', async (provider) => {
@@ -2569,7 +2581,7 @@ it('refreshes an upload outcome before offering inline reauthorization for expir
   await confirmAllLocalUploads(user);
   expect(await screen.findByRole('alert')).toHaveTextContent('上传需要网页验证');
   expect(screen.getByRole('alert')).toHaveTextContent('登录已过期');
-  expect(screen.getByRole('button', { name: '打开 夸克 授权并继续上传' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 夸克网盘 授权并继续上传' })).toBeVisible();
   expect(listCloudDirectory).toHaveBeenCalledTimes(2);
 });
 
@@ -2595,7 +2607,7 @@ it('automatically completes a renewed web authorization after credentials expire
   render(<CloudManager provider="quark" client={client} initialAccount={{ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
 
   expect(await screen.findByRole('alert')).toHaveTextContent('会话失效');
-  await user.click(await screen.findByRole('button', { name: '打开 夸克 授权并继续加载目录' }));
+  await user.click(await screen.findByRole('button', { name: '打开 夸克网盘 授权并继续加载目录' }));
   await act(async () => { client.emitAuthorization({ id: 'q-1', displayName: 'alice', provider: 'quark', authMethod: 'web' }); });
 
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' }, { timeout: 2_000 })).toBeVisible();

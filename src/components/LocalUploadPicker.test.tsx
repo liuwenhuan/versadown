@@ -57,7 +57,7 @@ it('sorts upload files by byte size and modification timestamp without losing se
   await user.click(sizeSort);
   expect(visibleEntryNames()).toEqual(['large.zip', 'medium.zip', 'small.zip', 'unknown.zip']);
 
-  const modifiedSort = screen.getByRole('button', { name: '按修改时间排序' });
+  const modifiedSort = screen.getByRole('button', { name: '按时间排序' });
   await user.click(modifiedSort);
   expect(visibleEntryNames()).toEqual(['large.zip', 'medium.zip', 'small.zip', 'unknown.zip']);
   await user.click(modifiedSort);
