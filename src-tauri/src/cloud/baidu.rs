@@ -543,6 +543,11 @@ mod tests {
             let requests = http.requests.lock().unwrap();
             assert_eq!(requests.len(), 4);
             assert_eq!(requests[0].url, input.url);
+            assert!(
+                !requests[0].headers.contains_key("Cookie"),
+                "account cookies on the share page trigger an endless passport SSO redirect"
+            );
+            assert!(requests[1].headers["Cookie"].contains("BDUSS=current"));
             assert_eq!(requests[1].method, "POST");
             let verify_url = url::Url::parse(&requests[1].url).unwrap();
             assert_eq!(verify_url.path(), "/share/verify");
@@ -2805,10 +2810,14 @@ impl<T: CloudHttpTransport + ?Sized> BaiduClient<'_, T> {
         cookies.0.remove("BDCLND");
         self.session.cookie = cookies.header();
         let page_url = format!("{PAN}/s/1{}", encoded(short));
+        // The page only seeds anonymous web cookies. Account cookies start a
+        // passport SSO hop that never sees pan-scoped cookies and redirects forever.
+        let mut page_headers = self.web_headers();
+        page_headers.remove("Cookie");
         let page = self.http.send(CloudHttpRequest {
             method: "GET",
             url: page_url.clone(),
-            headers: self.web_headers(),
+            headers: page_headers,
             body: None,
         })?;
         if page.status == 401 {
