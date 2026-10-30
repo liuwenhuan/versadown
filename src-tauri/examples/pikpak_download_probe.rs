@@ -48,7 +48,7 @@ fn probe(label: &str, uri: &str) {
     match client
         .get(uri)
         .header("Range", "bytes=0-1023")
-        .header("User-Agent", "aria2-next/2.8.0")
+        .header("User-Agent", "aria2-next/3.0.9")
         .send()
     {
         Ok(mut response) => {

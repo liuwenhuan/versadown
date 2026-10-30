@@ -540,7 +540,12 @@ impl Aria2Api for Aria2RpcClient {
         self.call("aria2.saveSession", vec![]).await
     }
     async fn shutdown(&self) -> Result<String, Aria2Error> {
-        self.call("aria2.shutdown", vec![]).await
+        // aria2-next 3.x stops serving as soon as it accepts the call and closes
+        // the connection before replying. Callers confirm the exit on the child.
+        match self.call("aria2.shutdown", vec![]).await {
+            Err(Aria2Error::Transport) => Ok("OK".into()),
+            result => result,
+        }
     }
     async fn multicall(
         &self,

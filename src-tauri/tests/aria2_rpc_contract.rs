@@ -457,3 +457,29 @@ async fn every_wrapper_uses_the_documented_method_and_parameter_order() {
     }
     handle.abort();
 }
+
+/// aria2-next 3.x stops serving as soon as it accepts `aria2.shutdown` and
+/// closes the connection before replying.
+async fn closing_engine_fixture() -> Aria2RpcClient {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Aria2RpcClient::new(
+        format!("http://{}/jsonrpc", listener.local_addr().unwrap()),
+        RpcSecret::from_bytes([0xab; 32]),
+    )
+    .unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await;
+        }
+    });
+    client
+}
+
+#[tokio::test]
+async fn shutdown_accepts_an_engine_that_closes_before_replying() {
+    let client = closing_engine_fixture().await;
+    assert_eq!(client.shutdown().await.unwrap(), "OK");
+    assert!(matches!(client.save_session().await, Err(Aria2Error::Transport)));
+}

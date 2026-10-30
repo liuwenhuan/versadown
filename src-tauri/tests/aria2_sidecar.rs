@@ -14,6 +14,6 @@ fn bundled_aria2_next_matches_the_pinned_official_release() {
     let digest = format!("{:x}", Sha256::digest(std::fs::read(binary).unwrap()));
     assert_eq!(
         digest,
-        "74183154fa993a96ffd8c21b971b4783e05f0b2ec189e134a3b6f92292865758"
+        "e74899ce4a39815a509bc663d29aca5028f9bdd6b390fe33141eb11d478d1c13"
     );
 }

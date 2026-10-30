@@ -31,7 +31,7 @@ pnpm run build:linux:quick
 ./src-tauri/target/debug/versadown
 ```
 
-产物包含 Linux x86_64 的 aria2-next 2.8.0 sidecar。该命令生成调试二进制，不生成 Release 包或安装包。
+产物包含 Linux x86_64 的 aria2-next 3.0.9 sidecar。该命令生成调试二进制，不生成 Release 包或安装包。
 
 ### Linux x86_64 发布包
 
