@@ -66,6 +66,21 @@ fn physical_regions(
         .collect()
 }
 
+// GDK multiplies input shapes by its integer window scale. Convert the CSS
+// regions to GDK units, or a 2x desktop scales them twice and the icon passes
+// clicks through.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn gdk_input_regions(
+    regions: &[LauncherInputRegion],
+    css_scale_factor: f64,
+    gdk_scale_factor: i32,
+) -> Result<Vec<PhysicalLauncherRegion>, String> {
+    if gdk_scale_factor <= 0 {
+        return Err("悬浮窗输入区域无效".to_string());
+    }
+    physical_regions(regions, css_scale_factor / f64::from(gdk_scale_factor))
+}
+
 const LAUNCHER_CANVAS_WIDTH: f64 = 756.0;
 
 // GDK button coordinates are physical pixels on fractional-scale X11
@@ -242,7 +257,7 @@ pub async fn launcher_input_hit_test_for_test(
 #[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
     use super::{
-        launcher_drag_capture_regions, launcher_drag_icon_regions, physical_regions,
+        gdk_input_regions, launcher_drag_capture_regions, launcher_drag_icon_regions,
         point_hits_regions, LauncherInputRegion, PhysicalLauncherRegion,
     };
     use gtk::prelude::*;
@@ -285,8 +300,9 @@ mod platform {
         logical_regions: &[LauncherInputRegion],
         scale_factor: f64,
     ) -> Result<(), String> {
-        let regions = physical_regions(logical_regions, scale_factor)?;
-        apply_physical_input_regions(&gdk_window(window)?, &regions)
+        let gdk_window = gdk_window(window)?;
+        let regions = gdk_input_regions(logical_regions, scale_factor, gdk_window.scale_factor())?;
+        apply_physical_input_regions(&gdk_window, &regions)
     }
 
     fn begin_drag_capture(window: &WebviewWindow) -> Result<(), String> {
@@ -920,6 +936,46 @@ mod tests {
                 right: 615,
                 bottom: 588,
             }]
+        );
+    }
+
+    #[test]
+    fn gdk_input_shape_is_not_scaled_twice_on_integer_hidpi() {
+        // GDK multiplies input shapes by its window scale, so a 2x desktop
+        // (WebKit devicePixelRatio 2) must hand GDK the CSS-pixel icon.
+        let regions = gdk_input_regions(
+            &[LauncherInputRegion {
+                x: 346.0,
+                y: 328.0,
+                width: 64.0,
+                height: 64.0,
+            }],
+            2.0,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            regions,
+            vec![PhysicalLauncherRegion {
+                left: 346,
+                top: 328,
+                right: 410,
+                bottom: 392,
+            }]
+        );
+    }
+
+    #[test]
+    fn gdk_input_shape_keeps_fractional_scale_at_unit_gdk_scale() {
+        let icon = [LauncherInputRegion {
+            x: 346.0,
+            y: 328.0,
+            width: 64.0,
+            height: 64.0,
+        }];
+        assert_eq!(
+            gdk_input_regions(&icon, 1.5, 1).unwrap(),
+            physical_regions(&icon, 1.5).unwrap()
         );
     }
 
