@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const LINUX_X86_64_SHA256: &str =
-    "61a7a6e68dc24aed20c078f59aa0fee3c480c79dc62c4d3174711a1e29435be6";
+    "ca0bfc952f15d5aa79afa73189f6665694a61b6ed0f55d44009389f8f08cc6db";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineBinary {

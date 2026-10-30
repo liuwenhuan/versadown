@@ -17,3 +17,14 @@ fn unsupported_target_returns_a_typed_error() {
         Err(EngineBinaryError::UnsupportedTarget { .. })
     ));
 }
+
+#[test]
+fn bundled_linux_engine_matches_the_runtime_checksum_pin() {
+    // A sidecar upgrade must update the pin, or the app refuses to start.
+    let binary = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("binaries/aria2-next-x86_64-unknown-linux-gnu");
+    EngineBinary::for_target("linux", "x86_64")
+        .unwrap()
+        .verify(&binary)
+        .unwrap();
+}
