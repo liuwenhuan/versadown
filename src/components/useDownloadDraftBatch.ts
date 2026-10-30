@@ -70,6 +70,20 @@ export function selectedResourceIds(item: DownloadDraftItem): string[] {
     .map(resource => resource.id) ?? [];
 }
 
+function withResources(item: DownloadDraftItem, resources: ConfirmResource[], selected: boolean): DownloadDraftItem {
+  const confirmation = item.result!.confirmation!;
+  return { ...item, selected, result: { confirmation: { ...confirmation, resources } } };
+}
+
+// An item with files mirrors its files like a tri-state checkbox: picking any
+// file selects the item, and toggling the item selects or clears every file.
+function toggledItem(item: DownloadDraftItem): DownloadDraftItem {
+  const resources = item.result?.confirmation?.resources ?? [];
+  if (!resources.length) return { ...item, selected: !item.selected };
+  const selected = !(item.selected && resources.every(resource => resource.selected));
+  return withResources(item, resources.map(resource => ({ ...resource, selected })), selected);
+}
+
 export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 }: Options) {
   const [items, setItems] = useState<DownloadDraftItem[]>([]);
   const itemsRef = useRef<DownloadDraftItem[]>([]);
@@ -176,7 +190,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
   }, [discard, replaceItems]);
 
   const toggleItem = useCallback((id: string) => {
-    replaceItems(current => current.map(item => item.id === id ? { ...item, selected: !item.selected } : item));
+    replaceItems(current => current.map(item => item.id === id ? toggledItem(item) : item));
   }, [replaceItems]);
 
   const setAccessCode = useCallback((id: string, accessCode: string) => {
@@ -190,17 +204,10 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
   const toggleResource = useCallback((id: string, resourceId: string) => {
     replaceItems(current => current.map(item => {
       if (item.id !== id || !item.result?.confirmation) return item;
-      return {
-        ...item,
-        result: {
-          confirmation: {
-            ...item.result.confirmation,
-            resources: item.result.confirmation.resources.map(resource => resource.id === resourceId
-              ? { ...resource, selected: !resource.selected }
-              : resource),
-          },
-        },
-      };
+      const resources = item.result.confirmation.resources.map(resource => resource.id === resourceId
+        ? { ...resource, selected: !resource.selected }
+        : resource);
+      return withResources(item, resources, resources.some(resource => resource.selected));
     }));
   }, [replaceItems]);
 
@@ -241,7 +248,8 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
 
   const canSubmit = useMemo(() => {
     const selected = items.filter(item => item.selected);
-    return selected.length > 0 && selected.every(item => item.status === 'ready');
+    return selected.length > 0 && selected.every(item => item.status === 'ready'
+      && (!item.result?.confirmation?.resources.length || item.result.confirmation.resources.some(resource => resource.selected)));
   }, [items]);
 
   return { items, canSubmit, start, retry, remove, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, discardAll };

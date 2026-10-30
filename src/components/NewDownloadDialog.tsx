@@ -419,8 +419,9 @@ function BatchNewDownloadDialog({
           : item.error;
         const canExpand = item.result ? canExpandDownloadDraft(item.result) : false;
         const resourceBytes = resources.reduce((total, resource) => total + batchResourceBytes(resource.size), 0);
+        const partiallySelected = item.selected && resources.some(resource => !resource.selected);
         const rootRow = <div className="batch-download-row batch-tree-root">
-            <input type="checkbox" aria-label={t('batch.selectNamed', { name: item.input })} checked={item.selected} disabled={existingTask} onChange={() => batch.toggleItem(item.id)} />
+            <BatchSelectionCheckbox ariaLabel={t('batch.selectNamed', { name: item.input })} checked={item.selected && !partiallySelected} indeterminate={partiallySelected} disabled={existingTask} onChange={() => batch.toggleItem(item.id)} />
             {canExpand ? <button type="button" className="batch-expand" aria-label={t(item.expanded ? 'batch.collapseNamed' : 'batch.expandNamed', { name: title })} aria-expanded={item.expanded} onClick={() => batch.toggleExpanded(item.id)}><svg className={item.expanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg></button> : <span className="batch-expand-placeholder" />}
             <span className={`batch-root-icon${item.result?.confirmation?.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{item.result?.confirmation?.isBitTorrent ? 'BT' : resources.length > 1 ? '▱' : '↓'}</span>
             <div className="batch-download-name"><strong title={title}>{title}</strong><small>{loadingStatus ? <BatchLoadingStatus>{loadingStatus}</BatchLoadingStatus> : itemStatus}</small></div>

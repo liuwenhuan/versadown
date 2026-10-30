@@ -149,3 +149,56 @@ it('discards a draft that finishes parsing after the batch window was closed', a
 
   await waitFor(() => expect(discard).toHaveBeenCalledWith('slow-draft'));
 });
+
+function shareWithFiles(taskId: string): ParseDownloadResult {
+  return {
+    confirmation: {
+      taskId,
+      title: taskId,
+      requiresConfirmation: true,
+      resources: ['a.7z', 'b.7z', 'c.7z'].map((name, index) => ({ id: `r${index}`, name: `folder/${name}`, size: '1 MB', selected: true, index })),
+      processing: [],
+    },
+  };
+}
+
+async function readyShareBatch() {
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: 'https://pan.baidu.com/s/1share', valid: true as const, kind: 'cloud_share' as const }],
+    prepare: async () => shareWithFiles('share'),
+    discard: vi.fn(),
+  }));
+  await act(async () => { await result.current.start('share'); });
+  await waitFor(() => expect(result.current.items[0].status).toBe('ready'));
+  return result;
+}
+
+it('selecting a file inside an unselected share selects the share and allows submission', async () => {
+  const result = await readyShareBatch();
+  const id = result.current.items[0].id;
+  act(() => result.current.toggleItem(id));
+  expect(result.current.items[0].selected).toBe(false);
+  expect(result.current.items[0].result?.confirmation?.resources.some(resource => resource.selected)).toBe(false);
+  expect(result.current.canSubmit).toBe(false);
+
+  act(() => result.current.toggleResource(id, 'r2'));
+  expect(result.current.items[0].selected).toBe(true);
+  expect(result.current.canSubmit).toBe(true);
+
+  act(() => result.current.toggleResource(id, 'r2'));
+  expect(result.current.items[0].selected).toBe(false);
+  expect(result.current.canSubmit).toBe(false);
+});
+
+it('toggling a partially selected share selects every file, then clears them all', async () => {
+  const result = await readyShareBatch();
+  const id = result.current.items[0].id;
+  act(() => result.current.toggleResource(id, 'r0'));
+  act(() => result.current.toggleItem(id));
+  expect(result.current.items[0].selected).toBe(true);
+  expect(result.current.items[0].result?.confirmation?.resources.every(resource => resource.selected)).toBe(true);
+
+  act(() => result.current.toggleItem(id));
+  expect(result.current.items[0].selected).toBe(false);
+  expect(result.current.items[0].result?.confirmation?.resources.every(resource => !resource.selected)).toBe(true);
+});

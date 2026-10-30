@@ -403,6 +403,41 @@ it('filters batch resources by category and toggles the visible category selecti
   expect(screen.getByRole('checkbox', { name: '选择 source.zip' })).not.toBeChecked();
 });
 
+it('submits a share when only one of its files is picked after clearing the share', async () => {
+  const user = userEvent.setup();
+  const onSubmitBatch = vi.fn();
+  const share = 'https://pan.baidu.com/s/1office';
+  render(<NewDownloadDialog
+    open
+    placement="modal"
+    initialInput={share}
+    onScan={async () => [{ input: share, valid: true, kind: 'cloud_share' }]}
+    onParse={async () => ({ confirmation: {
+      taskId: 'office', title: 'Office', requiresConfirmation: true, processing: [],
+      resources: [
+        { id: 'a', name: 'Office/a.7z', size: '1 MB', selected: true },
+        { id: 'b', name: 'Office/b.7z', size: '2 MB', selected: true },
+      ],
+    } })}
+    onDiscardPrepared={vi.fn()}
+    onSubmitBatch={onSubmitBatch}
+    onClose={vi.fn()}
+  />);
+
+  const fileBox = await screen.findByRole('checkbox', { name: '选择 b.7z' });
+  const shareBox = screen.getByRole('checkbox', { name: `选择 ${share}` });
+  await user.click(shareBox);
+  expect(shareBox).not.toBeChecked();
+  const submit = screen.getByRole('button', { name: '新建任务' });
+  expect(submit).toBeDisabled();
+
+  await user.click(fileBox);
+  expect((shareBox as HTMLInputElement).indeterminate).toBe(true);
+  expect(submit).toBeEnabled();
+  await user.click(submit);
+  expect(onSubmitBatch).toHaveBeenCalledTimes(1);
+});
+
 it('sorts expanded batch resources by name and size', async () => {
   const user = userEvent.setup();
   render(<NewDownloadDialog
