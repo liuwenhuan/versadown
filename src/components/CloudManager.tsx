@@ -643,7 +643,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const label = cloudProviderLabel(provider, t);
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
-  const [xunleiProfile, setXunleiProfile] = useState<XunleiAccountProfile | null>();
+  const [xunleiProfile, setXunleiProfile] = useState<XunleiAccountProfile | null>(null);
   const [accountCapacity, setAccountCapacity] = useState<CloudCapacityViewState>();
   const capacityControllerRef = useRef<CloudCapacityController | null>(null);
   if (!capacityControllerRef.current) capacityControllerRef.current = new CloudCapacityController();
@@ -861,13 +861,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   useEffect(() => () => capacityController.dispose(), [capacityController]);
 
   useEffect(() => {
-    setXunleiProfile(undefined);
+    setXunleiProfile(null);
     const id = activeAccount?.id;
-    if (!authorizationOnly || provider !== 'xunlei' || !id) return;
-    if (!client.getXunleiAccountProfile) {
-      setXunleiProfile(null);
-      return;
-    }
+    if (!authorizationOnly || provider !== 'xunlei' || !id || !client.getXunleiAccountProfile) return;
     let current = true;
     client.getXunleiAccountProfile().then(profile => {
       if (current) setXunleiProfile(profile.accountId === id ? profile : null);
@@ -1648,9 +1644,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={t('cloud.accountAuthorization', { name: label })}>
       <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{t('cloud.providerDrive', { name: label })} <span className="cloud-account-name">· {profile?.nickname ?? activeAccount?.displayName}</span></h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? t('cloud.closeProviderInfo', { name: label }) : t('cloud.viewProviderInfo', { name: label })} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {!providerInfoOpen && <p className="cloud-account-capacity" aria-live="polite">{capacityText}{accountCapacity?.value && accountCapacity.refreshFailed && <span> · {t('cloud.capacityRefreshFailed')}</span>}</p>}
-      {!providerInfoOpen && provider === 'xunlei' && <p className="cloud-account-capacity" aria-live="polite">
-        {member ? t(`cloud.xunlei.membership.${member.kind}`, { level: member.level ?? '' })
-          : t(xunleiProfile === undefined ? 'cloud.xunlei.membership.loading' : 'cloud.xunlei.membership.unavailable')}
+      {!providerInfoOpen && member && member.kind !== 'none' && <p className="cloud-account-capacity" aria-live="polite">
+        {t(`cloud.xunlei.membership.${member.kind}`, { level: member.level ?? '' })}
       </p>}
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{sessionActions()}{logoutConfirmation()}{operationStatus()}</>}
     </section>;
