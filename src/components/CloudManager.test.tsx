@@ -2732,3 +2732,23 @@ it('keeps the Xunlei file list and offers explicit authorization when operation 
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
   expect(client.logoutCloud).not.toHaveBeenCalled();
 });
+
+it('shows the profile nickname and SVIP level for the authorized Xunlei account', async () => {
+  const client = createCloudFake({ getXunleiAccountProfile: vi.fn().mockResolvedValue({
+    accountId: '123456', nickname: '中文昵称', membership: { kind: 'svip', level: 1 }
+  }) });
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly initialAccount={{ id: '123456', displayName: '123456', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByRole('heading', { name: /中文昵称/ })).toBeVisible();
+  expect(screen.getByText('SVIP1')).toBeVisible();
+});
+
+it('keeps the signed-in card and withholds profile details belonging to another account', async () => {
+  const client = createCloudFake({ getXunleiAccountProfile: vi.fn().mockResolvedValue({
+    accountId: 'different', nickname: '别的账号', membership: { kind: 'svip', level: 8 }
+  }) });
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly initialAccount={{ id: '123456', displayName: '123456', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByText(t('cloud.xunlei.membership.unavailable'))).toBeVisible();
+  expect(screen.getByRole('heading', { name: /123456/ })).toBeVisible();
+  expect(screen.queryByText('SVIP8')).not.toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: /别的账号/ })).not.toBeInTheDocument();
+});
