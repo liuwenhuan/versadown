@@ -254,6 +254,10 @@ pub fn run() {
             });
         })
         .on_window_event(|window, event| {
+            // Tao reports minimize/restore as a resize of that window.
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Resized(_)) {
+                launcher::refresh_tray_manager_visibility(window.app_handle());
+            }
             if let tauri::WindowEvent::Focused(focused) = event {
                 if let Some(history) = window
                     .app_handle()
