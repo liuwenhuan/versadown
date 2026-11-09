@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { DownloadFile, QueueTask, TaskCommand } from '../lib/types';
 import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
-import { isPrivateTask } from '../lib/queueTask';
+import { downloadErrorMessage, isPrivateTask } from '../lib/queueTask';
 import { reorderTaskIds } from '../lib/taskOrder';
 import { t, useTranslation } from '../i18n';
 
@@ -245,7 +245,7 @@ function cloudTaskSubtitle(source: string | undefined): string | undefined {
 }
 
 function taskSubtitle(task: QueueTask): string | undefined {
-  if (task.error) return task.error;
+  if (task.error) return downloadErrorMessage(task.error);
   const cloudSubtitle = cloudTaskSubtitle(task.source);
   if (task.source?.toLowerCase().startsWith('cloud://xunlei/') && task.statusMessage === '正在使用迅雷svip加速') {
     return t('download.cloudTaskSvip', { name: t('cloud.provider.xunlei') });
@@ -474,7 +474,8 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const canUseTaskCommand = !isBtFile && !isFolder && Boolean(primaryAction);
     const canPlay = !isFolder && node.status === 'completed' && hasPlayableMediaExtension(node.name);
     const openableFileType = node.status === 'completed' ? taskAssociatedFileType(node) : undefined;
-    const error = node.status === 'completed' ? undefined : node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
+    const failure = node.status === 'completed' ? undefined : node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
+    const error = failure && downloadErrorMessage(failure);
     const transferSize = childFileSize(node);
     const childSpeed = node.status === 'downloading'
       ? node.speed ?? (node.download_speed !== undefined

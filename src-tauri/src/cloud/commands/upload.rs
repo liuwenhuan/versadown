@@ -517,6 +517,7 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
         QuarkError::DownloadEngineUnavailable => "download_engine_unavailable",
         QuarkError::DownloadSubmissionFailed => "download_submission_failed",
         QuarkError::BaiduTransferPending => "baidu_transfer_pending",
+        QuarkError::ShareTransferDownloadUnavailable => "share_transfer_download_unavailable",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",

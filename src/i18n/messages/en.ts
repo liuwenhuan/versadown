@@ -1,4 +1,5 @@
 const messages = {
+  'download.error.transferredFileUnavailable': 'The file was saved to your cloud drive, but its download link is unavailable. Retry the download later.',
   'cloud.xunlei.membership.vip': 'VIP{level}',
   'cloud.xunlei.membership.platinum': 'Platinum VIP{level}',
   'cloud.xunlei.membership.svip': 'SVIP{level}',

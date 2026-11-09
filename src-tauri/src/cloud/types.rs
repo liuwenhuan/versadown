@@ -370,6 +370,8 @@ pub enum CloudError {
     DownloadSubmissionFailed,
     #[error("百度转存仍在进行或结果未知，请稍后在网盘中查看，确认后再重试")]
     BaiduTransferPending,
+    #[error("download.error.transferredFileUnavailable")]
+    ShareTransferDownloadUnavailable,
     #[error("云盘响应无效，请刷新后重试")]
     InvalidResponse,
     #[error("安全凭据存储不可用")]
@@ -478,6 +480,7 @@ impl Serialize for CloudError {
             Self::DownloadEngineUnavailable => "download_engine_unavailable",
             Self::DownloadSubmissionFailed => "download_submission_failed",
             Self::BaiduTransferPending => "baidu_transfer_pending",
+            Self::ShareTransferDownloadUnavailable => "share_transfer_download_unavailable",
             Self::Storage => "credential_storage_error",
             Self::InvalidResponse => "invalid_response",
             Self::Transport(_) => "network_error",

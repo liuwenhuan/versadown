@@ -1,4 +1,5 @@
 const messages = {
+  'download.error.transferredFileUnavailable': '文件已转存到你的网盘，但暂时无法获取下载地址。请稍后重试下载。',
   'cloud.xunlei.membership.vip': 'VIP{level}',
   'cloud.xunlei.membership.platinum': '白金 VIP{level}',
   'cloud.xunlei.membership.svip': 'SVIP{level}',
