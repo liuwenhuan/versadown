@@ -647,6 +647,7 @@ pub fn run() {
             launcher::run_launcher_menu_action,
             launcher::launcher_manager_visible,
             launcher::toggle_manager_from_launcher,
+            launcher::reveal_manager_from_launcher,
             launcher::launcher_interaction_snapshot,
             launcher::manager_window_snapshot,
             launcher::activate_launcher_menu_for_test,

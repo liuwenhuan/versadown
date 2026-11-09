@@ -480,8 +480,37 @@ pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
         let _ = manager.unminimize();
         let _ = manager.show();
         let _ = manager.set_focus();
+        #[cfg(target_os = "linux")]
+        present_manager(app, &manager);
     }
     set_tray_manager_visibility(app, true);
+}
+
+/// Tao cannot restore a minimized manager on X11 window managers that keep
+/// minimized windows mapped (deepin's KWin): `unminimize` only queues GDK's
+/// `deiconify`, which is a no-op for a mapped window, and `set_focus` is
+/// skipped while Tao's minimized flag is still set. `gtk_window_present`
+/// sends `_NET_ACTIVE_WINDOW`, which the window manager honours.
+#[cfg(target_os = "linux")]
+fn present_manager(app: &AppHandle, manager: &WebviewWindow) {
+    let manager = manager.clone();
+    let _ = app.run_on_main_thread(move || {
+        use gtk::prelude::GtkWindowExt;
+        if let Ok(window) = manager.gtk_window() {
+            window.present();
+        }
+    });
+}
+
+/// The launcher's own manager activation (e.g. for dropped links) must use the
+/// same path as the tray and menu so a minimized manager is restored.
+#[tauri::command]
+pub fn reveal_manager_from_launcher(window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "launcher" {
+        return Err("只能从悬浮窗显示主界面".to_string());
+    }
+    reveal_manager(window.app_handle(), None);
+    Ok(())
 }
 
 fn begin_application_exit(app: &AppHandle) {
