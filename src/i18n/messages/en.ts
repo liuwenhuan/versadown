@@ -1,4 +1,8 @@
 const messages = {
+  'download.xunlei.native': 'Thunder native channel',
+  'download.xunlei.accelerating': 'Thunder member channel',
+  'download.xunlei.submitFailed': 'Unable to start or resume the Thunder task. Retry, or start a new download if its checkpoint was removed.',
+  'download.xunlei.proxyCheckpoint': 'This Thunder checkpoint requires a direct connection. Disable the proxy to resume, or start a new download through the proxy.',
   'cloud.xunlei.membership.vip': 'VIP{level}',
   'cloud.xunlei.membership.platinum': 'Platinum VIP{level}',
   'cloud.xunlei.membership.svip': 'SVIP{level}',

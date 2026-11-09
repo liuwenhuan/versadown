@@ -5,6 +5,7 @@ import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/do
 import { isPrivateTask } from '../lib/queueTask';
 import { reorderTaskIds } from '../lib/taskOrder';
 import { t, useTranslation } from '../i18n';
+import { xunleiDownloadMessage } from '../i18n/xunleiDownloadMessage';
 
 interface DownloadQueueProps {
   tasks: readonly QueueTask[];
@@ -245,12 +246,12 @@ function cloudTaskSubtitle(source: string | undefined): string | undefined {
 }
 
 function taskSubtitle(task: QueueTask): string | undefined {
-  if (task.error) return task.error;
+  if (task.error) return xunleiDownloadMessage(task.error);
   const cloudSubtitle = cloudTaskSubtitle(task.source);
   if (task.source?.toLowerCase().startsWith('cloud://xunlei/') && task.statusMessage === '正在使用迅雷svip加速') {
     return t('download.cloudTaskSvip', { name: t('cloud.provider.xunlei') });
   }
-  if (task.statusMessage) return task.statusMessage;
+  if (task.statusMessage) return xunleiDownloadMessage(task.statusMessage);
   const hasTransferData = task.progress > 0 || (task.completed_length ?? 0) > 0 || (task.total_length ?? 0) > 0;
   if (task.kind === 'magnet') return hasTransferData ? t('download.kind.magnet') : t('download.kind.magnetMetadata');
   if (task.kind === 'torrent') return hasTransferData ? t('download.kind.torrent') : t('download.kind.torrentMetadata');
@@ -474,7 +475,8 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const canUseTaskCommand = !isBtFile && !isFolder && Boolean(primaryAction);
     const canPlay = !isFolder && node.status === 'completed' && hasPlayableMediaExtension(node.name);
     const openableFileType = node.status === 'completed' ? taskAssociatedFileType(node) : undefined;
-    const error = node.status === 'completed' ? undefined : node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
+    const failure = node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
+    const error = node.status !== 'completed' && failure && xunleiDownloadMessage(failure);
     const transferSize = childFileSize(node);
     const childSpeed = node.status === 'downloading'
       ? node.speed ?? (node.download_speed !== undefined

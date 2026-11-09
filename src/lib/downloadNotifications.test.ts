@@ -44,3 +44,8 @@ describe('download status notifications', () => {
     expect(shouldNotifyTask(task({ status: 'failed' }), 'cancelled')).toBe(true);
   });
 });
+
+it('translates a native submit failure in the OS notification', () => {
+  expect(notificationForTask(task({ status: 'failed', error: 'download.xunlei.submitFailed' }))?.body)
+    .toContain('迅雷原生任务无法启动或恢复');
+});

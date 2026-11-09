@@ -336,6 +336,28 @@ impl Drop for PasswordLoginRequest {
         self.password.zeroize();
     }
 }
+#[derive(Clone, Copy, Debug)]
+pub enum XunleiNativeDownloadFailure {
+    ProxyCheckpoint,
+    SubmitFailed,
+}
+
+impl XunleiNativeDownloadFailure {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::ProxyCheckpoint => "xunlei_proxy_checkpoint",
+            Self::SubmitFailed => "xunlei_submission_failed",
+        }
+    }
+
+    pub(crate) fn message_key(self) -> &'static str {
+        match self {
+            Self::ProxyCheckpoint => "download.xunlei.proxyCheckpoint",
+            Self::SubmitFailed => "download.xunlei.submitFailed",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CloudError {
     #[error("尚未授权此网盘，请登录后使用")]
@@ -368,6 +390,8 @@ pub enum CloudError {
     DownloadEngineUnavailable,
     #[error("本地下载引擎未能接受任务，请重试；若持续失败请检查下载目录和引擎日志")]
     DownloadSubmissionFailed,
+    #[error("{}", .0.message_key())]
+    XunleiNativeDownload(XunleiNativeDownloadFailure),
     #[error("百度转存仍在进行或结果未知，请稍后在网盘中查看，确认后再重试")]
     BaiduTransferPending,
     #[error("云盘响应无效，请刷新后重试")]
@@ -477,6 +501,7 @@ impl Serialize for CloudError {
             Self::DownloadCheckpointInvalid => "download_checkpoint_invalid",
             Self::DownloadEngineUnavailable => "download_engine_unavailable",
             Self::DownloadSubmissionFailed => "download_submission_failed",
+            Self::XunleiNativeDownload(failure) => failure.code(),
             Self::BaiduTransferPending => "baidu_transfer_pending",
             Self::Storage => "credential_storage_error",
             Self::InvalidResponse => "invalid_response",

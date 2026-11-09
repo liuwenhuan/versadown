@@ -1477,3 +1477,25 @@ it('emits details only after its right-click menu item is selected', async () =>
   expect(onCommand).toHaveBeenCalledTimes(1);
   expect(onCommand).toHaveBeenCalledWith('task-1', 'details');
 });
+
+it.each([
+  ['download.xunlei.native', '迅雷原生通道'],
+  ['download.xunlei.accelerating', '迅雷会员通道'],
+])('localizes the Mac native channel status %s', (statusMessage, label) => {
+  render(<DownloadQueue tasks={[{ id: 'native', name: 'file.bin', source: 'cloud://xunlei/file', kind: 'cloud', status: 'downloading', progress: 20, statusMessage }]}
+    selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.queryByText(statusMessage)).not.toBeInTheDocument();
+});
+
+it('shows the Mac native channel failure for both the directory and its expanded file', async () => {
+  const error = 'download.xunlei.proxyCheckpoint';
+  const message = '此迅雷断点需要直连。关闭代理后可继续，或新建任务通过代理下载。';
+  render(<DownloadQueue tasks={[{
+    id: 'dir', name: 'files', kind: 'folder', status: 'failed', progress: 5, error,
+    children: [{ id: 'leaf', name: 'video.mp4', kind: 'cloud', status: 'failed', progress: 5, error }],
+  }]} privacyEnabled={false} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  expect(screen.getByText(message)).toBeVisible();
+  await userEvent.click(screen.getByRole('button', { name: '展开 files' }));
+  expect(screen.getAllByText(message)).toHaveLength(2);
+});

@@ -1,4 +1,8 @@
 const messages = {
+  'download.xunlei.native': '迅雷原生通道',
+  'download.xunlei.accelerating': '迅雷会员通道',
+  'download.xunlei.submitFailed': '迅雷原生任务无法启动或恢复，请重试。如果断点已删除，请新建下载任务。',
+  'download.xunlei.proxyCheckpoint': '此迅雷断点需要直连。关闭代理后可继续，或新建任务通过代理下载。',
   'cloud.xunlei.membership.vip': 'VIP{level}',
   'cloud.xunlei.membership.platinum': '白金 VIP{level}',
   'cloud.xunlei.membership.svip': 'SVIP{level}',
