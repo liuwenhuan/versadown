@@ -185,7 +185,6 @@ function errorMessage(error: unknown, fallback: string) {
   if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'baidu_transfer_pending') {
     return t('cloud.error.baiduTransferPending');
   }
-  if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
     return xunleiDownloadMessage((error as { message: string }).message);
   }

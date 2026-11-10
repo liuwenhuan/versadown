@@ -338,6 +338,8 @@ impl Drop for PasswordLoginRequest {
 }
 #[derive(Clone, Copy, Debug)]
 pub enum XunleiNativeDownloadFailure {
+    #[cfg(target_os = "macos")]
+    UnsupportedCheckpoint,
     ProxyCheckpoint,
     SubmitFailed,
 }
@@ -345,13 +347,17 @@ pub enum XunleiNativeDownloadFailure {
 impl XunleiNativeDownloadFailure {
     pub(crate) fn code(self) -> &'static str {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::UnsupportedCheckpoint => "xunlei_unsupported_checkpoint",
             Self::ProxyCheckpoint => "xunlei_proxy_checkpoint",
             Self::SubmitFailed => "xunlei_submission_failed",
         }
     }
 
-    pub(crate) fn message_key(self) -> &'static str {
+    pub(crate) fn message(self) -> &'static str {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::UnsupportedCheckpoint => crate::xunlei_native::macos_checkpoint_notice(),
             Self::ProxyCheckpoint => "download.xunlei.proxyCheckpoint",
             Self::SubmitFailed => "download.xunlei.submitFailed",
         }
@@ -390,7 +396,7 @@ pub enum CloudError {
     DownloadEngineUnavailable,
     #[error("本地下载引擎未能接受任务，请重试；若持续失败请检查下载目录和引擎日志")]
     DownloadSubmissionFailed,
-    #[error("{}", .0.message_key())]
+    #[error("{}", .0.message())]
     XunleiNativeDownload(XunleiNativeDownloadFailure),
     #[error("百度转存仍在进行或结果未知，请稍后在网盘中查看，确认后再重试")]
     BaiduTransferPending,

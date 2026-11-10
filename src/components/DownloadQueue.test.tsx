@@ -1488,6 +1488,16 @@ it.each([
   expect(screen.queryByText(statusMessage)).not.toBeInTheDocument();
 });
 
+it('keeps the Mac native channel fallback reason available after a quick download finishes', () => {
+  const task = { id: 'file', name: 'file.bin', kind: 'cloud' as const, statusMessage: 'download.xunlei.unsupportedFallback:5.80.7 (66660)' };
+  const props = { selectedTaskId: null, onSelect() {}, onCommand() {} };
+  const reason = '本机迅雷版本不受支持，已改用普通下载。支持的版本为 5.80.7 (66660)。';
+  const { rerender } = render(<DownloadQueue {...props} tasks={[{ ...task, status: 'downloading', progress: 5 }]} />);
+  expect(screen.getByText(reason)).toBeVisible();
+  rerender(<DownloadQueue {...props} tasks={[{ ...task, status: 'completed', progress: 100 }]} />);
+  expect(screen.getByText('已完成 · 普通下载')).toHaveAttribute('title', reason);
+});
+
 it('shows the Mac native channel failure for both the directory and its expanded file', async () => {
   const error = 'download.xunlei.proxyCheckpoint';
   const message = '此迅雷断点需要直连。关闭代理后可继续，或新建任务通过代理下载。';
@@ -1498,4 +1508,14 @@ it('shows the Mac native channel failure for both the directory and its expanded
   expect(screen.getByText(message)).toBeVisible();
   await userEvent.click(screen.getByRole('button', { name: '展开 files' }));
   expect(screen.getAllByText(message)).toHaveLength(2);
+});
+
+it('shows a Mac native channel fallback on the affected file in an expanded directory', async () => {
+  const statusMessage = 'download.xunlei.unsupportedFallback:5.80.7 (66660)';
+  render(<DownloadQueue tasks={[{
+    id: 'dir', name: 'files', kind: 'folder', status: 'downloading', progress: 5,
+    children: [{ id: 'leaf', name: 'video.mp4', kind: 'cloud', status: 'downloading', progress: 5, statusMessage }],
+  }]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  await userEvent.click(screen.getByRole('button', { name: '展开 files' }));
+  expect(screen.getByText(/已改用普通下载/)).toBeVisible();
 });

@@ -115,8 +115,32 @@ impl XunleiNativeBackend {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use macos::supported_versions as macos_supported_versions;
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_fallback_notice() -> String {
+    format!(
+        "download.xunlei.unsupportedFallback:{}",
+        macos_supported_versions()
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_checkpoint_notice() -> &'static str {
+    static NOTICE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "download.xunlei.unsupportedCheckpoint:{}",
+            macos_supported_versions()
+        )
+    });
+    NOTICE.as_str()
+}
+
 #[derive(Debug)]
 pub enum NativeSubmitError {
+    #[cfg(target_os = "macos")]
+    UnsupportedClientVersion,
     Incompatible,
     #[cfg(target_os = "macos")]
     ProxyCheckpoint,
@@ -129,6 +153,8 @@ impl NativeSubmitError {
     pub fn user_message(&self) -> String {
         match self {
             Self::Incompatible => PLUGIN_UPDATE_MESSAGE.into(),
+            #[cfg(target_os = "macos")]
+            Self::UnsupportedClientVersion => macos_fallback_notice(),
             #[cfg(target_os = "macos")]
             Self::ProxyCheckpoint => "download.xunlei.proxyCheckpoint".into(),
             #[cfg(target_os = "macos")]
@@ -440,6 +466,9 @@ impl XunleiNativeBackend {
                         *engine = Some(started);
                     }
                     Err(engine::NativeEngineError::Unavailable) => return Ok(None),
+                    Err(engine::NativeEngineError::UnsupportedClientVersion) => {
+                        return Err(NativeSubmitError::UnsupportedClientVersion);
+                    }
                     Err(_) => return Err(NativeSubmitError::Incompatible),
                 }
             }

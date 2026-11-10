@@ -88,7 +88,14 @@ int main(int argc, const char **argv) {
         __block int code = -1;
         NSMutableDictionary *reply = [NSMutableDictionary dictionary];
         if ([op isEqual:@"init"]) {
-            NSDictionary *context = @{@"appVersion":@"5.80.7",@"clientVersion":@66660,
+            NSString *appVersion = r[@"appVersion"];
+            NSNumber *clientVersion = r[@"clientVersion"];
+            if (![appVersion isKindOfClass:NSString.class] || !appVersion.length ||
+                ![clientVersion isKindOfClass:NSNumber.class] || clientVersion.integerValue <= 0) {
+                output(@{@"code": @(-1)});
+                continue;
+            }
+            NSDictionary *context = @{@"appVersion":appVersion,@"clientVersion":clientVersion,
                 @"configPath":root,@"downloadPath":root,@"peerId":r[@"peerId"],@"guid":r[@"peerId"],@"networkType":@5};
             [proxy initETM:context withReply:^(int v) { code = v; }];
             initialized = code == 0;

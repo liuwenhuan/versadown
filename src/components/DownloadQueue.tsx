@@ -5,7 +5,7 @@ import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/do
 import { isPrivateTask } from '../lib/queueTask';
 import { reorderTaskIds } from '../lib/taskOrder';
 import { t, useTranslation } from '../i18n';
-import { xunleiDownloadMessage } from '../i18n/xunleiDownloadMessage';
+import { xunleiDownloadMessage, xunleiFallbackMessage } from '../i18n/xunleiDownloadMessage';
 
 interface DownloadQueueProps {
   tasks: readonly QueueTask[];
@@ -477,6 +477,8 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
     const openableFileType = node.status === 'completed' ? taskAssociatedFileType(node) : undefined;
     const failure = node.error ?? (node.status === 'failed' ? node.statusMessage : undefined);
     const error = node.status !== 'completed' && failure && xunleiDownloadMessage(failure);
+    const fallback = !isFolder && xunleiFallbackMessage(node.statusMessage);
+    const detailText = error || fallback;
     const transferSize = childFileSize(node);
     const childSpeed = node.status === 'downloading'
       ? node.speed ?? (node.download_speed !== undefined
@@ -490,7 +492,7 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
         <span className="child-name">
           {hasChildren && <button className="queue-tree-expand" aria-label={t(isExpanded ? 'common.collapse' : 'common.expand', { name: nodeName })} onClick={() => onToggle(node.id)}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></button>}
           <b title={nodeName}>{nodeName}</b>
-          {error && <small className="queue-tree-error" title={error}>{error}</small>}
+          {detailText && <small className={error ? 'queue-tree-error' : 'queue-tree-note'} title={detailText}>{node.status === 'completed' ? t('download.xunlei.completedFallback') : detailText}</small>}
         </span>
         {showsCompletionSummary
           ? <small className="child-completion-time" style={{ gridColumn: 'span 2' }}>{completionTime}</small>
@@ -756,6 +758,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
       {tasks.length === 0 ? <p className="queue-empty">{translate('download.empty')}</p> : displayedTasks.map((task) => {
         const isExpanded = expanded[task.id] ?? false;
         const isCompleted = task.status === 'completed';
+        const completedFallback = isCompleted && task.kind !== 'folder' ? xunleiFallbackMessage(task.statusMessage) : undefined;
         const hasPersistentChildren = Boolean(task.children?.length);
         const isBtFileTree = !hasPersistentChildren && (task.kind === 'magnet' || task.kind === 'torrent') && Boolean(task.files?.length);
         const taskChildren = hasPersistentChildren ? task.children : isBtFileTree ? buildBtFileTree(task) : undefined;
@@ -792,7 +795,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
               <span className={`kind-icon ${task.kind}`}><TaskKindIcon kind={task.kind} /></span>
               <span className="task-copy"><b title={taskName}>{taskName}</b>{eta && <span className="task-title-eta">{t('download.remaining', { eta })}</span>}</span>
             </div>
-            <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={t('download.progressNamed', { name: taskName })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={isCompleted ? 100 : task.progress}><i style={{ width: `${isCompleted ? 100 : task.progress}%` }} /></div><div className="transfer-metrics">{isCompleted ? <>{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>{t('download.p2pSharing')}</span>}<span className="transfer-live"><span className="transfer-paused transfer-completed">{t('download.status.completed')}</span></span></> : <>{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error && !waitingForCloudAuthorization ? ' task-error' : ''}`} title={subtitle}>{subtitle}{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">{recoveringCloudAuthorization ? t('download.status.recoveringLogin') : t('download.status.paused')}</span> : <>{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></>}</div></div>
+            <div className="task-progress"><div className="progress-track" role="progressbar" aria-label={t('download.progressNamed', { name: taskName })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={isCompleted ? 100 : task.progress}><i style={{ width: `${isCompleted ? 100 : task.progress}%` }} /></div><div className="transfer-metrics">{isCompleted ? <>{completedSize && <strong>{completedSize}</strong>}{completionTime && <span>{completionTime}</span>}{task.p2p_sharing && <span>{t('download.p2pSharing')}</span>}<span className="transfer-live"><span className="transfer-paused transfer-completed" title={completedFallback}>{t(completedFallback ? 'download.xunlei.completedFallback' : 'download.status.completed')}</span></span></> : <>{transferSize && <strong>{transferSize}</strong>}{subtitle && <span className={`task-subtitle${task.error && !waitingForCloudAuthorization ? ' task-error' : ''}`} title={subtitle}>{subtitle}{peerMetric && <span className="task-peer-metric">{peerMetric}</span>}{fetchingMetadata && <i className="task-metadata-indicator" aria-hidden="true" />}</span>}<span className="transfer-live">{isPaused ? <span className="transfer-paused">{recoveringCloudAuthorization ? t('download.status.recoveringLogin') : t('download.status.paused')}</span> : <>{hasSpeed && <span className="transfer-speed">{speed}</span>}</>}</span></>}</div></div>
             <div className="task-actions">
               {isCompleted && task.cleanup_pending && <button className="completed-quick-action" aria-label={`${t('download.action.retryCleanup')} ${taskName}`} title={t('download.action.retryCleanup')} onClick={(event) => { event.stopPropagation(); onCommand(task.id, 'retry_cleanup'); }}><ActionIcon action="retry" /></button>}
               {completedAction && completedActionText && <button className="completed-quick-action" aria-label={completedActionText.aria} title={completedActionText.title} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedAction === 'image' ? 'open_file' : completedAction === 'directory' ? 'open_directory' : 'play_videos'); }}><ActionIcon action={completedAction === 'video' ? 'play' : completedAction === 'directory' ? 'folder' : completedAction} /></button>}

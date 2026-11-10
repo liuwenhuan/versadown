@@ -1,6 +1,8 @@
 mod runtime;
 mod transport;
 
+pub(crate) use runtime::supported_versions;
+
 use super::engine::{
     NativeEngine, NativeEngineError, NativeEngineSession, NativeProgress, NativeSubmission,
     NativeTaskHandle,
@@ -74,7 +76,11 @@ impl MacWorkerEngine {
         };
         let mut worker = Worker::start(&runtime.executable, &runtime.state)?;
         let task_ids: Vec<u32> = records.values().map(|v| v.sdk_id).collect();
-        worker.call(json!({"op":"init","peerId":peer_id,"taskIds":task_ids}))?;
+        worker.call(json!({
+            "op": "init", "peerId": peer_id, "taskIds": task_ids,
+            "appVersion": runtime.version.app_version,
+            "clientVersion": runtime.version.client_version,
+        }))?;
         Ok(Self {
             worker,
             session,
