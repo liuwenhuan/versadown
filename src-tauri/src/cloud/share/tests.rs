@@ -3,7 +3,7 @@ use super::*;
 fn sqlite_failed_journal_claim_rolls_back_plan_and_remains_retryable() {
     let directory = tempfile::tempdir().unwrap();
     let store =
-        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new_for_test(SystemCredentialStore::new(directory.path().into()).unwrap());
     let plan = fixture("journal-rollback");
     let source = plan.source_for("f1");
     store.upsert(&plan).unwrap();
@@ -44,14 +44,14 @@ fn sqlite_failed_journal_claim_rolls_back_plan_and_remains_retryable() {
     assert_eq!(store.mark_cleanup_attempted(&source).unwrap().len(), 1);
     drop(store);
     let reopened =
-        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new_for_test(SystemCredentialStore::new(directory.path().into()).unwrap());
     assert!(reopened.mark_cleanup_attempted(&source).unwrap().is_empty());
 }
 #[test]
 fn sqlite_failed_write_preserves_previous_row_and_other_plan() {
     let directory = tempfile::tempdir().unwrap();
     let store =
-        CloudSharePlanStore::new(SystemCredentialStore::new(directory.path().into()).unwrap());
+        CloudSharePlanStore::new_for_test(SystemCredentialStore::new(directory.path().into()).unwrap());
     let mut plan = fixture("row-write");
     store.upsert(&plan).unwrap();
     store.upsert(&fixture("untouched-row")).unwrap();

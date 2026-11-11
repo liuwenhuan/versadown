@@ -897,7 +897,7 @@ mod tests {
             panic!("share plan required")
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -935,7 +935,7 @@ mod tests {
             panic!("share plan required")
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
             panic!()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -1155,7 +1155,7 @@ mod tests {
             panic!()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -1261,7 +1261,7 @@ mod tests {
             panic!()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -1296,7 +1296,7 @@ mod tests {
                 panic!()
             };
             let dir = tempfile::tempdir().unwrap();
-            let store = CloudSharePlanStore::new(
+            let store = CloudSharePlanStore::new_for_test(
                 crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
             );
             store.upsert(&plan).unwrap();
