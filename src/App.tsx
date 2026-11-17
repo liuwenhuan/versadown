@@ -1823,7 +1823,7 @@ export function App() {
         <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="tasks" /></span><span>{t('navigation.tasks')}</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
         <CloudNavigation providers={authorizedCloudProviders} activePage={view === 'cloud' ? cloudPage : null} icon={<NavigationIcon kind="cloud" />} onSelect={page => { setCloudPage(page); setView('cloud'); }} />
         <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="settings" /></span><span>{t('navigation.settings')}</span></button>
-        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{t('navigation.about')}</span>{appUpdate && <span className="nav-update-dot" role="img" aria-label={t('navigation.newVersion')} />}</button>
+        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{t('navigation.about')}</span>{appUpdate && <span className="nav-update-badge" title={t('navigation.newVersion')}>{t('navigation.updateBadge')}</span>}</button>
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">

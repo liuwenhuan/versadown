@@ -249,9 +249,9 @@ it('highlights a newer release and opens its official download page from About',
   await act(async () => { render(<App />); });
 
   const navigation = screen.getByRole('navigation', { name: '主导航' });
-  const about = within(navigation).getByRole('button', { name: '关于 有新版本' });
+  const about = within(navigation).getByRole('button', { name: '关于 有更新' });
   expect(within(about).getByText('关于')).toBeVisible();
-  expect(within(about).getByRole('img', { name: '有新版本' })).toHaveClass('nav-update-dot');
+  expect(within(about).getByText('有更新')).toBeVisible();
   await user.click(about);
 
   const updateLink = screen.getByRole('button', { name: '去官网下载' });
@@ -260,7 +260,7 @@ it('highlights a newer release and opens its official download page from About',
   await user.click(updateLink);
 
   expect(state.openExternalUrl).toHaveBeenCalledWith(update.downloadUrl);
-  expect(within(about).getByRole('img', { name: '有新版本' })).toBeVisible();
+  expect(within(about).getByText('有更新')).toBeVisible();
   expect(state.updateCheck).toHaveBeenCalledOnce();
 });
 
@@ -307,11 +307,11 @@ it('preserves a known update after a failed check and clears it after a successf
   state.updateCheck.mockResolvedValueOnce(update).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(null);
   const user = userEvent.setup();
   await act(async () => { render(<App />); });
-  await user.click(screen.getByRole('button', { name: '关于 有新版本' }));
+  await user.click(screen.getByRole('button', { name: '关于 有更新' }));
   await user.click(screen.getByRole('button', { name: '检查更新' }));
   expect(await screen.findByText('暂时无法检查更新，请稍后重试。')).toBeVisible();
   expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
-  expect(screen.getByRole('button', { name: '关于 有新版本' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '关于 有更新' })).toBeVisible();
   expect(screen.getByRole('button', { name: '去官网下载' })).toBeVisible();
   await user.click(screen.getByRole('button', { name: '检查更新' }));
   expect(await screen.findByText('当前没有可用更新。')).toBeVisible();
@@ -324,10 +324,10 @@ it('reports browser-opening failures and lets the user retry without clearing th
   state.openExternalUrl.mockRejectedValueOnce(new Error('Opener unavailable')).mockResolvedValueOnce(undefined);
   const user = userEvent.setup();
   await act(async () => { render(<App />); });
-  await user.click(screen.getByRole('button', { name: '关于 有新版本' }));
+  await user.click(screen.getByRole('button', { name: '关于 有更新' }));
   await user.click(screen.getByRole('button', { name: '去官网下载' }));
   expect(await screen.findByRole('alert')).toHaveTextContent(t('about.openUpdateFailed'));
-  expect(screen.getByRole('button', { name: '关于 有新版本' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '关于 有更新' })).toBeVisible();
   await user.click(screen.getByRole('button', { name: '去官网下载' }));
   await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   expect(state.openExternalUrl).toHaveBeenCalledTimes(2);

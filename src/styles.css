@@ -94,8 +94,8 @@ button,input,textarea{font:inherit}button{color:inherit}
 .workspace>nav button:hover{background:var(--surface-hover)}.workspace>nav button.nav-active{background:var(--accent-soft);color:var(--accent-text);font-weight:650}
 .workspace>nav .nav-icon{display:grid;width:24px;height:24px;place-items:center;transform:translateY(-1px)}.workspace>nav .nav-icon svg{display:block;width:21px;height:21px}
 .workspace>nav b{display:grid;min-width:20px;height:20px;place-items:center;padding:0 6px;border-radius:99px;background:var(--accent);color:#fff;font-size:11px}
-.workspace>nav .nav-about{margin-top:auto;flex-shrink:0}
-.nav-update-dot{width:8px;height:8px;border-radius:50%;background:var(--danger)}
+.workspace>nav .nav-about{margin-top:auto;flex-shrink:0;grid-template-columns:28px minmax(0,1fr) auto}
+.nav-update-badge{display:inline-flex;align-items:center;justify-content:center;padding:0 6px;border:1px solid color-mix(in srgb,var(--warning) 45%,var(--border));border-radius:6px;background:color-mix(in srgb,var(--warning) 8%,var(--surface));color:color-mix(in srgb,var(--warning) 52%,var(--text));font-size:12px;font-weight:600;line-height:18px;white-space:nowrap}
 .cloud-provider-navigation{display:grid;flex-shrink:0;gap:2px}
 /* Match the parent text inset: 10px padding + 28px icon column + 6px gap. */
 .workspace>nav .cloud-provider-navigation button{min-height:32px;grid-template-columns:minmax(0,1fr);padding-left:44px;font-size:14px}

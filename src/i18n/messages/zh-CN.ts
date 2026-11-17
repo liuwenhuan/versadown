@@ -172,6 +172,7 @@ const messages = {
   'navigation.primary': '主导航',
   'navigation.tasks': '任务',
   'navigation.newVersion': '有新版本',
+  'navigation.updateBadge': '有更新',
   'window.controls': '窗口控制',
   'window.minimize': '最小化',
   'window.maximizeRestore': '最大化或还原',

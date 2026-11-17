@@ -172,6 +172,7 @@ const messages = {
   'navigation.primary': 'Primary navigation',
   'navigation.tasks': 'Tasks',
   'navigation.newVersion': 'Update available',
+  'navigation.updateBadge': 'Update',
   'window.controls': 'Window controls',
   'window.minimize': 'Minimize',
   'window.maximizeRestore': 'Maximize or restore',
