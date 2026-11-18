@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{io::Read, time::Duration};
 
 pub const LATEST_RELEASE_URL: &str = "https://www.versadown.com/releases/latest.json";
-pub const DOWNLOAD_PAGE_URL: &str = "https://www.versadown.com/#download";
+pub const DOWNLOAD_PAGE_URL: &str = "https://www.versadown.com/#gate";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_REDIRECTS: usize = 5;
 
@@ -254,7 +254,7 @@ mod tests {
         let update = result.unwrap().unwrap();
         assert_eq!(update.version, "0.3.1");
         assert_eq!(update.notes, "");
-        assert_eq!(update.download_url, "https://www.versadown.com/#download");
+        assert_eq!(update.download_url, "https://www.versadown.com/#gate");
         assert!(request.starts_with("get /latest.json http/1.1\r\n"));
         assert!(request.contains("\r\naccept: application/json\r\n"));
         assert!(request.contains("\r\ncache-control: no-cache\r\n"));
