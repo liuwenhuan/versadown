@@ -70,9 +70,17 @@ describe('share failure messages', () => {
     expect(downloadErrorMessage('cloud.error.mega.integrityFailed')).toContain('integrity check');
   });
 
-  it('localizes Gofile failures', async () => {
+  it('localizes OneDrive link and sign-in failures in Chinese and English', async () => {
+    await setLocalePreference('zh-CN');
+    expect(shareFailureMessage('cloud.error.onedrive.linkUnavailable')).toContain('已失效');
+    expect(shareFailureMessage('cloud.error.onedrive.clientIdMissing')).toContain('应用 ID');
+    expect(shareFailureMessage('cloud.authorization.onedriveBrowser')).toContain('浏览器');
     await setLocalePreference('en');
+    expect(shareFailureMessage('cloud.error.onedrive.authorizationDenied')).toContain('declined access');
+    expect(shareFailureMessage('cloud.error.onedrive.serviceBusy')).toContain('busy');
+    expect(shareFailureMessage('cloud.error.onedrive.anonymousInterfaceChanged')).toContain('may have changed');
     expect(shareFailureMessage('cloud.error.gofile.linkExpired')).toContain('expired');
+    expect(downloadErrorMessage('cloud.error.onedrive.linkUnsupported')).toContain('not supported');
   });
 
   it('ignores unrelated text and shows task failures through the queue helper', async () => {

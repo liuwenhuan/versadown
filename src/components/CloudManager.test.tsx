@@ -2400,6 +2400,67 @@ it('surfaces the message when opening a web authorization window fails', async (
   expect(await screen.findByRole('status')).toHaveTextContent('无法打开授权窗口');
 });
 
+function onedriveCatalog(authorizationConfigured: boolean) {
+  const base = cloudCatalog.find(descriptor => descriptor.provider === 'quark')!;
+  return [...cloudCatalog, {
+    ...base, provider: 'onedrive' as const, displayName: 'OneDrive', rootDirectoryId: 'root', authorizationConfigured,
+    authorization: { provider: 'onedrive' as const, web: true, password: false, passwordLoginMode: 'none' as const },
+  }];
+}
+
+it('disables OneDrive sign-in with an explanation when this build has no application id', async () => {
+  const client = createCloudFake({
+    getCloudProviderCatalog: vi.fn().mockResolvedValue(onedriveCatalog(false)),
+  });
+  render(<NativeCloudManager descriptor={onedriveCatalog(false).at(-1)!} provider="onedrive" client={client} />);
+
+  expect(await screen.findByRole('button', { name: '使用网页授权' })).toBeDisabled();
+  expect(screen.getByText(t('cloud.authorization.notConfigured', { provider: 'OneDrive' }))).toBeVisible();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+});
+
+it('shows OneDrive browser sign-in instructions and localizes a refused consent', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    getCloudProviderCatalog: vi.fn().mockResolvedValue(onedriveCatalog(true)),
+    beginCloudAuthorization: vi.fn().mockResolvedValue({ provider: 'onedrive', windowLabel: '', instructions: 'cloud.authorization.onedriveBrowser' }),
+    completeCloudAuthorization: vi.fn().mockRejectedValue({ code: 'onedrive_authorization_denied', message: 'cloud.error.onedrive.authorizationDenied' }),
+  });
+  render(<NativeCloudManager descriptor={onedriveCatalog(true).at(-1)!} provider="onedrive" client={client} />);
+
+  await user.click(await screen.findByRole('button', { name: '使用网页授权' }));
+  expect(await screen.findByRole('status')).toHaveTextContent(t('cloud.authorization.onedriveBrowser'));
+  await user.click(await screen.findByRole('button', { name: t('cloud.authorizationCompleted') }));
+
+  expect(await screen.findByText(t('cloud.error.onedrive.authorizationDenied'))).toBeVisible();
+  // The wait ends: the user must authorize again explicitly.
+  expect(screen.queryByRole('button', { name: t('cloud.authorizationCompleted') })).not.toBeInTheDocument();
+});
+
+it('offers only reading and downloading for a read-only drive such as OneDrive', async () => {
+  const user = userEvent.setup();
+  const base = onedriveCatalog(true).at(-1)!;
+  const readOnly = {
+    ...base,
+    capabilities: { ...base.capabilities, createDirectory: false, rename: false, move: false, copy: false, trash: false, delete: false, restore: false, upload: false, shareCreate: false, shareList: false, shareCancel: false },
+  };
+  const client = createCloudFake({ getCloudProviderCatalog: vi.fn().mockResolvedValue([readOnly]) });
+  render(<NativeCloudManager descriptor={readOnly} provider="onedrive" client={client} initialAccount={{ id: 'u', displayName: 'ada', provider: 'onedrive', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await screen.findByRole('tree', { name: 'OneDrive文件' });
+  // No virtual recycle bin / my-shares folders and no write actions.
+  expect(screen.queryByText(t('cloud.recycleBin'))).not.toBeInTheDocument();
+  expect(screen.queryByText(t('cloud.myShares'))).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: t('cloud.action.upload'), exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: t('cloud.action.newFolder') })).not.toBeInTheDocument();
+  await user.pointer({ keys: '[MouseRight]', target: screen.getByText('报告.pdf') });
+  const menu = await screen.findByRole('menu');
+  expect(within(menu).getByRole('menuitem', { name: t('download.action.download') })).toBeVisible();
+  for (const label of [t('cloud.action.rename'), t('cloud.action.move'), t('cloud.action.copyTo'), t('cloud.action.share'), t('download.action.delete')]) {
+    expect(within(menu).queryByRole('menuitem', { name: label })).not.toBeInTheDocument();
+  }
+});
+
 it('prevents duplicate directory submissions while the first operation is pending', async () => {
   const user = userEvent.setup();
   let finish: (() => void) | undefined;

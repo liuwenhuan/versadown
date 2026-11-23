@@ -1,6 +1,6 @@
 import type { TaskActionResult } from './types';
 
-export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega' | 'gofile';
+export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega' | 'onedrive' | 'gofile';
 export type CloudAuthMethod = 'web' | 'password';
 
 export interface ProviderCapabilities {
@@ -23,10 +23,15 @@ export interface SharePassCodeConstraint {
   characterSet: SharePassCodeCharacterSet;
   hint: string;
 }
+export type UnofficialShareScope = 'none' | 'all';
 export interface ProviderDescriptor {
   provider: CloudProvider;
   /** False for providers that only serve public share links: no sign-in, no personal drive. */
   account: boolean;
+  /** Which public shares are read through an interface the provider does not publish and may drop. */
+  publicSharesUnofficial: UnofficialShareScope;
+  /** False when this build cannot sign in (for example OneDrive without an injected application id). */
+  authorizationConfigured: boolean;
   displayName: string;
   shareDisplayName: string;
   uploadDisplayName: string;

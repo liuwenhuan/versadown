@@ -3,6 +3,8 @@ import { ConfirmResource, ParseResult } from '../lib/types';
 import { VideoFormatCard } from './VideoFormatCard';
 import { ResourceFileRow, resourceFileCategory } from './ResourceFileRow';
 import { t, useTranslation } from '../i18n';
+import { getCloudProviderCatalog } from '../lib/cloudApi';
+import type { UnofficialShareScope } from '../lib/cloudTypes';
 
 interface ParseConfirmDialogProps {
   result: ParseResult;
@@ -20,6 +22,21 @@ type ResourceFilter = 'all' | 'video' | 'other';
 function cloudShareProvider(planSource: string): string | undefined {
   if (!planSource.startsWith('cloud-share://')) return undefined;
   return planSource.slice('cloud-share://'.length).split('/', 1)[0];
+}
+
+/** The backend catalog's declaration of how much of this provider's public-share reading is unofficial. */
+function useUnofficialShareScope(providerKey: string | undefined): UnofficialShareScope {
+  const [scope, setScope] = useState<UnofficialShareScope>('none');
+  useEffect(() => {
+    setScope('none');
+    if (!providerKey) return;
+    let cancelled = false;
+    void getCloudProviderCatalog().then((catalog) => {
+      if (!cancelled) setScope(catalog.find((descriptor) => descriptor.provider === providerKey)?.publicSharesUnofficial ?? 'none');
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [providerKey]);
+  return scope;
 }
 
 function pathParts(value: string): string[] {
@@ -77,6 +94,8 @@ export function ParseConfirmDialog({ result, placement = 'modal', downloadDirect
   const allSelected = resources.length > 0 && selected.length === resources.length;
   const root = result.isBitTorrent ? torrentRoot(resources, downloadDirectory) : undefined;
   const providerKey = cloudShareProvider(result.taskId);
+  const unofficialScope = useUnofficialShareScope(providerKey);
+  const unofficialShare = unofficialScope === 'all';
   useEffect(() => {
     setShowProcessing(false);
     setShowPassword(false);
@@ -102,6 +121,7 @@ export function ParseConfirmDialog({ result, placement = 'modal', downloadDirect
         </div>
       </div>}
       <div className="resource-list">{resources.length ? visibleResources.map((resource) => <ResourceFileRow key={resource.id} resource={resource} displayName={displayResourceName(resource, root, downloadDirectory)} onToggle={() => changeSelection(resource.id)} />) : <p className="resource-loading">{t('download.retrievingFileInfo')}</p>}</div>
+      {unofficialShare && <p className="parse-unofficial-notice" role="note">{t('cloud.share.unofficialNotice')}</p>}
     </div>}
     {hasProcessing && <button className="disclosure" onClick={() => setShowProcessing(!showProcessing)}>{showProcessing ? t('common.collapse') : t('common.view')} {t('download.postProcessingAndPassword')} {showProcessing ? '⌃' : '⌄'}</button>}
     {hasProcessing && showProcessing && <div className="processing-summary"><ul>{processing.map((step) => <li key={step}>{step}</li>)}</ul>{hasPassword && <p>{t('download.archivePassword')}：<code>{showPassword ? result.discoveredPassword : '••••••••'}</code><button onClick={() => setShowPassword(!showPassword)}>{showPassword ? t('common.hide') : t('common.show')}</button></p>}</div>}
