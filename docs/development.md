@@ -107,6 +107,15 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
 
 `Desktop checks` 工作流在 PR 中检查 Windows、Linux、Apple Silicon 与 Intel Mac。`Desktop release` 可手动运行并下载构建产物；推送与应用版本一致的 `v*` 标签后，各平台构建全部成功才会统一发布 GitHub Release。
 
+## Google Drive 登录凭据（可选）
+
+公开的 Google Drive 分享链接无需任何配置即可下载。若要在“网盘”中登录 Google 账号浏览自己的云端硬盘，发布构建需要内置一个 Google OAuth“桌面应用”客户端，仓库不保存真实值：
+
+1. 在 Google Cloud 控制台启用 Google Drive API，配置 OAuth 同意屏幕，并创建类型为“桌面应用”的 OAuth 客户端 ID。
+2. 编译时通过环境变量注入：`VERSADOWN_GOOGLE_CLIENT_ID`（必需）与 `VERSADOWN_GOOGLE_CLIENT_SECRET`（桌面客户端的 secret 不属于机密，但仍不入库）。在 GitHub Actions 中把它们保存为同名 Secrets，`linux-release.yml` 的 Linux、Windows、macOS 三个发布构建步骤都会传入；本地构建在运行构建脚本的 shell 中先设置这两个变量。
+3. 未注入时登录入口自动禁用并提示，公开链接下载不受影响。
+4. 应用只申请 `https://www.googleapis.com/auth/drive.readonly`。该范围属于 Google 的受限范围：面向公众发布前需要通过 OAuth 应用验证和 CASA 安全评估；验证通过前应用处于“测试”状态，最多 100 个测试用户，且测试状态下的刷新令牌 7 天后失效。
+
 ## OneDrive 个人版登录（可选构建参数）
 
 OneDrive 公开分享链接（`1drv.ms`、`onedrive.live.com`）无需登录即可解析下载。登录个人 OneDrive 以浏览、下载自己的文件，需要在 Microsoft Entra 注册一个免费的公共客户端应用，并在**编译时**注入其应用（客户端）ID：
