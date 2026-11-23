@@ -269,6 +269,11 @@ fn capture_persistent_authorization(
     if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
         return Err(CloudError::NotAuthorized);
     }
+    // OAuth providers have no browser profile to capture: their only silent
+    // renewal is the refresh token, already tried by `refresh_session`.
+    if provider.uses_oauth() {
+        return Ok(false);
+    }
     let record = state.auth_supervisor.record(&state.store, provider)?;
     let expected = record.account_id.or(
         if cloud_session_policy(provider).supports_password_fallback {

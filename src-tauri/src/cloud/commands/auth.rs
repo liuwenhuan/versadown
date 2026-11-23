@@ -379,6 +379,9 @@ pub async fn cloud_begin_authorization(
     provider: CloudProvider,
 ) -> Result<CloudAuthorization, QuarkError> {
     require_connected_provider(provider)?;
+    if provider.uses_oauth() {
+        return begin_oauth_authorization(app, provider).await;
+    }
     // Providers without an official web sign-in use their own login form.
     if !provider_capabilities(provider).web {
         return Err(QuarkError::NotAuthorized);
@@ -875,6 +878,9 @@ pub async fn cloud_complete_authorization(
     if let Some(account) = cloud.completed_authorization(provider)? {
         return Ok(account);
     }
+    if provider.uses_oauth() {
+        return complete_oauth_authorization(app, provider).await;
+    }
     let window = app
         .get_webview_window(&format!("cloud-auth-{}", provider.key()))
         .ok_or(QuarkError::WebAuthorizationRequired)?;
@@ -1181,7 +1187,9 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
         if provider == CloudProvider::Mega {
             crate::cloud::mega::account::revoke_session(http, &s.store);
         }
-        if provider_capabilities(provider).web {
+        if provider.uses_oauth() {
+            end_oauth_session(s, provider, http);
+        } else if provider_capabilities(provider).web {
             let profile_window = WebviewWindowBuilder::new(
                 &copy,
                 format!("cloud-logout-{}", provider.key()),
