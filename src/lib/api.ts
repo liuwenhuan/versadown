@@ -75,6 +75,7 @@ type NativeShareConfirmationOutcome = {
   kind: 'share_confirmation';
   plan_source: string;
   title: string;
+  root_directory: boolean;
   resources: ConfirmResource[];
 };
 
@@ -124,6 +125,7 @@ export async function parseDownload(input: string, accessCode?: string, requireC
       confirmation: {
         taskId: result.plan_source,
         title: result.title,
+        shareRootDirectory: result.root_directory,
         requiresConfirmation: true,
         resources: result.resources,
         processing: []

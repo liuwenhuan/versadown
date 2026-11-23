@@ -5,7 +5,7 @@ const cloudCatalogRows = [
   ['quark', '夸克', '0', 'none', 4, 4], ['pikpak', 'PikPak', '0', 'rustDirect', 4, 4],
   ['baidu', '百度', '/', 'rustDirect', 4, 4], ['tianyi', '天翼', '-11', 'rustDirect', 1, 1],
   ['aliyun', '阿里', 'root', 'officialWebView', 4, 4], ['xunlei', '迅雷', '0', 'officialWebView', 1, 4],
-  ['uc', 'UC', '0', 'officialWebView', 4, 4], ['mega', 'MEGA', '0', 'none', 4, 2]
+  ['uc', 'UC', '0', 'officialWebView', 4, 4], ['mega', 'MEGA', '0', 'none', 4, 2], ['gdrive', 'Google Drive', 'root', 'none', 4, 3]
 ] as const satisfies readonly (readonly [
   CloudProvider,
   string,

@@ -46,6 +46,8 @@ pub enum UnofficialShareScope {
     None,
     /// Every public share, file or folder.
     All,
+    /// Only the listing of public folders; single files use a published path.
+    Folders,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,7 +61,7 @@ pub struct ProviderDescriptor {
     pub account: bool,
     /// Whether this provider's public share links run inside the signed-in
     /// session (so they need, refresh and may recover it). Links that carry
-    /// their own key (MEGA) or are public (OneDrive) work signed out:
+    /// their own key (MEGA) or are public (Google, OneDrive) work signed out:
     /// they never trigger a login recovery and are not bound to an account.
     #[serde(skip)]
     pub public_shares_need_session: bool,
@@ -212,6 +214,7 @@ impl ProviderRegistry {
                     account_quota: options.mega_account_quota,
                 })
             }
+            CloudProvider::Gdrive => read_only!(super::gdrive::GdriveShareAdapter { http }),
             CloudProvider::Onedrive => {
                 read_only!(super::onedrive::OnedriveShareAdapter::new(http))
             }
@@ -374,6 +377,34 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             &["mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"],
             &["/file/", "/folder/"],
         ),
+        // Public links need no account; the account (OAuth) is optional and
+        // grants the personal drive. Every link shape is recognised by
+        // `gdrive::share_link_id`, the path prefixes only pre-select hosts.
+        Gdrive => (
+            "Google Drive",
+            "root",
+            "__versa_down_gdrive_recycle_bin__",
+            None,
+            "https://drive.google.com",
+            &[
+                "drive.google.com",
+                "docs.google.com",
+                "drive.usercontent.google.com",
+            ],
+            &[
+                "/file/",
+                "/open",
+                "/uc",
+                "/download",
+                "/drive/",
+                "/folders/",
+                "/folderview",
+                "/document/",
+                "/spreadsheets/",
+                "/presentation/",
+                "/drawings/",
+            ],
+        ),
         // Read-only personal drive plus anonymous public share links. The
         // parser validates link shapes itself (`onedrive::is_share_link`).
         Onedrive => (
@@ -406,28 +437,31 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
     // Every provider declares these facts explicitly (no wildcard arm), so a
     // new provider cannot silently inherit the wrong session semantics.
     let account = match provider {
-        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega | Onedrive => true,
+        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega | Gdrive | Onedrive => true,
         Gofile => false,
     };
     let public_shares_need_session = match provider {
         Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc => true,
-        Mega | Onedrive | Gofile => false,
+        Mega | Gdrive | Onedrive | Gofile => false,
     };
-    // OneDrive reads shares through its web page's anonymous "badger" API.
+    // OneDrive reads shares through its web page's anonymous "badger" API;
+    // Google lists public folders by scraping the embedded folder view.
     let public_shares_unofficial = match provider {
         Onedrive => UnofficialShareScope::All,
+        Gdrive => UnofficialShareScope::Folders,
         Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega | Gofile => {
             UnofficialShareScope::None
         }
     };
     let authorization_configured = match provider {
+        Gdrive => super::gdrive::oauth_client_configured(),
         Onedrive => super::onedrive::oauth_configured(),
         Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega | Gofile => true,
     };
-    // OneDrive is browse-and-download only. MEGA's drive is fully managed,
-    // including copy (every node key of the copied tree is re-encrypted for the
-    // account).
-    let writable = account && provider != Onedrive;
+    // Google Drive (scope `drive.readonly`) and OneDrive are browse-and-download
+    // only. MEGA's drive is fully managed, including copy (every node key of the
+    // copied tree is re-encrypted for the account).
+    let writable = account && !matches!(provider, Gdrive | Onedrive);
     let public_shares_browser_capture = provider == Gofile;
     ProviderDescriptor {
         provider,
@@ -453,6 +487,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷网盘",
             Uc => "UC 网盘",
             Mega => "MEGA",
+            Gdrive => "Google Drive",
             Onedrive => "OneDrive",
             Gofile => "Gofile",
         },
@@ -465,6 +500,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷云盘",
             Uc => "UC网盘",
             Mega => "MEGA",
+            Gdrive => "Google Drive",
             Onedrive => "OneDrive",
             Gofile => "Gofile",
         },
@@ -477,6 +513,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷云盘分享目录",
             Uc => "UC网盘分享目录",
             Mega => "MEGA分享目录",
+            Gdrive => "Google Drive分享目录",
             Onedrive => "OneDrive分享目录",
             Gofile => "Gofile分享目录",
         },
@@ -490,7 +527,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Quark => &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
             Baidu => &["https://pan.baidu.com"],
             Uc => &["https://drive.uc.cn", "https://pc-api.uc.cn"],
-            Pikpak | Aliyun | Xunlei | Mega | Onedrive | Gofile => &[],
+            Pikpak | Aliyun | Xunlei | Mega | Gdrive | Onedrive | Gofile => &[],
         },
         authorization: CloudAuthorizationCapabilities {
             provider,
@@ -538,6 +575,11 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
                 max_connections_per_file: 4,
                 max_concurrent_tasks: 2,
             },
+            // Google throttles anonymous downloads of popular files per IP.
+            Gdrive => DownloadConcurrencyPolicy {
+                max_connections_per_file: 4,
+                max_concurrent_tasks: 3,
+            },
             Tianyi => DownloadConcurrencyPolicy {
                 max_connections_per_file: 1,
                 max_concurrent_tasks: 1,
@@ -576,6 +618,7 @@ mod tests {
             let json = serde_json::to_value(&descriptor).unwrap();
             let expected = match descriptor.provider {
                 CloudProvider::Onedrive => "all",
+                CloudProvider::Gdrive => "folders",
                 _ => "none",
             };
             assert_eq!(json["publicSharesUnofficial"], serde_json::json!(expected));

@@ -114,6 +114,10 @@ pub(crate) fn registered_share_provider(url: &Url) -> Option<CloudProvider> {
 }
 
 fn valid_share_id(url: &Url, provider: CloudProvider) -> Option<&str> {
+    if provider == CloudProvider::Gdrive {
+        // The id sits in the path or the `id` query depending on the link shape.
+        return crate::cloud::gdrive::share_link_id(url).map(|_| "");
+    }
     // OneDrive links are tokens and queries on a few hosts, not `/s/<id>`.
     if provider == CloudProvider::Onedrive {
         return crate::cloud::onedrive::is_share_link(url).then(|| url.path());

@@ -79,6 +79,7 @@ describe('share failure messages', () => {
     expect(shareFailureMessage('cloud.error.onedrive.authorizationDenied')).toContain('declined access');
     expect(shareFailureMessage('cloud.error.onedrive.serviceBusy')).toContain('busy');
     expect(shareFailureMessage('cloud.error.onedrive.anonymousInterfaceChanged')).toContain('may have changed');
+    expect(shareFailureMessage('cloud.error.gdrive.folderPageChanged')).toContain('may have changed');
     expect(shareFailureMessage('cloud.error.gofile.linkExpired')).toContain('expired');
     expect(downloadErrorMessage('cloud.error.onedrive.linkUnsupported')).toContain('not supported');
   });
@@ -89,5 +90,30 @@ describe('share failure messages', () => {
     await setLocalePreference('en');
     expect(downloadErrorMessage('download.error.bandwidthLimited')).toContain('quota');
     expect(downloadErrorMessage('cloud.error.mega.quotaExceeded:600')).toContain('about 10 min');
+  });
+});
+
+describe('Google Drive failure messages', () => {
+  it('localizes the sharing, quota and sign-in failures in Chinese and English', async () => {
+    await setLocalePreference('zh-CN');
+    expect(shareFailureMessage('cloud.error.gdrive.accessDenied')).toContain('知道链接的任何人');
+    expect(shareFailureMessage('cloud.error.gdrive.quotaExceeded')).toContain('24 小时');
+    expect(shareFailureMessage('cloud.error.gdrive.notConfigured')).toContain('公开分享链接');
+    await setLocalePreference('en');
+    expect(shareFailureMessage('cloud.error.gdrive.accessDenied')).toContain('anyone with the link');
+    expect(shareFailureMessage('cloud.error.gdrive.consentTimeout')).toContain('Timed out');
+    expect(downloadErrorMessage('cloud.error.gdrive.quotaExceeded')).toContain('too many downloads');
+  });
+
+  it('has a message for every failure the backend can send', async () => {
+    const keys = ['linkUnsupported', 'accessDenied', 'notFound', 'quotaExceeded', 'folderTooLarge', 'notConfigured', 'consentDenied', 'consentTimeout', 'clientNotAllowed', 'nativeNotDownloadable', 'rateLimited'];
+    for (const locale of ['zh-CN', 'en'] as const) {
+      await setLocalePreference(locale);
+      for (const key of keys) {
+        const text = shareFailureMessage(`cloud.error.gdrive.${key}`);
+        expect(text, `${locale} ${key}`).toBeTruthy();
+        expect(text).not.toContain('cloud.error.gdrive');
+      }
+    }
   });
 });

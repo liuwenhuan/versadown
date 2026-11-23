@@ -140,6 +140,7 @@ mod tests {
             "tianyi",
             "aliyun",
             "onedrive",
+            "gdrive",
             "ai-api-key",
             "privacy-download-password-v1",
         ];

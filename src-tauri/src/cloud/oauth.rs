@@ -1,4 +1,4 @@
-//! Browser sign-in shared by every OAuth provider (OneDrive):
+//! Browser sign-in shared by every OAuth provider (Google Drive, OneDrive):
 //! authorization code flow with PKCE and a loopback redirect (RFC 8252).
 //!
 //! The system browser shows the provider's own consent page; this process only
@@ -89,7 +89,7 @@ pub(crate) struct Redirect {
 }
 
 impl Redirect {
-    /// `http://127.0.0.1:<port>` (clients registered with the IP address).
+    /// `http://127.0.0.1:<port>` (Google).
     pub const LOOPBACK_IP: Self = Self {
         host: "127.0.0.1",
         path: "",

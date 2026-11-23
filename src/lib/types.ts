@@ -135,6 +135,8 @@ export interface ParseResult {
   processing: string[];
   discoveredPassword?: string;
   isBitTorrent?: boolean;
+  /** True when a cloud share's root is a folder rather than one file. */
+  shareRootDirectory?: boolean;
   /** True only until the complete selectable file list is available. */
   fileListPending?: boolean;
 }
@@ -150,7 +152,7 @@ export interface ScanDownloadProgress {
   pending: string[];
 }
 
-export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega' | 'onedrive' | 'gofile';
+export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega' | 'gdrive' | 'onedrive' | 'gofile';
 
 export interface CloudShareAccessCodeRequired {
   provider: CloudShareProvider;

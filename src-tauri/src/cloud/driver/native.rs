@@ -43,6 +43,10 @@ impl ProviderDriverFactory for NativeDriverFactory {
                 store: StoreRef(store),
                 http: HttpRef(http),
             }),
+            CloudProvider::Gdrive => Box::new(GdriveDriver {
+                store: StoreRef(store),
+                http: HttpRef(http),
+            }),
             CloudProvider::Onedrive => Box::new(OnedriveDriver {
                 store: StoreRef(store),
                 http: HttpRef(http),
@@ -52,6 +56,8 @@ impl ProviderDriverFactory for NativeDriverFactory {
     }
 }
 
+mod gdrive_driver;
+use gdrive_driver::GdriveDriver;
 mod accountless_driver;
 // Providers the registry declares with `account == false` (Gofile).
 use accountless_driver::AccountlessDriver;

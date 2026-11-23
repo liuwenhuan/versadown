@@ -85,6 +85,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
             "当前网盘分享下载暂不支持".into()
         }
         QuarkError::Mega(failure) => failure.message(),
+        QuarkError::Gdrive(failure) => failure.message(),
         QuarkError::Onedrive(failure) => failure.message().into(),
         QuarkError::Gofile(failure) => failure.message().into(),
     }
@@ -125,6 +126,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::InvalidInput(_) => "invalid_input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
         QuarkError::Mega(failure) => failure.code(),
+        QuarkError::Gdrive(failure) => failure.code(),
         QuarkError::Onedrive(failure) => failure.code(),
         QuarkError::Gofile(failure) => failure.code(),
     }
@@ -243,7 +245,7 @@ pub(crate) async fn run_session_work_checked<T: Send + 'static>(
 }
 
 /// Share reads and resolutions of providers whose public links need no login
-/// (MEGA keys and OneDrive links) never recover the signed-in session,
+/// (MEGA keys, Google and OneDrive links) never recover the signed-in session,
 /// even when the provider also has accounts. MEGA may read the stored session
 /// to request download URLs against its quota, falling back to anonymous.
 pub(crate) async fn run_share_work_checked<T: Send + 'static>(

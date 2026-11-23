@@ -1511,6 +1511,31 @@ fn only_an_explicit_exact_root_file_is_selected_for_automatic_submission() {
 }
 
 #[test]
+fn the_confirmation_says_whether_the_share_root_is_a_folder() {
+    let candidate =
+        crate::parser::extract_cloud_share_candidate("https://pan.baidu.com/s/private-share", None)
+            .unwrap()
+            .unwrap();
+    for (root_kind, expected) in [
+        (CloudShareRootKind::Directory, true),
+        (CloudShareRootKind::Collection, true),
+        (CloudShareRootKind::Unknown, false),
+        (CloudShareRootKind::File { entry_id: "f1".into() }, false),
+    ] {
+        let mut plan = fixture("private-share");
+        plan.root_kind = root_kind;
+        let (store, _, _) = memory_store();
+        let confirmation =
+            match inspect_share_with_adapter(&store, &PlanAdapter(plan), &candidate).unwrap() {
+                ShareConfirmationOutcome::Confirmation(confirmation)
+                | ShareConfirmationOutcome::AutoSubmit { confirmation, .. } => confirmation,
+                ShareConfirmationOutcome::AccessCodeRequired => unreachable!(),
+            };
+        assert_eq!(confirmation.root_directory, expected);
+    }
+}
+
+#[test]
 fn legacy_plan_without_root_kind_defaults_to_unknown_and_requires_confirmation() {
     let candidate =
         crate::parser::extract_cloud_share_candidate("https://pan.baidu.com/s/private-share", None)

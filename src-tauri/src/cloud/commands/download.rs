@@ -441,8 +441,8 @@ pub(crate) fn ready_cloud_download_account(
     app: &AppHandle,
     provider: CloudProvider,
 ) -> Result<Option<String>, QuarkError> {
-    // Public links that run outside the session (MEGA keys and OneDrive
-    // links) never belong to the signed-in account.
+    // Public links that run outside the session (MEGA keys, Google and
+    // OneDrive links) never belong to the signed-in account.
     let descriptor = ProviderRegistry::global().get(provider);
     if !descriptor.account || !descriptor.public_shares_need_session {
         return Ok(None);
@@ -708,8 +708,13 @@ pub async fn queue_cloud_dispatch(
                     let (signed_url, options) =
                         share::share_submission_options(resolved, configured)?;
                     let mut gateway_registration = None;
+                    // Public Google links are plain, cookie-free URLs (and
+                    // exports cannot be ranged): only the signed-in drive,
+                    // whose token must stay out of aria2, needs the gateway.
+                    let public_link =
+                        share && !ProviderRegistry::global().get(provider).public_shares_need_session;
                     let (url, options) = if transform.is_some()
-                        || requires_stable_range_gateway(provider)
+                        || (requires_stable_range_gateway(provider) && !public_link)
                     {
                         let gateway = state
                             .range_gateway
@@ -876,7 +881,10 @@ pub(crate) fn register_stable_range_gateway_download(
 /// Signed CDN URLs that must be refreshed keep one loopback URI in aria2 so
 /// native range checkpoints never retain an expired provider URL as a mirror.
 pub(crate) fn requires_stable_range_gateway(provider: CloudProvider) -> bool {
-    matches!(provider, CloudProvider::Baidu | CloudProvider::Pikpak)
+    matches!(
+        provider,
+        CloudProvider::Baidu | CloudProvider::Pikpak | CloudProvider::Gdrive
+    )
 }
 
 pub fn apply_cloud_download_policy(
@@ -1042,6 +1050,9 @@ pub(crate) fn directory_download_failure_fields(
     if let QuarkError::Mega(failure) = error {
         return (failure.code(), failure.message().into());
     }
+    if let QuarkError::Gdrive(failure) = error {
+        return (failure.code(), failure.message().into());
+    }
     if let QuarkError::Onedrive(failure) = error {
         return (failure.code(), failure.message().into());
     }
@@ -1057,6 +1068,7 @@ fn fixed_directory_download_failure_fields(
 ) -> (&'static str, &'static str) {
     match error {
         QuarkError::Mega(failure) => (failure.code(), failure.message_key()),
+        QuarkError::Gdrive(failure) => (failure.code(), failure.message_key()),
         QuarkError::Onedrive(failure) => (failure.code(), failure.message()),
         QuarkError::Gofile(failure) => (failure.code(), failure.message()),
         QuarkError::XunleiVerificationUnavailable(reason) => ("xunlei_verification_unavailable", reason),
