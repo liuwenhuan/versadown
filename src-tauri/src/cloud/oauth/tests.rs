@@ -232,11 +232,19 @@ fn every_oauth_provider_has_its_own_pending_authorization() {
             "{provider:?}"
         );
     }
-    let microsoft = flows.get(CloudProvider::Onedrive).unwrap();
-    begin(microsoft, Redirect::LOOPBACK_IP, Duration::from_secs(30));
-    flows.cancel(CloudProvider::Onedrive);
+    let (google, microsoft) = (
+        flows.get(CloudProvider::Gdrive).unwrap(),
+        flows.get(CloudProvider::Onedrive).unwrap(),
+    );
+    begin(google, Redirect::LOOPBACK_IP, Duration::from_secs(30));
+    // Starting one provider's sign-in never disturbs the other's.
     assert!(matches!(
         microsoft.poll(),
+        Err(QuarkError::WebAuthorizationRequired)
+    ));
+    flows.cancel(CloudProvider::Gdrive);
+    assert!(matches!(
+        google.poll(),
         Err(QuarkError::WebAuthorizationRequired)
     ));
 }

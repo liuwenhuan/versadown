@@ -11,11 +11,13 @@ pub enum CloudProvider {
     Xunlei,
     Uc,
     Mega,
+    #[serde(rename = "gdrive")]
+    Gdrive,
     Onedrive,
     Gofile,
 }
 impl CloudProvider {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Quark,
         Self::Pikpak,
         Self::Baidu,
@@ -24,6 +26,7 @@ impl CloudProvider {
         Self::Xunlei,
         Self::Uc,
         Self::Mega,
+        Self::Gdrive,
         Self::Onedrive,
         Self::Gofile,
     ];
@@ -44,6 +47,7 @@ impl CloudProvider {
             Self::Xunlei => "xunlei",
             Self::Uc => "uc",
             Self::Mega => "mega",
+            Self::Gdrive => "gdrive",
             Self::Onedrive => "onedrive",
             Self::Gofile => "gofile",
         }
@@ -53,7 +57,7 @@ impl CloudProvider {
     /// an embedded web page, so there is no browser profile to capture or
     /// clear.
     pub fn uses_oauth(self) -> bool {
-        matches!(self, Self::Onedrive)
+        matches!(self, Self::Gdrive | Self::Onedrive)
     }
 }
 
@@ -462,6 +466,8 @@ pub enum CloudError {
     #[error("{}", .0.message())]
     Mega(super::mega::MegaFailure),
     #[error("{}", .0.message())]
+    Gdrive(super::gdrive::GdriveFailure),
+    #[error("{}", .0.message())]
     Onedrive(super::onedrive::OnedriveFailure),
     #[error("{}", .0.message())]
     Gofile(super::gofile::GofileFailure),
@@ -571,6 +577,7 @@ impl Serialize for CloudError {
             Self::UploadUnavailable => "provider_unsupported",
             Self::ProviderUnsupported => "provider_unsupported",
             Self::Mega(failure) => failure.code(),
+            Self::Gdrive(failure) => failure.code(),
             Self::Onedrive(failure) => failure.code(),
             Self::Gofile(failure) => failure.code(),
         };

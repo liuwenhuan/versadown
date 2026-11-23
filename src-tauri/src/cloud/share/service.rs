@@ -183,6 +183,9 @@ impl crate::cloud::CloudHttpTransport for RetryingShareReadTransport<'_> {
 pub struct CloudShareConfirmation {
     pub plan_source: String,
     pub title: String,
+    /// Whether the share root is a folder (as opposed to one file), so the UI
+    /// can scope notes that only concern folder listings.
+    pub root_directory: bool,
     pub resources: Vec<CloudShareConfirmationResource>,
 }
 
@@ -219,6 +222,10 @@ pub fn inspect_share_with_adapter(
     let confirmation = CloudShareConfirmation {
         plan_source: plan.source_for(&plan.entries[0].entry_id),
         title: "网盘分享文件".into(),
+        root_directory: matches!(
+            plan.root_kind,
+            CloudShareRootKind::Directory | CloudShareRootKind::Collection
+        ),
         resources: plan
             .entries
             .iter()
@@ -385,10 +392,11 @@ pub(crate) fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
         || authority.contains('@')
         || !parsed.username().is_empty()
         || parsed.password().is_some()
-        || !matches!(
-            crate::parser::extract_cloud_share_candidate(url, None),
-            Ok(None)
-        )
+        || !(crate::cloud::gdrive::is_resolved_download_url(&parsed)
+            || matches!(
+                crate::parser::extract_cloud_share_candidate(url, None),
+                Ok(None)
+            ))
     {
         return Err(QuarkError::InvalidResponse);
     }

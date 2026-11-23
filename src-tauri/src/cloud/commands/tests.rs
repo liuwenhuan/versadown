@@ -1242,6 +1242,43 @@ fn pikpak_uses_a_stable_local_gateway_for_refreshable_cdn_links() {
 }
 
 #[tokio::test]
+async fn google_drive_submission_keeps_the_bearer_token_out_of_local_aria2_options() {
+    assert!(super::requires_stable_range_gateway(CloudProvider::Gdrive));
+    let resolved = super::ResolvedCloudDownload {
+        transform: None,
+        url: "https://www.googleapis.com/drive/v3/files/FILE?alt=media&supportsAllDrives=true".into(),
+        name: "movie.mkv".into(),
+        headers: vec![("Authorization".into(), "Bearer ya29.secret".into())],
+    };
+    let configured = super::apply_cloud_download_policy(
+        CloudProvider::Gdrive,
+        3,
+        crate::UriSubmissionOptions::default(),
+    );
+    let (upstream, options) =
+        crate::cloud::share::share_submission_options(resolved, configured).unwrap();
+    let gateway = crate::cloud::range_gateway::RangeGateway::start()
+        .await
+        .unwrap();
+    let (url, options, mut registration) = super::register_stable_range_gateway_download(
+        &gateway,
+        uuid::Uuid::new_v4(),
+        upstream,
+        options,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(url.starts_with("http://127.0.0.1:") && !url.contains("secret"));
+    assert!(options.headers.is_empty());
+    let aria2 = options.into_aria2_options().unwrap();
+    assert!(!aria2.contains_key("header"));
+    assert!(!format!("{aria2:?}").contains("ya29.secret"));
+    assert_eq!(aria2.get("split").map(String::as_str), Some("3"));
+    registration.commit();
+}
+
+#[tokio::test]
 async fn baidu_share_submission_keeps_configured_connections_through_gateway() {
     let configured = super::apply_cloud_download_policy(
         CloudProvider::Baidu,
