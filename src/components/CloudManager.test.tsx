@@ -2847,6 +2847,32 @@ it('keeps the signed-in card and withholds profile details belonging to another 
   expect(screen.queryByRole('heading', { name: /别的账号/ })).not.toBeInTheDocument();
 });
 
+it('browses Google Drive read-only: shared folders instead of recycle bin and shares, no upload or editing', async () => {
+  const user = userEvent.setup();
+  const gdrive = cloudCatalog.find(d => d.provider === 'gdrive')!;
+  const readOnly = {
+    ...gdrive,
+    capabilities: { ...gdrive.capabilities, createDirectory: false, rename: false, move: false, copy: false, trash: false, delete: false, restore: false, upload: false, shareCreate: false, shareList: false, shareCancel: false },
+  };
+  const client = createCloudFake({
+    listCloudDirectory: vi.fn().mockResolvedValue({ id: 'root', items: [{ id: 'file-1', parentId: 'root', name: 'movie.mkv', kind: 'file', size: 2048 }] }),
+  });
+  render(<NativeCloudManager provider="gdrive" descriptor={readOnly} client={client} initialAccount={{ id: 'g', displayName: 'ada@example.com', provider: 'gdrive', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByText('movie.mkv')).toBeVisible();
+  expect(screen.getByText('与我共享')).toBeVisible();
+  expect(screen.getByText('共享云端硬盘')).toBeVisible();
+  expect(screen.queryByText('回收站')).not.toBeInTheDocument();
+  expect(screen.queryByText('我的分享')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '上传', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '新建目录' })).not.toBeInTheDocument();
+  // Selecting a file offers download but no delete or overflow menu.
+  await user.click(screen.getByRole('checkbox', { name: /movie.mkv/ }));
+  const toolbar = await screen.findByRole('toolbar', { name: /已选/ });
+  expect(within(toolbar).getByRole('button', { name: '下载' })).toBeVisible();
+  expect(within(toolbar).queryByRole('button', { name: '删除' })).not.toBeInTheDocument();
+  expect(within(toolbar).queryByRole('button', { name: '更多文件操作' })).not.toBeInTheDocument();
+});
+
 const incomingSharesId = '__versa_down_mega_incoming_shares__';
 const megaAccount = { id: 'm', displayName: 'me@example.com', provider: 'mega' as const, authMethod: 'password' as const };
 
@@ -2908,4 +2934,12 @@ it('keeps pass code and expiration controls in the Quark share dialog', async ()
   expect(within(dialog).getByRole('textbox', { name: '提取码' })).toBeVisible();
   expect(within(dialog).getByRole('combobox', { name: '有效期' })).toBeVisible();
   expect(dialog).not.toHaveTextContent(t('cloud.share.linkOnlyNote'));
+});
+
+it('tells a Google build without sign-in credentials why it cannot connect', async () => {
+  const gdrive = cloudCatalog.find(d => d.provider === 'gdrive')!;
+  const unconfigured = { ...gdrive, authorizationConfigured: false };
+  render(<NativeCloudManager provider="gdrive" descriptor={unconfigured} client={createCloudFake()} restoreOnMount={false} />);
+  expect(await screen.findByRole('button', { name: '使用网页授权' })).toBeDisabled();
+  expect(screen.getByRole('status')).toHaveTextContent('未内置 Google Drive 的登录凭据');
 });

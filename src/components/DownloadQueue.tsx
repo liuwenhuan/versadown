@@ -239,6 +239,7 @@ const cloudProviderTaskLabels: Record<string, string> = {
   xunlei: 'cloud.provider.xunlei',
   uc: 'cloud.provider.uc',
   mega: 'cloud.provider.mega',
+  gdrive: 'cloud.provider.gdrive',
   onedrive: 'cloud.provider.onedrive',
 };
 

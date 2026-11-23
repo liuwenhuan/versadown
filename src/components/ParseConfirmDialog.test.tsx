@@ -160,25 +160,35 @@ it('uses the torrent root as the title, hides the local path, formats byte sizes
 });
 
 describe('unofficial share interface notice', () => {
-  const shareResult = (provider: string) => ({ ...result, taskId: `cloud-share://${provider}/plan/entry`, processing: [] });
-  const catalogWith = (provider: string, scope: 'none' | 'all') => cloudCatalog.map((descriptor) => ({ ...descriptor, publicSharesUnofficial: descriptor.provider === provider ? scope : 'none' as const }));
+  const shareResult = (provider: string, shareRootDirectory?: boolean) => ({ ...result, taskId: `cloud-share://${provider}/plan/entry`, shareRootDirectory, processing: [] });
+  const catalogWith = (provider: string, scope: 'none' | 'all' | 'folders') => cloudCatalog.map((descriptor) => ({ ...descriptor, publicSharesUnofficial: descriptor.provider === provider ? scope : 'none' as const }));
   const renderShare = (value: ReturnType<typeof shareResult>) => render(<ParseConfirmDialog result={value} onConfirm={() => {}} onSelectionChange={() => {}} onClose={() => {}} />);
 
   it('notes every share of a provider declared unofficial for all shares', async () => {
     cloudApi.getCloudProviderCatalog.mockResolvedValue(catalogWith('quark', 'all'));
-    renderShare(shareResult('quark'));
+    renderShare(shareResult('quark', false));
     expect(await screen.findByText('非官方接口，可能失效')).toBeVisible();
   });
 
+  it('notes only folder shares of a provider declared unofficial for folders', async () => {
+    cloudApi.getCloudProviderCatalog.mockResolvedValue(catalogWith('quark', 'folders'));
+    const folder = renderShare(shareResult('quark', true));
+    expect(await screen.findByText('非官方接口，可能失效')).toBeVisible();
+    folder.unmount();
+    renderShare(shareResult('quark', false));
+    await waitFor(() => expect(cloudApi.getCloudProviderCatalog).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('非官方接口，可能失效')).not.toBeInTheDocument();
+  });
+
   it('shows nothing for providers without the declaration or for non-share tasks', async () => {
-    renderShare(shareResult('quark'));
+    renderShare(shareResult('quark', true));
     await waitFor(() => expect(cloudApi.getCloudProviderCatalog).toHaveBeenCalled());
     expect(screen.queryByText('非官方接口，可能失效')).not.toBeInTheDocument();
   });
 
   it('stays quiet when the catalog cannot be read', async () => {
     cloudApi.getCloudProviderCatalog.mockRejectedValue(new Error('offline'));
-    renderShare(shareResult('quark'));
+    renderShare(shareResult('quark', true));
     await waitFor(() => expect(cloudApi.getCloudProviderCatalog).toHaveBeenCalled());
     expect(screen.queryByText('非官方接口，可能失效')).not.toBeInTheDocument();
   });

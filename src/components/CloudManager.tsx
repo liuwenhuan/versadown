@@ -96,6 +96,9 @@ const expiredAuthorizationStatus = t('cloud.authorization.expired');
 const DIRECTORY_INDEX_CONFIRMATION_DELAYS_MS = [0, 250, 750, 1_500] as const;
 type CloudHeaderMenuAction = 'rename' | 'move' | 'copy' | 'share';
 const MY_SHARES_DIRECTORY_ID = '__versa_down_my_shares__';
+// Virtual folders of the Google Drive root; the backend lists them by these ids.
+const GDRIVE_SHARED_WITH_ME_ID = '__versa_down_gdrive_shared_with_me__';
+const GDRIVE_SHARED_DRIVES_ID = '__versa_down_gdrive_shared_drives__';
 
 const authorizationWatchdogMs = 10_000;
 
@@ -195,6 +198,7 @@ function isXunleiVerificationFailure(error: unknown, reason: 'metadata_expired' 
 /** Browser sign-in failures that end the wait (no window to retry in). */
 // A browser (OAuth) sign-in that ended without an account: the round trip is over.
 const browserAuthorizationFailureCodes: readonly string[] = [
+  'gdrive_consent_denied', 'gdrive_consent_timeout', 'gdrive_client_not_allowed',
   'onedrive_authorization_denied', 'onedrive_authorization_timeout', 'onedrive_authorization_failed',
 ];
 
@@ -367,7 +371,7 @@ function CloudContextMenu({ state, selectedCount, recycleBin, readOnlyDirectory,
       : recycleBin
       ? [{ action: 'restore', label: 'cloud.action.restore' as const }, { action: 'delete', label: 'cloud.action.permanentDelete' as const, danger: true, separated: true }]
       : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: 'cloud.action.open' as const }] : []), { action: 'download', label: 'download.action.download' as const }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: 'cloud.action.rename' as const, separated: true }] : []), { action: 'move', label: 'cloud.action.move' as const, separated: selectedCount > 1 }, { action: 'copy', label: 'cloud.action.copyTo' as const }, { action: 'share', label: 'cloud.action.share' as const, separated: true }, { action: 'delete', label: 'download.action.delete' as const, danger: true, separated: true }];
-  // A drive without a write capability (OneDrive) drops those
+  // A drive without a write capability (Google Drive, OneDrive) drops those
   // entries; the first remaining one never starts with a separator.
   const items = allItems
     .filter((item) => contextActionSupported(item.action, capabilities))
@@ -759,11 +763,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const incomingSharesId = descriptor.incomingSharesDirectoryId;
   // Everything under the "shared with me" virtual folder is read-only: no upload / new folder.
   const isReadOnlyDirectory = Boolean(incomingSharesId) && breadcrumbs.some((crumb) => crumb.id === incomingSharesId);
-  const isVirtualIncomingSharesItem = (item: CloudFile | undefined) => Boolean(incomingSharesId) && item?.id === incomingSharesId;
-  const isVirtualDirectoryItem = (item: CloudFile | undefined) => isVirtualRecycleBinItem(item) || isVirtualMySharesItem(item) || isVirtualIncomingSharesItem(item);
+  const isVirtualGdriveItem = (item: CloudFile | undefined) => item?.id === GDRIVE_SHARED_WITH_ME_ID || item?.id === GDRIVE_SHARED_DRIVES_ID || (Boolean(incomingSharesId) && item?.id === incomingSharesId);
+  const isVirtualDirectoryItem = (item: CloudFile | undefined) => isVirtualRecycleBinItem(item) || isVirtualMySharesItem(item) || isVirtualGdriveItem(item);
   const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
   // Any other open-only virtual folder behaves like "my shares" for selection rules.
-  const selectedVirtualMyShares = selected.some((item) => isVirtualMySharesItem(item) || isVirtualIncomingSharesItem(item));
+  const selectedVirtualMyShares = selected.some((item) => isVirtualMySharesItem(item) || isVirtualGdriveItem(item));
   const canModifySelection = descriptor.capabilities.rename || descriptor.capabilities.move || descriptor.capabilities.copy || descriptor.capabilities.shareCreate;
   const selectableItems = sortedItems.filter((item) => !isVirtualDirectoryItem(item));
   const operationBusy = operationRunning || operation?.kind === 'working';
@@ -951,6 +955,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       ...(!descriptor.capabilities.restore || next.items.some((item) => item.id === recycleBinId) ? [] : [{ id: recycleBinId, parentId: rootId, name: t('cloud.recycleBin'), kind: 'folder' as const }]),
       ...(!descriptor.capabilities.shareList || next.items.some((item) => item.id === MY_SHARES_DIRECTORY_ID) ? [] : [{ id: MY_SHARES_DIRECTORY_ID, parentId: rootId, name: t('cloud.myShares'), kind: 'folder' as const }]),
       ...(!incomingSharesId || next.items.some((item) => item.id === incomingSharesId) ? [] : [{ id: incomingSharesId, parentId: rootId, name: t('cloud.incomingShares'), kind: 'folder' as const }]),
+      ...(provider === 'gdrive' ? [
+        { id: GDRIVE_SHARED_WITH_ME_ID, parentId: rootId, name: t('cloud.gdrive.sharedWithMe'), kind: 'folder' as const },
+        { id: GDRIVE_SHARED_DRIVES_ID, parentId: rootId, name: t('cloud.gdrive.sharedDrives'), kind: 'folder' as const },
+      ] : []),
         ]
         : next.items;
       const items = rootItems;

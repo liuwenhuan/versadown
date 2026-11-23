@@ -186,7 +186,7 @@ it('defaults to the cloud management page and lists every supported provider the
   expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'PikPak 网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(9));
 });
 
 it('keeps one provider workspace submenu after logout and login as a different account', async () => {
@@ -216,7 +216,7 @@ it('renders authorization cards for every newly supported cloud service', async 
   for (const label of ['百度网盘', '天翼云盘', '阿里云盘', '迅雷网盘']) {
     expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
   }
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(9));
 });
 
 it('signs in to MEGA with its own form, including a two-factor code, and browses with full drive management', async () => {
@@ -277,7 +277,7 @@ it('keeps account-less providers out of the drive cards, navigation and account 
 
   await screen.findByRole('region', { name: '夸克网盘账号授权' });
   expect(screen.queryByRole('region', { name: /MEGA/ })).not.toBeInTheDocument();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
   expect(client.getCloudAccount).not.toHaveBeenCalledWith('mega');
   expect(screen.queryByRole('button', { name: /MEGA/ })).not.toBeInTheDocument();
 });
@@ -312,7 +312,7 @@ it('ignores a recovered account when the provider does not match the request', a
   client.getCloudAccount.mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' });
   render(<CloudWorkspace client={client as never} />);
 
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(9));
   expect(screen.getAllByRole('button', { name: 'PikPak 网盘' })).toHaveLength(1);
   expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
 });
@@ -402,7 +402,7 @@ it('recovers accounts into submenus while still opening on cloud management', as
   expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
   expect(client.listCloudDirectory).not.toHaveBeenCalled();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(9));
 });
 
 it('shows only authorized provider submenus and switches their real directory views', async () => {

@@ -95,7 +95,7 @@ export function ParseConfirmDialog({ result, placement = 'modal', downloadDirect
   const root = result.isBitTorrent ? torrentRoot(resources, downloadDirectory) : undefined;
   const providerKey = cloudShareProvider(result.taskId);
   const unofficialScope = useUnofficialShareScope(providerKey);
-  const unofficialShare = unofficialScope === 'all';
+  const unofficialShare = unofficialScope === 'all' || (unofficialScope === 'folders' && Boolean(result.shareRootDirectory));
   useEffect(() => {
     setShowProcessing(false);
     setShowPassword(false);

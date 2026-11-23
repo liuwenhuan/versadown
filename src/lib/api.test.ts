@@ -57,12 +57,13 @@ it('maps a share confirmation without inventing an aria2 task', async () => {
     kind: 'share_confirmation',
     plan_source: 'cloud-share://uc/a/b',
     title: '照片',
+    root_directory: true,
     resources: [{ id: 'f1', name: '照片/a.jpg', size: '3 B', selected: true }]
   });
   const { parseDownload } = await import('./api');
 
   await expect(parseDownload('https://drive.uc.cn/s/id')).resolves.toMatchObject({
-    confirmation: { taskId: 'cloud-share://uc/a/b', processing: [] }
+    confirmation: { taskId: 'cloud-share://uc/a/b', processing: [], shareRootDirectory: true }
   });
 });
 
