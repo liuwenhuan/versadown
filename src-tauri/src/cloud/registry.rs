@@ -37,6 +37,17 @@ pub struct DownloadConcurrencyPolicy {
     pub max_concurrent_tasks: u16,
 }
 
+/// How much of a provider's public-share reading relies on an unofficial
+/// interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnofficialShareScope {
+    /// Everything goes through the provider's published interfaces.
+    None,
+    /// Every public share, file or folder.
+    All,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDescriptor {
@@ -48,15 +59,24 @@ pub struct ProviderDescriptor {
     pub account: bool,
     /// Whether this provider's public share links run inside the signed-in
     /// session (so they need, refresh and may recover it). Links that carry
-    /// their own key (MEGA) or are public work signed out: they never trigger a
-    /// login recovery and are not bound to an account.
+    /// their own key (MEGA) or are public (OneDrive) work signed out:
+    /// they never trigger a login recovery and are not bound to an account.
     #[serde(skip)]
     pub public_shares_need_session: bool,
+    /// Which public shares are read through an interface the provider does
+    /// not publish (for example a web page's private endpoints). Such an
+    /// interface may stop working without notice, so the UI says so next to
+    /// the affected shares.
+    pub public_shares_unofficial: UnofficialShareScope,
     /// Whether a public share is opened in an embedded browser window and its
     /// file requests are captured there, instead of being read through an
     /// adapter. The provider's own page does all the work (password, tokens);
     /// the app only takes over the final file download.
     pub public_shares_browser_capture: bool,
+    /// Whether sign-in is available in this build. False when the OAuth
+    /// client id was not injected at compile time; the UI then disables the
+    /// login entry and explains why. Public share links are unaffected.
+    pub authorization_configured: bool,
     pub display_name: &'static str,
     pub share_display_name: &'static str,
     pub upload_display_name: &'static str,
@@ -191,6 +211,9 @@ impl ProviderRegistry {
                     http,
                     account_quota: options.mega_account_quota,
                 })
+            }
+            CloudProvider::Onedrive => {
+                read_only!(super::onedrive::OnedriveShareAdapter::new(http))
             }
             CloudProvider::Gofile => read_only!(super::gofile::GofileShareAdapter::new(http)),
         }
@@ -351,6 +374,17 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             &["mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"],
             &["/file/", "/folder/"],
         ),
+        // Read-only personal drive plus anonymous public share links. The
+        // parser validates link shapes itself (`onedrive::is_share_link`).
+        Onedrive => (
+            "OneDrive",
+            "root",
+            "__versa_down_onedrive_recycle_bin__",
+            None,
+            "https://onedrive.live.com",
+            &["1drv.ms", "onedrive.live.com"],
+            &["/"],
+        ),
         // No account and no API: the share page runs in an embedded browser
         // window (`public_shares_browser_capture`).
         Gofile => (
@@ -372,22 +406,36 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
     // Every provider declares these facts explicitly (no wildcard arm), so a
     // new provider cannot silently inherit the wrong session semantics.
     let account = match provider {
-        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega => true,
+        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega | Onedrive => true,
         Gofile => false,
     };
     let public_shares_need_session = match provider {
         Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc => true,
-        Mega | Gofile => false,
+        Mega | Onedrive | Gofile => false,
     };
-    // MEGA's drive is fully managed, including copy (every node key of the
-    // copied tree is re-encrypted for the account).
-    let writable = account;
+    // OneDrive reads shares through its web page's anonymous "badger" API.
+    let public_shares_unofficial = match provider {
+        Onedrive => UnofficialShareScope::All,
+        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega | Gofile => {
+            UnofficialShareScope::None
+        }
+    };
+    let authorization_configured = match provider {
+        Onedrive => super::onedrive::oauth_configured(),
+        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega | Gofile => true,
+    };
+    // OneDrive is browse-and-download only. MEGA's drive is fully managed,
+    // including copy (every node key of the copied tree is re-encrypted for the
+    // account).
+    let writable = account && provider != Onedrive;
     let public_shares_browser_capture = provider == Gofile;
     ProviderDescriptor {
         provider,
         account,
         public_shares_need_session,
+        public_shares_unofficial,
         public_shares_browser_capture,
+        authorization_configured,
         browser_context: provider == Tianyi,
         browser_profile_owner: provider == Baidu,
         recycle_directory_download: provider != Pikpak,
@@ -405,6 +453,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷网盘",
             Uc => "UC 网盘",
             Mega => "MEGA",
+            Onedrive => "OneDrive",
             Gofile => "Gofile",
         },
         upload_display_name: match provider {
@@ -416,6 +465,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷云盘",
             Uc => "UC网盘",
             Mega => "MEGA",
+            Onedrive => "OneDrive",
             Gofile => "Gofile",
         },
         share_directory_name: match provider {
@@ -427,6 +477,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷云盘分享目录",
             Uc => "UC网盘分享目录",
             Mega => "MEGA分享目录",
+            Onedrive => "OneDrive分享目录",
             Gofile => "Gofile分享目录",
         },
         password_login_hosts,
@@ -439,11 +490,12 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Quark => &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
             Baidu => &["https://pan.baidu.com"],
             Uc => &["https://drive.uc.cn", "https://pc-api.uc.cn"],
-            Pikpak | Aliyun | Xunlei | Mega | Gofile => &[],
+            Pikpak | Aliyun | Xunlei | Mega | Onedrive | Gofile => &[],
         },
         authorization: CloudAuthorizationCapabilities {
             provider,
             // MEGA signs in with its own e-mail/password/2FA form and command.
+            // Whether an OAuth client is compiled in is `authorization_configured`.
             web: account && provider != Mega,
             password: password_login_mode == RustDirect
                 || (password_login_mode == OfficialWebView && !password_login_hosts.is_empty()),
@@ -477,7 +529,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         share_patterns,
         max_upload_concurrency: 2,
         download_concurrency: match provider {
-            Quark | Pikpak | Baidu | Aliyun | Uc | Gofile => DownloadConcurrencyPolicy {
+            Quark | Pikpak | Baidu | Aliyun | Uc | Onedrive | Gofile => DownloadConcurrencyPolicy {
                 max_connections_per_file: 4,
                 max_concurrent_tasks: 4,
             },
@@ -517,10 +569,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unofficial_public_share_scope_is_declared_per_provider() {
+        // The UI shows its "may stop working" note from this declaration, so
+        // only the providers that really read shares unofficially carry it.
+        for descriptor in ProviderRegistry::global().catalog() {
+            let json = serde_json::to_value(&descriptor).unwrap();
+            let expected = match descriptor.provider {
+                CloudProvider::Onedrive => "all",
+                _ => "none",
+            };
+            assert_eq!(json["publicSharesUnofficial"], serde_json::json!(expected));
+        }
+    }
+
+    #[test]
     fn gofile_is_an_accountless_browser_captured_provider() {
         let registry = ProviderRegistry::global();
         let gofile = registry.get(CloudProvider::Gofile);
         assert!(!gofile.account && !gofile.public_shares_need_session);
+        assert_eq!(gofile.public_shares_unofficial, UnofficialShareScope::None);
         assert!(gofile.public_shares_browser_capture);
         // No other provider routes its shares through the capture window.
         for descriptor in registry.all() {

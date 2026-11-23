@@ -366,6 +366,7 @@ fn error_state(error: &QuarkError) -> &'static str {
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider-unsupported",
         QuarkError::Gofile(_) => "gofile-link-error",
         QuarkError::Mega(_) => "mega-link-error",
+        QuarkError::Onedrive(_) => "onedrive-link-error",
     }
 }
 

@@ -114,6 +114,10 @@ pub(crate) fn registered_share_provider(url: &Url) -> Option<CloudProvider> {
 }
 
 fn valid_share_id(url: &Url, provider: CloudProvider) -> Option<&str> {
+    // OneDrive links are tokens and queries on a few hosts, not `/s/<id>`.
+    if provider == CloudProvider::Onedrive {
+        return crate::cloud::onedrive::is_share_link(url).then(|| url.path());
+    }
     let descriptor = crate::cloud::ProviderRegistry::global().get(provider);
     if !descriptor.accepts_share_url(url)
         || !url.username().is_empty()
@@ -876,12 +880,55 @@ mod tests {
     }
 
     #[test]
+    fn onedrive_share_links_keep_their_query_and_are_not_direct_downloads() {
+        for url in [
+            "https://1drv.ms/u/s!AbCdEf_gh-IJ",
+            "https://1drv.ms/f/s!AbCdEf_gh-IJ?e=XyZ123",
+            "https://1drv.ms/t/c/0123456789abcdef/EaBcDeFgHi",
+            "https://onedrive.live.com/redir?resid=ABCDEF0123456789!114&authkey=!Abc",
+            "https://onedrive.live.com/:u:/g/personal/ABCDEF0123456789/s!AbCd?resid=ABCDEF0123456789!114",
+        ] {
+            let candidate = extract_cloud_share_candidate(url, None).unwrap().unwrap();
+            assert_eq!(candidate.provider, CloudProvider::Onedrive, "{url}");
+            assert_eq!(candidate.url, url);
+            assert_eq!(
+                validate_download_input(url).unwrap().kind,
+                CandidateKind::CloudShare
+            );
+            assert_ne!(classify_input(url).kind, CandidateKind::Direct);
+        }
+    }
+
+    #[test]
+    fn onedrive_link_inside_pasted_text_is_found() {
+        let url = "https://1drv.ms/u/s!AbCdEf_gh-IJ?e=XyZ123";
+        let text = format!("资料在这里：{url} 请查收");
+        let candidate = extract_cloud_share_candidate(&text, None).unwrap().unwrap();
+        assert_eq!(candidate.provider, CloudProvider::Onedrive);
+        assert_eq!(candidate.url, url);
+    }
+
+    #[test]
     fn gofile_share_pages_are_recognised_and_other_gofile_pages_are_not_downloaded() {
         let text = "密码 123 见 https://gofile.io/d/AbC123 谢谢";
         let candidate = extract_cloud_share_candidate(text, None).unwrap().unwrap();
         assert_eq!(candidate.provider, CloudProvider::Gofile);
         assert_eq!(candidate.url, "https://gofile.io/d/AbC123");
         for page in ["https://gofile.io/", "https://gofile.io/d/", "https://gofile.io/d/a/b"] {
+            assert_eq!(
+                extract_cloud_share_candidate(page, None),
+                Err(ShareInputError::InvalidShare),
+                "{page}"
+            );
+        }
+    }
+
+    #[test]
+    fn onedrive_pages_that_are_not_shares_are_rejected_not_downloaded() {
+        for page in [
+            "https://onedrive.live.com/about/en-us/",
+            "https://1drv.ms/",
+        ] {
             assert_eq!(
                 extract_cloud_share_candidate(page, None),
                 Err(ShareInputError::InvalidShare),

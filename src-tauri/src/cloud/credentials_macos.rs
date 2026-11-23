@@ -139,6 +139,7 @@ mod tests {
             "pikpak",
             "tianyi",
             "aliyun",
+            "onedrive",
             "ai-api-key",
             "privacy-download-password-v1",
         ];

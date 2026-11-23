@@ -43,6 +43,10 @@ impl ProviderDriverFactory for NativeDriverFactory {
                 store: StoreRef(store),
                 http: HttpRef(http),
             }),
+            CloudProvider::Onedrive => Box::new(OnedriveDriver {
+                store: StoreRef(store),
+                http: HttpRef(http),
+            }),
             CloudProvider::Gofile => Box::new(AccountlessDriver),
         }
     }
@@ -53,6 +57,8 @@ mod accountless_driver;
 use accountless_driver::AccountlessDriver;
 mod mega_driver;
 use mega_driver::MegaDriver;
+mod onedrive_driver;
+use onedrive_driver::OnedriveDriver;
 mod quark_driver;
 use quark_driver::QuarkDriver;
 mod pikpak_driver;

@@ -441,7 +441,8 @@ pub(crate) fn ready_cloud_download_account(
     app: &AppHandle,
     provider: CloudProvider,
 ) -> Result<Option<String>, QuarkError> {
-    // Public links that run outside the session (MEGA keys) never belong to the signed-in account.
+    // Public links that run outside the session (MEGA keys and OneDrive
+    // links) never belong to the signed-in account.
     let descriptor = ProviderRegistry::global().get(provider);
     if !descriptor.account || !descriptor.public_shares_need_session {
         return Ok(None);
@@ -1041,6 +1042,9 @@ pub(crate) fn directory_download_failure_fields(
     if let QuarkError::Mega(failure) = error {
         return (failure.code(), failure.message().into());
     }
+    if let QuarkError::Onedrive(failure) = error {
+        return (failure.code(), failure.message().into());
+    }
     if let QuarkError::Gofile(failure) = error {
         return (failure.code(), failure.message().into());
     }
@@ -1053,6 +1057,7 @@ fn fixed_directory_download_failure_fields(
 ) -> (&'static str, &'static str) {
     match error {
         QuarkError::Mega(failure) => (failure.code(), failure.message_key()),
+        QuarkError::Onedrive(failure) => (failure.code(), failure.message()),
         QuarkError::Gofile(failure) => (failure.code(), failure.message()),
         QuarkError::XunleiVerificationUnavailable(reason) => ("xunlei_verification_unavailable", reason),
         QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
