@@ -24,8 +24,18 @@ const fixedKeys: Readonly<Record<string, TranslationKey>> = {
   'cloud.error.mega.keysConflict': 'cloud.error.mega.keysConflict',
   'cloud.error.mega.keysUnsupported': 'cloud.error.mega.keysUnsupported',
   'cloud.error.mega.copyTooLarge': 'cloud.error.mega.copyTooLarge',
+  'cloud.error.onedrive.linkUnavailable': 'cloud.error.onedrive.linkUnavailable',
+  'cloud.error.onedrive.linkUnsupported': 'cloud.error.onedrive.linkUnsupported',
+  'cloud.error.onedrive.shareTooLarge': 'cloud.error.onedrive.shareTooLarge',
+  'cloud.error.onedrive.clientIdMissing': 'cloud.error.onedrive.clientIdMissing',
+  'cloud.error.onedrive.authorizationDenied': 'cloud.error.onedrive.authorizationDenied',
+  'cloud.error.onedrive.authorizationTimeout': 'cloud.error.onedrive.authorizationTimeout',
+  'cloud.error.onedrive.authorizationFailed': 'cloud.error.onedrive.authorizationFailed',
+  'cloud.error.onedrive.serviceBusy': 'cloud.error.onedrive.serviceBusy',
+  'cloud.error.onedrive.anonymousInterfaceChanged': 'cloud.error.onedrive.anonymousInterfaceChanged',
   'cloud.error.gofile.linkExpired': 'cloud.error.gofile.linkExpired',
   'cloud.error.gofile.openSharePage': 'cloud.error.gofile.openSharePage',
+  'cloud.authorization.onedriveBrowser': 'cloud.authorization.onedriveBrowser',
 };
 
 const quotaRetryKeys: Readonly<Record<string, TranslationKey>> = {

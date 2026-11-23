@@ -34,6 +34,7 @@ mod download;
 mod drive;
 #[path = "commands/mega.rs"]
 mod mega_commands;
+mod oauth;
 #[path = "commands/share.rs"]
 mod share_commands;
 #[path = "commands/upload.rs"]
@@ -43,6 +44,7 @@ pub use common::*;
 pub use download::*;
 pub use drive::*;
 pub use mega_commands::*;
+pub(crate) use oauth::*;
 pub use share_commands::*;
 pub use upload_commands::*;
 #[cfg(test)]
@@ -58,6 +60,8 @@ pub struct CloudState {
     authorization_resumption: CloudDownloadSourceGate,
     authorization_completion: CloudDownloadSourceGate,
     authorization_results: Mutex<HashMap<CloudProvider, CloudAccount>>,
+    /// The OAuth sign-ins waiting for their browser round trip.
+    pub(crate) oauth: crate::cloud::oauth::OAuthFlows,
     pub auth_supervisor: auth_supervisor::AuthSupervisor,
     application: OnceLock<AppHandle>,
     http: ReqwestTransport,
@@ -172,6 +176,7 @@ impl CloudState {
             authorization_resumption: Default::default(),
             authorization_completion: Default::default(),
             authorization_results: Default::default(),
+            oauth: Default::default(),
             auth_supervisor: Default::default(),
             application: OnceLock::new(),
             store,

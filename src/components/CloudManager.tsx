@@ -192,6 +192,16 @@ function isXunleiVerificationFailure(error: unknown, reason: 'metadata_expired' 
     && 'message' in error && error.message === reason;
 }
 
+/** Browser sign-in failures that end the wait (no window to retry in). */
+// A browser (OAuth) sign-in that ended without an account: the round trip is over.
+const browserAuthorizationFailureCodes: readonly string[] = [
+  'onedrive_authorization_denied', 'onedrive_authorization_timeout', 'onedrive_authorization_failed',
+];
+
+function isBrowserAuthorizationFailure(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && browserAuthorizationFailureCodes.includes(String((error as { code?: unknown }).code));
+}
+
 function errorMessage(error: unknown, fallback: string) {
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
     const localized = shareFailureMessage((error as { message: string }).message);
@@ -332,10 +342,23 @@ function CloudActionIcon({ action }: { action: CloudActionIconType }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
 
-function CloudContextMenu({ state, selectedCount, recycleBin, readOnlyDirectory, virtualDirectory, myShares, canUpdateSharePassCode, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; readOnlyDirectory: boolean; virtualDirectory: boolean; myShares: boolean; canUpdateSharePassCode: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
+function contextActionSupported(action: CloudMenuAction, capabilities: ProviderDescriptor['capabilities']) {
+  switch (action) {
+    case 'create': return capabilities.createDirectory;
+    case 'upload': return capabilities.upload;
+    case 'rename': return capabilities.rename;
+    case 'move': return capabilities.move;
+    case 'copy': return capabilities.copy;
+    case 'share': return capabilities.shareCreate;
+    case 'delete': return capabilities.trash;
+    default: return true;
+  }
+}
+
+function CloudContextMenu({ state, selectedCount, recycleBin, readOnlyDirectory, virtualDirectory, myShares, canUpdateSharePassCode, capabilities, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; readOnlyDirectory: boolean; virtualDirectory: boolean; myShares: boolean; canUpdateSharePassCode: boolean; capabilities: ProviderDescriptor['capabilities']; onAction(action: CloudMenuAction): void; onClose(): void }) {
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
-  const items: Array<{ action: CloudMenuAction; label: Parameters<typeof t>[0]; danger?: boolean; separated?: boolean }> = state.kind === 'background'
+  const allItems: Array<{ action: CloudMenuAction; label: Parameters<typeof t>[0]; danger?: boolean; separated?: boolean }> = state.kind === 'background'
     ? recycleBin || myShares || readOnlyDirectory ? [{ action: 'refresh', label: 'cloud.action.refresh' as const }] : [{ action: 'create', label: 'cloud.action.newFolder' as const }, { action: 'upload', label: 'cloud.action.upload' as const }, { action: 'refresh', label: 'cloud.action.refresh' as const, separated: true }]
     : virtualDirectory
       ? [{ action: 'open', label: 'cloud.action.open' as const }]
@@ -344,6 +367,11 @@ function CloudContextMenu({ state, selectedCount, recycleBin, readOnlyDirectory,
       : recycleBin
       ? [{ action: 'restore', label: 'cloud.action.restore' as const }, { action: 'delete', label: 'cloud.action.permanentDelete' as const, danger: true, separated: true }]
       : [...(selectedCount === 1 && state.item.kind === 'folder' ? [{ action: 'open' as const, label: 'cloud.action.open' as const }] : []), { action: 'download', label: 'download.action.download' as const }, ...(selectedCount === 1 ? [{ action: 'rename' as const, label: 'cloud.action.rename' as const, separated: true }] : []), { action: 'move', label: 'cloud.action.move' as const, separated: selectedCount > 1 }, { action: 'copy', label: 'cloud.action.copyTo' as const }, { action: 'share', label: 'cloud.action.share' as const, separated: true }, { action: 'delete', label: 'download.action.delete' as const, danger: true, separated: true }];
+  // A drive without a write capability (OneDrive) drops those
+  // entries; the first remaining one never starts with a separator.
+  const items = allItems
+    .filter((item) => contextActionSupported(item.action, capabilities))
+    .map((item, index) => (index === 0 && item.separated ? { ...item, separated: false } : item));
   const [menuSize, setMenuSize] = useState({ width: 210, height: items.length * 38 + (state.kind === 'selection' && selectedCount > 1 ? 24 : 14) });
   const left = Math.max(8, Math.min(state.x, window.innerWidth - menuSize.width - 8));
   const top = Math.max(8, Math.min(state.y, window.innerHeight - menuSize.height - 8));
@@ -736,6 +764,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
   // Any other open-only virtual folder behaves like "my shares" for selection rules.
   const selectedVirtualMyShares = selected.some((item) => isVirtualMySharesItem(item) || isVirtualIncomingSharesItem(item));
+  const canModifySelection = descriptor.capabilities.rename || descriptor.capabilities.move || descriptor.capabilities.copy || descriptor.capabilities.shareCreate;
   const selectableItems = sortedItems.filter((item) => !isVirtualDirectoryItem(item));
   const operationBusy = operationRunning || operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
@@ -919,8 +948,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       const rootItems = parentId === rootId
         ? [
           ...next.items,
-      ...(next.items.some((item) => item.id === recycleBinId) ? [] : [{ id: recycleBinId, parentId: rootId, name: t('cloud.recycleBin'), kind: 'folder' as const }]),
-      ...(next.items.some((item) => item.id === MY_SHARES_DIRECTORY_ID) ? [] : [{ id: MY_SHARES_DIRECTORY_ID, parentId: rootId, name: t('cloud.myShares'), kind: 'folder' as const }]),
+      ...(!descriptor.capabilities.restore || next.items.some((item) => item.id === recycleBinId) ? [] : [{ id: recycleBinId, parentId: rootId, name: t('cloud.recycleBin'), kind: 'folder' as const }]),
+      ...(!descriptor.capabilities.shareList || next.items.some((item) => item.id === MY_SHARES_DIRECTORY_ID) ? [] : [{ id: MY_SHARES_DIRECTORY_ID, parentId: rootId, name: t('cloud.myShares'), kind: 'folder' as const }]),
       ...(!incomingSharesId || next.items.some((item) => item.id === incomingSharesId) ? [] : [{ id: incomingSharesId, parentId: rootId, name: t('cloud.incomingShares'), kind: 'folder' as const }]),
         ]
         : next.items;
@@ -1154,7 +1183,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
       authorizationRegistered.current = true;
       setWebAuthorization(authorization);
-      setAuthorizationStatus(authorization.instructions);
+      setAuthorizationStatus(shareFailureMessage(authorization.instructions) ?? authorization.instructions);
       if (authorizationWakePending.current) authorizationWake.current?.();
     } catch (error) {
       if (generation !== authorizationGeneration.current) return;
@@ -1182,6 +1211,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       }
       const message = errorMessage(error, t('cloud.authorization.webNotCompleted'));
       setAuthorizationStatus(message);
+      if (isBrowserAuthorizationFailure(error)) {
+        setWebAuthorization(null);
+        webAuthorizationActive.current = false;
+      }
       if (effectiveAuthorizationCapabilities?.passwordLoginMode === 'officialWebView' && isTerminalWebAuthorizationError(error)) {
         // A rejected verification must not automatically start another captcha.
         // Keep the account and let the user explicitly reopen authorization.
@@ -1593,12 +1626,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       openFolder(selected[0]);
       return;
     }
-    if (event.key === 'F2' && !isRecycleBin && !isMyShares && !selectedVirtualRecycleBin && !selectedVirtualMyShares && selected.length === 1) {
+    if (event.key === 'F2' && descriptor.capabilities.rename && !isRecycleBin && !isMyShares && !selectedVirtualRecycleBin && !selectedVirtualMyShares && selected.length === 1) {
       event.preventDefault();
       openEditor('rename');
       return;
     }
-    if (event.key === 'Delete' && selected.length && !selectedVirtualRecycleBin && !selectedVirtualMyShares && !isMyShares) {
+    if (event.key === 'Delete' && descriptor.capabilities.trash && selected.length && !selectedVirtualRecycleBin && !selectedVirtualMyShares && !isMyShares) {
       event.preventDefault();
       setPendingTrash(true);
     }
@@ -1627,7 +1660,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           <input aria-label={t('cloud.password')} placeholder={useSavedPassword ? "******" : t('cloud.password')} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
           <button className="primary" type="submit" disabled={passwordLoginBusy}>{passwordLoginBusy ? t('cloud.autoLogin') : t('cloud.login')}</button>
         </>}
-        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>{t('cloud.webAuthorization')}</button>}
+        {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy || !descriptor.authorizationConfigured} onClick={() => void beginWebAuthorization()}>{t('cloud.webAuthorization')}</button>}
+        {effectiveAuthorizationCapabilities.web && !descriptor.authorizationConfigured && <p className="cloud-authorization-feedback" role="status"><span>{t('cloud.authorization.notConfigured', { provider: label })}</span></p>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization()}>{t('cloud.authorizationCompleted')}</button>}
       </form>}
       {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${showAuthorizationError ? ' error' : ''}`} role="status">{expired && <b>{t('cloud.credentialsExpired')}</b>}<span>{displayedAuthorizationStatus}</span></p>}</>}
@@ -1752,8 +1786,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         <div className="cloud-breadcrumbs" role="navigation" aria-label={t('cloud.currentDirectory', { name: breadcrumbs.at(-1)?.name ?? '' })}>{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1 || operationBusy} onClick={() => navigateToDirectory(crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label={t('cloud.fileActions')}>
-        {!isRecycleBin && !isMyShares && !isReadOnlyDirectory && <button aria-label={t('cloud.action.upload')} disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />{t('cloud.action.upload')}</button>}
-        {!isRecycleBin && !isMyShares && !isReadOnlyDirectory && <button aria-label={t('cloud.action.newFolder')} disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />{t('cloud.action.newFolder')}</button>}
+        {!isRecycleBin && !isMyShares && !isReadOnlyDirectory && descriptor.capabilities.upload && <button aria-label={t('cloud.action.upload')} disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />{t('cloud.action.upload')}</button>}
+        {!isRecycleBin && !isMyShares && !isReadOnlyDirectory && descriptor.capabilities.createDirectory && <button aria-label={t('cloud.action.newFolder')} disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />{t('cloud.action.newFolder')}</button>}
         {isMyShares && descriptor.capabilities.shareUpdatePassCode && selected.length === 1 && <button disabled={operationBusy} onClick={() => openSharePassCodeEditor()}><CloudActionIcon action="updateSharePassCode" />{t('cloud.share.changePassCode')}</button>}
       </div>
     </div>
@@ -1775,7 +1809,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       onKeyDown={handleFileListKeyDown}
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
-      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label={t('cloud.selectCurrentDirectory')} checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={t('cloud.selectedFileActions', { count: selected.length })}><b>{t('cloud.itemsSelected', { count: selected.length })}</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">{t('cloud.specialFolderOpenOnly')}</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation(t('cloud.action.restore'), () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />{t('cloud.action.restore')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('cloud.action.permanentDelete')}</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl, selected[0].sharePassCode)}><CloudActionIcon action="copyShareLink" />{t('cloud.action.copyLink')}</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />{t('cloud.action.cancelShare')}</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />{t('download.action.download')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('download.action.delete')}</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label={t('cloud.moreFileActions')} aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label={t('cloud.clearSelection')} title={t('cloud.clearSelection')} onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByName')} aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>{t('download.sort.name')}<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortBySize')} aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>{t('download.sort.size')}<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByModifiedAt')} aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>{t('download.sort.time')}<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
+      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label={t('cloud.selectCurrentDirectory')} checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={t('cloud.selectedFileActions', { count: selected.length })}><b>{t('cloud.itemsSelected', { count: selected.length })}</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">{t('cloud.specialFolderOpenOnly')}</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation(t('cloud.action.restore'), () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />{t('cloud.action.restore')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('cloud.action.permanentDelete')}</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl, selected[0].sharePassCode)}><CloudActionIcon action="copyShareLink" />{t('cloud.action.copyLink')}</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />{t('cloud.action.cancelShare')}</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />{t('download.action.download')}</button>{descriptor.capabilities.trash && <button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('download.action.delete')}</button>}{canModifySelection && <button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label={t('cloud.moreFileActions')} aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button>}</span>}<button className="cloud-clear-selection" aria-label={t('cloud.clearSelection')} title={t('cloud.clearSelection')} onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByName')} aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>{t('download.sort.name')}<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortBySize')} aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>{t('download.sort.size')}<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByModifiedAt')} aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>{t('download.sort.time')}<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
       {canNavigateToParent && <div className="cloud-row cloud-file-row cloud-parent-directory-row" role="treeitem" aria-label={t('cloud.parentDirectory')} tabIndex={0} onClick={navigateToParent} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); navigateToParent(); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
         <span className="cloud-check-cell"><input type="checkbox" aria-label={t('cloud.selectNamed', { name: t('cloud.parentDirectory') })} disabled /></span>
         <span className="cloud-file-name"><i className="folder"><CloudFileIcon kind="folder" /></i><b title={t('cloud.parentDirectory')}>{t('cloud.parentDirectory')}</b></span>
@@ -1804,7 +1838,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       })}
     </div>}
     {uploadPickerOpen && <LocalUploadPicker listEntries={client.listLocalUploadEntries ?? unavailableLocalUploadListing} onCancel={() => setUploadPickerOpen(false)} onConfirm={paths => { setUploadPickerOpen(false); void uploadSelectedFiles(paths); }} />}
-    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} readOnlyDirectory={isReadOnlyDirectory} virtualDirectory={contextMenu.kind === 'selection' && isVirtualDirectoryItem(contextMenu.item)} myShares={isMyShares} canUpdateSharePassCode={Boolean(descriptor.capabilities.shareUpdatePassCode)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
+    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} readOnlyDirectory={isReadOnlyDirectory} virtualDirectory={contextMenu.kind === 'selection' && isVirtualDirectoryItem(contextMenu.item)} myShares={isMyShares} canUpdateSharePassCode={Boolean(descriptor.capabilities.shareUpdatePassCode)} capabilities={descriptor.capabilities} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
     {shareItems && <CloudShareDialog provider={provider} items={shareItems} share={createdShare} busy={operationBusy} linkOnly={descriptor.capabilities.shareConfigurable === false} sharePassCodeConstraint={descriptor.sharePassCodeConstraint} onUpdatePassCode={descriptor.capabilities.shareUpdatePassCode ? updateSharePassCode : undefined} onCreate={submitCloudShare} onCopy={copyShareLink} onClose={() => { setShareItems(null); setCreatedShare(null); }} />}
     {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { const action = destinationAction; setDestinationAction(null); queueAuthorizationContinuation(`选择${action === 'copy' ? '复制' : '移动'}目标`, async () => { setDestinationAction(action); }, errorMessage(error, `读取${action === 'copy' ? '复制' : '移动'}目标目录需要网页验证。`)); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; const sourceIds = selectedIds.slice(); setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, sourceIds, targetParentId), true, undefined, (directory) => sourceIds.every((id) => !directory.items.some((item) => item.id === id))); else void runOperation('复制', () => client.copyCloudFiles(provider, sourceIds, targetParentId)); }} />}

@@ -13,6 +13,8 @@ pub mod driver;
 pub mod gofile;
 mod http;
 pub mod mega;
+pub mod onedrive;
+mod oauth;
 mod pikpak;
 mod quark;
 pub mod range_gateway;

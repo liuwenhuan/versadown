@@ -25,6 +25,8 @@ export const cloudCatalog: ProviderDescriptor[] = cloudCatalogRows.map(([
 ]) => ({
   provider: provider as CloudProvider, displayName, rootDirectoryId,
   account: true,
+  publicSharesUnofficial: 'none',
+  authorizationConfigured: true,
   shareDisplayName: displayName + '网盘',
   uploadDisplayName: displayName,
   shareDirectoryName: displayName + '分享目录',

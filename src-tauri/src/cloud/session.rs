@@ -163,6 +163,7 @@ fn password_credential_key(provider: CloudProvider) -> Result<&'static str, Quar
         | CloudProvider::Aliyun
         | CloudProvider::Uc
         | CloudProvider::Mega
+        | CloudProvider::Onedrive
         | CloudProvider::Gofile => {
             unreachable!("password providers must have a password credential key")
         }
@@ -1001,6 +1002,7 @@ fn password_login_draft_key(provider: CloudProvider) -> Result<&'static str, Qua
         | CloudProvider::Aliyun
         | CloudProvider::Uc
         | CloudProvider::Mega
+        | CloudProvider::Onedrive
         | CloudProvider::Gofile => {
             unreachable!("password providers have a login draft key")
         }

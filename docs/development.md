@@ -106,3 +106,14 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
 ## 持续集成与发布
 
 `Desktop checks` 工作流在 PR 中检查 Windows、Linux、Apple Silicon 与 Intel Mac。`Desktop release` 可手动运行并下载构建产物；推送与应用版本一致的 `v*` 标签后，各平台构建全部成功才会统一发布 GitHub Release。
+
+## OneDrive 个人版登录（可选构建参数）
+
+OneDrive 公开分享链接（`1drv.ms`、`onedrive.live.com`）无需登录即可解析下载。登录个人 OneDrive 以浏览、下载自己的文件，需要在 Microsoft Entra 注册一个免费的公共客户端应用，并在**编译时**注入其应用（客户端）ID：
+
+1. 在 [Microsoft Entra 管理中心](https://entra.microsoft.com) 的“应用注册”新建应用；受支持的账户类型选“仅个人 Microsoft 账户”（或“任何组织目录中的账户和个人 Microsoft 账户”）。
+2. 平台选“移动和桌面应用程序”，重定向 URI 添加 `http://localhost`（回环地址，端口由应用临时选择，注册时不写端口）。不需要客户端密码。
+3. API 权限只需 Microsoft Graph 委托权限 `Files.Read` 与 `offline_access`。
+4. 构建前设置环境变量 `VERSADOWN_ONEDRIVE_CLIENT_ID=<应用 ID>`；CI 中把它存为仓库 Variables（应用 ID 不是密钥），`linux-release.yml` 的 Linux、Windows、macOS 三个发布构建步骤已通过 `${{ vars.VERSADOWN_ONEDRIVE_CLIENT_ID }}` 传入。
+
+未注入时应用仍可下载公开分享链接，OneDrive 的登录按钮会禁用并给出提示。仓库不保存任何真实应用 ID。

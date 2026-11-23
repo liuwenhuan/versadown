@@ -11,10 +11,11 @@ pub enum CloudProvider {
     Xunlei,
     Uc,
     Mega,
+    Onedrive,
     Gofile,
 }
 impl CloudProvider {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Quark,
         Self::Pikpak,
         Self::Baidu,
@@ -23,6 +24,7 @@ impl CloudProvider {
         Self::Xunlei,
         Self::Uc,
         Self::Mega,
+        Self::Onedrive,
         Self::Gofile,
     ];
 
@@ -42,8 +44,16 @@ impl CloudProvider {
             Self::Xunlei => "xunlei",
             Self::Uc => "uc",
             Self::Mega => "mega",
+            Self::Onedrive => "onedrive",
             Self::Gofile => "gofile",
         }
+    }
+
+    /// Signs in with OAuth in the system browser (`cloud::oauth`) instead of
+    /// an embedded web page, so there is no browser profile to capture or
+    /// clear.
+    pub fn uses_oauth(self) -> bool {
+        matches!(self, Self::Onedrive)
     }
 }
 
@@ -452,6 +462,8 @@ pub enum CloudError {
     #[error("{}", .0.message())]
     Mega(super::mega::MegaFailure),
     #[error("{}", .0.message())]
+    Onedrive(super::onedrive::OnedriveFailure),
+    #[error("{}", .0.message())]
     Gofile(super::gofile::GofileFailure),
 }
 pub use CloudError as QuarkError;
@@ -559,6 +571,7 @@ impl Serialize for CloudError {
             Self::UploadUnavailable => "provider_unsupported",
             Self::ProviderUnsupported => "provider_unsupported",
             Self::Mega(failure) => failure.code(),
+            Self::Onedrive(failure) => failure.code(),
             Self::Gofile(failure) => failure.code(),
         };
         // Xunlei verification keeps its stable reason on the wire so the

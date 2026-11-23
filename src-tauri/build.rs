@@ -5,6 +5,8 @@ fn main() {
     // This forces Tauri to re-embed the matching dist assets without clearing
     // Cargo's incremental Rust target.
     println!("cargo:rerun-if-env-changed=VERSADOWN_FRONTEND_SIGNATURE");
+    // OAuth sign-in is compiled in (`option_env!`), so a changed client must rebuild.
+    println!("cargo:rerun-if-env-changed=VERSADOWN_ONEDRIVE_CLIENT_ID");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let source = "src/xunlei_native/macos/worker.m";
         println!("cargo:rerun-if-changed={source}");
