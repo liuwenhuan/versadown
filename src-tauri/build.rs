@@ -6,6 +6,8 @@ fn main() {
     // Cargo's incremental Rust target.
     println!("cargo:rerun-if-env-changed=VERSADOWN_FRONTEND_SIGNATURE");
     // OAuth sign-in is compiled in (`option_env!`), so a changed client must rebuild.
+    println!("cargo:rerun-if-env-changed=VERSADOWN_GOOGLE_CLIENT_ID");
+    println!("cargo:rerun-if-env-changed=VERSADOWN_GOOGLE_CLIENT_SECRET");
     println!("cargo:rerun-if-env-changed=VERSADOWN_ONEDRIVE_CLIENT_ID");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let source = "src/xunlei_native/macos/worker.m";

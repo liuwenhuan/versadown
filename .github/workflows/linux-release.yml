@@ -48,9 +48,11 @@ jobs:
       - name: Build Linux packages
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
-          # Optional OAuth client, compiled into the build. Without it the
-          # build still downloads public OneDrive links but cannot sign in
-          # to that account.
+          # Optional OAuth clients, compiled into the build. Without them the
+          # build still downloads public Google Drive / OneDrive links but
+          # cannot sign in to those accounts.
+          VERSADOWN_GOOGLE_CLIENT_ID: ${{ secrets.VERSADOWN_GOOGLE_CLIENT_ID }}
+          VERSADOWN_GOOGLE_CLIENT_SECRET: ${{ secrets.VERSADOWN_GOOGLE_CLIENT_SECRET }}
           VERSADOWN_ONEDRIVE_CLIENT_ID: ${{ vars.VERSADOWN_ONEDRIVE_CLIENT_ID }}
         run: pnpm run build:linux:release
       - name: Download and merge 1080p with the installed Debian tools
@@ -146,9 +148,11 @@ jobs:
       - name: Build Windows installer
         env:
           VD_WINDOWS_FFMPEG_SHA256: ${{ needs.windows-ffmpeg.outputs.sha256 }}
-          # Optional OAuth client, compiled into the build. Without it the
-          # build still downloads public OneDrive links but cannot sign in
-          # to that account.
+          # Optional OAuth clients, compiled into the build. Without them the
+          # build still downloads public Google Drive / OneDrive links but
+          # cannot sign in to those accounts.
+          VERSADOWN_GOOGLE_CLIENT_ID: ${{ secrets.VERSADOWN_GOOGLE_CLIENT_ID }}
+          VERSADOWN_GOOGLE_CLIENT_SECRET: ${{ secrets.VERSADOWN_GOOGLE_CLIENT_SECRET }}
           VERSADOWN_ONEDRIVE_CLIENT_ID: ${{ vars.VERSADOWN_ONEDRIVE_CLIENT_ID }}
         run: pnpm run build:windows:installer
       - name: Prepare Windows release asset
@@ -237,9 +241,11 @@ jobs:
           VERSADOWN_APPLE_ID: ${{ secrets.APPLE_ID }}
           VERSADOWN_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           VERSADOWN_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # Optional OAuth client, compiled into the build. Without it the
-          # build still downloads public OneDrive links but cannot sign in
-          # to that account.
+          # Optional OAuth clients, compiled into the build. Without them the
+          # build still downloads public Google Drive / OneDrive links but
+          # cannot sign in to those accounts.
+          VERSADOWN_GOOGLE_CLIENT_ID: ${{ secrets.VERSADOWN_GOOGLE_CLIENT_ID }}
+          VERSADOWN_GOOGLE_CLIENT_SECRET: ${{ secrets.VERSADOWN_GOOGLE_CLIENT_SECRET }}
           VERSADOWN_ONEDRIVE_CLIENT_ID: ${{ vars.VERSADOWN_ONEDRIVE_CLIENT_ID }}
         shell: bash
         run: |
