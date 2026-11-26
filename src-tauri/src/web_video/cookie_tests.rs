@@ -171,7 +171,7 @@ async fn cookie_file_authenticates_preview_and_aria2_retry_without_modifying_the
             );
             let failed = terminal_task(&store, task.id).await;
             assert_eq!(failed.status, TaskStatus::Failed);
-            assert_eq!(failed.error.as_deref(), Some("video.error.accessDenied"));
+            assert_eq!(failed.error.as_deref(), Some("video.error.accessDeniedProxy"));
             assert!(denied_pages.load(Ordering::SeqCst) >= 2);
             let output = store.reserved_output_path(task.id).unwrap().unwrap();
             assert!(

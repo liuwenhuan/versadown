@@ -1128,3 +1128,19 @@ fn opening_an_older_video_task_preserves_its_selected_format() {
         ("18".to_owned(), None)
     );
 }
+
+/// Live check for a site that rejects the inherited (environment) proxy:
+/// `http_proxy=… VERSADOWN_LIVE_PROXY_PAGE=https://www.bilibili.com/video/… \
+///  cargo test --lib live_direct_route -- --ignored`
+#[tokio::test]
+#[ignore = "requires yt-dlp on PATH, VERSADOWN_LIVE_PROXY_PAGE and an inherited proxy the site rejects"]
+async fn live_direct_route_bypasses_an_inherited_proxy_the_site_rejects() {
+    use crate::network_proxy::ProxyRoute;
+    let source = std::env::var("VERSADOWN_LIVE_PROXY_PAGE").expect("provide a playback page");
+    let page = || async { routing::resolve(&source, false).await.unwrap().expect("supported page") };
+    let followed = extractor::inspect(page().await, &ProxyRoute::System, None).await;
+    assert_eq!(followed.unwrap_err(), "video.error.accessDeniedProxy");
+    let direct = extractor::inspect(page().await, &ProxyRoute::Direct, None).await.unwrap();
+    assert!(!direct.is_empty() && !direct[0].formats.is_empty());
+    println!("VD-LIVE-DIRECT {} formats", direct[0].formats.len());
+}
