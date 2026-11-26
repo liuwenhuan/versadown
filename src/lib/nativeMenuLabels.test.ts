@@ -46,6 +46,18 @@ describe('native menu labels', () => {
     expect(Object.keys(nativeMenuLabelKeys).sort()).toEqual(nativeKeys.sort());
   });
 
+  it('keeps the startup-failure placeholders for the backend to fill in', async () => {
+    const { currentNativeMenuLabels } = await freshModules();
+    expect(currentNativeMenuLabels()).toMatchObject({
+      startupFailedTitle: 'VersaDown 启动失败',
+      startupFailedBody: expect.stringMatching(/\{summary\}[\s\S]*\{logPath\}/),
+    });
+    for (const catalog of [en, zhCN]) {
+      expect(catalog['startup.failed.body']).toContain('{summary}');
+      expect(catalog['startup.failed.body']).toContain('{logPath}');
+    }
+  });
+
   it('pushes complete Simplified Chinese labels at startup', async () => {
     const { startNativeMenuLabelSync, nativeMenuLabelKeys } = await freshModules();
     startNativeMenuLabelSync();

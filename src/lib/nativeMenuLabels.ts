@@ -3,7 +3,7 @@ import { subscribeLocale, t, type TranslationKey } from '../i18n';
 import { isTauriRuntime } from './api';
 
 /**
- * Text of the tray menu, which the native side draws. The i18n catalogs stay
+ * Text the native side draws: the tray menu and the startup-failure dialog. The i18n catalogs stay
  * the only source of translations: each stable key below names the catalog
  * entry that supplies it, and the whole table is pushed to the backend.
  */
@@ -19,6 +19,10 @@ export const nativeMenuLabelKeys = {
   launcherDownloading: 'launcher.visibility.downloading',
   launcherHidden: 'launcher.visibility.hidden',
   quit: 'launcher.quit',
+  // The startup-failure dialog is drawn natively before any renderer exists;
+  // its body keeps the {summary} and {logPath} placeholders for the backend.
+  startupFailedTitle: 'startup.failed.title',
+  startupFailedBody: 'startup.failed.body',
 } as const satisfies Record<string, TranslationKey>;
 
 export type NativeMenuLabelKey = keyof typeof nativeMenuLabelKeys;

@@ -53,6 +53,7 @@ mod privacy;
 mod processing;
 mod store;
 mod startup;
+mod startup_error;
 mod update;
 mod web_video;
 mod webview_memory;
@@ -281,8 +282,22 @@ pub fn run() -> i32 {
         &mut context.config_mut().app.windows,
         startup_options.agent_host,
     );
-    let startup_exit = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(1));
+    let startup_exit = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(
+        startup_error::failure_exit_code(startup_options.agent_host, startup_error::FailureKind::Other),
+    ));
     let setup_exit = std::sync::Arc::clone(&startup_exit);
+    // The status the application asked to exit with. The event loop itself
+    // reports 0 for every orderly exit, so it is collected from the
+    // `ExitRequested` event and combined with the loop's result at the end.
+    let requested_exit = std::sync::Arc::new(std::sync::Mutex::new(None::<i32>));
+    let observed_exit = std::sync::Arc::clone(&requested_exit);
+    // Set by a failed setup; shown once the event loop has ended.
+    let startup_failure = std::sync::Arc::new(std::sync::Mutex::new(None::<startup_error::StartupReport>));
+    let setup_failure = std::sync::Arc::clone(&startup_failure);
+    let failure_data_dir = startup_options.data_dir.clone();
+    let setup_data_dir = failure_data_dir.clone();
+    let agent_host = startup_options.agent_host;
+    let background_ui_test_mode = startup_options.background_ui_test;
     webview_memory::apply_process_defaults();
     // Managed before any plugin: the single-instance callback can queue links
     // while setup is still running.
@@ -368,8 +383,14 @@ pub fn run() -> i32 {
                 Err(error) => {
                     // A concurrent desktop may own the profile before its
                     // activation IPC/API is ready. Let the client wait for it.
-                    if startup_options.agent_host && error.kind() == std::io::ErrorKind::WouldBlock {
-                        setup_exit.store(0, std::sync::atomic::Ordering::Release);
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        setup_exit.store(
+                            startup_error::failure_exit_code(
+                                startup_options.agent_host,
+                                startup_error::FailureKind::ProfileBusy,
+                            ),
+                            std::sync::atomic::Ordering::Release,
+                        );
                     }
                     return Err(error.into());
                 }
@@ -380,7 +401,13 @@ pub fn run() -> i32 {
             // Authorization may have changed after preflight while another
             // process was starting. Recheck under the profile lease, before DB.
             if startup_options.agent_host && !settings.agent_access.enabled {
-                setup_exit.store(4, std::sync::atomic::Ordering::Release);
+                setup_exit.store(
+                    startup_error::failure_exit_code(
+                        startup_options.agent_host,
+                        startup_error::FailureKind::AgentAccessDisabled,
+                    ),
+                    std::sync::atomic::Ordering::Release,
+                );
                 return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Agent access disabled").into());
             }
             #[cfg(target_os = "macos")]
@@ -655,7 +682,11 @@ pub fn run() -> i32 {
             native_smoke::schedule(app.handle())?;
             Ok(())
             })();
-            if result.is_err() {
+            if let Err(error) = &result {
+                // Setup runs before any window exists, so nothing else would
+                // tell the user why the process is ending.
+                let report = startup_error::record_now(&setup_data_dir, error.as_ref());
+                *setup_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(report);
                 // Tauri turns setup errors into a panic. Request an orderly
                 // event-loop exit instead so bootstrap receives our exit code.
                 if let Some(lifecycle) = app.try_state::<std::sync::Arc<ApplicationLifecycle>>() {
@@ -768,9 +799,15 @@ pub fn run() -> i32 {
         .build(context);
     let application = match application {
         Ok(application) => application,
-        Err(_) => return startup_exit.load(std::sync::atomic::Ordering::Acquire),
+        Err(error) => {
+            let report = startup_error::record_now(&failure_data_dir, &error);
+            if startup_error::shows_dialog(agent_host, background_ui_test_mode) {
+                startup_error::present(&failure_data_dir, &report);
+            }
+            return startup_exit.load(std::sync::atomic::Ordering::Acquire);
+        }
     };
-    application.run_return(|app, event| {
+    let loop_code = application.run_return(move |app, event| {
             #[cfg(target_os = "macos")]
             match &event {
                 tauri::RunEvent::Opened { urls } => {
@@ -784,7 +821,9 @@ pub fn run() -> i32 {
                 let application_exiting = app
                     .try_state::<std::sync::Arc<ApplicationLifecycle>>()
                     .is_some_and(|lifecycle| lifecycle.is_exiting());
-                if should_prevent_implicit_exit(application_exiting, code) {
+                if !should_prevent_implicit_exit(application_exiting, code) {
+                    *observed_exit.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = code;
+                } else {
                     api.prevent_exit();
                     // Cmd-Q and the native application menu are explicit quit
                     // requests on macOS; use the same bounded engine shutdown
@@ -795,7 +834,18 @@ pub fn run() -> i32 {
                     }
                 }
             }
-        })
+        });
+    let exit_code = startup_error::resolve_exit_code(
+        loop_code,
+        *requested_exit.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+    let failure = startup_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    if let Some(report) = failure {
+        if startup_error::shows_dialog(agent_host, background_ui_test_mode) {
+            startup_error::present(&failure_data_dir, &report);
+        }
+    }
+    exit_code
 }
 
 /// Runs the private no-UI Linux Xunlei worker before Tauri is initialized.

@@ -784,6 +784,8 @@ const messages = {
   'launcher.startAll': 'Start all tasks',
   'launcher.pauseAll': 'Pause all tasks',
   'launcher.quit': 'Quit VersaDown',
+  'startup.failed.title': 'VersaDown failed to start',
+  'startup.failed.body': 'VersaDown could not finish starting and will now close.\n\nReason: {summary}\n\nDetails were saved to:\n{logPath}',
   'about.title': 'About',
   'about.version': 'Version',
   'engine.starting': 'Starting download engine…',

@@ -362,6 +362,8 @@ mod tests {
             launcher_downloading: "仅下载时显示".into(),
             launcher_hidden: "关闭显示".into(),
             quit: "退出万能下载".into(),
+            startup_failed_title: "VersaDown 启动失败".into(),
+            startup_failed_body: "VersaDown 无法完成启动。{summary}{logPath}".into(),
         }
     }
 

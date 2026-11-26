@@ -784,6 +784,8 @@ const messages = {
   'launcher.startAll': '开始全部任务',
   'launcher.pauseAll': '暂停全部任务',
   'launcher.quit': '退出万能下载',
+  'startup.failed.title': 'VersaDown 启动失败',
+  'startup.failed.body': 'VersaDown 无法完成启动，即将退出。\n\n原因：{summary}\n\n详细信息已保存到：\n{logPath}',
   'about.title': '关于',
   'about.version': '版本',
   'engine.starting': '正在启动下载引擎…',
