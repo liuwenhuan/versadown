@@ -128,6 +128,21 @@ impl UriSubmissionOptions {
     }
 }
 
+/// An app-owned loopback endpoint (the cloud range gateway) applies the
+/// user's route upstream; aria2 must reach it directly.
+fn uses_only_loopback(status: &Aria2Status) -> bool {
+    let mut uris = status.files.iter().flat_map(|file| &file.uris).peekable();
+    uris.peek().is_some()
+        && uris.all(|uri| {
+            url::Url::parse(&uri.uri).is_ok_and(|url| match url.host() {
+                Some(url::Host::Ipv4(host)) => host.is_loopback(),
+                Some(url::Host::Ipv6(host)) => host.is_loopback(),
+                Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                None => false,
+            })
+        })
+}
+
 fn valid_output_name(value: &str) -> bool {
     !value.trim().is_empty()
         && !value.contains(['\r', '\n', '/', '\\', '<', '>', ':', '"', '|', '?', '*'])
@@ -1193,7 +1208,30 @@ impl DownloadService {
             .unwrap_or(&0)
     }
 
-    async fn unpause_gid(&self, gid: &str) -> Result<String, Aria2Error> {
+    /// Every start of a download (resume, retry, a GID restored from the
+    /// engine session) states its proxy route again, from the task's current
+    /// network choice. A route is therefore never stale, whenever the GID was
+    /// created.
+    async fn refresh_download_route(&self, gid: &str) -> Result<(), DownloadServiceError> {
+        let network = self
+            .store
+            .find_by_gid(gid)?
+            .map(|task| task.network)
+            .unwrap_or_default();
+        let status = self.api().tell_status(gid).await?;
+        let options = UriSubmissionOptions {
+            proxy: crate::network_proxy::published_task_route(network)
+                .map_err(|_| DownloadServiceError::InvalidUriOption("proxy"))?,
+            direct_loopback: uses_only_loopback(&status),
+            ..Default::default()
+        }
+        .into_aria2_options()?;
+        self.api().change_option(gid, options).await?;
+        Ok(())
+    }
+
+    async fn unpause_gid(&self, gid: &str) -> Result<String, DownloadServiceError> {
+        self.refresh_download_route(gid).await?;
         let result = self.api().unpause(gid).await;
         // Even an uncertain RPC completion may have accepted the resume.
         let mut versions = self
@@ -1202,7 +1240,7 @@ impl DownloadService {
             .unwrap_or_else(|e| e.into_inner());
         let version = versions.entry(gid.to_owned()).or_default();
         *version = version.wrapping_add(1);
-        result
+        Ok(result?)
     }
 
     pub async fn control_directory_member(

@@ -7,6 +7,7 @@ use crate::{aria2::*, store::{CliCreateOutcome, CliDispatchIntent}, DownloadActi
 struct Engine {
     jobs: Mutex<BTreeMap<String, Aria2Status>>,
     submitted: Mutex<Vec<Aria2Options>>,
+    changed: Mutex<Vec<(String, Aria2Options)>>,
     adds: AtomicUsize,
     lose_add_response: AtomicBool,
     fail_snapshot: AtomicBool,
@@ -88,7 +89,12 @@ impl Aria2Api for Engine {
     }
     async fn get_global_stat(&self)->Result<Aria2GlobalStat,Aria2Error>{unreachable!()}
     async fn multicall(&self,_:Vec<RpcCall>)->Result<Vec<Result<Value,RpcFault>>,Aria2Error>{unreachable!()}
-    async fn change_option(&self,_:&str,_:Aria2Options)->Result<String,Aria2Error>{unreachable!()}
+    async fn change_option(&self, gid: &str, options: Aria2Options) -> Result<String, Aria2Error> {
+        // aria2 only accepts option changes for downloads it still knows.
+        self.jobs.lock().unwrap().get(gid).ok_or(Aria2Error::Transport)?;
+        self.changed.lock().unwrap().push((gid.into(), options));
+        Ok("OK".into())
+    }
     async fn get_option(&self,_:&str)->Result<Aria2Options,Aria2Error>{unreachable!()}
     async fn shutdown(&self)->Result<String,Aria2Error>{unreachable!()}
 }
@@ -363,4 +369,49 @@ async fn cli_bt_pending_stop_reconciles_an_uncertain_active_job_without_director
     service.dispatch_cli_torrent(task.id, &metadata, &[2], &options, &|_| false).await.unwrap();
     assert_eq!(engine.tell_status(&gid).await.unwrap().status, "removed");
     assert_eq!(engine.adds.load(Ordering::SeqCst), 1);
+}
+
+/// A GID loaded paused from the engine session was created without proxy
+/// options (or with outdated ones). Resuming it must state the task's current
+/// route before the download starts.
+#[tokio::test]
+async fn a_download_restored_from_the_engine_session_gets_its_route_when_resumed() {
+    use crate::network_proxy::{aria2_options, ProxyRoute, TaskNetwork};
+    let expected = |route: &ProxyRoute| -> Aria2Options {
+        aria2_options(route).into_iter().map(|(name, value)| (name.into(), value)).collect()
+    };
+    let gateway = |options: Aria2Options| -> Aria2Options {
+        let mut options = options;
+        options.insert("no-proxy".into(), "127.0.0.1".into());
+        options
+    };
+    for (index, (network, uri, route)) in [
+        (TaskNetwork::Follow, "https://example.test/restored.bin", expected(&ProxyRoute::System)),
+        (TaskNetwork::Direct, "https://example.test/restored.bin", expected(&ProxyRoute::Direct)),
+        (TaskNetwork::Follow, "http://127.0.0.1:41000/gateway", gateway(expected(&ProxyRoute::Direct))),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let engine = Arc::new(Engine::default());
+        let gid = format!("{index:016x}");
+        let status: Aria2Status = serde_json::from_value(json!({
+            "gid": gid, "status": "paused", "totalLength": "100", "completedLength": "40",
+            "downloadSpeed": "0", "uploadSpeed": "0", "connections": "0",
+            "files": [{"index":"1","path":"/tmp/restored.bin","length":"100","completedLength":"40",
+                "selected":"true","uris":[{"uri":uri,"status":"used"}]}]
+        })).unwrap();
+        engine.jobs.lock().unwrap().insert(gid.clone(), status);
+        let task = store.create(NewTask::direct("https://example.test/restored.bin")).unwrap();
+        store.bind_gid(task.id, &gid).unwrap();
+        store.set_task_network(task.id, network).unwrap();
+        let service = DownloadService::new(engine.clone(), store.clone());
+
+        service.control(task.id, DownloadAction::Resume).await.unwrap();
+
+        let changed = engine.changed.lock().unwrap().clone();
+        assert_eq!(changed, [(gid.clone(), route)], "{network:?} {uri}");
+        assert_eq!(engine.jobs.lock().unwrap()[&gid].status, "active");
+    }
 }

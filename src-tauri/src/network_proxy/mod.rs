@@ -8,10 +8,7 @@ mod discovery;
 #[cfg(test)]
 mod tests;
 
-use std::{
-    fmt,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{fmt, sync::RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -136,16 +133,30 @@ pub(crate) fn task_route(proxy: &ProxySettings, network: TaskNetwork) -> Result<
     }
 }
 
-static GLOBAL_DIRECT: AtomicBool = AtomicBool::new(false);
+static PUBLISHED: RwLock<Option<ProxySettings>> = RwLock::new(None);
 
-/// Publish the saved settings to clients that are not built per task.
+/// Publish the saved settings to consumers that do not hold the settings
+/// themselves: shared HTTP clients and the download engine's resumes.
 pub(crate) fn publish_settings(proxy: &ProxySettings) {
-    GLOBAL_DIRECT.store(proxy.direct, Ordering::Release);
+    *PUBLISHED.write().unwrap_or_else(|error| error.into_inner()) = Some(proxy.clone());
+}
+
+fn published() -> ProxySettings {
+    PUBLISHED
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default()
 }
 
 /// Whether the global settings demand a direct connection.
 pub(crate) fn global_direct() -> bool {
-    GLOBAL_DIRECT.load(Ordering::Acquire)
+    published().direct
+}
+
+/// The route a task uses under the currently published settings.
+pub(crate) fn published_task_route(network: TaskNetwork) -> Result<ProxyRoute, String> {
+    task_route(&published(), network)
 }
 
 /// Apply the global direct mode to an application HTTP client. Other modes
