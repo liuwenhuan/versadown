@@ -115,6 +115,12 @@ asset="VersaDown_${version}_${arch}${suffix}"
 # Local distributions need a complete ad-hoc bundle signature too. Sign only
 # the host bundle: the pinned engine resources must retain their vendor bytes.
 if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  # The Agent companions are our own executables. The arm64 linker gives them
+  # an ad-hoc signature but x86_64 leaves them unsigned, which fails the deep
+  # verification below; seal them before the host bundle.
+  for helper in vd-cli vd-mcp-server; do
+    codesign --force --sign - "$app/Contents/MacOS/$helper"
+  done
   codesign --force --sign - "$app"
 fi
 codesign --verify --deep --strict "$app"
