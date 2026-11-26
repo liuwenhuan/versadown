@@ -1,37 +1,32 @@
+//! Discovery of the proxies a child process would inherit: environment
+//! variables (with urllib precedence) and, on macOS/Windows, the OS settings.
+
 use std::collections::BTreeMap;
 
-use tokio::process::Command;
+/// Scheme (`http`, `https`, `all`, `no`, ...) to proxy value.
+pub(super) type Proxies = BTreeMap<String, String>;
 
-type Proxies = BTreeMap<String, String>;
-
-pub(super) fn apply(cmd: &mut Command, manual: Option<&str>) -> Result<(), String> {
-    let environment: Vec<_> = std::env::vars_os().collect();
-    let proxies = resolve(
-        manual,
-        environment_proxies(environment.iter().filter_map(|(key, value)| {
-            Some((key.to_str()?.to_owned(), value.to_str()?.to_owned()))
-        })),
-        system_proxies,
-    )?;
-
-    // Both yt-dlp and its aria2 child read these variables. --proxy would
-    // discard yt-dlp's no_proxy rules and collapse per-protocol settings.
-    for (key, _) in &environment {
-        if key
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .ends_with("_proxy")
-        {
-            cmd.env_remove(key);
-        }
-    }
-    for (scheme, proxy) in proxies {
-        cmd.env(format!("{scheme}_proxy"), proxy);
-    }
-    Ok(())
+/// Names of every proxy variable in this process, in their original case.
+pub(super) fn environment_keys() -> Vec<std::ffi::OsString> {
+    std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| is_proxy_variable(&key.to_string_lossy()))
+        .collect()
 }
 
-fn resolve(
+pub(super) fn is_proxy_variable(key: &str) -> bool {
+    key.to_ascii_lowercase().ends_with("_proxy")
+}
+
+/// The proxy variables of this process, keyed by lower-case scheme.
+pub(super) fn process_environment() -> Proxies {
+    environment_proxies(
+        std::env::vars_os()
+            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))),
+    )
+}
+
+pub(super) fn resolve(
     manual: Option<&str>,
     mut proxies: Proxies,
     system: impl FnOnce() -> Proxies,
@@ -78,7 +73,7 @@ fn normalize(proxy: &str) -> Result<String, String> {
     Ok(proxy)
 }
 
-fn environment_proxies(environment: impl IntoIterator<Item = (String, String)>) -> Proxies {
+pub(super) fn environment_proxies(environment: impl IntoIterator<Item = (String, String)>) -> Proxies {
     let environment: Vec<_> = environment.into_iter().collect();
     let mut proxies = Proxies::new();
     for (key, value) in &environment {
@@ -107,7 +102,7 @@ fn environment_proxies(environment: impl IntoIterator<Item = (String, String)>) 
 }
 
 #[cfg(target_os = "macos")]
-fn system_proxies() -> Proxies {
+pub(super) fn system_proxies() -> Proxies {
     std::process::Command::new("/usr/sbin/scutil")
         .arg("--proxy")
         .output()
@@ -118,7 +113,7 @@ fn system_proxies() -> Proxies {
 }
 
 #[cfg(windows)]
-fn system_proxies() -> Proxies {
+pub(super) fn system_proxies() -> Proxies {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
     let Ok(settings) = RegKey::predef(HKEY_CURRENT_USER)
@@ -136,7 +131,7 @@ fn system_proxies() -> Proxies {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn system_proxies() -> Proxies {
+pub(super) fn system_proxies() -> Proxies {
     Proxies::new()
 }
 

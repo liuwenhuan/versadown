@@ -36,7 +36,7 @@ pub struct UriSubmissionOptions {
     pub directory: Option<PathBuf>,
     pub output_name: Option<String>,
     pub headers: Vec<(String, String)>,
-    pub proxy: Option<String>,
+    pub proxy: crate::network_proxy::ProxyRoute,
     /// Route only to an app-owned 127.0.0.1 endpoint; its upstream applies the user proxy.
     pub direct_loopback: bool,
     pub max_connections_per_server: Option<u8>,
@@ -88,11 +88,16 @@ impl UriSubmissionOptions {
         if self.direct_loopback {
             options.insert("all-proxy".into(), String::new());
             options.insert("no-proxy".into(), "127.0.0.1".into());
-        } else if let Some(proxy) = self.proxy {
-            if proxy.trim().is_empty() || proxy.contains(['\r', '\n']) {
+        } else {
+            if self.proxy.manual().is_some_and(|proxy| proxy.trim().is_empty()) {
                 return Err(DownloadServiceError::InvalidUriOption("proxy"));
             }
-            options.insert("all-proxy".into(), proxy);
+            for (name, value) in crate::network_proxy::aria2_options(&self.proxy) {
+                if value.contains(['\r', '\n']) {
+                    return Err(DownloadServiceError::InvalidUriOption("proxy"));
+                }
+                options.insert(name.into(), value);
+            }
         }
         if let Some(max_connections_per_server) = self.max_connections_per_server {
             let value = max_connections_per_server.to_string();

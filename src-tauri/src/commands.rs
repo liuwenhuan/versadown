@@ -18,7 +18,7 @@ use crate::{
     confirm_download, duplicate_state, prepare_download, resolve_magnet_metadata,
     retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings, DownloadAction,
     DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility, ParseOutcome,
-    ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
+    ParseResource, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
 
 #[derive(Serialize)]
@@ -304,37 +304,6 @@ fn share_action_parse_outcome(action: TaskActionOutcome) -> ParseDownloadOutcome
     })
 }
 
-pub(crate) fn proxy_url(proxy: &ProxySettings) -> Result<Option<String>, String> {
-    if !proxy.enabled {
-        return Ok(None);
-    }
-    if !matches!(proxy.protocol.as_str(), "http" | "https") {
-        return Err("aria2 仅支持 HTTP/HTTPS 代理".into());
-    }
-    if proxy.host.trim().is_empty() || proxy.host.contains("://") || proxy.port == 0 {
-        return Err("代理服务器地址或端口无效".into());
-    }
-    let host = proxy.host.trim();
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    let mut value = url::Url::parse(&format!("{}://{}:{}", proxy.protocol, host, proxy.port))
-        .map_err(|_| "代理服务器地址无效".to_string())?;
-    if !proxy.username.is_empty() {
-        value
-            .set_username(&proxy.username)
-            .map_err(|_| "代理用户名无效".to_string())?;
-    }
-    if !proxy.password.is_empty() {
-        value
-            .set_password(Some(&proxy.password))
-            .map_err(|_| "代理密码无效".to_string())?;
-    }
-    Ok(Some(value.to_string()))
-}
-
 fn validated_download_directory(value: &str) -> Result<PathBuf, String> {
     let directory = PathBuf::from(value.trim());
     if directory.as_os_str().is_empty() || !directory.is_absolute() {
@@ -519,7 +488,7 @@ pub(crate) fn download_submission_options_for_directory(
     let directory = destination_directory
         .map(str::to_owned)
         .unwrap_or_else(|| settings.download_directory.clone());
-    let proxy = proxy_url(&settings.proxy)?;
+    let proxy = crate::network_proxy::global_route(&settings.proxy)?;
     drop(settings);
     Ok(UriSubmissionOptions {
         directory: Some(validated_download_directory(&directory)?),
@@ -2635,7 +2604,7 @@ pub(crate) async fn resubmit_task(
     if options.directory.is_none() {
         options.directory = configured.directory;
     }
-    if options.proxy.is_none() {
+    if options.proxy == crate::network_proxy::ProxyRoute::System {
         options.proxy = configured.proxy;
     }
     if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
@@ -4104,7 +4073,7 @@ pub async fn update_settings(
         .map_err(|error| format!("无法创建下载目录：{error}"))?;
     settings.proxy.host = settings.proxy.host.trim().to_string();
     settings.proxy.username = settings.proxy.username.trim().to_string();
-    proxy_url(&settings.proxy)?;
+    crate::network_proxy::global_route(&settings.proxy)?;
     settings.aria2.rpc_token = settings.aria2.rpc_token.trim().to_string();
     settings.aria2.validate()?;
 
@@ -4165,6 +4134,7 @@ pub async fn update_settings(
         // await. A stale general settings form must never undo a revocation.
         settings.agent_access = current.agent_access.clone();
         persist_settings(&state.settings_path, &settings)?;
+        crate::network_proxy::publish_settings(&settings.proxy);
         *current = settings.clone();
     }
     crate::launcher_window::sync_launcher_window(&app, settings.launcher_visibility);
@@ -6446,11 +6416,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_proxy_does_not_leak_process_proxy_settings_into_aria2() {
-        assert_eq!(proxy_url(&ProxySettings::default()).unwrap(), None);
-    }
-
-    #[test]
     fn automatic_share_submission_preserves_the_existing_duplicate_outcome() {
         let store = TaskStore::open_in_memory().unwrap();
         let task = store
@@ -6733,23 +6698,6 @@ mod tests {
             .unwrap();
 
         assert!(task_payload_with_cleanup(&store, Some(&plans), completed).is_err());
-    }
-
-    #[test]
-    fn authenticated_proxy_is_validated_and_encoded_for_aria2() {
-        let proxy = ProxySettings {
-            enabled: true,
-            protocol: "https".into(),
-            host: "127.0.0.1".into(),
-            port: 1080,
-            username: "user@example.com".into(),
-            password: "p@ss word".into(),
-        };
-        let value = proxy_url(&proxy).unwrap().unwrap();
-        assert_eq!(
-            value,
-            "https://user%40example.com:p%40ss%20word@127.0.0.1:1080/"
-        );
     }
 
     #[test]

@@ -527,7 +527,7 @@ impl TaskStore {
         // A replay uses the original persisted options even if desktop proxy
         // settings changed since acceptance. Validate new FTP submissions only
         // after the receipt lookup; FTP does not implement HTTP proxy/headers.
-        if new_task.kind == "ftp" && options.is_some_and(|options| options.proxy.is_some() || !options.headers.is_empty()) {
+        if new_task.kind == "ftp" && options.is_some_and(|options| options.proxy.manual().is_some() || !options.headers.is_empty()) {
             return Err(StoreError::UnsupportedCliOptions);
         }
         let duplicate: bool = transaction.query_row(

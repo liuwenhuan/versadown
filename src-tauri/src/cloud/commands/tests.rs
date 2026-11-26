@@ -1205,7 +1205,7 @@ async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options(
         "https://d.pcs.baidu.com/file?sign=secret".into(),
         crate::UriSubmissionOptions {
             headers: vec![("Cookie".into(), "BDUSS=secret".into())],
-            proxy: Some("http://proxy.example.test:8080".into()),
+            proxy: crate::network_proxy::ProxyRoute::Manual("http://proxy.example.test:8080".into()),
             ..Default::default()
         },
         None,
@@ -1216,7 +1216,7 @@ async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options(
     assert!(url.starts_with("http://127.0.0.1:"));
     assert!(!url.contains("secret"));
     assert!(options.headers.is_empty());
-    assert!(options.proxy.is_none());
+    assert!(options.proxy.manual().is_none());
     assert!(options.direct_loopback);
     let aria2 = options.into_aria2_options().unwrap();
     assert_eq!(aria2.get("all-proxy").map(String::as_str), Some(""));

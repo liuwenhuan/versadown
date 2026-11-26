@@ -7,7 +7,12 @@ use crate::{aria2::TransferFile, cloud::CloudProvider};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProxySettings {
+    /// Manual proxy switch. Existing settings files only know this field, so
+    /// `enabled` without `direct` keeps meaning "use the manual proxy".
     pub enabled: bool,
+    /// Never use any proxy, including environment and system proxies. Wins
+    /// over `enabled`, so the two flags can never request contradictory routes.
+    pub direct: bool,
     pub protocol: String,
     pub host: String,
     pub port: u16,
@@ -19,6 +24,7 @@ impl Default for ProxySettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            direct: false,
             protocol: "http".into(),
             host: String::new(),
             port: 7890,

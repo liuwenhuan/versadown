@@ -147,6 +147,7 @@ impl Aria2Process {
                 // pipe unless a reader drains it continuously: a busy startup
                 // can fill the Windows pipe before the RPC listener opens.
                 .stderr(Stdio::null());
+            crate::network_proxy::strip_inherited(&mut command);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;

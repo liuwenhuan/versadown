@@ -82,7 +82,7 @@ pub async fn resolve_magnet_metadata(
     let endpoint = base_url
         .join("api/v1/metadata")
         .map_err(|_| MagnetMetadataError::InvalidBaseUrl)?;
-    let client = reqwest::Client::builder()
+    let client = crate::network_proxy::client_builder(reqwest::Client::builder())
         .user_agent(METADATA_USER_AGENT)
         .connect_timeout(METADATA_TIMEOUT.min(std::time::Duration::from_secs(8)))
         .read_timeout(METADATA_TIMEOUT)

@@ -96,7 +96,7 @@ pub trait CloudUploadTransport: Send + Sync {
 impl CloudUploadTransport for ReqwestTransport {
     fn send_upload(&self, r: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
         let mut b = self
-            .client
+            .client()?
             .request(
                 r.method.parse().map_err(|_| QuarkError::InvalidResponse)?,
                 &r.url,

@@ -43,6 +43,7 @@ mod link_association;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
+mod network_proxy;
 pub mod native_menu_labels;
 #[cfg(all(target_os = "macos", feature = "native-smoke"))]
 mod native_smoke;
@@ -398,6 +399,7 @@ pub fn run() -> i32 {
             app.manage(lease);
             let settings_path = data_dir.join("settings.json");
             let mut settings = agent_runtime::load_settings(&data_dir);
+            network_proxy::publish_settings(&settings.proxy);
             // Authorization may have changed after preflight while another
             // process was starting. Recheck under the profile lease, before DB.
             if startup_options.agent_host && !settings.agent_access.enabled {

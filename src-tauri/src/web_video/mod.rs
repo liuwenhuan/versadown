@@ -3,7 +3,6 @@ mod aria2_transfer;
 mod cookies;
 mod extractor;
 mod previews;
-mod proxy;
 pub(crate) mod routing;
 mod sites;
 mod transfer;
@@ -34,7 +33,7 @@ pub(crate) enum VideoTransferEngine {
 
 #[derive(Default)]
 pub(crate) struct VideoOptions {
-    pub proxy: Option<String>,
+    pub proxy: crate::network_proxy::ProxyRoute,
     pub rate: u64,
     pub cookie_file: Option<PathBuf>,
 }
@@ -75,7 +74,7 @@ impl VideoDownloads {
     ) -> Result<Vec<VideoPreview>, String> {
         let previews = extractor::inspect(
             page,
-            options.proxy.as_deref(),
+            &options.proxy,
             options.cookie_file.as_deref(),
         )
         .await?;
@@ -208,7 +207,7 @@ impl VideoDownloads {
             .map_err(|e| e.to_string())?
             .ok_or("video.error.output")?;
         let cookies = cookies::CookieFile::load(options.cookie_file.as_deref())?;
-        let mut cmd = transfer::transfer_command(options.proxy.as_deref(), options.rate)?;
+        let (mut cmd, applied_proxy) = transfer::transfer_command(&options.proxy, options.rate)?;
         if let Some(cookies) = &cookies {
             cookies.apply(&mut cmd);
         }
@@ -283,7 +282,7 @@ impl VideoDownloads {
                 }
                 Err(message) => {
                     task.status = TaskStatus::Failed;
-                    task.error = Some(message);
+                    task.error = Some(applied_proxy.diagnose(&message, &page));
                     task.download_speed = 0;
                     publish(&task);
                 }
@@ -342,7 +341,7 @@ impl VideoDownloads {
 pub(crate) fn network_options(state: &AppState) -> Result<VideoOptions, String> {
     let settings = state.settings.lock().map_err(|_| "video.error.state")?;
     Ok(VideoOptions {
-        proxy: commands::proxy_url(&settings.proxy)?,
+        proxy: crate::network_proxy::global_route(&settings.proxy)?,
         rate: settings.aria2.overall_download_limit,
         cookie_file: (!settings.video_cookie_file.is_empty())
             .then(|| PathBuf::from(&settings.video_cookie_file)),
@@ -370,7 +369,7 @@ pub(crate) async fn prepare_agent_video(
 ) -> Result<Vec<AgentPreparedVideo>, String> {
     let page = routing::resolve(input, true).await?.ok_or("video.error.unsupported")?;
     let options = network_options(state)?;
-    let previews = extractor::inspect(page, options.proxy.as_deref(), options.cookie_file.as_deref()).await?;
+    let previews = extractor::inspect(page, &options.proxy, options.cookie_file.as_deref()).await?;
     Ok(agent_video_formats(previews))
 }
 

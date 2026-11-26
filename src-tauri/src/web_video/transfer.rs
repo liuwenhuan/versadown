@@ -3,6 +3,7 @@ use super::{
     extractor::{command, tool, Diagnostics},
     VideoTransferEngine,
 };
+use crate::network_proxy::{AppliedProxy, ProxyRoute};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -235,10 +236,10 @@ pub(super) async fn download(
 }
 
 pub(super) fn transfer_command(
-    proxy: Option<&str>,
+    proxy: &ProxyRoute,
     rate_limit: u64,
-) -> Result<tokio::process::Command, String> {
-    let mut cmd = command(proxy)?;
+) -> Result<(tokio::process::Command, AppliedProxy), String> {
+    let (mut cmd, applied) = command(proxy)?;
     // Transfers need yt-dlp's normal retry budget, rather than the shorter
     // preview budget. Back off between transport failures and resume the range.
     cmd.args(["--retries", "10", "--retry-sleep", "http:exp=1:8"]);
@@ -252,5 +253,5 @@ pub(super) fn transfer_command(
     if rate_limit > 0 {
         cmd.arg("--limit-rate").arg(rate_limit.to_string());
     }
-    Ok(cmd)
+    Ok((cmd, applied))
 }

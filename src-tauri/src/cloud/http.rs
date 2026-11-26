@@ -135,12 +135,19 @@ impl<T: super::CloudUploadTransport> super::CloudUploadTransport for ControlledU
     }
 }
 pub struct ReqwestTransport {
-    pub(super) client: reqwest::blocking::Client,
+    /// Rebuilt when the global direct mode changes after construction.
+    client: Mutex<RoutedClient>,
     jar: Arc<reqwest::cookie::Jar>,
     explicit_cookie_sessions: Mutex<HashMap<[u8; 32], ExplicitCookieSession>>,
 }
 
+struct RoutedClient {
+    direct: bool,
+    client: reqwest::blocking::Client,
+}
+
 struct ExplicitCookieSession {
+    direct: bool,
     client: reqwest::blocking::Client,
     snapshot_client: Option<reqwest::blocking::Client>,
     jar: Arc<reqwest::cookie::Jar>,
@@ -149,6 +156,12 @@ struct ExplicitCookieSession {
 
 impl ExplicitCookieSession {
     fn client(&mut self, snapshot: bool) -> Result<reqwest::blocking::Client, QuarkError> {
+        let direct = crate::network_proxy::global_direct();
+        if direct != self.direct {
+            self.client = ReqwestTransport::client_with_jar(Arc::clone(&self.jar), true, direct)?;
+            self.snapshot_client = None;
+            self.direct = direct;
+        }
         if !snapshot {
             return Ok(self.client.clone());
         }
@@ -156,6 +169,7 @@ impl ExplicitCookieSession {
             self.snapshot_client = Some(ReqwestTransport::client_with_jar(
                 Arc::clone(&self.jar),
                 false,
+                direct,
             )?);
         }
         Ok(self.snapshot_client.as_ref().unwrap().clone())
@@ -175,6 +189,7 @@ impl ReqwestTransport {
     fn client_with_jar(
         jar: Arc<reqwest::cookie::Jar>,
         follow_redirects: bool,
+        direct: bool,
     ) -> Result<reqwest::blocking::Client, QuarkError> {
         let mut builder = reqwest::blocking::Client::builder()
             .cookie_provider(jar)
@@ -183,7 +198,9 @@ impl ReqwestTransport {
         if !follow_redirects {
             builder = builder.redirect(reqwest::redirect::Policy::none());
         }
-        if let Some(proxy) = std::env::var_os("HTTPS_PROXY")
+        if direct {
+            builder = builder.no_proxy();
+        } else if let Some(proxy) = std::env::var_os("HTTPS_PROXY")
             .or_else(|| std::env::var_os("https_proxy"))
             .or_else(|| std::env::var_os("ALL_PROXY"))
             .filter(|value| !value.is_empty())
@@ -243,8 +260,10 @@ impl ReqwestTransport {
             // paths while response Set-Cookie still observes its real scope.
             jar.add_cookie_str(cookie, &root_url);
         }
+        let direct = crate::network_proxy::global_direct();
         let mut session = ExplicitCookieSession {
-            client: Self::client_with_jar(Arc::clone(&jar), true)?,
+            direct,
+            client: Self::client_with_jar(Arc::clone(&jar), true, direct)?,
             snapshot_client: None,
             jar: Arc::clone(&jar),
             last_used: now,
@@ -256,12 +275,33 @@ impl ReqwestTransport {
 
     pub fn new() -> Result<Self, QuarkError> {
         let jar = Arc::new(reqwest::cookie::Jar::default());
+        let direct = crate::network_proxy::global_direct();
         Ok(Self {
-            client: Self::client_with_jar(Arc::clone(&jar), true)?,
+            client: Mutex::new(RoutedClient {
+                direct,
+                client: Self::client_with_jar(Arc::clone(&jar), true, direct)?,
+            }),
             jar,
             explicit_cookie_sessions: Mutex::new(HashMap::new()),
         })
     }
+    /// The shared client, rebuilt (same cookie jar) when the global direct
+    /// mode changed since it was built.
+    pub(super) fn client(&self) -> Result<reqwest::blocking::Client, QuarkError> {
+        let mut routed = self
+            .client
+            .lock()
+            .map_err(|_| QuarkError::Transport("HTTP 会话状态不可用".into()))?;
+        let direct = crate::network_proxy::global_direct();
+        if routed.direct != direct {
+            *routed = RoutedClient {
+                direct,
+                client: Self::client_with_jar(Arc::clone(&self.jar), true, direct)?,
+            };
+        }
+        Ok(routed.client.clone())
+    }
+
     fn send_request(
         &self,
         r: CloudHttpRequest,
@@ -300,7 +340,7 @@ impl ReqwestTransport {
             }
             client
         } else {
-            self.client.clone()
+            self.client()?
         };
         let mut b = client.request(
             r.method.parse().map_err(|_| QuarkError::InvalidResponse)?,
@@ -367,7 +407,7 @@ impl CloudHttpTransport for ReqwestTransport {
     fn send_detailed(&self, r: CloudHttpRequest) -> Result<CloudHttpDetail, QuarkError> {
         use std::io::Read;
         let mut builder = self
-            .client
+            .client()?
             .request(r.method.parse().map_err(|_| QuarkError::InvalidResponse)?, &r.url);
         for (name, value) in r.headers {
             builder = builder.header(name, value);

@@ -27,7 +27,9 @@ async fn bundled_tools_download_a_public_page_with_audio() {
     let proxy = std::env::var("VERSADOWN_VIDEO_TEST_PROXY")
         .ok()
         .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+        .map(crate::network_proxy::ProxyRoute::Manual)
+        .unwrap_or_default();
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
@@ -522,7 +524,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let url = "http://embedded.example.test/article";
-    let options = VideoOptions { proxy: Some(proxy), ..Default::default() };
+    let options = VideoOptions { proxy: crate::network_proxy::ProxyRoute::Manual(proxy), ..Default::default() };
     let scanned = routing::scan(url).await;
     assert!(scanned[0].can_probe_video);
     assert_eq!(scanned[0].kind, Some(crate::CandidateKind::Direct));
@@ -670,7 +672,7 @@ async fn installed_extractor_aria2_reports_progress_and_resumes_with_a_fresh_url
             .to_string(),
         )
         .unwrap();
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.env("no_proxy", "127.0.0.1,localhost")
             .args(["--proxy", "", "--load-info-json"])
             .arg(&metadata);
@@ -811,7 +813,7 @@ async fn installed_extractor_preserves_and_resumes_a_rejected_download() {
             .to_string(),
         )
         .unwrap();
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.args(["--proxy", "", "--load-info-json"]).arg(&metadata);
         let (_hold, stop) = oneshot::channel();
         let result = tokio::time::timeout(
@@ -891,7 +893,7 @@ async fn installed_extractor_rejects_missing_fragments_without_publishing() {
         let started = std::time::Instant::now();
         println!("Missing-fragment fixture: starting {engine:?}");
         missing_requests.store(0, Ordering::SeqCst);
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.args(["--proxy", "", "--fragment-retries", "0", "--load-info-json"])
             .arg(&metadata);
         let output = dir.path().join("complete.mp4");
@@ -957,7 +959,7 @@ async fn installed_extractor_selects_later_videos_from_the_same_page() {
     )
     .unwrap();
     for index in [2, 3, 4] {
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         // Loading a cleaned info file drops entries, which would turn this
         // offline playlist fixture into an empty collection.
         cmd.args(["--enable-file-urls", "--no-clean-info-json", "--load-info-json"])
@@ -1017,7 +1019,7 @@ async fn installed_extractor_rejects_changed_media_before_reusing_staging() {
     )
     .unwrap();
     let cmd = || {
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.args(["--enable-file-urls", "--load-info-json"])
             .arg(&metadata);
         cmd

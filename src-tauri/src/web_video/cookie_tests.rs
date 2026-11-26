@@ -128,7 +128,7 @@ async fn cookie_file_authenticates_preview_and_aria2_retry_without_modifying_the
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let server = tokio::spawn(async move { axum::serve(socket, site).await.unwrap() });
     let options = || VideoOptions {
-        proxy: Some(proxy.clone()),
+        proxy: crate::network_proxy::ProxyRoute::Manual(proxy.clone()),
         cookie_file: Some(cookie_path.clone()),
         ..Default::default()
     };
@@ -140,12 +140,13 @@ async fn cookie_file_authenticates_preview_and_aria2_retry_without_modifying_the
         AssertUnwindSafe(async {
             let page = || sites::manual_page(&PAGE_URL.parse().unwrap()).unwrap();
             let anonymous = VideoOptions {
-                proxy: Some(proxy.clone()),
+                proxy: crate::network_proxy::ProxyRoute::Manual(proxy.clone()),
                 ..Default::default()
             };
             assert_eq!(
                 engine.prepare(page(), &anonymous).await.unwrap_err(),
-                "video.error.accessDenied"
+                // The rejected request went through the application proxy.
+                "video.error.accessDeniedProxy"
             );
             let preview = engine.prepare(page(), &options()).await.unwrap().remove(0);
             assert_eq!(preview.formats.len(), 1);

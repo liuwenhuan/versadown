@@ -264,7 +264,7 @@ fn anonymous_view(url: &str, fetch: &str) -> Result<AnonymousView, QuarkError> {
                     uuid::Uuid::new_v4(),
                     download.url,
                     download.headers,
-                    None,
+                    crate::network_proxy::ProxyRoute::System,
                     transform,
                     false,
                 )

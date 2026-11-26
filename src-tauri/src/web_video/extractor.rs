@@ -12,6 +12,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::sites::PlaybackPage;
+use crate::network_proxy::{AppliedProxy, ProxyRoute};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,10 +424,10 @@ pub(super) fn tool(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-pub(super) fn command(proxy: Option<&str>) -> Result<Command, String> {
+pub(super) fn command(proxy: &ProxyRoute) -> Result<(Command, AppliedProxy), String> {
     let mut cmd = base_command()?;
-    super::proxy::apply(&mut cmd, proxy)?;
-    Ok(cmd)
+    let applied = crate::network_proxy::apply_to_command(&mut cmd, proxy)?;
+    Ok((cmd, applied))
 }
 
 pub(super) fn base_command() -> Result<Command, String> {
@@ -632,11 +633,11 @@ async fn metadata(mut cmd: Command) -> Result<Vec<u8>, String> {
 
 pub(crate) async fn inspect(
     page: PlaybackPage,
-    proxy: Option<&str>,
+    proxy: &ProxyRoute,
     cookie_file: Option<&Path>,
 ) -> Result<Vec<VideoPreview>, String> {
     let cookies = super::cookies::CookieFile::load(cookie_file)?;
-    let mut cmd = command(proxy)?;
+    let (mut cmd, applied) = command(proxy)?;
     if let Some(cookies) = &cookies {
         cookies.apply(&mut cmd);
     }
@@ -647,7 +648,9 @@ pub(crate) async fn inspect(
         "--",
     ])
     .arg(page.url.as_str());
-    let bytes = metadata(cmd).await?;
+    let bytes = metadata(cmd)
+        .await
+        .map_err(|key| applied.diagnose(&key, page.url.as_str()))?;
     page_previews(page, &bytes, tool("ffmpeg").is_some())
 }
 
