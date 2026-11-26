@@ -98,17 +98,18 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
     : { task, ...(queueTask ? { queueTask } : {}) };
 }
 
-export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false, probeVideo?: boolean): Promise<ParseDownloadResult> {
+export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false, probeVideo?: boolean, network: TaskNetwork = 'follow'): Promise<ParseDownloadResult> {
   if (!isTauriRuntime()) {
     if (probeVideo) throw new Error(t('video.error.desktop'));
     return parseLocally(input);
   }
-  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}), ...(probeVideo !== undefined ? { probeVideo } : {}) })
+  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}), ...(probeVideo !== undefined ? { probeVideo } : {}), ...(network !== 'follow' ? { network } : {}) })
     .catch((error: unknown) => {
       if (isXunleiVerificationReason(error) || isXunleiVerificationFailure(error)) {
         throw new Error(xunleiVerificationMessage(typeof error === 'string' ? error : (error as { message?: unknown }).message));
       }
-      if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
+      // Keep the key: the dialog offers a direct retry for a proxy rejection.
+      if (typeof error === 'string' && error.startsWith('video.error.')) throw Object.assign(new Error(videoMessage(error)), { code: error });
       const shareFailure = typeof error === 'string' ? shareFailureMessage(error) : undefined;
       if (shareFailure) throw new Error(shareFailure);
       throw error;

@@ -686,8 +686,12 @@ pub async fn parse_download(
     access_code: Option<String>,
     require_confirmation: Option<bool>,
     probe_video: Option<bool>,
+    network: Option<TaskNetwork>,
     state: State<'_, AppState>,
 ) -> Result<ParseDownloadOutcome, String> {
+    // The new-download dialog's network choice covers parsing too, so the
+    // extraction and the later transfer use the same route.
+    let network = network.unwrap_or_default();
     if let Some(candidate) =
         crate::parser::extract_cloud_share_candidate(&input, access_code.as_deref())
             .map_err(|error| error.to_string())?
@@ -758,7 +762,7 @@ pub async fn parse_download(
         &input,
         &state.store,
         &state.web_video,
-        || crate::web_video::network_options(&state, crate::network_proxy::TaskNetwork::Follow),
+        || crate::web_video::network_options(&state, network),
         probe_video,
         require_confirmation.unwrap_or(false),
     )
@@ -772,13 +776,22 @@ pub async fn parse_download(
         ensure_private_task_access(&state, &outcome.task)?;
         return Ok(ParseDownloadOutcome::Task(outcome));
     }
+    let network = if accepts_task_network(&outcome.task) {
+        network
+    } else {
+        TaskNetwork::Follow
+    };
+    outcome.task = state
+        .store
+        .set_task_network(outcome.task.id, network)
+        .map_err(|error| error.to_string())?;
     if outcome.task.kind == "torrent" {
         let service = state
             .runtime
             .service()
             .await
             .map_err(|error| error.to_string())?;
-        let options = download_submission_options(&state)?
+        let options = download_submission_options_for_network(&state, None, network)?
             .into_aria2_options()
             .map_err(|error| error.to_string())?;
         let encoded = match load_torrent_base64(&outcome.task.source).await {
@@ -801,7 +814,7 @@ pub async fn parse_download(
         };
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     } else if !outcome.requires_confirmation {
-        let options = download_submission_options(&state)?;
+        let options = download_submission_options_for_network(&state, None, network)?;
         outcome.task = match state
             .runtime
             .submit_uri_with_options(outcome.task.id, vec![outcome.task.source.clone()], options)
@@ -822,7 +835,7 @@ pub async fn parse_download(
             .service()
             .await
             .map_err(|error| error.to_string())?;
-        let options = download_submission_options(&state)?;
+        let options = download_submission_options_for_network(&state, None, network)?;
         let metadata_settings = state
             .settings
             .lock()

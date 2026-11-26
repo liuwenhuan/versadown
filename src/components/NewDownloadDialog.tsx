@@ -13,7 +13,8 @@ export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
 export interface NewDownloadDialogProps {
   open: boolean;
   placement?: NewDownloadDialogPlacement;
-  onParse(input: string, accessCode?: string, probeVideo?: boolean): void | Promise<ParseDownloadResult | void>;
+  /** `network` is passed only when the dialog's network choice is not `follow`. */
+  onParse(input: string, accessCode?: string, probeVideo?: boolean, network?: TaskNetwork): void | Promise<ParseDownloadResult | void>;
   onScan?(input: string, onProgress?: (progress: ScanDownloadProgress) => void): Promise<ScanDownloadResult[]>;
   onClose(): void;
   onOpenTaskList?(): void | Promise<void>;
@@ -30,9 +31,19 @@ export interface NewDownloadDialogProps {
   manualProxyAvailable?: boolean;
 }
 
+const CLOUD_INPUT_KINDS = new Set(['cloud_share', 'quark_share', 'pik_pak_share']);
+
 /** Cloud downloads always follow the global proxy settings. */
 function isCloudDraft(item: DownloadDraftItem): boolean {
-  return Boolean(item.result?.browserShare) || /^cloud(-share)?:\/\//.test(item.result?.confirmation?.taskId ?? '');
+  return Boolean(item.result?.browserShare || item.result?.shareAccessCodeRequired)
+    || CLOUD_INPUT_KINDS.has(item.kind ?? '')
+    || /^cloud(-share)?:\/\//.test(item.result?.confirmation?.taskId ?? '');
+}
+
+/** Drafts whose parse depends on the network choice. */
+function followsDialogNetwork(item: DownloadDraftItem): boolean {
+  return !isCloudDraft(item) && !item.submitted && !item.result?.duplicate
+    && (item.status === 'failed' || item.status === 'ready' || item.status === 'parsing');
 }
 
 // Parse errors currently cross IPC as text. All providers use the same action
@@ -301,9 +312,16 @@ function BatchNewDownloadDialog({
   manualProxyAvailable = false,
 }: NewDownloadDialogProps) {
   const { t } = useTranslation();
+  // Parsing reads the choice when it starts; a change re-parses the drafts.
+  const networkRef = useRef<TaskNetwork>('follow');
   const batch = useDownloadDraftBatch({
     scan: onScan ?? (async input => [{ input, valid: true, kind: 'direct' }]),
-    prepare: async (input, accessCode, probeVideo) => (await (probeVideo !== undefined ? onParse(input, accessCode, probeVideo) : onParse(input, accessCode))) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
+    prepare: async (input, accessCode, probeVideo) => {
+      const network = networkRef.current;
+      const parsed = network !== 'follow' ? onParse(input, accessCode, probeVideo, network)
+        : probeVideo !== undefined ? onParse(input, accessCode, probeVideo) : onParse(input, accessCode);
+      return (await parsed) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } };
+    },
     discard: onDiscardPrepared ?? (async () => {}),
     concurrency: 4,
   });
@@ -338,6 +356,7 @@ function BatchNewDownloadDialog({
     setShowPostProcessing(false);
     setPostProcessingNote('');
     setNetwork('follow');
+    networkRef.current = 'follow';
     setDestination(undefined);
     setManualInput(initialInput);
     setScanning(Boolean(initialInput.trim()));
@@ -389,6 +408,20 @@ function BatchNewDownloadDialog({
     }
     if (closeWhenEmpty) void requestClose();
   });
+
+  function changeNetwork(next: TaskNetwork) {
+    if (next === networkRef.current) return;
+    networkRef.current = next;
+    setNetwork(next);
+    batch.reparse(followsDialogNetwork);
+  }
+
+  /** Switch this dialog to direct and parse the rejected draft again. */
+  function retryDirectly(id: string) {
+    setShowPostProcessing(true);
+    if (networkRef.current === 'direct') batch.retry(id);
+    else changeNetwork('direct');
+  }
 
   function scanManualInput(event: FormEvent) {
     event.preventDefault();
@@ -485,6 +518,7 @@ function BatchNewDownloadDialog({
             <div className="batch-download-name"><strong title={title}>{title}</strong><small>{loadingStatus ? <BatchLoadingStatus>{loadingStatus}</BatchLoadingStatus> : itemStatus}</small></div>
             {resources.length > 0 && <small className="batch-root-size">{formatBytes(resourceBytes)}</small>}
             {item.status === 'failed' && <button type="button" className="batch-retry-button" disabled={busy} onClick={() => batch.retry(item.id)}>{t('common.retryAction')}</button>}
+            {item.status === 'failed' && item.errorCode === 'video.error.accessDeniedProxy' && <button type="button" className="batch-retry-button" disabled={busy} onClick={() => retryDirectly(item.id)}>{t('download.action.retryDirect')}</button>}
             <button type="button" aria-label={t('batch.removeNamed', { name: title })} disabled={busy} onClick={() => batch.remove(item.id)}>×</button>
           </div>;
         return <article key={item.id} className={`batch-download-item ${item.status}${item.expanded && canExpand ? ' expanded' : ''}`}>
@@ -508,7 +542,7 @@ function BatchNewDownloadDialog({
     </button>
     {showPostProcessing && offersNetworkChoice && <div className="batch-network-options" role="radiogroup" aria-label={t('download.network')}>
       <span>{t('download.network')}</span>
-      {networkChoices.map(choice => <label key={choice}><input type="radio" name="batch-network" value={choice} checked={submittedNetwork === choice} disabled={submitting} onChange={() => setNetwork(choice)} />{t(`download.network.${choice}`)}</label>)}
+      {networkChoices.map(choice => <label key={choice}><input type="radio" name="batch-network" value={choice} checked={submittedNetwork === choice} disabled={submitting} onChange={() => changeNetwork(choice)} />{t(`download.network.${choice}`)}</label>)}
       <small>{t('download.network.hint')}</small>
     </div>}
     {showPostProcessing && <textarea className="batch-processing-input" aria-label={t('download.postProcessingAndPassword')} value={postProcessingNote} onChange={event => setPostProcessingNote(event.target.value)} placeholder={t('download.postProcessingPlaceholder')} />}
