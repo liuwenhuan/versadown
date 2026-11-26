@@ -1458,10 +1458,20 @@ async fn metadata_timeout_leaves_pending_task_available_for_later_sync() {
 
 #[tokio::test]
 async fn successful_confirmation_survives_status_failure_and_service_reopen() {
-    let queries = std::sync::atomic::AtomicUsize::new(0);
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Only the status read after `unpause` fails: the status read that
+    // precedes it (the route refresh) must not use up the failure.
+    let started = AtomicBool::new(false);
+    let status_failed = AtomicBool::new(false);
     let (client, server) = fixture::server(move |r| match r["method"].as_str().unwrap() {
-        "aria2.changeOption" | "aria2.unpause" => json!("OK"),
-        "aria2.tellStatus" if queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 => {
+        "aria2.changeOption" => json!("OK"),
+        "aria2.unpause" => {
+            started.store(true, Ordering::SeqCst);
+            json!("OK")
+        }
+        "aria2.tellStatus"
+            if started.load(Ordering::SeqCst) && !status_failed.swap(true, Ordering::SeqCst) =>
+        {
             json!(false)
         }
         "aria2.tellStatus" => fixture::status("child", "active", 30),
@@ -1568,4 +1578,107 @@ fn version_one_database_keeps_tasks_and_defaults_confirmation_false() {
         .unwrap()
         .selection_confirmed(task.id)
         .unwrap());
+}
+
+/// A GID restored from the engine session may carry an outdated route, so
+/// every start states the task's route again, and before the download starts.
+#[tokio::test]
+async fn resume_states_the_proxy_route_before_the_download_starts() {
+    let routes = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let wire_routes = routes.clone();
+    let routes_when_started = Arc::new(Mutex::new(None));
+    let seen = routes_when_started.clone();
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_running = running.clone();
+    let (client, server) = fixture::server_with_routes(routes.clone(), move |request| {
+        match request["method"].as_str().unwrap() {
+            "aria2.unpause" => {
+                *seen.lock().unwrap() = Some(wire_routes.lock().unwrap().len());
+                wire_running.store(true, std::sync::atomic::Ordering::SeqCst);
+                json!("gid")
+            }
+            "aria2.tellStatus" => fixture::status(
+                "gid",
+                if wire_running.load(std::sync::atomic::Ordering::SeqCst) {
+                    "active"
+                } else {
+                    "paused"
+                },
+                10,
+            ),
+            other => panic!("unexpected method {other}"),
+        }
+    })
+    .await;
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/restored"))
+        .unwrap();
+    store.bind_gid(task.id, "gid").unwrap();
+    let service = DownloadService::new(Arc::new(client), store);
+
+    service
+        .control(task.id, versadown_lib::aria2::DownloadAction::Resume)
+        .await
+        .unwrap();
+
+    assert_eq!(*routes_when_started.lock().unwrap(), Some(1));
+    let routes = routes.lock().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0]["params"][1], "gid");
+    server.abort();
+}
+
+/// The route is the user's explicit network choice. When it cannot be stated
+/// the download must stay paused instead of starting with an unknown route
+/// (a proxy the user turned off, or a direct connection they did not want).
+#[tokio::test]
+async fn failed_route_write_keeps_the_download_paused() {
+    let unpaused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wire_unpaused = unpaused.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/jsonrpc", listener.local_addr().unwrap());
+    let app = axum::Router::new().route(
+        "/jsonrpc",
+        axum::routing::post(move |axum::Json(request): axum::Json<serde_json::Value>| {
+            let unpaused = wire_unpaused.clone();
+            async move {
+                let reply = match request["method"].as_str().unwrap() {
+                    "aria2.changeOption" => json!({"code":1,"message":"Unknown option"}),
+                    "aria2.tellStatus" => {
+                        return axum::Json(json!({"jsonrpc":"2.0","id":request["id"],
+                            "result":fixture::status("gid", "paused", 10)}));
+                    }
+                    "aria2.unpause" => {
+                        unpaused.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return axum::Json(json!({"jsonrpc":"2.0","id":request["id"],"result":"gid"}));
+                    }
+                    other => panic!("unexpected method {other}"),
+                };
+                axum::Json(json!({"jsonrpc":"2.0","id":request["id"],"error":reply}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = versadown_lib::aria2::Aria2RpcClient::new(
+        endpoint,
+        versadown_lib::aria2::RpcSecret::from_bytes([1; 32]),
+    )
+    .unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store
+        .create(NewTask::direct("https://example.test/restored"))
+        .unwrap();
+    store.bind_gid(task.id, "gid").unwrap();
+    let before = store.find(task.id).unwrap().status;
+    let service = DownloadService::new(Arc::new(client), store.clone());
+
+    let result = service
+        .control(task.id, versadown_lib::aria2::DownloadAction::Resume)
+        .await;
+
+    assert!(result.is_err());
+    assert!(!unpaused.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(store.find(task.id).unwrap().status, before);
+    server.abort();
 }
