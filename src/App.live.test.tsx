@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
   list: vi.fn(), parse: vi.fn(), submitVideo: vi.fn(), onTask: undefined as undefined | ((task: QueueTaskInput) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
-  confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
+  confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(), retryWithNetwork: vi.fn(),
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), deleteTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(), clipboardRead: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
@@ -28,7 +28,7 @@ vi.mock('./lib/api', () => ({
   submitVideoFormats: state.submitVideo,
   syncMainWindowIcon: vi.fn().mockResolvedValue(undefined), takeExternalLinks: state.takeExternalLinks,
   scanDownloadInputs: vi.fn().mockResolvedValue([]),
-  confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, discardPreparedDownload: state.discardPrepared, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
+  confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, discardPreparedDownload: state.discardPrepared, runTaskAction: state.taskAction, retryTaskWithNetwork: state.retryWithNetwork, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
   getPrivacyTaskVisibility: state.privacyVisibility,
   checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
@@ -108,6 +108,7 @@ beforeEach(() => {
   state.getEngineState.mockResolvedValue({ available: true, retrying: false });
   state.retryEngine.mockReset();
   state.taskAction.mockReset();
+  state.retryWithNetwork.mockReset();
   state.moveToRecycle.mockReset();
   state.purgeTasks.mockReset();
   state.deleteTasks.mockReset();
@@ -525,6 +526,22 @@ it('shows a native authorization failure and allows the Baidu authorization butt
   expect(await screen.findByRole('status')).toHaveTextContent('授权窗口打开失败，请重试');
   await user.click(screen.getByRole('button', { name: '重新授权 book.pdf' }));
   expect(state.reauthorizeFailedCloudTask).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  ['直连重试', { network: 'follow', error: 'video.error.accessDeniedProxy' }, 'direct', { enabled: false }],
+  ['用代理重试', { network: 'direct', error: 'video.error.network' }, 'proxy', { enabled: false, host: '127.0.0.1', port: 10808 }],
+] as const)('%s switches the failed task network and retries it', async (label, failure, network, proxy) => {
+  const failed: QueueTask = { id: 'network-retry', name: 'clip.mp4', kind: 'web_video', status: 'failed', progress: 0, source: 'https://www.bilibili.com/video/BV1', ...failure };
+  state.list.mockResolvedValue([failed]);
+  state.getSettings.mockResolvedValue({ downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { protocol: 'http', host: '', port: 7890, username: '', password: '', ...proxy }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } });
+  state.retryWithNetwork.mockResolvedValue({ task: { ...failed, status: 'queued', network } });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(screen.getByRole('tab', { name: /失败/ }));
+  await user.click(await screen.findByRole('button', { name: `${label} clip.mp4` }));
+  expect(state.retryWithNetwork).toHaveBeenCalledWith('network-retry', network);
+  expect(state.taskAction).not.toHaveBeenCalled();
 });
 
 it('shows the duplicate decision when retry returns a queue projection', async () => {
@@ -1496,8 +1513,8 @@ it('opens one batch dialog for pasted links and closes after the first selected 
   await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
 
   await waitFor(() => expect(state.confirm).toHaveBeenCalledTimes(2));
-  expect(state.confirm).toHaveBeenCalledWith('first-draft', [], undefined, false, '密码 88in');
-  expect(state.confirm).toHaveBeenCalledWith('second-draft', [], undefined, false, '密码 88in');
+  expect(state.confirm).toHaveBeenCalledWith('first-draft', [], undefined, false, '密码 88in', 'follow');
+  expect(state.confirm).toHaveBeenCalledWith('second-draft', [], undefined, false, '密码 88in', 'follow');
   await act(async () => { first.resolve({ id: 'first-task', name: 'first.zip', kind: 'file', status: 'downloading', progress: 0 }); });
   await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
   expect(screen.getByRole('tab', { name: /下载中/ })).toHaveAttribute('aria-selected', 'true');

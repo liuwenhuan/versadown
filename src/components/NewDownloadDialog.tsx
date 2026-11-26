@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { formatBytes } from '../lib/downloadEvents';
-import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoPreview } from '../lib/types';
+import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, TaskNetwork, VideoPreview } from '../lib/types';
 import { ResourceFileRow } from './ResourceFileRow';
 import { VideoFormatCard } from './VideoFormatCard';
 import { canExpandDownloadDraft, DownloadDraftItem, DraftSubmissionFailure, useDownloadDraftBatch } from './useDownloadDraftBatch';
@@ -20,12 +20,19 @@ export interface NewDownloadDialogProps {
   initialInput?: string;
   initialVideos?: VideoPreview[];
   onDiscardPrepared?(reference: string): Promise<void>;
-  onSubmitBatch?(items: DownloadDraftItem[], destinationDirectory?: string, privateDownload?: boolean, postProcessingNote?: string): void | Promise<void | DraftSubmissionFailure[]>;
+  onSubmitBatch?(items: DownloadDraftItem[], destinationDirectory?: string, privateDownload?: boolean, postProcessingNote?: string, network?: TaskNetwork): void | Promise<void | DraftSubmissionFailure[]>;
   downloadDirectory?: string;
   browseDirectory?(currentDirectory: string): Promise<string | null | undefined>;
   privacyEnabled?: boolean;
   /** What a Gofile-style share window last reported; the matching draft reacts to it. */
   browserShareSignals?: readonly BrowserShareSignal[];
+  /** A manual proxy address exists in the settings, whatever the mode. */
+  manualProxyAvailable?: boolean;
+}
+
+/** Cloud downloads always follow the global proxy settings. */
+function isCloudDraft(item: DownloadDraftItem): boolean {
+  return Boolean(item.result?.browserShare) || /^cloud(-share)?:\/\//.test(item.result?.confirmation?.taskId ?? '');
 }
 
 // Parse errors currently cross IPC as text. All providers use the same action
@@ -291,6 +298,7 @@ function BatchNewDownloadDialog({
   browseDirectory,
   privacyEnabled = false,
   browserShareSignals,
+  manualProxyAvailable = false,
 }: NewDownloadDialogProps) {
   const { t } = useTranslation();
   const batch = useDownloadDraftBatch({
@@ -301,6 +309,7 @@ function BatchNewDownloadDialog({
   });
   const [showPostProcessing, setShowPostProcessing] = useState(false);
   const [postProcessingNote, setPostProcessingNote] = useState('');
+  const [network, setNetwork] = useState<TaskNetwork>('follow');
   const [manualInput, setManualInput] = useState('');
   const [scanning, setScanning] = useState(false);
   const [destination, setDestination] = useState<string | undefined>();
@@ -328,6 +337,7 @@ function BatchNewDownloadDialog({
     setSubmitError(null);
     setShowPostProcessing(false);
     setPostProcessingNote('');
+    setNetwork('follow');
     setDestination(undefined);
     setManualInput(initialInput);
     setScanning(Boolean(initialInput.trim()));
@@ -402,7 +412,7 @@ function BatchNewDownloadDialog({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const failures = await onSubmitBatch(selected, destination, privateDownload, postProcessingNote);
+      const failures = await onSubmitBatch(selected, destination, privateDownload, postProcessingNote, submittedNetwork);
       if (failures?.length) {
         batch.applySubmissionFailures(selected, failures);
         setSubmitting(false);
@@ -440,6 +450,9 @@ function BatchNewDownloadDialog({
     && (item.result.confirmation.fileListPending ?? batchItemResources(item).length === 0)
     && batchItemResources(item).length === 0);
   const canSubmit = batch.canSubmit && !hasUnresolvedBitTorrentFileList;
+  const networkChoices: readonly TaskNetwork[] = manualProxyAvailable ? ['follow', 'direct', 'proxy'] : ['follow', 'direct'];
+  const submittedNetwork = networkChoices.includes(network) ? network : 'follow';
+  const offersNetworkChoice = !batch.items.length || batch.items.some(item => !isCloudDraft(item));
   const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}${batch.items.some(i => i.result?.confirmation?.video) ? ' has-video-options' : ''}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label={t('download.new')} onKeyDown={trapFocus}>
     <div className="launcher-title"><span>{t('download.newTask')}</span>{batch.items.length > 0 && <small>{selectedCount ? t('download.selection.count', { count: selectedCount }) : t('download.selectTasks')}</small>}<button type="button" aria-label={placement === 'modal' ? t('download.closeNew') : t('download.collapseInput')} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
     {!batch.items.length && !scanning ? <form className="batch-manual-input" onSubmit={scanManualInput}><label htmlFor="batch-download-input">{t('download.content')}</label><textarea id="batch-download-input" aria-label={t('download.content')} value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder={t('download.inputPlaceholder')} /><div className="new-download-actions"><button type="submit" className="primary" disabled={!manualInput.trim()}>{t('download.parseTask')}</button></div></form> : <section className="batch-download-list" aria-label={t('download.pendingTasks')}>
@@ -493,6 +506,11 @@ function BatchNewDownloadDialog({
       <span>{t('download.postProcessingAndPassword')}</span>
       <svg className={showPostProcessing ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></svg>
     </button>
+    {showPostProcessing && offersNetworkChoice && <div className="batch-network-options" role="radiogroup" aria-label={t('download.network')}>
+      <span>{t('download.network')}</span>
+      {networkChoices.map(choice => <label key={choice}><input type="radio" name="batch-network" value={choice} checked={submittedNetwork === choice} disabled={submitting} onChange={() => setNetwork(choice)} />{t(`download.network.${choice}`)}</label>)}
+      <small>{t('download.network.hint')}</small>
+    </div>}
     {showPostProcessing && <textarea className="batch-processing-input" aria-label={t('download.postProcessingAndPassword')} value={postProcessingNote} onChange={event => setPostProcessingNote(event.target.value)} placeholder={t('download.postProcessingPlaceholder')} />}
     {submitError && <p className="parse-failure" role="alert">{submitError}</p>}
     <footer className="batch-download-footer">

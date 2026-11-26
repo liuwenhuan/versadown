@@ -549,6 +549,13 @@ fn classify_message(message: &str) -> &'static str {
         "video.error.restricted"
     } else if text.contains("http error 429") {
         "video.error.rateLimited"
+    } else if contains(&[
+        "geo-restricted",
+        "geo restriction",
+        "available in your country",
+        "not available from your location",
+    ]) {
+        "video.error.geoRestricted"
     } else if contains(&["http error 401", "http error 403", "http error 412"]) {
         "video.error.accessDenied"
     } else if contains(&[
@@ -573,7 +580,6 @@ fn classify_message(message: &str) -> &'static str {
         "private video",
         "not available",
         "http error 404",
-        "geo-restricted",
     ]) {
         "video.error.unavailable"
     } else if contains(&["no video formats", "only images are available"]) {
@@ -678,6 +684,18 @@ mod tests {
             diagnostic("ERROR: unable to download video data: HTTP Error 429: Too Many Requests"),
             "video.error.rateLimited"
         );
+    }
+
+    #[test]
+    fn regional_blocks_are_distinct_from_removed_videos() {
+        for text in [
+            "ERROR: [youtube] clip: The uploader has not made this video available in your country",
+            "ERROR: [niconico] sm9: This video is not available from your location due to geo restriction",
+            "ERROR: [site] clip: Video is geo-restricted",
+        ] {
+            assert_eq!(diagnostic(text), "video.error.geoRestricted");
+        }
+        assert_eq!(diagnostic("ERROR: [site] clip: Private video"), "video.error.unavailable");
     }
 
     #[test]

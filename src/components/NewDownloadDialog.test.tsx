@@ -1207,7 +1207,7 @@ describe('a Gofile share awaiting download confirmation', () => {
     await userEvent.click(screen.getByRole('button', { name: privateDownload ? '新建隐私任务' : '新建任务' }));
     expect(onSubmit).toHaveBeenCalledWith(
       [expect.objectContaining({ status: 'browser_share', selected: true, result: { browserShare: { provider: 'gofile', page } } })],
-      'D:/Selected', privateDownload, '',
+      'D:/Selected', privateDownload, '', 'follow',
     );
   });
 
@@ -1220,5 +1220,89 @@ describe('a Gofile share awaiting download confirmation', () => {
     await userEvent.click(screen.getByRole('button', { name: '新建任务' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Window unavailable');
     expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
+  });
+});
+
+describe('per-task network choice', () => {
+  const directDraft = (input: string) => ({ confirmation: {
+    taskId: input.includes('share') ? `cloud-share://baidu/${'a'.repeat(64)}/${'b'.repeat(64)}` : 'task-one',
+    title: input.includes('share') ? '网盘分享' : '文件一',
+    requiresConfirmation: true,
+    resources: [{ id: `${input}-file`, name: 'a.zip', size: '10 MB', selected: true }],
+    processing: []
+  } });
+
+  function renderDialog(inputs: string[], props: { manualProxyAvailable?: boolean; onSubmitBatch?: ReturnType<typeof vi.fn> } = {}) {
+    const onSubmitBatch = props.onSubmitBatch ?? vi.fn().mockResolvedValue(undefined);
+    const view = render(<NewDownloadDialog
+      open
+      placement="modal"
+      initialInput={inputs.join('\n')}
+      onScan={async () => inputs.map(input => ({ input, valid: true, kind: 'direct' as const }))}
+      onParse={vi.fn(async (input: string) => directDraft(input))}
+      onDiscardPrepared={vi.fn()}
+      onSubmitBatch={onSubmitBatch}
+      manualProxyAvailable={props.manualProxyAvailable}
+      onClose={vi.fn()}
+    />);
+    return { ...view, onSubmitBatch };
+  }
+
+  it('defaults to following the settings and offers the proxy only when one is configured', async () => {
+    const user = userEvent.setup();
+    const { rerender, onSubmitBatch } = renderDialog(['https://example.test/one']);
+    expect(await screen.findByText('文件一')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '后处理与密码' }));
+
+    const group = screen.getByRole('radiogroup', { name: '网络' });
+    expect(within(group).getByRole('radio', { name: '跟随设置' })).toBeChecked();
+    expect(within(group).getByRole('radio', { name: '直连' })).toBeVisible();
+    expect(within(group).queryByRole('radio', { name: '使用代理' })).not.toBeInTheDocument();
+
+    rerender(<NewDownloadDialog open placement="modal" initialInput="https://example.test/one"
+      onScan={async () => [{ input: 'https://example.test/one', valid: true, kind: 'direct' }]}
+      onParse={vi.fn(async (input: string) => directDraft(input))} onDiscardPrepared={vi.fn()}
+      onSubmitBatch={onSubmitBatch} manualProxyAvailable onClose={vi.fn()} />);
+    expect(within(screen.getByRole('radiogroup', { name: '网络' })).getByRole('radio', { name: '使用代理' })).toBeVisible();
+  });
+
+  it.each([
+    ['直连', 'direct'],
+    ['使用代理', 'proxy'],
+    ['跟随设置', 'follow'],
+  ])('submits the %s choice with this batch only', async (label, expected) => {
+    const user = userEvent.setup();
+    const { onSubmitBatch } = renderDialog(['https://example.test/one'], { manualProxyAvailable: true });
+    expect(await screen.findByText('文件一')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '后处理与密码' }));
+    await user.click(screen.getByRole('radio', { name: label }));
+    await user.click(screen.getByRole('button', { name: '新建任务' }));
+    expect(onSubmitBatch).toHaveBeenCalledTimes(1);
+    expect(onSubmitBatch.mock.calls[0][4]).toBe(expected);
+  });
+
+  it('starts from following the settings each time the dialog opens', async () => {
+    const user = userEvent.setup();
+    const { rerender, onSubmitBatch } = renderDialog(['https://example.test/one']);
+    expect(await screen.findByText('文件一')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '后处理与密码' }));
+    await user.click(screen.getByRole('radio', { name: '直连' }));
+    const props = { placement: 'modal' as const, initialInput: 'https://example.test/one',
+      onScan: async () => [{ input: 'https://example.test/one', valid: true, kind: 'direct' as const }],
+      onParse: vi.fn(async (input: string) => directDraft(input)), onDiscardPrepared: vi.fn(), onSubmitBatch, onClose: vi.fn() };
+    rerender(<NewDownloadDialog open={false} {...props} />);
+    rerender(<NewDownloadDialog open {...props} />);
+    expect(await screen.findByText('文件一')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '后处理与密码' }));
+    expect(screen.getByRole('radio', { name: '跟随设置' })).toBeChecked();
+  });
+
+  it('hides the choice when every draft is a cloud share', async () => {
+    const user = userEvent.setup();
+    renderDialog(['https://pan.example.test/share'], { manualProxyAvailable: true });
+    expect(await screen.findByText('网盘分享')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '后处理与密码' }));
+    expect(screen.queryByRole('radiogroup', { name: '网络' })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '后处理与密码' })).toBeVisible();
   });
 });

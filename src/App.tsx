@@ -19,14 +19,16 @@ import { AboutPanel, type AppUpdateCheckStatus } from './components/AboutPanel';
 import { BuildIdentityFooter } from './components/BuildIdentityFooter';
 import { EngineStatusToast } from './components/EngineStatusBanner';
 import { StartupNotice } from './components/StartupNotice';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, submitVideoFormats, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, submitVideoFormats, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, retryTaskWithNetwork, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { configureAgentAccess } from './lib/api';
 import type { AgentAccessSettings } from './lib/types';
 import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
 import { downloadErrorMessage, isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
-import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand, VideoPreview } from './lib/types';
+import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand, TaskNetwork, VideoPreview } from './lib/types';
+import { hasManualProxy } from './lib/proxyMode';
+import { isCloudSourceTask } from './lib/taskNetwork';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import { startNativeMenuLabelSync } from './lib/nativeMenuLabels';
 import darkMintIcon from './assets/launcher/dark_mint.svg';
@@ -1372,7 +1374,7 @@ export function App() {
     if (!task) return;
     if (command === 'details') { setSelectedTaskId(id); setDetailsTaskId(id); return; }
     if (command === 'delete') { setPendingPurgeTaskIds([id]); return; }
-    const optimisticStart = command === 'resume' || command === 'retry';
+    const optimisticStart = command === 'resume' || command === 'retry' || command === 'retry_direct' || command === 'retry_proxy';
     if (optimisticStart) {
       if (pendingStartTaskIds.current.has(id)) return;
       queueTaskOptimistically(task);
@@ -1433,7 +1435,9 @@ export function App() {
         await reopenBrowserShare(id, task.source);
         return;
       }
-      const result = await runTaskAction(id, command);
+      const result = command === 'retry_direct' || command === 'retry_proxy'
+        ? await retryTaskWithNetwork(id, command === 'retry_direct' ? 'direct' : 'proxy')
+        : await runTaskAction(id, command);
       if (result.duplicate) {
         const projection = result.queueTask ?? result.duplicate.task;
         applyTaskProjection(projection);
@@ -1695,6 +1699,7 @@ export function App() {
     destinationDirectory?: string,
     privateDownload = false,
     postProcessingNote?: string,
+    network: TaskNetwork = 'follow',
   ) {
     rememberDownloadDirectory(destinationDirectory);
     const includesVideo = items.some(item => item.result?.confirmation?.video);
@@ -1745,7 +1750,7 @@ export function App() {
       if (!prepared) throw new Error(t('download.error.taskNotParsed', { input: item.input }));
       const ids = selectedResourceIds(item);
       if (prepared.video) {
-        const failed = await submitVideoFormats(prepared.video, ids, destinationDirectory, privateDownload, acceptCreated, postProcessingNote);
+        const failed = await submitVideoFormats(prepared.video, ids, destinationDirectory, privateDownload, acceptCreated, postProcessingNote, network);
         if (failed.length) return { id: item.id, resourceIds: failed.map(f => f.selectedId), message: failed[0].message };
         return;
       }
@@ -1772,6 +1777,7 @@ export function App() {
         destinationDirectory,
         privateDownload,
         postProcessingNote,
+        isCloudSourceTask({ kind: 'file', source: prepared.taskId }) ? 'follow' : network,
       );
       if (!task) throw new Error(t('download.error.taskSubmissionFailed', { name: prepared.title || item.input }));
       acceptCreated(task);
@@ -1928,7 +1934,7 @@ export function App() {
             </div>
           </header>
           <section className="queue-area">
-            <DownloadQueue tasks={visibleTasks} privacyEnabled={settings.privacyDownloadEnabled === true} selectedTaskId={selectedTaskId} selectedTaskIds={selectedTaskIds} onSelect={() => {}} onSelectionChange={(ids) => setSelectedTaskIds([...ids])} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onReorder={(orderedTaskIds) => setTaskOrderPreferences((current) => ({
+            <DownloadQueue tasks={visibleTasks} privacyEnabled={settings.privacyDownloadEnabled === true} manualProxyAvailable={hasManualProxy(settings.proxy)} selectedTaskId={selectedTaskId} selectedTaskIds={selectedTaskIds} onSelect={() => {}} onSelectionChange={(ids) => setSelectedTaskIds([...ids])} onCommand={taskCommand} onBatchCommand={batchTaskCommand} onReorder={(orderedTaskIds) => setTaskOrderPreferences((current) => ({
               sorts: { ...current.sorts, [downloadTab]: 'manual' },
               orders: {
                 ...current.orders,
@@ -1959,7 +1965,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} initialVideos={preparedVideos} browserShareSignals={browserShareSignals} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} initialVideos={preparedVideos} browserShareSignals={browserShareSignals} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} manualProxyAvailable={hasManualProxy(settings.proxy)} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}
