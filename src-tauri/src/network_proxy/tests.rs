@@ -200,8 +200,8 @@ fn aria2_download_options_express_each_route_against_each_backdrop() {
         ("all", "socks5://environment.invalid:1080"),
         ("no", "localhost,.lan"),
     ]);
-    let options = |values: [&str; 5]| -> Vec<(&'static str, String)> {
-        ["http-proxy", "https-proxy", "ftp-proxy", "all-proxy", "no-proxy"]
+    let options = |values: [&str; 4]| -> Vec<(&'static str, String)> {
+        ["http-proxy", "https-proxy", "all-proxy", "no-proxy"]
             .into_iter()
             .zip(values.map(str::to_owned))
             .collect()
@@ -209,21 +209,21 @@ fn aria2_download_options_express_each_route_against_each_backdrop() {
     for backdrop in [environment.clone(), Proxies::new()] {
         assert_eq!(
             aria2_options_from(&ProxyRoute::Direct, backdrop.clone()),
-            options(["", "", "", "", ""])
+            options(["", "", "", ""])
         );
         assert_eq!(
             aria2_options_from(&ProxyRoute::Manual(MANUAL.into()), backdrop),
-            options(["", "", "", MANUAL, ""])
+            options(["", "", MANUAL, ""])
         );
     }
     assert_eq!(
         aria2_options_from(&ProxyRoute::System, environment),
-        options([ENVIRONMENT, ENVIRONMENT, "", "socks5://environment.invalid:1080", "localhost,.lan"])
+        options([ENVIRONMENT, ENVIRONMENT, "socks5://environment.invalid:1080", "localhost,.lan"])
     );
     // aria2 itself ignores OS proxy settings; follow-system keeps that.
     assert_eq!(
         aria2_options_from(&ProxyRoute::System, Proxies::new()),
-        options(["", "", "", "", ""])
+        options(["", "", "", ""])
     );
 }
 

@@ -50,6 +50,19 @@ impl RecordingAria2 {
     fn added_options(&self) -> Vec<Aria2Options> {
         self.options.lock().unwrap().clone()
     }
+    /// Submitted options apart from the proxy route, which every submission
+    /// states in full and which follow-system derives from the environment.
+    fn added_options_without_route(&self) -> Vec<Aria2Options> {
+        self.added_options()
+            .into_iter()
+            .map(|mut options| {
+                for name in ["http-proxy", "https-proxy", "ftp-proxy", "all-proxy", "no-proxy"] {
+                    options.remove(name);
+                }
+                options
+            })
+            .collect()
+    }
     fn changed_uris(&self) -> Vec<(Vec<String>, Vec<String>)> {
         self.changed_uris.lock().unwrap().clone()
     }
@@ -933,7 +946,7 @@ async fn cloud_download_policy_sends_capped_connections_and_spaced_bounded_retri
         .unwrap();
 
     assert_eq!(
-        api.added_options(),
+        api.added_options_without_route(),
         vec![BTreeMap::from([
             ("auto-file-renaming".into(), "false".into()),
             ("follow-torrent".into(), "false".into()),
@@ -1236,7 +1249,7 @@ async fn scheduler_pause_during_resolution_releases_slot_and_resume_uses_a_fresh
                             8,
                             UriSubmissionOptions {
                                 continue_download: true,
-                                proxy: Some("http://proxy.test:1234".into()),
+                                proxy: versadown_lib::ProxyRoute::Manual("http://proxy.test:1234".into()),
                                 ..Default::default()
                             },
                         ),
@@ -1897,7 +1910,7 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
                     ("Cookie".into(), "sid=web; __puus=fresh".into()),
                     ("Referer".into(), "https://pan.quark.cn/".into()),
                 ],
-                proxy: Some("http://127.0.0.1:7890".into()),
+                proxy: versadown_lib::ProxyRoute::Manual("http://127.0.0.1:7890".into()),
                 max_connections_per_server: None,
                 allow_overwrite: true,
                 continue_download: false,
@@ -1908,13 +1921,12 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
         .unwrap();
 
     assert_eq!(
-        api.added_options(),
+        api.added_options_without_route(),
         vec![BTreeMap::from([
             ("dir".into(), "D:/Downloads".into()),
             ("out".into(), "wallpaper.jpg".into()),
             ("header".into(), "Cookie: sid=web; __puus=fresh".into(),),
             ("referer".into(), "https://pan.quark.cn/".into()),
-            ("all-proxy".into(), "http://127.0.0.1:7890".into()),
             ("allow-overwrite".into(), "true".into()),
             ("auto-file-renaming".into(), "false".into()),
             ("continue".into(), "false".into()),
@@ -1923,6 +1935,10 @@ async fn cloud_submission_forwards_transient_options_without_persisting_them() {
             ("remove-control-file".into(), "true".into()),
         ])]
     );
+    let route = &api.added_options()[0];
+    assert_eq!(route["all-proxy"], "http://127.0.0.1:7890");
+    assert_eq!(route["http-proxy"], "");
+    assert_eq!(route["https-proxy"], "");
     assert_eq!(store.find(task.id).unwrap().source, "cloud://quark/file-1");
 }
 
@@ -2008,7 +2024,7 @@ async fn overwrite_submission_starts_fresh_instead_of_inheriting_global_resume()
         .unwrap();
 
     assert_eq!(
-        api.added_options(),
+        api.added_options_without_route(),
         vec![BTreeMap::from([
             ("allow-overwrite".into(), "true".into()),
             ("auto-file-renaming".into(), "false".into()),

@@ -527,7 +527,7 @@ async fn live_mega_05_download_one_file_and_verify_mac() {
 
     let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
-        .register_transformed(Uuid::new_v4(), resolved.url.clone(), vec![], None, transform, false)
+        .register_transformed(Uuid::new_v4(), resolved.url.clone(), vec![], versadown_lib::ProxyRoute::System, transform, false)
         .unwrap();
     let local_url = registration.url().to_owned();
 

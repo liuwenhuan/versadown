@@ -303,12 +303,12 @@ pub(crate) fn aria2_options(route: &ProxyRoute) -> Vec<(&'static str, String)> {
 
 /// Every proxy option is stated, empty when unused: `changeOption` keeps
 /// values from an earlier submission, and a per-protocol proxy would
-/// override `all-proxy`.
+/// override `all-proxy`. aria2-next has no `ftp-proxy` (`changeOption`
+/// rejects it); its FTP transfers use `all-proxy`.
 fn aria2_options_from(route: &ProxyRoute, environment: Proxies) -> Vec<(&'static str, String)> {
-    const OPTIONS: [(&str, &str); 5] = [
+    const OPTIONS: [(&str, &str); 4] = [
         ("http", "http-proxy"),
         ("https", "https-proxy"),
-        ("ftp", "ftp-proxy"),
         ("all", "all-proxy"),
         ("no", "no-proxy"),
     ];

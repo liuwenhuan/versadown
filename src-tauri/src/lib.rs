@@ -73,6 +73,7 @@ pub use downloader::{
     confirm_download, prepare_download, DownloadError, ParseOutcome, ParseResource,
 };
 pub use duplicates::{duplicate_state, retry_duplicate_state};
+pub use network_proxy::{ProxyRoute, TaskNetwork};
 pub use engine_runtime::{
     EngineAvailability, EngineRuntime, EngineStateSink, EngineUnavailableError,
 };

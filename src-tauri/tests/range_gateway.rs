@@ -124,7 +124,7 @@ async fn bundled_engine_downloads_slow_continuous_ranges_without_false_stalls() 
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store.create(NewTask::direct(&upstream)).unwrap();
-    let registration = gateway.register(task.id, upstream, vec![], None).unwrap();
+    let registration = gateway.register(task.id, upstream, vec![], versadown_lib::ProxyRoute::System).unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut aria2 = versadown_lib::Aria2Settings::default();
     aria2.rpc_port = reserved.local_addr().unwrap().port();
@@ -344,7 +344,7 @@ async fn invalid_chunked_body_never_completes_the_advertised_range() {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     for path in ["truncated", "overlong", "broken-eof"] {
         let registration = gateway
-            .register(Uuid::new_v4(), format!("{upstream}/{path}"), vec![], None)
+            .register(Uuid::new_v4(), format!("{upstream}/{path}"), vec![], versadown_lib::ProxyRoute::System)
             .unwrap();
         let response = client
             .get(registration.url())
@@ -399,7 +399,7 @@ async fn valid_short_upstream_ranges_are_streamed_without_gaps() {
         .unwrap();
     });
     let gateway = RangeGateway::start().await.unwrap();
-    let registration = gateway.register(Uuid::new_v4(), upstream, vec![], None).unwrap();
+    let registration = gateway.register(Uuid::new_v4(), upstream, vec![], versadown_lib::ProxyRoute::System).unwrap();
     let response = reqwest::Client::builder().no_proxy().build().unwrap()
         .get(registration.url())
         .header(header::RANGE, format!("bytes=0-{}", payload.len() - 1))
@@ -455,7 +455,7 @@ async fn changing_upstream_total_aborts_the_local_response_stream() {
     });
     let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
-        .register(Uuid::new_v4(), upstream, vec![], None)
+        .register(Uuid::new_v4(), upstream, vec![], versadown_lib::ProxyRoute::System)
         .unwrap();
     let response = reqwest::Client::builder()
         .no_proxy()
@@ -494,7 +494,7 @@ async fn invalid_upstream_range_responses_are_rejected_before_exposing_file_byte
         ("short", StatusCode::BAD_GATEWAY),
     ] {
         let registration = gateway
-            .register(Uuid::new_v4(), format!("{upstream}/{path}"), vec![], None)
+            .register(Uuid::new_v4(), format!("{upstream}/{path}"), vec![], versadown_lib::ProxyRoute::System)
             .unwrap();
         let response = client
             .get(registration.url())
@@ -534,7 +534,7 @@ async fn no_range_and_head_expose_the_whole_file_without_unbounded_upstream_requ
     });
     let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
-        .register(Uuid::new_v4(), upstream, vec![], None)
+        .register(Uuid::new_v4(), upstream, vec![], versadown_lib::ProxyRoute::System)
         .unwrap();
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let head = client.head(registration.url()).send().await.unwrap();
@@ -593,7 +593,7 @@ async fn large_local_range_is_fetched_in_exact_four_mib_baidu_ranges() {
             Uuid::new_v4(),
             upstream,
             vec![("User-Agent".into(), "netdisk-test".into())],
-            None,
+            versadown_lib::ProxyRoute::System,
         )
         .unwrap();
     let response = reqwest::Client::builder()
@@ -656,7 +656,7 @@ async fn bundled_engine_completes_large_baidu_file_through_bounded_gateway() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store.create(NewTask::direct(&upstream)).unwrap();
-    let registration = gateway.register(task.id, upstream, vec![], None).unwrap();
+    let registration = gateway.register(task.id, upstream, vec![], versadown_lib::ProxyRoute::System).unwrap();
 
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut aria2 = versadown_lib::Aria2Settings::default();
@@ -776,7 +776,7 @@ async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
         })
         .unwrap();
     let mut original = gateway
-        .register(task.id, upstream.clone(), vec![], None)
+        .register(task.id, upstream.clone(), vec![], versadown_lib::ProxyRoute::System)
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut aria2 = versadown_lib::Aria2Settings::default();
@@ -863,9 +863,9 @@ async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
         .unwrap();
     expired.store(true, Ordering::SeqCst);
     let mut replacement = if rebind_existing_token {
-        gateway.register_refreshing(task.id, fresh_upstream, vec![], None)
+        gateway.register_refreshing(task.id, fresh_upstream, vec![], versadown_lib::ProxyRoute::System)
     } else {
-        gateway.register(task.id, fresh_upstream, vec![], None)
+        gateway.register(task.id, fresh_upstream, vec![], versadown_lib::ProxyRoute::System)
     }
     .unwrap();
     let new_url = replacement.url().to_owned();
@@ -950,7 +950,7 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
         .unwrap();
     let gateway = RangeGateway::start().await.unwrap();
     let mut original = gateway
-        .register(task.id, upstream.clone(), vec![], None)
+        .register(task.id, upstream.clone(), vec![], versadown_lib::ProxyRoute::System)
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut aria2 = versadown_lib::Aria2Settings::default();
@@ -1034,7 +1034,7 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
         .unwrap();
 
     let gateway = RangeGateway::start().await.unwrap();
-    let mut replacement = gateway.register(task.id, upstream, vec![], None).unwrap();
+    let mut replacement = gateway.register(task.id, upstream, vec![], versadown_lib::ProxyRoute::System).unwrap();
     let (mut process, client) = Aria2Process::start(config).await.unwrap();
     let service = DownloadService::new(Arc::new(client.clone()), Arc::clone(&store));
     // Restart imports the old GID in paused state. Production cloud dispatch
@@ -1123,7 +1123,7 @@ async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
         .unwrap();
     let gateway = RangeGateway::start().await.unwrap();
     let mut original = gateway
-        .register(task.id, upstream.clone(), vec![], None)
+        .register(task.id, upstream.clone(), vec![], versadown_lib::ProxyRoute::System)
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut aria2 = versadown_lib::Aria2Settings::default();
@@ -1193,7 +1193,7 @@ async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
             ..paused
         })
         .unwrap();
-    let mut replacement = gateway.register(task.id, upstream, vec![], None).unwrap();
+    let mut replacement = gateway.register(task.id, upstream, vec![], versadown_lib::ProxyRoute::System).unwrap();
     let refreshed = service
         .replace_cloud_uri_with_options(
             queued.id,

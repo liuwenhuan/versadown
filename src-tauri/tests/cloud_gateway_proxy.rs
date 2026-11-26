@@ -82,7 +82,7 @@ async fn system_proxy_child() {
             uuid::Uuid::new_v4(),
             "http://proxy-only.invalid/file".into(),
             vec![],
-            None,
+            versadown_lib::ProxyRoute::System,
         )
         .unwrap();
     let response = reqwest::Client::builder()

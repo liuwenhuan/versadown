@@ -160,7 +160,7 @@ fn register(
             task_id,
             upstream,
             vec![],
-            None,
+            versadown_lib::ProxyRoute::System,
             DownloadTransform::aes_ctr_path_range(KEY, NONCE, length as u64),
             refreshing,
         )
@@ -380,7 +380,7 @@ async fn quota_exhaustion_of_an_account_download_is_marked_as_the_accounts() {
             task_id,
             upstream,
             vec![],
-            None,
+            versadown_lib::ProxyRoute::System,
             DownloadTransform::aes_ctr_path_range(KEY, NONCE, 10_000).with_account_quota(),
             false,
         )
