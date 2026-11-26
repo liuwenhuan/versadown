@@ -1,7 +1,8 @@
-//! Text for the native tray menu. The renderer's i18n catalogs are the only
-//! source of translations: it pushes the current labels on startup and on every
-//! language change, and the last push is cached so the next launch builds the
-//! tray in the same language before any renderer has loaded.
+//! Text the native side draws itself: the tray menu and the startup-failure
+//! dialog. The renderer's i18n catalogs are the only source of translations: it
+//! pushes the current labels on startup and on every language change, and the
+//! last push is cached so the next launch can show them in the same language
+//! before any renderer has loaded.
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -23,6 +24,9 @@ pub struct NativeMenuLabels {
     pub launcher_downloading: String,
     pub launcher_hidden: String,
     pub quit: String,
+    pub startup_failed_title: String,
+    /// Carries the summary and log-path placeholders (see `startup_error`).
+    pub startup_failed_body: String,
 }
 
 impl NativeMenuLabels {
@@ -42,6 +46,8 @@ impl NativeMenuLabels {
             launcher_downloading: "Show only while downloading".into(),
             launcher_hidden: "Turn off".into(),
             quit: "Quit VersaDown".into(),
+            startup_failed_title: "VersaDown failed to start".into(),
+            startup_failed_body: "VersaDown could not finish starting and will now close.\n\nReason: {summary}\n\nDetails were saved to:\n{logPath}".into(),
         }
     }
 
@@ -58,6 +64,8 @@ impl NativeMenuLabels {
             &self.launcher_downloading,
             &self.launcher_hidden,
             &self.quit,
+            &self.startup_failed_title,
+            &self.startup_failed_body,
         ]
         .iter()
         .all(|label| !label.trim().is_empty())
@@ -133,6 +141,8 @@ mod tests {
             launcher_downloading: "仅下载时显示".into(),
             launcher_hidden: "关闭显示".into(),
             quit: "退出万能下载".into(),
+            startup_failed_title: "VersaDown 启动失败".into(),
+            startup_failed_body: "VersaDown 无法完成启动，即将退出。\n\n原因：{summary}\n\n详细信息已保存到：\n{logPath}".into(),
         }
     }
 
@@ -204,7 +214,7 @@ mod tests {
             [
                 "hideManager", "launcherAlways", "launcherDownloading", "launcherHidden",
                 "launcherVisibility", "newDownload", "pauseAll", "quit", "showManager",
-                "startAll", "tooltip",
+                "startAll", "startupFailedBody", "startupFailedTitle", "tooltip",
             ]
         );
         let mut extra = json;
