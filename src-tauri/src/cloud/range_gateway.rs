@@ -16,6 +16,7 @@ use axum::{
 use super::download_transform::{Decryptor, DownloadTransform};
 use futures_util::stream;
 use rand::RngCore;
+use crate::network_proxy::ProxyRoute;
 use reqwest::{Client, Proxy};
 use std::{
     collections::HashMap,
@@ -170,7 +171,7 @@ impl RangeGateway {
         task_id: Uuid,
         upstream: String,
         headers: Vec<(String, String)>,
-        proxy: Option<String>,
+        proxy: ProxyRoute,
     ) -> Result<GatewayRegistration, GatewayError> {
         self.register_inner(task_id, upstream, headers, proxy, false, None)
     }
@@ -183,7 +184,7 @@ impl RangeGateway {
         task_id: Uuid,
         upstream: String,
         headers: Vec<(String, String)>,
-        proxy: Option<String>,
+        proxy: ProxyRoute,
         transform: DownloadTransform,
         refreshing: bool,
     ) -> Result<GatewayRegistration, GatewayError> {
@@ -197,7 +198,7 @@ impl RangeGateway {
         task_id: Uuid,
         upstream: String,
         headers: Vec<(String, String)>,
-        proxy: Option<String>,
+        proxy: ProxyRoute,
     ) -> Result<GatewayRegistration, GatewayError> {
         self.register_inner(task_id, upstream, headers, proxy, true, None)
     }
@@ -207,7 +208,7 @@ impl RangeGateway {
         task_id: Uuid,
         upstream: String,
         headers: Vec<(String, String)>,
-        proxy: Option<String>,
+        proxy: ProxyRoute,
         reuse_existing: bool,
         transform: Option<DownloadTransform>,
     ) -> Result<GatewayRegistration, GatewayError> {
@@ -246,17 +247,21 @@ impl RangeGateway {
             .redirect(reqwest::redirect::Policy::limited(5))
             .connect_timeout(std::time::Duration::from_secs(15))
             .read_timeout(std::time::Duration::from_secs(90));
-        if let Some(proxy) = proxy {
-            builder = builder.proxy(Proxy::all(proxy).map_err(|_| GatewayError::InvalidProxy)?);
-        } else if match parsed.host() {
+        let loopback = match parsed.host() {
             Some(url::Host::Ipv4(host)) => host.is_loopback(),
             Some(url::Host::Ipv6(host)) => host.is_loopback(),
             Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
             None => false,
-        } {
+        };
+        match proxy {
+            ProxyRoute::Manual(proxy) => {
+                builder = builder.proxy(Proxy::all(proxy).map_err(|_| GatewayError::InvalidProxy)?);
+            }
             // Fixture and internal origins must remain local even when the
             // system proxy does not exclude loopback addresses.
-            builder = builder.no_proxy();
+            ProxyRoute::Direct => builder = builder.no_proxy(),
+            ProxyRoute::System if loopback => builder = builder.no_proxy(),
+            ProxyRoute::System => {}
         }
         let client = builder.build().map_err(|_| GatewayError::Transport)?;
         let mut targets = self.shared.targets.write().unwrap();

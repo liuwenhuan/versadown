@@ -309,6 +309,7 @@ fn transfer_snapshots_and_file_upserts_persist_real_aria2_values() {
             p2p_sharing: false,
             is_private: false,
             post_processing_note: None,
+            network: Default::default(),
         })
         .expect("persist snapshot");
     store

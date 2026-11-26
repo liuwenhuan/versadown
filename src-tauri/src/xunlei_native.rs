@@ -178,7 +178,7 @@ impl XunleiNativeBackend {
         // Existing aria2 checkpoints must stay with aria2 after installing or
         // upgrading the Mac native adapter. Only new tasks may select an engine.
         #[cfg(target_os = "macos")]
-        if options.proxy.is_some() && is_native_gid(options.native_resume_gid.as_deref()) {
+        if options.proxy.manual().is_some() && is_native_gid(options.native_resume_gid.as_deref()) {
             return Err(NativeSubmitError::ProxyCheckpoint);
         }
         #[cfg(target_os = "macos")]
@@ -1089,7 +1089,7 @@ fn prepare_native_output(
 
 #[cfg(target_os = "macos")]
 fn macos_can_select_native(options: &UriSubmissionOptions, legacy_checkpoint: bool) -> bool {
-    options.proxy.is_none()
+    options.proxy.manual().is_none()
         && !legacy_checkpoint
         && options
             .native_resume_gid
@@ -1889,9 +1889,9 @@ mod tests {
         let mut options = UriSubmissionOptions::default();
         assert!(macos_can_select_native(&options, false));
         assert!(!macos_can_select_native(&options, true));
-        options.proxy = Some("http://localhost:8080".into());
+        options.proxy = crate::network_proxy::ProxyRoute::Manual("http://localhost:8080".into());
         assert!(!macos_can_select_native(&options, false));
-        options.proxy = None;
+        options.proxy = crate::network_proxy::ProxyRoute::System;
         options.native_resume_gid = Some("12ab345678abcdef".into());
         assert!(!macos_can_select_native(&options, false));
         options.native_resume_gid =

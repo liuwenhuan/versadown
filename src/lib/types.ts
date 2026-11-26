@@ -1,7 +1,10 @@
 export type TaskStatus = 'draft' | 'parsing' | 'awaiting_user' | 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'recycled' | 'paused';
 export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'cloud' | 'web_video';
 export type DuplicateDownloadState = 'existing_active' | 'resume_available' | 'completed_files_present' | 'completed_files_missing' | 'overwrite_required';
-export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'reopen_share' | 'retry_cleanup' | 'open_directory' | 'open_file' | 'play_videos' | 'copy_link' | 'details' | 'delete' | 'move_to_private' | 'move_to_normal';
+export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'retry_direct' | 'retry_proxy' | 'reauthorize' | 'reopen_share' | 'retry_cleanup' | 'open_directory' | 'open_file' | 'play_videos' | 'copy_link' | 'details' | 'delete' | 'move_to_private' | 'move_to_normal';
+
+/** A task's own network choice; `follow` uses the proxy settings. */
+export type TaskNetwork = 'follow' | 'direct' | 'proxy';
 
 export interface QueueTask {
   id: string;
@@ -36,6 +39,7 @@ export interface QueueTask {
   p2p_sharing?: boolean;
   is_private?: boolean;
   post_processing_note?: string;
+  network?: TaskNetwork;
   files?: readonly DownloadFile[];
   file_index?: number;
   selected?: boolean;
@@ -175,8 +179,13 @@ export type ParseDownloadResult =
 export type ProxyProtocol = 'http' | 'https';
 export type LauncherVisibility = 'always' | 'downloading' | 'hidden';
 
+export type ProxyMode = 'system' | 'manual' | 'direct';
+
 export interface ProxySettings {
+  /** Manual proxy. Ignored when `direct` is set. */
   enabled: boolean;
+  /** Use no proxy at all, not even the system or environment proxy. */
+  direct?: boolean;
   protocol: ProxyProtocol;
   host: string;
   port: number;

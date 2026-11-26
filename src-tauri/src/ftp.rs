@@ -282,7 +282,7 @@ impl FtpDownloadEngine {
                 "FTP 不支持自定义 HTTP 请求头",
             ));
         }
-        if options.proxy.is_some() {
+        if options.proxy.manual().is_some() {
             return Err(FtpDownloadError::InvalidOption("FTP 暂不支持 HTTP 代理"));
         }
         let target = parse_ftp_url(source)?;

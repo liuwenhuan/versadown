@@ -13,12 +13,13 @@ use uuid::Uuid;
 
 use crate::downloader::load_torrent_base64;
 use crate::models::{CloudDirectoryGroup, CloudDirectoryGroupItem, QueueTaskPayload};
+use crate::network_proxy::TaskNetwork;
 use crate::{
     cloud::{share::CloudShareConfirmation, CloudProvider, CredentialStore, SystemCredentialStore},
     confirm_download, duplicate_state, prepare_download, resolve_magnet_metadata,
     retry_duplicate_state, AiSettings, AiSettingsInput, AppSettings, DownloadAction,
     DownloadServiceError, DownloadTask, DuplicateDownloadState, LauncherVisibility, ParseOutcome,
-    ParseResource, ProxySettings, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
+    ParseResource, TaskStatus, TaskStore, TransferFile, UriSubmissionOptions,
 };
 
 #[derive(Serialize)]
@@ -304,37 +305,6 @@ fn share_action_parse_outcome(action: TaskActionOutcome) -> ParseDownloadOutcome
     })
 }
 
-pub(crate) fn proxy_url(proxy: &ProxySettings) -> Result<Option<String>, String> {
-    if !proxy.enabled {
-        return Ok(None);
-    }
-    if !matches!(proxy.protocol.as_str(), "http" | "https") {
-        return Err("aria2 仅支持 HTTP/HTTPS 代理".into());
-    }
-    if proxy.host.trim().is_empty() || proxy.host.contains("://") || proxy.port == 0 {
-        return Err("代理服务器地址或端口无效".into());
-    }
-    let host = proxy.host.trim();
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    let mut value = url::Url::parse(&format!("{}://{}:{}", proxy.protocol, host, proxy.port))
-        .map_err(|_| "代理服务器地址无效".to_string())?;
-    if !proxy.username.is_empty() {
-        value
-            .set_username(&proxy.username)
-            .map_err(|_| "代理用户名无效".to_string())?;
-    }
-    if !proxy.password.is_empty() {
-        value
-            .set_password(Some(&proxy.password))
-            .map_err(|_| "代理密码无效".to_string())?;
-    }
-    Ok(Some(value.to_string()))
-}
-
 fn validated_download_directory(value: &str) -> Result<PathBuf, String> {
     let directory = PathBuf::from(value.trim());
     if directory.as_os_str().is_empty() || !directory.is_absolute() {
@@ -512,6 +482,15 @@ pub(crate) fn download_submission_options_for_directory(
     state: &AppState,
     destination_directory: Option<&str>,
 ) -> Result<UriSubmissionOptions, String> {
+    download_submission_options_for_network(state, destination_directory, TaskNetwork::Follow)
+}
+
+/// Submission options for a task with its own network choice.
+pub(crate) fn download_submission_options_for_network(
+    state: &AppState,
+    destination_directory: Option<&str>,
+    network: TaskNetwork,
+) -> Result<UriSubmissionOptions, String> {
     let settings = state
         .settings
         .lock()
@@ -519,7 +498,7 @@ pub(crate) fn download_submission_options_for_directory(
     let directory = destination_directory
         .map(str::to_owned)
         .unwrap_or_else(|| settings.download_directory.clone());
-    let proxy = proxy_url(&settings.proxy)?;
+    let proxy = crate::network_proxy::task_route(&settings.proxy, network)?;
     drop(settings);
     Ok(UriSubmissionOptions {
         directory: Some(validated_download_directory(&directory)?),
@@ -707,8 +686,12 @@ pub async fn parse_download(
     access_code: Option<String>,
     require_confirmation: Option<bool>,
     probe_video: Option<bool>,
+    network: Option<TaskNetwork>,
     state: State<'_, AppState>,
 ) -> Result<ParseDownloadOutcome, String> {
+    // The new-download dialog's network choice covers parsing too, so the
+    // extraction and the later transfer use the same route.
+    let network = network.unwrap_or_default();
     if let Some(candidate) =
         crate::parser::extract_cloud_share_candidate(&input, access_code.as_deref())
             .map_err(|error| error.to_string())?
@@ -779,7 +762,7 @@ pub async fn parse_download(
         &input,
         &state.store,
         &state.web_video,
-        || crate::web_video::network_options(&state),
+        || crate::web_video::network_options(&state, network),
         probe_video,
         require_confirmation.unwrap_or(false),
     )
@@ -793,13 +776,22 @@ pub async fn parse_download(
         ensure_private_task_access(&state, &outcome.task)?;
         return Ok(ParseDownloadOutcome::Task(outcome));
     }
+    let network = if accepts_task_network(&outcome.task) {
+        network
+    } else {
+        TaskNetwork::Follow
+    };
+    outcome.task = state
+        .store
+        .set_task_network(outcome.task.id, network)
+        .map_err(|error| error.to_string())?;
     if outcome.task.kind == "torrent" {
         let service = state
             .runtime
             .service()
             .await
             .map_err(|error| error.to_string())?;
-        let options = download_submission_options(&state)?
+        let options = download_submission_options_for_network(&state, None, network)?
             .into_aria2_options()
             .map_err(|error| error.to_string())?;
         let encoded = match load_torrent_base64(&outcome.task.source).await {
@@ -822,7 +814,7 @@ pub async fn parse_download(
         };
         outcome.resources = parse_resources(&state.store, outcome.task.id)?;
     } else if !outcome.requires_confirmation {
-        let options = download_submission_options(&state)?;
+        let options = download_submission_options_for_network(&state, None, network)?;
         outcome.task = match state
             .runtime
             .submit_uri_with_options(outcome.task.id, vec![outcome.task.source.clone()], options)
@@ -843,7 +835,7 @@ pub async fn parse_download(
             .service()
             .await
             .map_err(|error| error.to_string())?;
-        let options = download_submission_options(&state)?;
+        let options = download_submission_options_for_network(&state, None, network)?;
         let metadata_settings = state
             .settings
             .lock()
@@ -1201,6 +1193,7 @@ pub async fn confirm_download_command(
     destination_directory: Option<String>,
     private_download: Option<bool>,
     post_processing_note: Option<String>,
+    network: Option<TaskNetwork>,
     state: State<'_, AppState>,
 ) -> Result<DownloadTaskPayload, String> {
     let private_download = private_download.unwrap_or(false);
@@ -1218,12 +1211,20 @@ pub async fn confirm_download_command(
         .store
         .set_private(id, private_download)
         .map_err(|error| error.to_string())?;
-    let current = state
+    state
         .store
         .set_post_processing_note(id, post_processing_note.as_deref())
         .map_err(|error| error.to_string())?;
-    let options =
-        download_submission_options_for_directory(&state, destination_directory.as_deref())?;
+    let network = network.filter(|_| accepts_task_network(&current)).unwrap_or_default();
+    let current = state
+        .store
+        .set_task_network(id, network)
+        .map_err(|error| error.to_string())?;
+    let options = download_submission_options_for_network(
+        &state,
+        destination_directory.as_deref(),
+        current.network,
+    )?;
     if current.aria_gid.is_some() {
         let indices = selected_ids
             .into_iter()
@@ -1249,6 +1250,36 @@ pub async fn confirm_download_command(
         .await
         .map_err(|error| fail_engine_submission(&state.store, &task, error))?;
     task_payload(&state.store, task)
+}
+
+/// Cloud downloads always follow the global proxy settings.
+fn accepts_task_network(task: &DownloadTask) -> bool {
+    !(task.kind == "cloud"
+        || task.source.starts_with("cloud://")
+        || task.source.starts_with("cloud-share://"))
+}
+
+/// Retry a failed task after switching its own network choice.
+#[tauri::command]
+pub async fn retry_task_with_network(
+    task_id: String,
+    network: TaskNetwork,
+    app: AppHandle,
+) -> Result<TaskActionOutcome, String> {
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let state = app.state::<AppState>();
+    let current = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &current)?;
+    if !accepts_task_network(&current)
+        || !matches!(current.status, TaskStatus::Failed | TaskStatus::Cancelled)
+    {
+        return Err("当前任务不能切换网络后重试".to_string());
+    }
+    state
+        .store
+        .set_task_network(id, network)
+        .map_err(|error| error.to_string())?;
+    dispatch_task_action(task_id, "retry".to_string(), app).await
 }
 
 fn unbound_torrent_confirmation_error(task: &DownloadTask) -> Option<&'static str> {
@@ -1509,6 +1540,7 @@ pub(crate) fn queue_task_payload_from_task(
         p2p_sharing: task.p2p_sharing,
         is_private: task.is_private,
         post_processing_note: task.post_processing_note,
+        network: task.network,
         files,
         cleanup_pending: false,
         children: Vec::new(),
@@ -1581,6 +1613,7 @@ fn virtual_cloud_directory_item_payload(
         p2p_sharing: false,
         is_private: group.is_private,
         post_processing_note: None,
+        network: Default::default(),
         files: Vec::new(),
         cleanup_pending: false,
         children: Vec::new(),
@@ -1624,6 +1657,7 @@ fn cloud_directory_folder_payload(
         p2p_sharing: false,
         is_private: group.is_private,
         post_processing_note: None,
+        network: Default::default(),
         files: Vec::new(),
         cleanup_pending: false,
         children: Vec::new(),
@@ -1904,6 +1938,7 @@ fn aggregate_cloud_directory_folder(
         p2p_sharing: false,
         is_private: group.is_private,
         post_processing_note: folder.post_processing_note,
+        network: Default::default(),
         files: Vec::new(),
         cleanup_pending: false,
         children,
@@ -2631,11 +2666,11 @@ pub(crate) async fn resubmit_task(
         options,
     )
     .map_err(|error| error.to_string())?;
-    let configured = download_submission_options(state)?;
+    let configured = download_submission_options_for_network(state, None, task.network)?;
     if options.directory.is_none() {
         options.directory = configured.directory;
     }
-    if options.proxy.is_none() {
+    if options.proxy == crate::network_proxy::ProxyRoute::System {
         options.proxy = configured.proxy;
     }
     if task.source.starts_with("cloud://") || task.source.starts_with("cloud-share://") {
@@ -4104,7 +4139,7 @@ pub async fn update_settings(
         .map_err(|error| format!("无法创建下载目录：{error}"))?;
     settings.proxy.host = settings.proxy.host.trim().to_string();
     settings.proxy.username = settings.proxy.username.trim().to_string();
-    proxy_url(&settings.proxy)?;
+    crate::network_proxy::global_route(&settings.proxy)?;
     settings.aria2.rpc_token = settings.aria2.rpc_token.trim().to_string();
     settings.aria2.validate()?;
 
@@ -4165,6 +4200,7 @@ pub async fn update_settings(
         // await. A stale general settings form must never undo a revocation.
         settings.agent_access = current.agent_access.clone();
         persist_settings(&state.settings_path, &settings)?;
+        crate::network_proxy::publish_settings(&settings.proxy);
         *current = settings.clone();
     }
     crate::launcher_window::sync_launcher_window(&app, settings.launcher_visibility);
@@ -6446,11 +6482,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_proxy_does_not_leak_process_proxy_settings_into_aria2() {
-        assert_eq!(proxy_url(&ProxySettings::default()).unwrap(), None);
-    }
-
-    #[test]
     fn automatic_share_submission_preserves_the_existing_duplicate_outcome() {
         let store = TaskStore::open_in_memory().unwrap();
         let task = store
@@ -6733,23 +6764,6 @@ mod tests {
             .unwrap();
 
         assert!(task_payload_with_cleanup(&store, Some(&plans), completed).is_err());
-    }
-
-    #[test]
-    fn authenticated_proxy_is_validated_and_encoded_for_aria2() {
-        let proxy = ProxySettings {
-            enabled: true,
-            protocol: "https".into(),
-            host: "127.0.0.1".into(),
-            port: 1080,
-            username: "user@example.com".into(),
-            password: "p@ss word".into(),
-        };
-        let value = proxy_url(&proxy).unwrap().unwrap();
-        assert_eq!(
-            value,
-            "https://user%40example.com:p%40ss%20word@127.0.0.1:1080/"
-        );
     }
 
     #[test]

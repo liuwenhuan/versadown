@@ -16,6 +16,8 @@ export interface DownloadDraftItem {
   selected: boolean;
   result?: ParseDownloadResult;
   error?: string;
+  /** Stable key of the last parse failure, when the backend reported one. */
+  errorCode?: string;
   /** Neutral hint for a `browser_share` draft; it is not an error. */
   note?: string;
   accessCode: string;
@@ -64,6 +66,10 @@ function refreshVideoSelection(result: ParseDownloadResult, previous: DownloadDr
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
+}
+
+function errorCode(reason: unknown): string | undefined {
+  return reason instanceof Error && 'code' in reason && typeof reason.code === 'string' ? reason.code : undefined;
 }
 
 function isRejectedAccessCode(message: string): boolean {
@@ -206,6 +212,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
                 selected: candidate.selected && (!next.confirmation?.video || next.confirmation.resources.some(r => r.selected)),
                 status: 'ready',
                 error: undefined,
+                errorCode: undefined,
                 expanded: candidate.expanded || canExpandDownloadDraft(next),
               };
             });
@@ -218,7 +225,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
             if (work.accessCodeRetry && isRejectedAccessCode(message)) {
               return { ...candidate, status: 'access_code_required', accessCode: '', error: message };
             }
-            return { ...candidate, status: 'failed', selected: candidate.probeVideo ? false : candidate.selected, error: message };
+            return { ...candidate, status: 'failed', selected: candidate.probeVideo ? false : candidate.selected, error: message, errorCode: errorCode(reason) };
           }));
         })
         .finally(() => {
@@ -307,22 +314,32 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
     }
   }, [scan, discardAll, replaceItems]);
 
-  const retry = useCallback((id: string, probeVideo?: boolean) => {
-    let work: WorkItem | undefined;
+  const restart = useCallback((matches: (item: DownloadDraftItem) => boolean, probeVideo?: boolean, includeParsing = false) => {
+    const works: WorkItem[] = [];
     replaceItems(current => current.map(item => {
-      if (item.id !== id || item.status === 'parsing' || (probeVideo !== undefined && !item.canProbeVideo)) return item;
+      if (!matches(item) || (item.status === 'parsing' && !includeParsing) || (probeVideo !== undefined && !item.canProbeVideo)) return item;
+      // A newer generation drops the result of a parse still in flight.
       const generation = item.generation + 1;
       const mode = probeVideo ?? item.probeVideo;
       const superseded = item.result?.confirmation?.taskId;
-      work = { id, generation, superseded, accessCodeRetry: item.status === 'access_code_required' };
+      works.push({ id: item.id, generation, superseded, accessCodeRetry: item.status === 'access_code_required' });
       const selected = item.selected || probeVideo !== undefined || (item.status === 'failed' && mode === true);
-      return { ...item, status: 'parsing', selected, probeVideo: mode, error: undefined, result: superseded ? item.result : undefined, generation };
+      return { ...item, status: 'parsing', selected, probeVideo: mode, error: undefined, errorCode: undefined, result: superseded ? item.result : undefined, generation };
     }));
-    if (work) {
-      queueRef.current.push(work);
+    if (works.length) {
+      queueRef.current.push(...works);
       pumpRef.current();
     }
   }, [replaceItems]);
+
+  const retry = useCallback((id: string, probeVideo?: boolean) => {
+    restart(item => item.id === id, probeVideo);
+  }, [restart]);
+
+  /** Parse every matching draft again, including parses still in flight. */
+  const reparse = useCallback((matches: (item: DownloadDraftItem) => boolean) => {
+    restart(matches, undefined, true);
+  }, [restart]);
 
   const remove = useCallback((id: string) => {
     const item = itemsRef.current.find(candidate => candidate.id === id);
@@ -423,5 +440,5 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
       && (!item.result?.confirmation?.resources.length || item.result.confirmation.resources.some(resource => resource.selected)));
   }, [items]);
 
-  return { items, canSubmit, start, retry, remove, resolveBrowserShare, markBrowserShareClosed, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, applySubmissionFailures, discardAll };
+  return { items, canSubmit, start, retry, reparse, remove, resolveBrowserShare, markBrowserShareClosed, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, applySubmissionFailures, discardAll };
 }

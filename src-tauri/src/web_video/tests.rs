@@ -27,7 +27,9 @@ async fn bundled_tools_download_a_public_page_with_audio() {
     let proxy = std::env::var("VERSADOWN_VIDEO_TEST_PROXY")
         .ok()
         .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+        .map(crate::network_proxy::ProxyRoute::Manual)
+        .unwrap_or_default();
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
@@ -74,6 +76,7 @@ async fn bundled_tools_download_a_public_page_with_audio() {
             directory.path(),
             false,
             None,
+            crate::network_proxy::TaskNetwork::Follow,
             options,
         )
         .await
@@ -231,6 +234,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                     directory.path(),
                     false,
                     None,
+                    crate::network_proxy::TaskNetwork::Follow,
                     VideoOptions {
                         rate: if preview.site == "Bilibili" { 96_000 } else { 0 },
                         ..Default::default()
@@ -522,7 +526,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let url = "http://embedded.example.test/article";
-    let options = VideoOptions { proxy: Some(proxy), ..Default::default() };
+    let options = VideoOptions { proxy: crate::network_proxy::ProxyRoute::Manual(proxy), ..Default::default() };
     let scanned = routing::scan(url).await;
     assert!(scanned[0].can_probe_video);
     assert_eq!(scanned[0].kind, Some(crate::CandidateKind::Direct));
@@ -546,6 +550,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
             dir.path(),
             false,
             None,
+            crate::network_proxy::TaskNetwork::Follow,
             options,
         )
         .await
@@ -670,7 +675,7 @@ async fn installed_extractor_aria2_reports_progress_and_resumes_with_a_fresh_url
             .to_string(),
         )
         .unwrap();
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.env("no_proxy", "127.0.0.1,localhost")
             .args(["--proxy", "", "--load-info-json"])
             .arg(&metadata);
@@ -811,7 +816,7 @@ async fn installed_extractor_preserves_and_resumes_a_rejected_download() {
             .to_string(),
         )
         .unwrap();
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.args(["--proxy", "", "--load-info-json"]).arg(&metadata);
         let (_hold, stop) = oneshot::channel();
         let result = tokio::time::timeout(
@@ -891,7 +896,7 @@ async fn installed_extractor_rejects_missing_fragments_without_publishing() {
         let started = std::time::Instant::now();
         println!("Missing-fragment fixture: starting {engine:?}");
         missing_requests.store(0, Ordering::SeqCst);
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.args(["--proxy", "", "--fragment-retries", "0", "--load-info-json"])
             .arg(&metadata);
         let output = dir.path().join("complete.mp4");
@@ -957,7 +962,7 @@ async fn installed_extractor_selects_later_videos_from_the_same_page() {
     )
     .unwrap();
     for index in [2, 3, 4] {
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         // Loading a cleaned info file drops entries, which would turn this
         // offline playlist fixture into an empty collection.
         cmd.args(["--enable-file-urls", "--no-clean-info-json", "--load-info-json"])
@@ -1017,7 +1022,7 @@ async fn installed_extractor_rejects_changed_media_before_reusing_staging() {
     )
     .unwrap();
     let cmd = || {
-        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        let mut cmd = transfer::transfer_command(&crate::network_proxy::ProxyRoute::System, 0).unwrap().0;
         cmd.args(["--enable-file-urls", "--load-info-json"])
             .arg(&metadata);
         cmd
@@ -1122,4 +1127,20 @@ fn opening_an_older_video_task_preserves_its_selected_format() {
         reopened.video_selector(task.id).unwrap(),
         ("18".to_owned(), None)
     );
+}
+
+/// Live check for a site that rejects the inherited (environment) proxy:
+/// `http_proxy=… VERSADOWN_LIVE_PROXY_PAGE=https://www.bilibili.com/video/… \
+///  cargo test --lib live_direct_route -- --ignored`
+#[tokio::test]
+#[ignore = "requires yt-dlp on PATH, VERSADOWN_LIVE_PROXY_PAGE and an inherited proxy the site rejects"]
+async fn live_direct_route_bypasses_an_inherited_proxy_the_site_rejects() {
+    use crate::network_proxy::ProxyRoute;
+    let source = std::env::var("VERSADOWN_LIVE_PROXY_PAGE").expect("provide a playback page");
+    let page = || async { routing::resolve(&source, false).await.unwrap().expect("supported page") };
+    let followed = extractor::inspect(page().await, &ProxyRoute::System, None).await;
+    assert_eq!(followed.unwrap_err(), "video.error.accessDeniedProxy");
+    let direct = extractor::inspect(page().await, &ProxyRoute::Direct, None).await.unwrap();
+    assert!(!direct.is_empty() && !direct[0].formats.is_empty());
+    println!("VD-LIVE-DIRECT {} formats", direct[0].formats.len());
 }

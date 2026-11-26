@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(retry.items[1].data.as_ref().unwrap().kind, "ftp");
         assert_eq!(store.list().unwrap().len(), 3);
         let changed_options = crate::UriSubmissionOptions { directory: Some(directory.path().into()),
-            proxy: Some("http://proxy.example.test:8080".into()), ..Default::default() };
+            proxy: crate::network_proxy::ProxyRoute::Manual("http://proxy.example.test:8080".into()), ..Default::default() };
         let ftp_replay = create_direct_intent(&store, &items[1].url, &destination, "two", &changed_options).unwrap();
         assert_eq!(ftp_replay.id.to_string(), retry.items[1].data.as_ref().unwrap().id);
         assert_eq!(create_direct_intent(&store, "ftp://example.test/new.bin", &destination, "new", &changed_options).unwrap_err(), "UNSUPPORTED");

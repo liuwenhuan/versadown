@@ -133,7 +133,7 @@ async fn download_with(
             Uuid::new_v4(),
             download.url,
             vec![],
-            None,
+            crate::network_proxy::ProxyRoute::System,
             download.transform.expect("transform"),
             false,
         )

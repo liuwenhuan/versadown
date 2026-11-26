@@ -12,6 +12,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::sites::PlaybackPage;
+use crate::network_proxy::{AppliedProxy, ProxyRoute};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -423,10 +424,10 @@ pub(super) fn tool(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-pub(super) fn command(proxy: Option<&str>) -> Result<Command, String> {
+pub(super) fn command(proxy: &ProxyRoute) -> Result<(Command, AppliedProxy), String> {
     let mut cmd = base_command()?;
-    super::proxy::apply(&mut cmd, proxy)?;
-    Ok(cmd)
+    let applied = crate::network_proxy::apply_to_command(&mut cmd, proxy)?;
+    Ok((cmd, applied))
 }
 
 pub(super) fn base_command() -> Result<Command, String> {
@@ -548,6 +549,13 @@ fn classify_message(message: &str) -> &'static str {
         "video.error.restricted"
     } else if text.contains("http error 429") {
         "video.error.rateLimited"
+    } else if contains(&[
+        "geo-restricted",
+        "geo restriction",
+        "available in your country",
+        "not available from your location",
+    ]) {
+        "video.error.geoRestricted"
     } else if contains(&["http error 401", "http error 403", "http error 412"]) {
         "video.error.accessDenied"
     } else if contains(&[
@@ -572,7 +580,6 @@ fn classify_message(message: &str) -> &'static str {
         "private video",
         "not available",
         "http error 404",
-        "geo-restricted",
     ]) {
         "video.error.unavailable"
     } else if contains(&["no video formats", "only images are available"]) {
@@ -632,11 +639,11 @@ async fn metadata(mut cmd: Command) -> Result<Vec<u8>, String> {
 
 pub(crate) async fn inspect(
     page: PlaybackPage,
-    proxy: Option<&str>,
+    proxy: &ProxyRoute,
     cookie_file: Option<&Path>,
 ) -> Result<Vec<VideoPreview>, String> {
     let cookies = super::cookies::CookieFile::load(cookie_file)?;
-    let mut cmd = command(proxy)?;
+    let (mut cmd, applied) = command(proxy)?;
     if let Some(cookies) = &cookies {
         cookies.apply(&mut cmd);
     }
@@ -647,7 +654,9 @@ pub(crate) async fn inspect(
         "--",
     ])
     .arg(page.url.as_str());
-    let bytes = metadata(cmd).await?;
+    let bytes = metadata(cmd)
+        .await
+        .map_err(|key| applied.diagnose(&key, page.url.as_str()))?;
     page_previews(page, &bytes, tool("ffmpeg").is_some())
 }
 
@@ -675,6 +684,33 @@ mod tests {
             diagnostic("ERROR: unable to download video data: HTTP Error 429: Too Many Requests"),
             "video.error.rateLimited"
         );
+    }
+
+    #[test]
+    fn regional_blocks_are_distinct_from_removed_videos() {
+        for text in [
+            "ERROR: [youtube] clip: The uploader has not made this video available in your country",
+            "ERROR: [niconico] sm9: This video is not available from your location due to geo restriction",
+            "ERROR: [site] clip: Video is geo-restricted",
+        ] {
+            assert_eq!(diagnostic(text), "video.error.geoRestricted");
+        }
+        assert_eq!(diagnostic("ERROR: [site] clip: Private video"), "video.error.unavailable");
+    }
+
+    #[test]
+    fn the_same_rejection_names_the_proxy_only_when_the_request_used_one() {
+        let text = "ERROR: [BiliBili] BV1na1YBzELQ: Unable to download webpage: HTTP Error 412: Precondition Failed";
+        let page = "https://www.bilibili.com/video/BV1na1YBzELQ";
+        let key = diagnostic(text);
+        assert_eq!(key, "video.error.accessDenied");
+        let route = |route| {
+            let mut cmd = Command::new("yt-dlp");
+            crate::network_proxy::apply_to_command(&mut cmd, &route).unwrap()
+        };
+        let proxied = route(ProxyRoute::Manual("http://127.0.0.1:10808".into()));
+        assert_eq!(proxied.diagnose(key, page), "video.error.accessDeniedProxy");
+        assert_eq!(route(ProxyRoute::Direct).diagnose(key, page), key);
     }
 
     #[test]

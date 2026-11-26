@@ -40,7 +40,7 @@ pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>, 
     if api_key.trim().is_empty() {
         return Err("请先输入或保存 AI API Key".into());
     }
-    let client = reqwest::Client::builder()
+    let client = crate::network_proxy::client_builder(reqwest::Client::builder())
         .timeout(Duration::from_secs(12))
         .build()
         .map_err(|_| "无法创建 AI 服务连接".to_string())?;

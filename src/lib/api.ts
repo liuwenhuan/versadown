@@ -1,7 +1,7 @@
 import { AgentConnectionInfo, AgentAccessSettings, AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { videoMessage } from './webVideo';
 import { shareFailureMessage } from '../i18n/shareFailureMessage';
-import type { ScanDownloadProgress, VideoPreview } from './types';
+import type { ScanDownloadProgress, TaskNetwork, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { ThemeId } from './theme';
 import { t, type TranslationKey } from '../i18n';
@@ -98,17 +98,18 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
     : { task, ...(queueTask ? { queueTask } : {}) };
 }
 
-export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false, probeVideo?: boolean): Promise<ParseDownloadResult> {
+export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false, probeVideo?: boolean, network: TaskNetwork = 'follow'): Promise<ParseDownloadResult> {
   if (!isTauriRuntime()) {
     if (probeVideo) throw new Error(t('video.error.desktop'));
     return parseLocally(input);
   }
-  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}), ...(probeVideo !== undefined ? { probeVideo } : {}) })
+  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}), ...(probeVideo !== undefined ? { probeVideo } : {}), ...(network !== 'follow' ? { network } : {}) })
     .catch((error: unknown) => {
       if (isXunleiVerificationReason(error) || isXunleiVerificationFailure(error)) {
         throw new Error(xunleiVerificationMessage(typeof error === 'string' ? error : (error as { message?: unknown }).message));
       }
-      if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
+      // Keep the key: the dialog offers a direct retry for a proxy rejection.
+      if (typeof error === 'string' && error.startsWith('video.error.')) throw Object.assign(new Error(videoMessage(error)), { code: error });
       const shareFailure = typeof error === 'string' ? shareFailureMessage(error) : undefined;
       if (shareFailure) throw new Error(shareFailure);
       throw error;
@@ -211,17 +212,17 @@ export async function stageDroppedTorrent(fileName: string, bytes: Uint8Array): 
   });
 }
 
-export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false, postProcessingNote?: string): Promise<QueueTask | undefined> {
+export async function confirmDownload(taskId: string, selectedIds: string[] = [], destinationDirectory?: string, privateDownload = false, postProcessingNote?: string, network: TaskNetwork = 'follow'): Promise<QueueTask | undefined> {
   if (!isTauriRuntime()) return undefined;
-  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), ...(postProcessingNote?.trim() ? { postProcessingNote } : {}) });
+  return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), ...(postProcessingNote?.trim() ? { postProcessingNote } : {}), ...(network !== 'follow' ? { network } : {}) });
 }
 
-export async function submitVideoFormats(video: VideoPreview, ids: string[], destinationDirectory: string | undefined, privateDownload: boolean, onCreated: (task: QueueTask) => void, postProcessingNote?: string) {
+export async function submitVideoFormats(video: VideoPreview, ids: string[], destinationDirectory: string | undefined, privateDownload: boolean, onCreated: (task: QueueTask) => void, postProcessingNote?: string, network: TaskNetwork = 'follow') {
   if (!isTauriRuntime()) throw new Error(t('video.error.desktop'));
   const selected = video.formats.filter(format => ids.includes(format.id));
   if (!selected.length) throw new Error(t('video.error.formats'));
   const outcomes = await Promise.allSettled(selected.map(async format => {
-    const task = await invoke<QueueTask>('submit_video_download', { previewId: video.previewId, formatId: format.id, destinationDirectory, privateDownload, postProcessingNote });
+    const task = await invoke<QueueTask>('submit_video_download', { previewId: video.previewId, formatId: format.id, destinationDirectory, privateDownload, postProcessingNote, ...(network !== 'follow' ? { network } : {}) });
     onCreated(task);
   }));
   const failures = outcomes.flatMap((result, i) => result.status === 'rejected' ? [{ selectedId: selected[i].id, message: videoMessage(result.reason) }] : []);
@@ -238,6 +239,15 @@ export type PersistedTaskScope = 'active' | 'terminal';
 
 export async function listPersistedTasks(scope?: PersistedTaskScope): Promise<QueueTask[]> {
   return isTauriRuntime() ? invoke<QueueTask[]>('list_tasks', { scope: scope ?? null }) : [];
+}
+
+/** Switch a failed task's own network choice, then retry it. */
+export async function retryTaskWithNetwork(taskId: string, network: Exclude<TaskNetwork, 'follow'>): Promise<TaskActionResult> {
+  if (!isTauriRuntime()) return {};
+  return duplicateResult(await invoke<NativeTaskOutcome>('retry_task_with_network', { taskId, network }).catch(error => {
+    if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
+    throw error;
+  }));
 }
 
 export async function runTaskAction(taskId: string, action: Extract<TaskCommand, 'pause' | 'resume' | 'cancel' | 'retry' | 'retry_cleanup'>): Promise<TaskActionResult> {
@@ -318,7 +328,7 @@ export async function getDownloadGlobalStat(): Promise<DownloadGlobalStat> {
 export const defaultSettings: AppSettings = {
   downloadDirectory: '',
   launcherVisibility: 'always',
-  proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
+  proxy: { enabled: false, direct: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
   aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 20, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },

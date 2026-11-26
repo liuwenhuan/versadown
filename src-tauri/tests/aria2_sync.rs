@@ -5,7 +5,23 @@ use versadown_lib::{
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
-pub async fn server(
+/// Every start of a download states its proxy route again with a
+/// `changeOption` before `unpause` (`DownloadService::refresh_download_route`).
+/// That call carries proxy options only; any other option change (such as
+/// `select-file`, which may bring proxy options along) is not a refresh.
+pub fn is_route_refresh(request: &Value) -> bool {
+    const PROXY: [&str; 4] = ["http-proxy", "https-proxy", "all-proxy", "no-proxy"];
+    request["method"] == "aria2.changeOption"
+        && request["params"][2].as_object().is_some_and(|options| {
+            PROXY.iter().all(|name| options.contains_key(*name))
+                && options.keys().all(|name| PROXY.contains(&name.as_str()))
+        })
+}
+
+/// Mock RPC server whose `handler` sees every call except the route refresh,
+/// which is accepted and appended to `routes` instead.
+pub async fn server_with_routes(
+    routes: Arc<Mutex<Vec<Value>>>,
     handler: impl Fn(Value) -> Value + Send + Sync + 'static,
 ) -> (Aria2RpcClient, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -13,7 +29,16 @@ pub async fn server(
     let handler = Arc::new(handler);
     let app = axum::Router::new().route("/jsonrpc", axum::routing::post(move |axum::Json(request): axum::Json<Value>| {
         let handler = handler.clone();
-        async move { axum::Json(json!({"jsonrpc":"2.0", "id": request["id"], "result":handler(request.clone())})) }
+        let routes = routes.clone();
+        async move {
+            let result = if is_route_refresh(&request) {
+                routes.lock().unwrap().push(request.clone());
+                json!("OK")
+            } else {
+                handler(request.clone())
+            };
+            axum::Json(json!({"jsonrpc":"2.0", "id": request["id"], "result":result}))
+        }
     }));
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -22,6 +47,12 @@ pub async fn server(
         Aria2RpcClient::new(endpoint, RpcSecret::from_bytes([1; 32])).unwrap(),
         task,
     )
+}
+
+pub async fn server(
+    handler: impl Fn(Value) -> Value + Send + Sync + 'static,
+) -> (Aria2RpcClient, tokio::task::JoinHandle<()>) {
+    server_with_routes(Default::default(), handler).await
 }
 pub fn status(gid: &str, state: &str, completed: u64) -> Value {
     json!({"gid":gid,"status":state,"totalLength":"100","completedLength":completed.to_string(),"downloadSpeed":"10","uploadSpeed":"0","connections":"1","files":[]})
@@ -489,6 +520,7 @@ async fn pause_wins_when_an_inflight_resume_finishes_after_the_fast_interrupt() 
                 let paused = paused.clone();
                 async move {
                     let result = match request["method"].as_str().unwrap() {
+                        "aria2.changeOption" if is_route_refresh(&request) => json!("OK"),
                         "aria2.unpause" => {
                             entering_resume.notify_one();
                             release_resume.notified().await;
@@ -536,7 +568,13 @@ async fn pause_wins_when_an_inflight_resume_finishes_after_the_fast_interrupt() 
                 .await
         }
     });
-    entering_resume.notified().await;
+    // A resume that fails before `unpause` must fail this test, not hang it.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        entering_resume.notified(),
+    )
+    .await
+    .expect("resume never reached aria2.unpause");
     let pause = tokio::spawn({
         let service = service.clone();
         async move {

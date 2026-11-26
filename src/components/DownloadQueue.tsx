@@ -5,6 +5,7 @@ import { DownloadFile, QueueTask, TaskCommand } from '../lib/types';
 import { formatBytes, formatEta, formatSpeed, transferProgress } from '../lib/downloadEvents';
 import { downloadErrorMessage, isPrivateTask } from '../lib/queueTask';
 import { reorderTaskIds } from '../lib/taskOrder';
+import { networkRetryCommand } from '../lib/taskNetwork';
 import { t, useTranslation } from '../i18n';
 import { xunleiDownloadMessage, xunleiFallbackMessage } from '../i18n/xunleiDownloadMessage';
 
@@ -20,6 +21,8 @@ interface DownloadQueueProps {
   onReorder?(orderedTaskIds: readonly string[]): void;
   onFileSelection?(taskId: string, fileIndex: number, selected: boolean): void;
   onFileCancel?(taskId: string, fileIndex: number): void;
+  /** A manual proxy address exists in the settings, whatever the mode. */
+  manualProxyAvailable?: boolean;
 }
 
 export type BatchTaskCommand = 'resume' | 'pause' | 'delete' | 'copy_link' | 'move_to_private' | 'move_to_normal';
@@ -348,7 +351,9 @@ export function taskContextMenuPosition({ x, y, menuWidth, menuHeight, viewportW
   };
 }
 
-function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> {
+const networkRetryLabels = { retry_direct: 'download.action.retryDirect', retry_proxy: 'download.action.retryProxy' } as const;
+
+function contextCommands(task: QueueTask, privacyEnabled: boolean, manualProxyAvailable: boolean): Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> {
   const commands: Array<{ command: TaskMenuCommand; label: string; danger?: boolean; separated?: boolean }> = [];
   if (task.status === 'downloading') commands.push({ command: 'pause', label: t('download.action.pause') });
   if (task.status === 'paused') commands.push(task.reauthorization_required
@@ -358,6 +363,8 @@ function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ comm
   if (task.status === 'failed') commands.push(task.reauthorization_required
     ? { command: 'reauthorize', label: t('download.action.reauthorize') }
     : { command: 'retry', label: t('download.action.retry') });
+  const networkRetry = networkRetryCommand(task, manualProxyAvailable);
+  if (networkRetry) commands.push({ command: networkRetry, label: t(networkRetryLabels[networkRetry]) });
   if (task.status === 'completed' && task.cleanup_pending) commands.push({ command: 'retry_cleanup', label: t('download.action.retryCleanup') });
   commands.push({ command: 'open_directory', label: t('download.action.openDirectory'), separated: commands.length > 0 });
   commands.push({ command: 'details', label: t('download.action.details') });
@@ -388,6 +395,8 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
     reauthorize: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     reopen_share: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     retry_cleanup: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
+    retry_direct: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
+    retry_proxy: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     open_directory: <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>,
     open_file: <><path d="M7 3.5h7l3 3V20.5H7z" /><path d="M14 3.5v3h3M9.5 12h5M9.5 16h5" /></>,
     play_videos: <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>,
@@ -400,11 +409,11 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[command]}</svg>;
 }
 
-function TaskContextMenu({ state, privacyEnabled, onClose, onCommand }: { state: ContextMenuState; privacyEnabled: boolean; onClose(): void; onCommand(command: TaskMenuCommand): void }) {
+function TaskContextMenu({ state, privacyEnabled, manualProxyAvailable, onClose, onCommand }: { state: ContextMenuState; privacyEnabled: boolean; manualProxyAvailable: boolean; onClose(): void; onCommand(command: TaskMenuCommand): void }) {
   const { t: translate } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const isBatch = state.tasks.length > 1;
-  const commands = isBatch ? batchContextCommands(state.tasks, privacyEnabled) : contextCommands(state.tasks[0], privacyEnabled);
+  const commands = isBatch ? batchContextCommands(state.tasks, privacyEnabled) : contextCommands(state.tasks[0], privacyEnabled, manualProxyAvailable);
   const menuTitle = isBatch ? translate('download.selection.count', { count: state.tasks.length }) : displayTaskName(state.tasks[0]);
   const [menuSize, setMenuSize] = useState({ width: 224, height: commands.length * 38 + (isBatch ? 64 : 14) });
   const { left, top } = taskContextMenuPosition({
@@ -534,7 +543,7 @@ function QueueTreeRows({ nodes, depth, expanded, onToggle, onCommand, onFileSele
   })}</>;
 }
 
-export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedTaskIds: controlledSelectedTaskIds, onSelect, onSelectionChange, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel }: DownloadQueueProps) {
+export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedTaskIds: controlledSelectedTaskIds, onSelect, onSelectionChange, onCommand, onBatchCommand, onReorder, onFileSelection, onFileCancel, manualProxyAvailable = false }: DownloadQueueProps) {
   const { t: translate } = useTranslation();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [localSelectedTaskIds, setLocalSelectedTaskIds] = useState<string[]>(() => selectedTaskId ? [selectedTaskId] : []);
@@ -797,6 +806,7 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
           : task.status === 'downloading' ? 'pause' as const
           : task.status === 'paused' ? 'resume' as const
           : task.status === 'failed' ? (task.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
+        const networkRetry = networkRetryCommand(task, manualProxyAvailable);
         const primaryLabel = primaryAction === 'pause' ? translate('download.action.pause') : primaryAction === 'resume' ? translate('download.action.resume') : primaryAction === 'reauthorize' ? translate('download.action.reauthorize') : primaryAction === 'reopen_share' ? translate('download.action.reopenShare') : translate('download.action.retry');
         const completedSize = isCompleted ? completedTaskSize(task) : undefined;
         const completionTime = isCompleted ? completedAt(task.completed_at) : undefined;
@@ -817,14 +827,15 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
               {completedAction && completedActionText && <button className="completed-quick-action" aria-label={completedActionText.aria} title={completedActionText.title} onClick={(event) => { event.stopPropagation(); onCommand(task.id, completedAction === 'image' ? 'open_file' : completedAction === 'directory' ? 'open_directory' : 'play_videos'); }}><ActionIcon action={completedAction === 'video' ? 'play' : completedAction === 'directory' ? 'folder' : completedAction} /></button>}
               {task.status === 'queued'
                 ? <button className="queued-action" aria-label={`${taskName} ${t('download.status.queued')}`} aria-haspopup="menu" title={t('download.moreActions')} onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}>{t('download.status.queued')}</button>
-                : primaryAction && <button className={primaryAction === 'reauthorize' ? 'reauthorize-action' : undefined} aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} />{primaryAction === 'reauthorize' && <span>{t('download.action.reauthorize')}</span>}</button>}
+                : <>{networkRetry && <button className="reauthorize-action" aria-label={`${t(networkRetryLabels[networkRetry])} ${taskName}`} title={t(networkRetryLabels[networkRetry])} onClick={(event) => { event.stopPropagation(); onCommand(task.id, networkRetry); }}><ActionIcon action="retry" /><span>{t(networkRetryLabels[networkRetry])}</span></button>}
+                {primaryAction && <button className={primaryAction === 'reauthorize' ? 'reauthorize-action' : undefined} aria-label={`${primaryLabel} ${taskName}`} title={primaryLabel} onClick={(event) => { event.stopPropagation(); onCommand(task.id, primaryAction); }}><ActionIcon action={primaryAction} />{primaryAction === 'reauthorize' && <span>{t('download.action.reauthorize')}</span>}</button>}</>}
               {task.status !== 'queued' && <button className="task-more-button" aria-label={`${t('download.moreActions')} ${taskName}`} title={t('download.moreActions')} onClick={(event) => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); openContextMenu(task, rect.left, rect.bottom + 6); }}><ActionIcon action="more" /></button>}
             </div>
           </article>
           {hasChildren && isExpanded && <div className="children queue-tree"><QueueTreeRows nodes={taskChildren!} depth={0} expanded={expanded} onToggle={(id) => setExpanded((current) => ({ ...current, [id]: !current[id] }))} onCommand={onCommand} onFileSelection={onFileSelection} onFileCancel={onFileCancel} parentTaskId={task.id} isBtFileTree={isBtFileTree} completedRoot={isCompleted} /></div>}
         </div>;
       })}
-      {contextMenu && <TaskContextMenu state={contextMenu} privacyEnabled={privacyEnabled} onClose={closeContextMenu} onCommand={runCommand} />}
+      {contextMenu && <TaskContextMenu state={contextMenu} privacyEnabled={privacyEnabled} manualProxyAvailable={manualProxyAvailable} onClose={closeContextMenu} onCommand={runCommand} />}
     </section>
   );
 }

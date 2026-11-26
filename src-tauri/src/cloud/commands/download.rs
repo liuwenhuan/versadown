@@ -869,7 +869,8 @@ pub(crate) fn register_stable_range_gateway_download(
     }
     .map_err(|_| QuarkError::DownloadSubmissionFailed)?;
     options.headers.clear();
-    options.proxy = None;
+    // aria2 only talks to the loopback gateway, which applies the route above.
+    options.proxy = crate::network_proxy::ProxyRoute::Direct;
     options.direct_loopback = true;
     Ok((registration.url().to_owned(), options, registration))
 }
@@ -1272,6 +1273,7 @@ pub(crate) fn cloud_directory_group_task_outcome(
                 p2p_sharing: false,
                 is_private: group.is_private,
                 post_processing_note: None,
+                network: Default::default(),
             },
             files: Vec::new(),
             cleanup_pending: false,

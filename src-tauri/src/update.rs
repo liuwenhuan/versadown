@@ -29,7 +29,7 @@ pub fn fetch_app_update(current_version: &str) -> Result<Option<AppUpdate>, Stri
 }
 
 fn update_client(current_version: &str) -> reqwest::blocking::ClientBuilder {
-    reqwest::blocking::Client::builder()
+    crate::network_proxy::blocking_client_builder(reqwest::blocking::Client::builder())
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
         .https_only(true)

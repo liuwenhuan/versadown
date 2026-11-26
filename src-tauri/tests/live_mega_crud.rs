@@ -353,7 +353,7 @@ fn gateway_download(
             .await
             .map_err(|e| failure(format!("{e:?}")))?;
         let registration = gateway
-            .register_transformed(Uuid::new_v4(), url, headers, None, transform, false)
+            .register_transformed(Uuid::new_v4(), url, headers, versadown_lib::ProxyRoute::System, transform, false)
             .map_err(|e| failure(format!("{e:?}")))?;
         let local = registration.url().to_owned();
         let client = reqwest::Client::builder()
