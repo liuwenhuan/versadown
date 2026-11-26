@@ -25,6 +25,7 @@ mod agent_interactions;
 mod mega_integrity;
 pub(crate) use mega_integrity::{is_mega_integrity_failure, is_mega_integrity_pending};
 
+use crate::network_proxy::TaskNetwork;
 use crate::{
     cloud::CloudProvider,
     models::{
@@ -725,6 +726,7 @@ impl TaskStore {
             p2p_sharing: false,
             is_private: new_task.is_private,
             post_processing_note: None,
+            network: TaskNetwork::Follow,
         };
         connection.execute("INSERT INTO tasks (id, source, name, kind, status, progress, error, created_at, updated_at, is_private) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![task.id.to_string(), task.source, task.name, task.kind, task.status.as_db(), task.progress, task.error, task.created_at, task.updated_at, task.is_private])?;
@@ -1275,6 +1277,22 @@ impl TaskStore {
         let changed = connection.execute(
             "UPDATE tasks SET post_processing_note = ?1, updated_at = ?2 WHERE id = ?3",
             params![note, current_timestamp(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(id));
+        }
+        find_with_connection(&connection, id)
+    }
+
+    pub fn set_task_network(
+        &self,
+        id: Uuid,
+        network: TaskNetwork,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET network = ?1, updated_at = ?2 WHERE id = ?3",
+            params![network.as_str(), current_timestamp(), id.to_string()],
         )?;
         if changed == 0 {
             return Err(StoreError::NotFound(id));
@@ -2086,7 +2104,7 @@ impl TaskStore {
     }
 }
 
-const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note, p2p_sharing, status_message FROM tasks";
+const TASK_SELECT: &str = "SELECT id, source, name, kind, status, progress, error, failure_code, aria_gid, followed_by_gid, total_length, completed_length, download_speed, upload_speed, connections, discovered_nodes, eta_seconds, aria_error_code, updated_at, completed_at, metadata_gid, created_at, is_private, post_processing_note, p2p_sharing, status_message, network FROM tasks";
 const CLOUD_DIRECTORY_GROUP_SELECT: &str = "SELECT id, provider, remote_directory_id, relative_directory, output_directory, status, created_at, updated_at, is_private, post_processing_note FROM cloud_directory_groups";
 
 fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
@@ -2191,6 +2209,11 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if !column_exists(&transaction, "tasks", "status_message")? {
         transaction.execute_batch("ALTER TABLE tasks ADD COLUMN status_message TEXT;")?;
+    }
+    if !column_exists(&transaction, "tasks", "network")? {
+        // The default is the task network choice "follow the settings".
+        transaction
+            .execute_batch("ALTER TABLE tasks ADD COLUMN network TEXT NOT NULL DEFAULT 'follow';")?;
     }
     if !column_exists(&transaction, "cloud_directory_groups", "is_private")? {
         transaction.execute_batch(
@@ -2388,6 +2411,7 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<DownloadTask> {
         is_private: row.get(22)?,
         post_processing_note: row.get(23)?,
         p2p_sharing: row.get(24)?,
+        network: TaskNetwork::parse(&row.get::<_, String>(26)?).ok_or(rusqlite::Error::InvalidQuery)?,
     })
 }
 
@@ -3086,6 +3110,39 @@ mod tests {
         assert!(leaves.is_empty());
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, task.id);
+    }
+
+    #[test]
+    fn task_network_choice_defaults_to_follow_and_survives_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let (direct, untouched) = {
+            let store = TaskStore::open_path(&database).unwrap();
+            let direct = store
+                .create(NewTask::direct("https://example.test/direct.zip"))
+                .unwrap();
+            let untouched = store
+                .create(NewTask::direct("https://example.test/default.zip"))
+                .unwrap();
+            assert_eq!(untouched.network, TaskNetwork::Follow);
+            assert_eq!(
+                store.set_task_network(direct.id, TaskNetwork::Direct).unwrap().network,
+                TaskNetwork::Direct
+            );
+            (direct.id, untouched.id)
+        };
+
+        let store = TaskStore::open_path(&database).unwrap();
+        assert_eq!(store.find(direct).unwrap().network, TaskNetwork::Direct);
+        assert_eq!(store.find(untouched).unwrap().network, TaskNetwork::Follow);
+        assert_eq!(
+            store.set_task_network(direct, TaskNetwork::Proxy).unwrap().network,
+            TaskNetwork::Proxy
+        );
+        assert!(matches!(
+            store.set_task_network(Uuid::new_v4(), TaskNetwork::Direct),
+            Err(StoreError::NotFound(_))
+        ));
     }
 
     #[test]

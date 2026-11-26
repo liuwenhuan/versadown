@@ -8,6 +8,7 @@ mod sites;
 mod transfer;
 
 use crate::commands::{self, AppState};
+use crate::network_proxy::TaskNetwork;
 use crate::{DownloadTask, NewTask, TaskStatus, TaskStore};
 use std::{
     collections::HashMap,
@@ -90,9 +91,11 @@ impl VideoDownloads {
         state: &AppState,
         task: DownloadTask,
     ) -> Result<DownloadTask, String> {
-        self.start(task, network_options(state)?).await
+        let options = network_options(state, task.network)?;
+        self.start(task, options).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn submit(
         &self,
         preview_id: Uuid,
@@ -100,6 +103,7 @@ impl VideoDownloads {
         directory: &Path,
         private_download: bool,
         post_processing_note: Option<&str>,
+        network: TaskNetwork,
         options: VideoOptions,
     ) -> Result<DownloadTask, String> {
         let previews::SelectedVideo {
@@ -148,6 +152,7 @@ impl VideoDownloads {
                 .into_owned();
             record.total_length = format.bytes;
             store.set_post_processing_note(record.id, post_processing_note)?;
+            store.set_task_network(record.id, network)?;
             store.apply_transfer_snapshot_with_files(
                 record,
                 &[(
@@ -331,17 +336,22 @@ impl VideoDownloads {
             "pause" => self.stop(task.id, TaskStatus::Paused).await,
             "cancel" => self.stop(task.id, TaskStatus::Cancelled).await,
             "retry" | "resume" => {
-                self.start(task, network_options(state)?).await
+                let options = network_options(state, task.network)?;
+                self.start(task, options).await
             }
             _ => Err("video.error.state".into()),
         }
     }
 }
 
-pub(crate) fn network_options(state: &AppState) -> Result<VideoOptions, String> {
+/// yt-dlp options for one task (or a preview, with `TaskNetwork::Follow`).
+pub(crate) fn network_options(
+    state: &AppState,
+    network: TaskNetwork,
+) -> Result<VideoOptions, String> {
     let settings = state.settings.lock().map_err(|_| "video.error.state")?;
     Ok(VideoOptions {
-        proxy: crate::network_proxy::global_route(&settings.proxy)?,
+        proxy: crate::network_proxy::task_route(&settings.proxy, network)?,
         rate: settings.aria2.overall_download_limit,
         cookie_file: (!settings.video_cookie_file.is_empty())
             .then(|| PathBuf::from(&settings.video_cookie_file)),
@@ -368,7 +378,7 @@ pub(crate) async fn prepare_agent_video(
     input: &str,
 ) -> Result<Vec<AgentPreparedVideo>, String> {
     let page = routing::resolve(input, true).await?.ok_or("video.error.unsupported")?;
-    let options = network_options(state)?;
+    let options = network_options(state, TaskNetwork::Follow)?;
     let previews = extractor::inspect(page, &options.proxy, options.cookie_file.as_deref()).await?;
     Ok(agent_video_formats(previews))
 }
@@ -428,16 +438,17 @@ pub(crate) async fn submit_video_download(
     destination_directory: Option<String>,
     private_download: bool,
     post_processing_note: Option<String>,
+    network: Option<TaskNetwork>,
     state: State<'_, AppState>,
 ) -> Result<commands::DownloadTaskPayload, String> {
     commands::ensure_private_download_enabled(&state, private_download)?;
+    let network = network.unwrap_or_default();
     let options = commands::download_submission_options_for_directory(
         &state,
         destination_directory.as_deref(),
     )?;
     let directory = options.directory.ok_or("video.error.output")?;
-    let mut network = network_options(&state)?;
-    network.proxy = options.proxy;
+    let video_options = network_options(&state, network)?;
     let task = state
         .web_video
         .submit(
@@ -447,6 +458,7 @@ pub(crate) async fn submit_video_download(
             private_download,
             post_processing_note.as_deref(),
             network,
+            video_options,
         )
         .await?;
     commands::task_payload(&state.store, task)

@@ -359,6 +359,9 @@ pub struct DownloadTask {
     pub is_private: bool,
     #[serde(default)]
     pub post_processing_note: Option<String>,
+    /// The task's own network choice; `Follow` uses the settings.
+    #[serde(default)]
+    pub network: crate::network_proxy::TaskNetwork,
 }
 
 #[derive(Clone, Debug)]
@@ -452,6 +455,8 @@ pub struct QueueTaskPayload {
     pub is_private: bool,
     #[serde(default)]
     pub post_processing_note: Option<String>,
+    #[serde(default)]
+    pub network: crate::network_proxy::TaskNetwork,
     pub files: Vec<TransferFile>,
     pub cleanup_pending: bool,
     #[serde(default)]

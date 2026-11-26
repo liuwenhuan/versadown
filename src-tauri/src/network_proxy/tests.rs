@@ -200,27 +200,31 @@ fn aria2_download_options_express_each_route_against_each_backdrop() {
         ("all", "socks5://environment.invalid:1080"),
         ("no", "localhost,.lan"),
     ]);
+    let options = |values: [&str; 5]| -> Vec<(&'static str, String)> {
+        ["http-proxy", "https-proxy", "ftp-proxy", "all-proxy", "no-proxy"]
+            .into_iter()
+            .zip(values.map(str::to_owned))
+            .collect()
+    };
     for backdrop in [environment.clone(), Proxies::new()] {
         assert_eq!(
             aria2_options_from(&ProxyRoute::Direct, backdrop.clone()),
-            [("all-proxy", String::new())]
+            options(["", "", "", "", ""])
         );
         assert_eq!(
             aria2_options_from(&ProxyRoute::Manual(MANUAL.into()), backdrop),
-            [("all-proxy", MANUAL.to_owned())]
+            options(["", "", "", MANUAL, ""])
         );
     }
     assert_eq!(
         aria2_options_from(&ProxyRoute::System, environment),
-        [
-            ("http-proxy", ENVIRONMENT.to_owned()),
-            ("https-proxy", ENVIRONMENT.to_owned()),
-            ("all-proxy", "socks5://environment.invalid:1080".to_owned()),
-            ("no-proxy", "localhost,.lan".to_owned()),
-        ]
+        options([ENVIRONMENT, ENVIRONMENT, "", "socks5://environment.invalid:1080", "localhost,.lan"])
     );
     // aria2 itself ignores OS proxy settings; follow-system keeps that.
-    assert!(aria2_options_from(&ProxyRoute::System, Proxies::new()).is_empty());
+    assert_eq!(
+        aria2_options_from(&ProxyRoute::System, Proxies::new()),
+        options(["", "", "", "", ""])
+    );
 }
 
 #[test]
@@ -255,4 +259,44 @@ fn bypass_rules_exclude_matching_hosts_from_the_proxy_hint() {
         Proxies::new(),
     );
     assert!(!everything.proxied_for("https://youtube.com/watch"));
+}
+
+#[test]
+fn every_task_choice_and_global_mode_reaches_yt_dlp_and_aria2() {
+    let modes = [
+        ("system", ProxySettings { enabled: false, ..manual_settings() }),
+        ("manual", manual_settings()),
+        ("direct", ProxySettings { enabled: false, direct: true, ..manual_settings() }),
+    ];
+    let inherited = || pairs(&[("http", ENVIRONMENT), ("https", ENVIRONMENT)]);
+    for (mode, settings) in &modes {
+        for network in [TaskNetwork::Follow, TaskNetwork::Direct, TaskNetwork::Proxy] {
+            let route = task_route(settings, network).unwrap();
+            let expected = match (network, *mode) {
+                (TaskNetwork::Direct, _) | (TaskNetwork::Follow, "direct") => None,
+                (TaskNetwork::Proxy, _) | (TaskNetwork::Follow, "manual") => Some(MANUAL),
+                (TaskNetwork::Follow, _) => Some(ENVIRONMENT),
+            };
+            let label = format!("{mode}/{network:?}");
+
+            let (cmd, _) = video_command(&route, inherited(), Proxies::new());
+            let https = command_environment(&cmd)
+                .into_iter()
+                .find(|(name, value)| name == "https_proxy" && value.is_some())
+                .and_then(|(_, value)| value);
+            assert_eq!(https.as_deref(), expected, "yt-dlp {label}");
+            assert_eq!(
+                command_arguments(&cmd) == ["--proxy", ""],
+                expected.is_none(),
+                "yt-dlp {label}"
+            );
+
+            let aria2: std::collections::BTreeMap<_, _> =
+                aria2_options_from(&route, inherited()).into_iter().collect();
+            let used = [aria2["all-proxy"].as_str(), aria2["https-proxy"].as_str()]
+                .into_iter()
+                .find(|value| !value.is_empty());
+            assert_eq!(used, expected, "aria2 {label}");
+        }
+    }
 }

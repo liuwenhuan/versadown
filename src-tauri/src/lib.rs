@@ -725,6 +725,7 @@ pub fn run() -> i32 {
             commands::set_task_private,
             commands::list_tasks,
             commands::task_action,
+            commands::retry_task_with_network,
             commands::resolve_duplicate_download,
             commands::open_task_directory,
             commands::open_task_file,

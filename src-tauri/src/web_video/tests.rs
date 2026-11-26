@@ -76,6 +76,7 @@ async fn bundled_tools_download_a_public_page_with_audio() {
             directory.path(),
             false,
             None,
+            crate::network_proxy::TaskNetwork::Follow,
             options,
         )
         .await
@@ -233,6 +234,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                     directory.path(),
                     false,
                     None,
+                    crate::network_proxy::TaskNetwork::Follow,
                     VideoOptions {
                         rate: if preview.site == "Bilibili" { 96_000 } else { 0 },
                         ..Default::default()
@@ -548,6 +550,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
             dir.path(),
             false,
             None,
+            crate::network_proxy::TaskNetwork::Follow,
             options,
         )
         .await

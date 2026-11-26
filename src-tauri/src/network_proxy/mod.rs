@@ -290,20 +290,27 @@ pub(crate) fn aria2_options(route: &ProxyRoute) -> Vec<(&'static str, String)> {
     aria2_options_from(route, discovery::process_environment())
 }
 
+/// Every proxy option is stated, empty when unused: `changeOption` keeps
+/// values from an earlier submission, and a per-protocol proxy would
+/// override `all-proxy`.
 fn aria2_options_from(route: &ProxyRoute, environment: Proxies) -> Vec<(&'static str, String)> {
-    match route {
-        ProxyRoute::Direct => vec![("all-proxy", String::new())],
-        ProxyRoute::Manual(url) => vec![("all-proxy", url.clone())],
-        // What aria2 itself read from its environment before it was stripped.
-        ProxyRoute::System => [
-            ("http", "http-proxy"),
-            ("https", "https-proxy"),
-            ("ftp", "ftp-proxy"),
-            ("all", "all-proxy"),
-            ("no", "no-proxy"),
-        ]
+    const OPTIONS: [(&str, &str); 5] = [
+        ("http", "http-proxy"),
+        ("https", "https-proxy"),
+        ("ftp", "ftp-proxy"),
+        ("all", "all-proxy"),
+        ("no", "no-proxy"),
+    ];
+    OPTIONS
         .into_iter()
-        .filter_map(|(scheme, option)| Some((option, environment.get(scheme)?.clone())))
-        .collect(),
-    }
+        .map(|(scheme, option)| {
+            let value = match route {
+                ProxyRoute::Direct => None,
+                ProxyRoute::Manual(url) => (scheme == "all").then(|| url.clone()),
+                // What aria2 itself read from its environment before it was stripped.
+                ProxyRoute::System => environment.get(scheme).cloned(),
+            };
+            (option, value.unwrap_or_default())
+        })
+        .collect()
 }

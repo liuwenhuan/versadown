@@ -85,19 +85,23 @@ impl UriSubmissionOptions {
                 options.insert("header".into(), headers.join("\n"));
             }
         }
-        if self.direct_loopback {
-            options.insert("all-proxy".into(), String::new());
-            options.insert("no-proxy".into(), "127.0.0.1".into());
+        // The loopback gateway applies the user's route to the upstream.
+        let route = if self.direct_loopback {
+            crate::network_proxy::ProxyRoute::Direct
         } else {
-            if self.proxy.manual().is_some_and(|proxy| proxy.trim().is_empty()) {
+            self.proxy
+        };
+        if route.manual().is_some_and(|proxy| proxy.trim().is_empty()) {
+            return Err(DownloadServiceError::InvalidUriOption("proxy"));
+        }
+        for (name, value) in crate::network_proxy::aria2_options(&route) {
+            if value.contains(['\r', '\n']) {
                 return Err(DownloadServiceError::InvalidUriOption("proxy"));
             }
-            for (name, value) in crate::network_proxy::aria2_options(&self.proxy) {
-                if value.contains(['\r', '\n']) {
-                    return Err(DownloadServiceError::InvalidUriOption("proxy"));
-                }
-                options.insert(name.into(), value);
-            }
+            options.insert(name.into(), value);
+        }
+        if self.direct_loopback {
+            options.insert("no-proxy".into(), "127.0.0.1".into());
         }
         if let Some(max_connections_per_server) = self.max_connections_per_server {
             let value = max_connections_per_server.to_string();

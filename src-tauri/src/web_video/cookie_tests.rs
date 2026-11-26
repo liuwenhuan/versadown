@@ -160,6 +160,7 @@ async fn cookie_file_authenticates_preview_and_aria2_retry_without_modifying_the
                     directory.path(),
                     false,
                     None,
+                    crate::network_proxy::TaskNetwork::Follow,
                     options(),
                 )
                 .await

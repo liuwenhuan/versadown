@@ -155,6 +155,7 @@ async fn handle(
             let task = state.video.submit(
                 preview_id, format_id, &directory, false,
                 request.args.get("postProcessingNote").and_then(Value::as_str),
+                crate::network_proxy::TaskNetwork::Follow,
                 VideoOptions { proxy: state.proxy.clone().map(crate::network_proxy::ProxyRoute::Manual).unwrap_or_default(), ..Default::default() },
             ).await?;
             serde_json::to_value(commands::task_payload(&state.store, task)?).map_err(|e| e.to_string())

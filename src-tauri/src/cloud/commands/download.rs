@@ -1273,6 +1273,7 @@ pub(crate) fn cloud_directory_group_task_outcome(
                 p2p_sharing: false,
                 is_private: group.is_private,
                 post_processing_note: None,
+                network: Default::default(),
             },
             files: Vec::new(),
             cleanup_pending: false,
