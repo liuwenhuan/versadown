@@ -1252,7 +1252,7 @@ async fn live_baidu_gateway_reads_three_consecutive_four_mib_chunks() {
             Uuid::new_v4(),
             signed.url,
             signed.headers.into_iter().collect(),
-            None,
+            versadown_lib::ProxyRoute::System,
         )
         .unwrap();
     let response = reqwest::Client::builder()
@@ -1493,7 +1493,7 @@ async fn live_baidu_file_completes_through_bundled_engine_and_gateway() {
             task.id,
             signed.url,
             signed.headers.into_iter().collect(),
-            None,
+            versadown_lib::ProxyRoute::System,
         )
         .unwrap();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
