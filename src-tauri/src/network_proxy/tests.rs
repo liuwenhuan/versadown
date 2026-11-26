@@ -127,6 +127,16 @@ fn command_environment(cmd: &tokio::process::Command) -> Vec<(String, Option<Str
         .collect()
 }
 
+/// Windows environment variable names are case-insensitive: `http_proxy` and
+/// `HTTP_PROXY` are one variable, and `Command` keeps a single spelling.
+fn env_key_eq(name: &str, key: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case(key)
+    } else {
+        name == key
+    }
+}
+
 fn command_arguments(cmd: &tokio::process::Command) -> Vec<String> {
     cmd.as_std().get_args().map(|arg| arg.to_string_lossy().into_owned()).collect()
 }
@@ -141,7 +151,7 @@ fn video_direct_route_clears_every_inherited_proxy_and_disables_os_lookup() {
             "{backdrop}: {envs:?}"
         );
         for key in ["HTTP_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "no_proxy"] {
-            assert!(envs.iter().any(|(name, value)| name == key && value.is_none()), "{backdrop}: {key}");
+            assert!(envs.iter().any(|(name, value)| env_key_eq(name, key) && value.is_none()), "{backdrop}: {key}");
         }
         assert_eq!(command_arguments(&cmd), ["--proxy", ""], "{backdrop}");
         assert!(!applied.proxied_for("https://www.bilibili.com/video/BV1"));
@@ -156,7 +166,7 @@ fn video_system_route_forwards_the_inherited_proxy() {
         let envs = command_environment(&cmd);
         let https = envs
             .iter()
-            .find(|(name, value)| name == "https_proxy" && value.is_some())
+            .find(|(name, value)| env_key_eq(name, "https_proxy") && value.is_some())
             .and_then(|(_, value)| value.clone());
         assert_eq!(https.as_deref(), expected, "{backdrop}");
         assert!(command_arguments(&cmd).is_empty(), "{backdrop}");
@@ -171,7 +181,7 @@ fn video_manual_route_overrides_every_backdrop() {
         let envs = command_environment(&cmd);
         for key in ["http_proxy", "https_proxy"] {
             assert!(
-                envs.iter().any(|(name, value)| name == key && value.as_deref() == Some(MANUAL)),
+                envs.iter().any(|(name, value)| env_key_eq(name, key) && value.as_deref() == Some(MANUAL)),
                 "{backdrop}: {key}"
             );
         }
@@ -282,7 +292,7 @@ fn every_task_choice_and_global_mode_reaches_yt_dlp_and_aria2() {
             let (cmd, _) = video_command(&route, inherited(), Proxies::new());
             let https = command_environment(&cmd)
                 .into_iter()
-                .find(|(name, value)| name == "https_proxy" && value.is_some())
+                .find(|(name, value)| env_key_eq(name, "https_proxy") && value.is_some())
                 .and_then(|(_, value)| value);
             assert_eq!(https.as_deref(), expected, "yt-dlp {label}");
             assert_eq!(
