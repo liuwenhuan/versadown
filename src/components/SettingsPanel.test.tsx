@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { SettingsPanel } from './SettingsPanel';
@@ -37,7 +37,7 @@ it('separates settings into common, network, and advanced workspaces', async () 
   expect(screen.getByRole('textbox', { name: '下载目录' })).toBeVisible();
 
   await user.click(screen.getByRole('tab', { name: '网络' }));
-  expect(screen.getByRole('checkbox', { name: '启用下载代理' })).toBeVisible();
+  expect(screen.getByRole('radiogroup', { name: '代理方式' })).toBeVisible();
   expect(screen.queryByRole('textbox', { name: '下载目录' })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole('tab', { name: '高级' }));
@@ -53,7 +53,7 @@ it('keeps proxy, traffic caps, and aria2 configuration in separate network setti
   render(<SettingsPanel initial={initial} onChange={() => {}} />);
   await user.click(screen.getByRole('tab', { name: '网络' }));
 
-  expect(screen.getByText('启用下载代理服务器')).toBeVisible();
+  expect(screen.getByRole('radio', { name: /跟随系统/ })).toBeChecked();
   const rateLimitForm = screen.getByText('限速设置').closest('form');
   const aria2Form = screen.getByText('aria2 下载引擎').closest('form');
   const overallDownloadLimit = screen.getByRole('spinbutton', { name: '整体下载限速（MiB/s）' });
@@ -114,7 +114,8 @@ it('shows the rate-limit helper and the privacy and aria2 diagnostic description
 
   expect(container.querySelectorAll('.settings-content small')).toHaveLength(0);
   await user.click(screen.getByRole('tab', { name: '网络' }));
-  expect(container.querySelectorAll('.settings-content small')).toHaveLength(2);
+  // Two helpers plus one description per proxy mode.
+  expect(container.querySelectorAll('.settings-content small')).toHaveLength(5);
   expect(screen.getByText(/仅使用你选择的 Netscape cookies.txt 文件/)).toBeVisible();
   expect(screen.getByText('（0为不限速）')).toBeVisible();
   await user.click(screen.getByRole('tab', { name: '高级' }));
@@ -359,7 +360,8 @@ it('uses compact aligned controls and consistent cards across settings tabs', as
     expect(getComputedStyle(theme).borderRadius).toBe(getComputedStyle(directory!).borderRadius);
 
     await user.click(screen.getByRole('tab', { name: '网络' }));
-    expect(getComputedStyle(screen.getByRole('checkbox', { name: '启用下载代理' })).width).toBe('18px');
+    await user.click(screen.getByRole('radio', { name: /手动/ }));
+    expect(getComputedStyle(screen.getByRole('radio', { name: /手动/ })).height).not.toBe('38px');
     const proxyFieldset = screen.getByLabelText('密码（可选）').closest('fieldset');
     expect(screen.getByRole('button', { name: '保存代理设置' }).parentElement).toBe(proxyFieldset);
     expect(Array.from(proxyFieldset!.children).slice(-3)).toEqual([
@@ -487,7 +489,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   render(<SettingsPanel initial={initial} onChange={onChange} />);
   await user.click(screen.getByRole('tab', { name: '网络' }));
 
-  await user.click(screen.getByRole('checkbox', { name: '启用下载代理' }));
+  await user.click(screen.getByRole('radio', { name: /手动/ }));
   await user.selectOptions(screen.getByRole('combobox', { name: '协议' }), 'https');
   await user.clear(screen.getByRole('textbox', { name: '服务器' }));
   await user.type(screen.getByRole('textbox', { name: '服务器' }), '127.0.0.1');
@@ -500,7 +502,7 @@ it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {
   expect(onChange).toHaveBeenLastCalledWith({
     downloadDirectory: 'C:\\Users\\tester\\Downloads',
     launcherVisibility: 'always',
-    proxy: { enabled: true, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
+    proxy: { enabled: true, direct: false, protocol: 'https', host: '127.0.0.1', port: 1080, username: 'alice', password: 'secret' },
     ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
     magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
     aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 20, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },
@@ -603,4 +605,50 @@ it('shows the native aria2 error instead of claiming a failed configuration was 
 
   expect(await screen.findByRole('status')).toHaveTextContent('aria2 RPC 端口 16800 已被占用');
   expect(screen.queryByText('已保存并立即应用')).not.toBeInTheDocument();
+});
+
+describe('proxy mode', () => {
+  const manualAddress = { protocol: 'http' as const, host: '127.0.0.1', port: 10808, username: 'alice', password: 'secret' };
+
+  it('offers three modes and shows the address fields only for the manual mode', async () => {
+    const user = userEvent.setup();
+    render(<SettingsPanel initial={initial} onChange={() => {}} />);
+    await user.click(screen.getByRole('tab', { name: '网络' }));
+
+    const group = screen.getByRole('radiogroup', { name: '代理方式' });
+    expect(within(group).getAllByRole('radio')).toHaveLength(3);
+    expect(group).toHaveTextContent('将使用系统或环境变量中的代理（如已设置）');
+    expect(group).toHaveTextContent('不使用任何代理，国内网站被代理拦截时可选此项');
+    expect(screen.queryByRole('textbox', { name: '服务器' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '保存代理设置' })).toBeVisible();
+
+    await user.click(screen.getByRole('radio', { name: /手动/ }));
+    for (const name of ['服务器', '用户名（可选）']) expect(screen.getByRole('textbox', { name })).toBeVisible();
+    expect(screen.getByRole('spinbutton', { name: '端口' })).toBeVisible();
+    expect(screen.getByLabelText('密码（可选）')).toBeVisible();
+
+    await user.click(screen.getByRole('radio', { name: /直连/ }));
+    expect(screen.queryByRole('textbox', { name: '服务器' })).not.toBeInTheDocument();
+  });
+
+  it('reads a settings file written before the direct mode existed as manual', async () => {
+    const user = userEvent.setup();
+    render(<SettingsPanel initial={{ ...initial, proxy: { enabled: true, ...manualAddress } }} onChange={() => {}} />);
+    await user.click(screen.getByRole('tab', { name: '网络' }));
+    expect(screen.getByRole('radio', { name: /手动/ })).toBeChecked();
+    expect(screen.getByRole('textbox', { name: '服务器' })).toHaveValue('127.0.0.1');
+  });
+
+  it.each([
+    ['直连', { enabled: false, direct: true }],
+    ['跟随系统', { enabled: false, direct: false }],
+  ])('saves the %s mode and keeps the manual address for later', async (label, flags) => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<SettingsPanel initial={{ ...initial, proxy: { enabled: true, direct: false, ...manualAddress } }} onChange={onChange} />);
+    await user.click(screen.getByRole('tab', { name: '网络' }));
+    await user.click(screen.getByRole('radio', { name: new RegExp(label) }));
+    await user.click(screen.getByRole('button', { name: '保存代理设置' }));
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ proxy: { ...manualAddress, ...flags } }));
+  });
 });

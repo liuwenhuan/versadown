@@ -318,7 +318,7 @@ export async function getDownloadGlobalStat(): Promise<DownloadGlobalStat> {
 export const defaultSettings: AppSettings = {
   downloadDirectory: '',
   launcherVisibility: 'always',
-  proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
+  proxy: { enabled: false, direct: false, protocol: 'http', host: '', port: 7890, username: '', password: '' },
   ai: { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false },
   magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' },
   aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 20, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false, overallDownloadLimit: 0, p2pUploadLimit: 1048576 },

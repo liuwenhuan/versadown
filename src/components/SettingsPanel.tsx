@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { AiSettings, AiSettingsInput, AppSettings, Aria2Settings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
+import { AiSettings, AiSettingsInput, AppSettings, Aria2Settings, LauncherVisibility, MagnetMetadataSettings, ProxyMode, ProxyProtocol } from '../lib/types';
+import { proxyMode, withProxyMode } from '../lib/proxyMode';
 import { getThemeMode, setThemeMode, subscribeTheme, themeOptions, ThemeMode } from '../lib/theme';
 import { localeMetadata, useTranslation } from '../i18n';
 import { AgentAccessSettings } from './AgentAccessSettings';
@@ -123,6 +124,11 @@ export function SettingsPanel({ initial, onChange, browseDirectory, browseVideoC
   function updateProxy<Key extends keyof typeof proxy>(key: Key, value: (typeof proxy)[Key]) {
     setSaved(false);
     setProxy((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateProxyMode(mode: ProxyMode) {
+    setSaved(false);
+    setProxy((current) => withProxyMode(current, mode));
   }
 
   function saveProxy(event: FormEvent) {
@@ -417,15 +423,20 @@ export function SettingsPanel({ initial, onChange, browseDirectory, browseVideoC
       </>}
       {activeTab === 'network' && <>
       <form className="proxy-settings" onSubmit={saveProxy}>
-        <div className="setting-row"><span><b>{t('settings.enableProxy')}</b></span><input aria-label={t('settings.enableProxyAria')} type="checkbox" checked={proxy.enabled} onChange={(event) => updateProxy('enabled', event.target.checked)} /></div>
-        <fieldset aria-disabled={!proxy.enabled}>
-          <label><span>{t('settings.proxy.protocol')}</span><select aria-label={t('settings.proxy.protocol')} disabled={!proxy.enabled} value={proxy.protocol} onChange={(event) => updateProxy('protocol', event.target.value as ProxyProtocol)}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
-          <label className="proxy-host"><span>{t('settings.proxy.server')}</span><input aria-label={t('settings.proxy.server')} disabled={!proxy.enabled} required value={proxy.host} placeholder="127.0.0.1" onChange={(event) => updateProxy('host', event.target.value)} /></label>
-          <label><span>{t('settings.proxy.port')}</span><input aria-label={t('settings.proxy.port')} disabled={!proxy.enabled} required type="number" min="1" max="65535" value={proxy.port} onChange={(event) => updateProxy('port', Number(event.target.value))} /></label>
-          <label><span>{t('settings.proxy.usernameOptional')}</span><input aria-label={t('settings.proxy.usernameOptional')} disabled={!proxy.enabled} value={proxy.username} autoComplete="off" onChange={(event) => updateProxy('username', event.target.value)} /></label>
-          <label><span>{t('settings.proxy.passwordOptional')}</span><input aria-label={t('settings.proxy.passwordOptional')} disabled={!proxy.enabled} type="password" value={proxy.password} autoComplete="new-password" onChange={(event) => updateProxy('password', event.target.value)} /></label>
+        <div className="proxy-mode-options" role="radiogroup" aria-label={t('settings.proxy.mode')}>
+          {(['system', 'manual', 'direct'] as const).map(mode => <label key={mode}>
+            <input type="radio" name="proxy-mode" value={mode} checked={proxyMode(proxy) === mode} onChange={() => updateProxyMode(mode)} />
+            <span><b>{t(`settings.proxy.mode.${mode}`)}</b><small>{t(`settings.proxy.mode.${mode}Hint`)}</small></span>
+          </label>)}
+        </div>
+        {proxyMode(proxy) === 'manual' ? <fieldset>
+          <label><span>{t('settings.proxy.protocol')}</span><select aria-label={t('settings.proxy.protocol')} value={proxy.protocol} onChange={(event) => updateProxy('protocol', event.target.value as ProxyProtocol)}><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
+          <label className="proxy-host"><span>{t('settings.proxy.server')}</span><input aria-label={t('settings.proxy.server')} required value={proxy.host} placeholder="127.0.0.1" onChange={(event) => updateProxy('host', event.target.value)} /></label>
+          <label><span>{t('settings.proxy.port')}</span><input aria-label={t('settings.proxy.port')} required type="number" min="1" max="65535" value={proxy.port} onChange={(event) => updateProxy('port', Number(event.target.value))} /></label>
+          <label><span>{t('settings.proxy.usernameOptional')}</span><input aria-label={t('settings.proxy.usernameOptional')} value={proxy.username} autoComplete="off" onChange={(event) => updateProxy('username', event.target.value)} /></label>
+          <label><span>{t('settings.proxy.passwordOptional')}</span><input aria-label={t('settings.proxy.passwordOptional')} type="password" value={proxy.password} autoComplete="new-password" onChange={(event) => updateProxy('password', event.target.value)} /></label>
           <button className="primary settings-inline-save" type="submit">{t('settings.proxy.save')}</button>
-        </fieldset>
+        </fieldset> : <div className="proxy-mode-actions"><button className="primary settings-inline-save" type="submit">{t('settings.proxy.save')}</button></div>}
         {saved && <div className="settings-actions"><span role="status">{t('settings.savedNewTasks')}</span></div>}
       </form>
       <form className="proxy-settings video-cookie-settings" onSubmit={event => { event.preventDefault(); void saveVideoCookieFile(videoCookieFile); }}>

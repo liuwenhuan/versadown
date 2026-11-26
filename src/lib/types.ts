@@ -175,8 +175,13 @@ export type ParseDownloadResult =
 export type ProxyProtocol = 'http' | 'https';
 export type LauncherVisibility = 'always' | 'downloading' | 'hidden';
 
+export type ProxyMode = 'system' | 'manual' | 'direct';
+
 export interface ProxySettings {
+  /** Manual proxy. Ignored when `direct` is set. */
   enabled: boolean;
+  /** Use no proxy at all, not even the system or environment proxy. */
+  direct?: boolean;
   protocol: ProxyProtocol;
   host: string;
   port: number;
