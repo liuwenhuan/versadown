@@ -681,6 +681,21 @@ mod tests {
     }
 
     #[test]
+    fn the_same_rejection_names_the_proxy_only_when_the_request_used_one() {
+        let text = "ERROR: [BiliBili] BV1na1YBzELQ: Unable to download webpage: HTTP Error 412: Precondition Failed";
+        let page = "https://www.bilibili.com/video/BV1na1YBzELQ";
+        let key = diagnostic(text);
+        assert_eq!(key, "video.error.accessDenied");
+        let route = |route| {
+            let mut cmd = Command::new("yt-dlp");
+            crate::network_proxy::apply_to_command(&mut cmd, &route).unwrap()
+        };
+        let proxied = route(ProxyRoute::Manual("http://127.0.0.1:10808".into()));
+        assert_eq!(proxied.diagnose(key, page), "video.error.accessDeniedProxy");
+        assert_eq!(route(ProxyRoute::Direct).diagnose(key, page), key);
+    }
+
+    #[test]
     fn cookie_requests_and_invalid_files_are_distinct_from_login_requirements() {
         for message in [
             "ERROR: [douyin] clip: Fresh cookies (not necessarily logged in) are needed",
